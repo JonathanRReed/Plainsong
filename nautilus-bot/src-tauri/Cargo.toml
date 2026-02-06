@@ -1,0 +1,110 @@
+[package]
+name = "nautilus-bot"
+version = "1.0.0"
+description = "Nautilus - Verifiable Memory Layer"
+authors = ["you"]
+edition = "2021"
+rust-version = "1.70"
+
+[lib]
+name = "nautilus_bot_lib"
+path = "src/lib.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-process = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+rusqlite = { version = "0.31", features = ["bundled", "chrono", "uuid"] }
+libsqlite3-sys = { version = "0.28", features = ["bundled"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5"
+cpal = "0.15"
+hound = "3.5"
+crossbeam = "0.8"
+ringbuf = "0.4"
+
+# ASR Dependencies
+# Whisper support via whisper-rs
+whisper-rs = { version = "0.14", optional = true }
+
+# ONNX Runtime for Parakeet and other ONNX models
+ort = { version = "2.0.0-rc.9", optional = true }
+ndarray = { version = "0.17", optional = true }
+
+# Candle for HuggingFace models (Canary, etc.)
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+
+# Tokenizers for HuggingFace models
+tokenizers = { version = "0.21", optional = true }
+
+# Audio preprocessing
+rubato = { version = "0.16", optional = true }
+
+# HTTP client for Ollama and downloads
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Download management
+futures-util = "0.3"
+sha2 = "0.10"
+ring = "0.17"
+rand = "0.8"
+async-trait = "0.1"
+hex = "0.4"
+argon2 = "0.5"
+aes-gcm = "0.10"
+zeroize = "1.8"
+keyring = "3.6"
+regex = "1.11"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+walkdir = "2.5"
+
+# Optional progress bars
+indicatif = { version = "0.17", optional = true }
+
+# PDF generation
+genpdf = { version = "0.2", optional = true }
+base64 = { version = "0.21", optional = true }
+
+[features]
+default = ["custom-protocol", "asr-all"]
+custom-protocol = ["tauri/custom-protocol"]
+
+# ASR Provider Features
+asr-whisper = ["whisper-rs", "download-manager"]
+asr-parakeet = ["ort", "ndarray", "download-manager", "audio-processing"]
+asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager", "audio-processing"]
+asr-all = ["asr-whisper", "asr-parakeet", "asr-canary"]
+
+# SQLCipher for encrypted SQLite (optional, requires OpenSSL)
+sqlcipher = ["rusqlite/sqlcipher", "libsqlite3-sys/sqlcipher"]
+
+# Supporting features
+download-manager = ["indicatif"]
+audio-processing = ["rubato"]
+export-pdf = ["genpdf", "base64"]
+
+# Speaker diarization (requires ONNX runtime)
+diarization = ["ort", "ndarray"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

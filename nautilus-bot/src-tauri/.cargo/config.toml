@@ -1,0 +1,9 @@
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-stdlib=libc++"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-stdlib=libc++"]
+
+[env]
+CXXFLAGS = "-mmacosx-version-min=10.15 -stdlib=libc++"
+MACOSX_DEPLOYMENT_TARGET = "10.15"

@@ -1,0 +1,67 @@
+export interface Settings {
+  audio: AudioSettings;
+  transcription: TranscriptionSettings;
+  ui: UiSettings;
+  export: ExportSettings;
+  privacy: PrivacySettings;
+  shortcuts: KeyboardShortcuts;
+  defaultTemplate: string;
+  theme: "light" | "dark" | "system";
+}
+
+export interface AudioSettings {
+  sampleRate: number;
+  channels: number;
+  captureSystemAudio: boolean;
+  captureMicrophone: boolean;
+  noiseSuppression: boolean;
+  voiceActivityDetection: boolean;
+  silenceTimeoutSeconds: number;
+  autoGainControl: boolean;
+}
+
+export interface TranscriptionSettings {
+  defaultProvider: string;
+  autoTranscribe: boolean;
+  enableDiarization: boolean;
+  intelligentPunctuation: boolean;
+  language: string | null;
+  numSpeakers: number;
+  saveRawTranscript: boolean;
+}
+
+export interface UiSettings {
+  alwaysOnTop: boolean;
+  showInDock: boolean;
+  minimizeToTray: boolean;
+  startMinimized: boolean;
+  windowPosition: [number, number] | null;
+  windowSize: [number, number] | null;
+  fontSize: number;
+}
+
+export interface ExportSettings {
+  defaultFormat: string;
+  autoExport: boolean;
+  exportDirectory: string | null;
+  includeTimestamps: boolean;
+  includeSpeakers: boolean;
+  openAfterExport: boolean;
+}
+
+export interface PrivacySettings {
+  encryptRecordings: boolean;
+  autoDeleteDays: number;
+  requirePassword: boolean;
+  auditLogging: boolean;
+  cloudSync: boolean;
+  remoteProcessingEnabled: boolean;
+}
+
+export interface KeyboardShortcuts {
+  toggleRecording: string;
+  toggleDictation: string;
+  openWindow: string;
+  quickExport: string;
+  focusSearch: string;
+}
