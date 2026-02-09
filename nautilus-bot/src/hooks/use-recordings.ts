@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { getRecordings } from "@/lib/tauri";
 import type { Recording } from "@/types";
 
 export function useRecordings(projectId?: string) {
@@ -11,7 +11,7 @@ export function useRecordings(projectId?: string) {
     setIsLoading(true);
     setError(null);
     try {
-      const data = await invoke<Recording[]>("get_recordings", { projectId });
+      const data = await getRecordings(projectId);
       setRecordings(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch recordings");

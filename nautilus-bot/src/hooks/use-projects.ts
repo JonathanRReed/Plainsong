@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import {
+  getProjects,
+  createProject as tauriCreateProject,
+} from "@/lib/tauri";
 import type { Project } from "@/types";
 
 export function useProjects() {
@@ -11,7 +14,7 @@ export function useProjects() {
     setIsLoading(true);
     setError(null);
     try {
-      const data = await invoke<Project[]>("get_projects");
+      const data = await getProjects();
       setProjects(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch projects");
@@ -27,7 +30,7 @@ export function useProjects() {
       parentId?: string;
     }) => {
       try {
-        const newProject = await invoke<Project>("create_project", { project });
+        const newProject = await tauriCreateProject(project);
         setProjects((prev) => [...prev, newProject]);
         return newProject;
       } catch (err) {

@@ -211,10 +211,25 @@ impl DownloadManager {
         Ok(models)
     }
 
-    /// Delete a model
+    /// Delete a model (path must be under the managed models directory)
     pub async fn delete_model(&self, path: &PathBuf) -> Result<()> {
-        tokio::fs::remove_file(path).await?;
-        tracing::info!("Deleted model at {:?}", path);
+        let canonical = path
+            .canonicalize()
+            .with_context(|| format!("Cannot resolve path: {:?}", path))?;
+        let models_canonical = self
+            .models_dir
+            .canonicalize()
+            .with_context(|| format!("Cannot resolve models dir: {:?}", self.models_dir))?;
+
+        if !canonical.starts_with(&models_canonical) {
+            return Err(anyhow::anyhow!(
+                "Refusing to delete file outside models directory: {:?}",
+                path
+            ));
+        }
+
+        tokio::fs::remove_file(&canonical).await?;
+        tracing::info!("Deleted model at {:?}", canonical);
         Ok(())
     }
 }

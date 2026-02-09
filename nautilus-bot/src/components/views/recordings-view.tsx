@@ -2,8 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { useRecordings } from "@/hooks/use-recordings";
 import { useRecording } from "@/hooks/use-recording";
 import { ConsentDialog } from "@/components/recording-overlay";
@@ -15,18 +17,23 @@ import {
   getSpeakers,
   getTranscript,
   renameSpeaker,
+  deleteRecording,
+  renameRecording,
 } from "@/lib/tauri";
 import type { Recording, Transcript } from "@/types";
 import {
   AlertCircle,
   BarChart3,
+  Edit3,
   FileAudio,
+  FileOutput,
   FileText,
   Loader2,
   Mic2,
   MoreHorizontal,
   Play,
   Square,
+  Trash2,
 } from "lucide-react";
 
 export function RecordingsView() {
@@ -41,6 +48,9 @@ export function RecordingsView() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState<Recording | null>(null);
+  const [showRenameDialog, setShowRenameDialog] = useState<Recording | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const lastRecordingState = useRef(false);
 
   useEffect(() => {
@@ -98,6 +108,42 @@ export function RecordingsView() {
     }
     setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
     await renameSpeaker(selectedRecording.id, speakerId, newName);
+  };
+
+  const handlePlayAudio = async (recording: Recording) => {
+    if (recording.audioPath) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("plugin:shell|open", { path: recording.audioPath });
+      } catch (err) {
+        console.error("Failed to open audio file:", err);
+      }
+    }
+  };
+
+  const handleDeleteRecording = async () => {
+    if (!showDeleteConfirm) return;
+    try {
+      await deleteRecording(showDeleteConfirm.id);
+      refetch();
+    } catch (err) {
+      console.error("Failed to delete recording:", err);
+    } finally {
+      setShowDeleteConfirm(null);
+    }
+  };
+
+  const handleRenameRecording = async () => {
+    if (!showRenameDialog || !renameValue.trim()) return;
+    try {
+      await renameRecording(showRenameDialog.id, renameValue.trim());
+      refetch();
+    } catch (err) {
+      console.error("Failed to rename recording:", err);
+    } finally {
+      setShowRenameDialog(null);
+      setRenameValue("");
+    }
   };
 
   const filteredSegments = useMemo(() => {
@@ -186,18 +232,55 @@ export function RecordingsView() {
                           className="h-8 w-8"
                           onClick={(e) => {
                             e.stopPropagation();
+                            handlePlayAudio(recording);
                           }}
                         >
                           <Play className="h-4 w-4" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <MoreHorizontal className="h-4 w-4" />
-                        </Button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <MoreHorizontal className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setRenameValue(recording.title);
+                                setShowRenameDialog(recording);
+                              }}
+                            >
+                              <Edit3 className="h-4 w-4 mr-2" />
+                              Rename
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRecordingClick(recording);
+                              }}
+                            >
+                              <FileOutput className="h-4 w-4 mr-2" />
+                              View Details
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              className="text-destructive"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setShowDeleteConfirm(recording);
+                              }}
+                            >
+                              <Trash2 className="h-4 w-4 mr-2" />
+                              Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </div>
                     </div>
                   </CardContent>
@@ -323,6 +406,62 @@ export function RecordingsView() {
               )}
             </TabsContent>
           </Tabs>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog
+        open={showDeleteConfirm !== null}
+        onOpenChange={(open) => { if (!open) setShowDeleteConfirm(null); }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Recording</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete &ldquo;{showDeleteConfirm?.title}&rdquo;? This will
+              permanently remove the recording, its transcript, and audio file.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowDeleteConfirm(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleDeleteRecording}>
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Rename Dialog */}
+      <Dialog
+        open={showRenameDialog !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setShowRenameDialog(null);
+            setRenameValue("");
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Rename Recording</DialogTitle>
+          </DialogHeader>
+          <Input
+            value={renameValue}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setRenameValue(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleRenameRecording()}
+            placeholder="New recording title"
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setShowRenameDialog(null); setRenameValue(""); }}>
+              Cancel
+            </Button>
+            <Button onClick={handleRenameRecording} disabled={!renameValue.trim()}>
+              Rename
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

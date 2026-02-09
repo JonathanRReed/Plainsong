@@ -737,7 +737,17 @@ async fn sync_to_rclone(
         .clone()
         .or_else(|| provider.default_remote_name().map(ToString::to_string))
         .ok_or_else(|| anyhow::anyhow!("No rclone remote configured"))?;
+
+    // Validate remote name contains only safe characters (alphanumeric, dash, underscore)
+    if !remote.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return Err(anyhow::anyhow!("Invalid rclone remote name: contains unsafe characters"));
+    }
+
     let folder = config.cloud_folder.trim_matches('/');
+    // Validate folder path contains no shell-unsafe characters
+    if folder.contains("..") || folder.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')' | '{' | '}' | '\'' | '"' | '\\' | '\n')) {
+        return Err(anyhow::anyhow!("Invalid cloud folder path: contains unsafe characters"));
+    }
     let backup_id = source
         .file_name()
         .and_then(|n| n.to_str())

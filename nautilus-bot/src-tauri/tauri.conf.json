@@ -20,7 +20,7 @@
     ],
     "longDescription": "Nautilus - Verifiable Memory Layer for dictation and meeting capture",
     "macOS": {
-      "entitlements": null,
+      "entitlements": "../src-tauri/Entitlements.plist",
       "exceptionDomain": "",
       "frameworks": [],
       "providerShortName": null,

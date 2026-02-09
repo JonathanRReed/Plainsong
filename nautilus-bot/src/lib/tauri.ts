@@ -52,6 +52,18 @@ export async function getTranscript(recordingId: string): Promise<Transcript | n
   return await invoke("get_transcript", { recordingId });
 }
 
+export async function deleteRecording(recordingId: string): Promise<void> {
+  await invoke("delete_recording", { recordingId });
+}
+
+export async function renameRecording(recordingId: string, newTitle: string): Promise<void> {
+  await invoke("rename_recording", { recordingId, newTitle });
+}
+
+export async function deleteProject(projectId: string): Promise<void> {
+  await invoke("delete_project", { projectId });
+}
+
 export async function exportRecording(
   recordingId: string,
   format: "markdown" | "pdf" | "json",

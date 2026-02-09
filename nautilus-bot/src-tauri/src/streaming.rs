@@ -348,18 +348,26 @@ fn samples_to_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     };
 
     let mut cursor = Cursor::new(Vec::new());
-    {
-        let mut writer = WavWriter::new(&mut cursor, spec).expect("Failed to create WAV writer");
+    let result: anyhow::Result<()> = (|| {
+        let mut writer = WavWriter::new(&mut cursor, spec)
+            .map_err(|e| anyhow::anyhow!("Failed to create WAV writer: {}", e))?;
 
         for sample in samples {
-            // Convert f32 [-1.0, 1.0] to i16
             let int_sample = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
             writer
                 .write_sample(int_sample)
-                .expect("Failed to write sample");
+                .map_err(|e| anyhow::anyhow!("Failed to write sample: {}", e))?;
         }
 
-        writer.finalize().expect("Failed to finalize WAV");
+        writer
+            .finalize()
+            .map_err(|e| anyhow::anyhow!("Failed to finalize WAV: {}", e))?;
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        tracing::error!("WAV encoding failed: {}", e);
+        return Vec::new();
     }
 
     cursor.into_inner()

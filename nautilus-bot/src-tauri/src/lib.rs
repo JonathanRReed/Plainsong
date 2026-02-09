@@ -1,5 +1,3 @@
-#![allow(non_snake_case)]
-
 mod asr;
 mod audio;
 mod backup;
@@ -53,6 +51,7 @@ async fn get_loopback_device_name(
 
 // Diarization commands
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn run_diarization(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -98,6 +97,7 @@ async fn run_diarization(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn get_speakers(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -146,6 +146,7 @@ async fn get_speakers(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn rename_speaker(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -256,6 +257,7 @@ async fn start_recording(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn stop_recording(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -364,6 +366,7 @@ async fn stop_recording(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn get_recordings(
     state: tauri::State<'_, AppState>,
     projectId: Option<String>,
@@ -374,6 +377,7 @@ async fn get_recordings(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn get_recording(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -383,6 +387,7 @@ async fn get_recording(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn get_transcript(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -392,6 +397,7 @@ async fn get_transcript(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn get_waveform_data(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -401,6 +407,7 @@ async fn get_waveform_data(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn get_recording_waveform(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -426,6 +433,7 @@ async fn get_recording_waveform(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn analyze_recording(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -467,6 +475,7 @@ async fn analyze_recording(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn summarize_recording(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -490,6 +499,7 @@ async fn summarize_recording(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn extract_action_items(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -527,6 +537,7 @@ async fn list_ollama_models(state: tauri::State<'_, AppState>) -> Result<Vec<Str
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn export_recording(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -564,6 +575,7 @@ async fn export_recording(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn export_recording_v2(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -614,9 +626,26 @@ async fn export_recording_v2(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn verify_evidence_bundle(
     targetPath: String,
 ) -> Result<transcription::EvidenceVerificationResult, String> {
+    let path = std::path::Path::new(&targetPath);
+    if !path.exists() {
+        return Err("File does not exist".to_string());
+    }
+    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+    let data_dir = dirs::data_dir()
+        .ok_or("Could not find data directory")?
+        .join("Nautilus");
+    let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
+    let canonical_str = canonical.to_string_lossy();
+    if !canonical.starts_with(&data_dir) && !canonical.starts_with(&home_dir) {
+        return Err(format!(
+            "Refusing to read file outside user directories: {}",
+            canonical_str
+        ));
+    }
     transcription::verify_evidence_bundle_file(&targetPath).map_err(|e| e.to_string())
 }
 
@@ -636,6 +665,72 @@ async fn create_project(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
+async fn delete_recording(
+    state: tauri::State<'_, AppState>,
+    recordingId: String,
+) -> Result<(), String> {
+    let mut db = state.db.lock().await;
+    let audio_path = db.delete_recording(&recordingId).map_err(|e| e.to_string())?;
+
+    // Try to delete the audio file from disk
+    if !audio_path.is_empty() {
+        let path = std::path::Path::new(&audio_path);
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(path) {
+                tracing::warn!("Failed to delete audio file {}: {}", audio_path, e);
+            }
+        }
+    }
+
+    let details = serde_json::json!({ "recording_id": &recordingId });
+    if let Err(e) = db.log_audit_event("recording_deleted", Some(details), "info") {
+        tracing::warn!("Failed to log audit event: {}", e);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn rename_recording(
+    state: tauri::State<'_, AppState>,
+    recordingId: String,
+    newTitle: String,
+) -> Result<(), String> {
+    let mut db = state.db.lock().await;
+    db.rename_recording(&recordingId, &newTitle)
+        .map_err(|e| e.to_string())?;
+
+    let details = serde_json::json!({
+        "recording_id": &recordingId,
+        "new_title": &newTitle
+    });
+    if let Err(e) = db.log_audit_event("recording_renamed", Some(details), "info") {
+        tracing::warn!("Failed to log audit event: {}", e);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn delete_project(
+    state: tauri::State<'_, AppState>,
+    projectId: String,
+) -> Result<(), String> {
+    let mut db = state.db.lock().await;
+    db.delete_project(&projectId).map_err(|e| e.to_string())?;
+
+    let details = serde_json::json!({ "project_id": &projectId });
+    if let Err(e) = db.log_audit_event("project_deleted", Some(details), "info") {
+        tracing::warn!("Failed to log audit event: {}", e);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_asr_providers(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<asr::ProviderInfo>, String> {
@@ -650,6 +745,7 @@ async fn get_default_asr_provider(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn set_default_asr_provider(
     state: tauri::State<'_, AppState>,
     providerType: asr::AsrProviderType,
@@ -666,6 +762,7 @@ async fn set_default_asr_provider(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn download_asr_models(
     state: tauri::State<'_, AppState>,
     providerType: asr::AsrProviderType,
@@ -678,6 +775,7 @@ async fn download_asr_models(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn benchmark_asr_providers(
     state: tauri::State<'_, AppState>,
     testAudioPath: String,
@@ -696,6 +794,7 @@ async fn get_audit_log(
 
 // Download manager commands
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn download_whisper_model(modelName: String) -> Result<String, String> {
     let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
 
@@ -815,6 +914,7 @@ async fn list_export_templates(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn export_with_template(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -959,6 +1059,7 @@ async fn get_backup_setup_report(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn sync_backup_to_cloud(
     state: tauri::State<'_, AppState>,
     backupId: String,
@@ -971,6 +1072,7 @@ async fn sync_backup_to_cloud(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn export_backup_archive(
     state: tauri::State<'_, AppState>,
     backupId: String,
@@ -1074,6 +1176,9 @@ pub fn run() {
             verify_evidence_bundle,
             get_projects,
             create_project,
+            delete_recording,
+            rename_recording,
+            delete_project,
             get_asr_providers,
             get_default_asr_provider,
             set_default_asr_provider,

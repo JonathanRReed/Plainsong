@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { Mic, AudioWaveform, FileOutput, FileText, Settings, Folder } from "lucide-react";
+import { Mic, AudioWaveform, FileOutput, FileText, Settings, Folder, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ interface SidebarProps {
   activeView: string;
   onViewChange: (view: string) => void;
   isCollapsed?: boolean;
+  onToggleCollapse?: () => void;
 }
 
 const navItems = [
@@ -21,22 +22,32 @@ const navItems = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
-export function Sidebar({ activeView, onViewChange, isCollapsed = false }: SidebarProps) {
+export function Sidebar({ activeView, onViewChange, isCollapsed = false, onToggleCollapse }: SidebarProps) {
   return (
     <TooltipProvider>
       <div className={cn(
         "flex flex-col h-full border-r bg-background transition-all duration-300",
         isCollapsed ? "w-16" : "w-64"
       )}>
-        <div className="p-4">
-          <h1 className={cn(
-            "font-semibold text-lg transition-opacity",
-            isCollapsed ? "opacity-0 w-0" : "opacity-100"
-          )}>
-            Nautilus
-          </h1>
-          {!isCollapsed && (
+        <div className="p-4 flex items-center justify-between">
+          <div className={cn(isCollapsed && "hidden")}>
+            <h1 className="font-semibold text-lg">Nautilus</h1>
             <p className="text-xs text-muted-foreground mt-1">Verifiable Memory Layer</p>
+          </div>
+          {onToggleCollapse && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0"
+              onClick={onToggleCollapse}
+              aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              {isCollapsed ? (
+                <PanelLeftOpen className="h-4 w-4" />
+              ) : (
+                <PanelLeftClose className="h-4 w-4" />
+              )}
+            </Button>
           )}
         </div>
         

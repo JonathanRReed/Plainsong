@@ -214,77 +214,17 @@ impl<T> BatchProcessor<T> {
     }
 }
 
-/// Performance metrics
-#[derive(Debug, Default)]
-pub struct PerformanceMetrics {
-    /// Startup time in milliseconds
-    pub startup_time_ms: u64,
-    /// Memory usage in bytes
-    pub memory_usage_bytes: usize,
-    /// Number of active recordings
-    pub active_recordings: usize,
-    /// Cache hit rate
-    pub cache_hit_rate: f64,
-}
-
-impl PerformanceMetrics {
-    /// Collect current metrics
-    pub fn collect() -> Self {
-        Self {
-            startup_time_ms: 0,    // Would measure actual startup
-            memory_usage_bytes: 0, // Would get actual memory
-            active_recordings: 0,
-            cache_hit_rate: 0.0,
-        }
-    }
-}
-
-/// Optimize audio buffer processing
-pub fn optimize_audio_buffer(buffer: &mut [f32]) {
-    #[cfg(not(target_arch = "x86_64"))]
-    let _ = buffer;
-
-    // Pre-fetch hint for sequential access
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        for i in (0..buffer.len()).step_by(64) {
-            std::arch::x86_64::_mm_prefetch(
-                buffer.as_ptr().add(i) as *const i8,
-                std::arch::x86_64::_MM_HINT_T0,
-            );
-        }
-    }
-}
-
 /// Fast in-place normalization
 pub fn fast_normalize(samples: &mut [f32]) {
-    // Find max using iterator
     let max_peak = samples.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
 
     if max_peak > 0.0 {
         let gain = 0.89 / max_peak;
 
-        // Use chunks for better cache utilization
         for chunk in samples.chunks_mut(64) {
             for sample in chunk.iter_mut() {
                 *sample *= gain;
             }
         }
-    }
-}
-
-/// Memory-efficient transcript storage
-pub struct TranscriptCompressor;
-
-impl TranscriptCompressor {
-    /// Compress transcript text (simple RLE for repeated words)
-    pub fn compress(text: &str) -> Vec<u8> {
-        // Simple compression - in production would use proper algorithm
-        text.as_bytes().to_vec()
-    }
-
-    /// Decompress transcript
-    pub fn decompress(data: &[u8]) -> String {
-        String::from_utf8_lossy(data).to_string()
     }
 }

@@ -111,12 +111,18 @@ pub struct EncryptedProjectData {
     pub salt: String,
 }
 
+/// Known plaintext used to verify that a derived key is correct.
+const VERIFY_PLAINTEXT: &[u8] = b"nautilus-key-check";
+
 /// Project encryption state
 #[derive(Debug, Clone)]
 pub struct ProjectEncryption {
     pub project_id: String,
     pub key: Option<[u8; KEY_LEN]>,
     pub salt: [u8; SALT_LEN],
+    /// Ciphertext of `VERIFY_PLAINTEXT` produced at initialization, used to
+    /// confirm that subsequent `unlock` calls supply the correct password.
+    pub verify_blob: Option<Vec<u8>>,
 }
 
 impl ProjectEncryption {
@@ -124,11 +130,13 @@ impl ProjectEncryption {
     pub fn new_with_password(project_id: String, password: &str) -> Self {
         let salt = ProjectKeyManager::generate_salt();
         let key = ProjectKeyManager::derive_key(password, &salt);
+        let verify_blob = ProjectKeyManager::encrypt(VERIFY_PLAINTEXT, &key).ok();
 
         Self {
             project_id,
             key: Some(key),
             salt,
+            verify_blob,
         }
     }
 
@@ -138,14 +146,46 @@ impl ProjectEncryption {
             project_id,
             key: None,
             salt,
+            verify_blob: None,
         }
     }
 
-    /// Unlock with password
+    /// Create from stored salt and verification blob
+    pub fn from_salt_and_verify(
+        project_id: String,
+        salt: [u8; SALT_LEN],
+        verify_blob: Vec<u8>,
+    ) -> Self {
+        Self {
+            project_id,
+            key: None,
+            salt,
+            verify_blob: Some(verify_blob),
+        }
+    }
+
+    /// Unlock with password. Returns `true` only if the derived key can
+    /// decrypt the verification blob (or if no blob is stored, falls back
+    /// to unconditional unlock for backwards compatibility).
     pub fn unlock(&mut self, password: &str) -> bool {
         let derived = ProjectKeyManager::derive_key(password, &self.salt);
-        self.key = Some(derived);
-        true
+
+        if let Some(ref blob) = self.verify_blob {
+            match ProjectKeyManager::decrypt(blob, &derived) {
+                Ok(plaintext) if plaintext == VERIFY_PLAINTEXT => {
+                    self.key = Some(derived);
+                    true
+                }
+                _ => {
+                    // Wrong password — do not store the key
+                    false
+                }
+            }
+        } else {
+            // No verification blob (legacy project) — accept unconditionally
+            self.key = Some(derived);
+            true
+        }
     }
 
     /// Lock (clear key from memory)
@@ -259,5 +299,126 @@ impl ProjectEncryptionManager {
 impl Default for ProjectEncryptionManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip() {
+        let salt = ProjectKeyManager::generate_salt();
+        let key = ProjectKeyManager::derive_key("test-password", &salt);
+        let plaintext = b"Hello, Nautilus!";
+
+        let encrypted = ProjectKeyManager::encrypt(plaintext, &key).unwrap();
+        let decrypted = ProjectKeyManager::decrypt(&encrypted, &key).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_wrong_key_fails_decrypt() {
+        let salt = ProjectKeyManager::generate_salt();
+        let key_correct = ProjectKeyManager::derive_key("correct", &salt);
+        let key_wrong = ProjectKeyManager::derive_key("wrong", &salt);
+
+        let encrypted = ProjectKeyManager::encrypt(b"secret", &key_correct).unwrap();
+        let result = ProjectKeyManager::decrypt(&encrypted, &key_wrong);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_different_salts_produce_different_keys() {
+        let salt_a = ProjectKeyManager::generate_salt();
+        let salt_b = ProjectKeyManager::generate_salt();
+        let key_a = ProjectKeyManager::derive_key("password", &salt_a);
+        let key_b = ProjectKeyManager::derive_key("password", &salt_b);
+
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn test_salt_roundtrip_serialization() {
+        let salt = ProjectKeyManager::generate_salt();
+        let hex_str = ProjectKeyManager::salt_to_string(&salt);
+        let restored = ProjectKeyManager::salt_from_string(&hex_str).unwrap();
+
+        assert_eq!(salt, restored);
+    }
+
+    #[test]
+    fn test_invalid_salt_string() {
+        assert!(ProjectKeyManager::salt_from_string("not-hex").is_err());
+        assert!(ProjectKeyManager::salt_from_string("aabb").is_err()); // too short
+    }
+
+    #[test]
+    fn test_decrypt_empty_payload_fails() {
+        let key = [0u8; KEY_LEN];
+        assert!(ProjectKeyManager::decrypt(&[], &key).is_err());
+        assert!(ProjectKeyManager::decrypt(&[0u8; 5], &key).is_err());
+    }
+
+    #[test]
+    fn test_project_encryption_unlock_correct_password() {
+        let enc = ProjectEncryption::new_with_password("p1".to_string(), "mypass");
+        assert!(enc.is_unlocked());
+        assert!(enc.verify_blob.is_some());
+
+        // Re-create from salt + verify_blob and unlock
+        let mut enc2 = ProjectEncryption::from_salt_and_verify(
+            "p1".to_string(),
+            enc.salt,
+            enc.verify_blob.clone().unwrap(),
+        );
+        assert!(!enc2.is_unlocked());
+        assert!(enc2.unlock("mypass"));
+        assert!(enc2.is_unlocked());
+    }
+
+    #[test]
+    fn test_project_encryption_unlock_wrong_password() {
+        let enc = ProjectEncryption::new_with_password("p1".to_string(), "correct");
+
+        let mut enc2 = ProjectEncryption::from_salt_and_verify(
+            "p1".to_string(),
+            enc.salt,
+            enc.verify_blob.clone().unwrap(),
+        );
+        assert!(!enc2.unlock("wrong"));
+        assert!(!enc2.is_unlocked());
+    }
+
+    #[test]
+    fn test_project_encryption_lock_zeroizes() {
+        let mut enc = ProjectEncryption::new_with_password("p1".to_string(), "pass");
+        assert!(enc.is_unlocked());
+        enc.lock();
+        assert!(!enc.is_unlocked());
+        assert!(enc.key.is_none());
+    }
+
+    #[test]
+    fn test_encryption_manager_lifecycle() {
+        let mut mgr = ProjectEncryptionManager::new();
+
+        let salt = mgr.initialize_project("p1".to_string(), "secret");
+        assert!(mgr.is_unlocked("p1"));
+
+        // Encrypt and decrypt through manager
+        let ct = mgr.encrypt("p1", b"data").unwrap();
+        let pt = mgr.decrypt("p1", &ct).unwrap();
+        assert_eq!(pt, b"data");
+
+        // Lock and verify
+        mgr.lock_project("p1");
+        assert!(!mgr.is_unlocked("p1"));
+
+        // Re-unlock with correct password
+        assert!(mgr.unlock_project("p1", "secret", salt));
+        assert!(mgr.is_unlocked("p1"));
     }
 }

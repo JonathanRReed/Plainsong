@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -9,16 +10,16 @@ export function DashboardView() {
   const { projects } = useProjects();
   const { recordings } = useRecordings();
 
-  const recentRecordings = recordings.slice(0, 10);
-  const totalDuration = recordings.reduce((acc, r) => acc + r.duration, 0);
-  const timelineGroups = recordings.reduce<Record<string, typeof recordings>>((acc, recording) => {
+  const recentRecordings = useMemo(() => recordings.slice(0, 10), [recordings]);
+  const totalDuration = useMemo(() => recordings.reduce((acc, r) => acc + r.duration, 0), [recordings]);
+  const timelineGroups = useMemo(() => recordings.reduce<Record<string, typeof recordings>>((acc, recording) => {
     const key = new Date(recording.createdAt).toLocaleDateString();
     if (!acc[key]) {
       acc[key] = [];
     }
     acc[key].push(recording);
     return acc;
-  }, {});
+  }, {}), [recordings]);
 
   return (
     <div className="h-full flex flex-col">

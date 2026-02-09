@@ -30,7 +30,8 @@ impl Database {
         // Set up encryption if key provided and SQLCipher is enabled
         #[cfg(feature = "sqlcipher")]
         if let Some(key) = _key {
-            conn.execute_batch(&format!("PRAGMA key = '{}';", key.replace("'", "''")))?;
+            let hex_key = hex::encode(key.as_bytes());
+            conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_key))?;
             // Verify encryption is working
             conn.execute("SELECT count(*) FROM sqlite_master;", [])?;
         }
@@ -64,8 +65,9 @@ impl Database {
     /// Change database key (encrypt or re-encrypt)
     #[cfg(feature = "sqlcipher")]
     pub fn change_key(&self, new_key: &str) -> Result<()> {
+        let hex_key = hex::encode(new_key.as_bytes());
         self.conn
-            .execute_batch(&format!("PRAGMA rekey = '{}';", new_key.replace("'", "''")))?;
+            .execute_batch(&format!("PRAGMA rekey = \"x'{}'\";", hex_key))?;
         tracing::info!("Database encryption key changed");
         Ok(())
     }
@@ -232,11 +234,11 @@ impl Database {
                 created_at: row
                     .get::<_, String>(4)?
                     .parse()
-                    .unwrap_or_else(|_| Utc::now()),
+                    .unwrap_or_else(|e| { tracing::warn!("Project created_at parse error: {}", e); Utc::now() }),
                 updated_at: row
                     .get::<_, String>(5)?
                     .parse()
-                    .unwrap_or_else(|_| Utc::now()),
+                    .unwrap_or_else(|e| { tracing::warn!("Project updated_at parse error: {}", e); Utc::now() }),
                 encrypted: row.get::<_, i32>(6)? != 0,
                 key_salt: row.get(7)?,
                 key_hint: row.get(8)?,
@@ -476,6 +478,60 @@ impl Database {
             .map_err(|e| e.into())
     }
 
+    /// Delete a recording and its associated transcript and speaker aliases
+    pub fn delete_recording(&mut self, recording_id: &str) -> Result<String> {
+        let audio_path: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT audio_path FROM recordings WHERE id = ?1",
+                params![recording_id],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM speaker_aliases WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        tx.execute(
+            "DELETE FROM transcripts WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        tx.execute(
+            "DELETE FROM recordings WHERE id = ?1",
+            params![recording_id],
+        )?;
+        tx.commit()?;
+
+        Ok(audio_path.unwrap_or_default())
+    }
+
+    /// Rename a recording
+    pub fn rename_recording(&mut self, recording_id: &str, new_title: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE recordings SET title = ?1, updated_at = ?2 WHERE id = ?3",
+            params![new_title, Utc::now().to_rfc3339(), recording_id],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a project, reassigning its recordings to the Inbox project
+    pub fn delete_project(&mut self, project_id: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        // Reassign recordings to the default Inbox project
+        tx.execute(
+            "UPDATE recordings SET project_id = 'inbox', updated_at = ?1 WHERE project_id = ?2",
+            params![Utc::now().to_rfc3339(), project_id],
+        )?;
+        tx.execute(
+            "DELETE FROM projects WHERE id = ?1",
+            params![project_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_audit_log(&self) -> Result<Vec<AuditLogEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, timestamp, event, details, severity 
@@ -526,5 +582,228 @@ impl Database {
         })?;
 
         entries.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn in_memory_db() -> Database {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        let db = Database { conn };
+        db.init_tables().expect("init tables");
+        db
+    }
+
+    fn sample_project(_id: &str, name: &str) -> CreateProjectRequest {
+        CreateProjectRequest {
+            name: name.to_string(),
+            description: Some("test".to_string()),
+            parent_id: None,
+        }
+    }
+
+    fn sample_recording(id: &str, project_id: &str) -> Recording {
+        Recording {
+            id: id.to_string(),
+            title: format!("Recording {}", id),
+            project_id: project_id.to_string(),
+            duration: 60,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            source_type: "meeting".to_string(),
+            audio_path: format!("/tmp/{}.wav", id),
+            status: "recording".to_string(),
+        }
+    }
+
+    fn sample_transcript(recording_id: &str) -> Transcript {
+        Transcript {
+            id: format!("t-{}", recording_id),
+            recording_id: recording_id.to_string(),
+            segments: vec![TranscriptSegment {
+                id: "s1".to_string(),
+                start_time: 0.0,
+                end_time: 5.0,
+                text: "Hello world".to_string(),
+                speaker_id: Some("speaker_0".to_string()),
+                confidence: 0.95,
+            }],
+            full_text: "Hello world".to_string(),
+            language: "en".to_string(),
+            confidence: 0.95,
+            model: "whisper-base".to_string(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_default_inbox_project_exists() {
+        let db = in_memory_db();
+        let projects = db.get_projects().unwrap();
+        assert!(projects.iter().any(|p| p.name == "Inbox"));
+    }
+
+    #[test]
+    fn test_create_and_get_projects() {
+        let mut db = in_memory_db();
+        let req = sample_project("p1", "Alpha");
+        let created = db.create_project(&req).unwrap();
+        assert_eq!(created.name, "Alpha");
+
+        let projects = db.get_projects().unwrap();
+        assert!(projects.iter().any(|p| p.name == "Alpha"));
+    }
+
+    #[test]
+    fn test_create_and_get_recording() {
+        let mut db = in_memory_db();
+        let rec = sample_recording("r1", "inbox");
+        db.create_recording(&rec).unwrap();
+
+        let fetched = db.get_recording("r1").unwrap();
+        assert!(fetched.is_some());
+        assert_eq!(fetched.unwrap().title, "Recording r1");
+    }
+
+    #[test]
+    fn test_get_recordings_filtered_by_project() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
+        db.create_recording(&sample_recording("r2", "other")).unwrap();
+
+        let all = db.get_recordings(None).unwrap();
+        assert_eq!(all.len(), 2);
+
+        let inbox_only = db.get_recordings(Some("inbox")).unwrap();
+        assert_eq!(inbox_only.len(), 1);
+        assert_eq!(inbox_only[0].id, "r1");
+    }
+
+    #[test]
+    fn test_update_recording_status() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
+        db.update_recording_status("r1", "completed").unwrap();
+
+        let rec = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(rec.status, "completed");
+    }
+
+    #[test]
+    fn test_save_and_get_transcript() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
+
+        let transcript = sample_transcript("r1");
+        db.save_transcript(&transcript).unwrap();
+
+        let fetched = db.get_transcript("r1").unwrap();
+        assert!(fetched.is_some());
+        let t = fetched.unwrap();
+        assert_eq!(t.full_text, "Hello world");
+        assert_eq!(t.segments.len(), 1);
+    }
+
+    #[test]
+    fn test_rename_recording() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
+        db.rename_recording("r1", "New Title").unwrap();
+
+        let rec = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(rec.title, "New Title");
+    }
+
+    #[test]
+    fn test_delete_recording_removes_transcript() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
+        db.save_transcript(&sample_transcript("r1")).unwrap();
+
+        let audio_path = db.delete_recording("r1").unwrap();
+        assert_eq!(audio_path, "/tmp/r1.wav");
+
+        assert!(db.get_recording("r1").unwrap().is_none());
+        assert!(db.get_transcript("r1").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_delete_project_reassigns_recordings() {
+        let mut db = in_memory_db();
+        let proj = db.create_project(&sample_project("p1", "ToDelete")).unwrap();
+        db.create_recording(&sample_recording("r1", &proj.id)).unwrap();
+
+        db.delete_project(&proj.id).unwrap();
+
+        // Recording should be reassigned to inbox
+        let rec = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(rec.project_id, "inbox");
+
+        // Project should be gone
+        let projects = db.get_projects().unwrap();
+        assert!(!projects.iter().any(|p| p.id == proj.id));
+    }
+
+    #[test]
+    fn test_audit_log_append() {
+        let mut db = in_memory_db();
+        db.log_audit_event("test_event", Some(serde_json::json!({"key": "value"})), "info")
+            .unwrap();
+
+        let log = db.get_audit_log().unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].event, "test_event");
+        assert_eq!(log[0].severity, "info");
+    }
+
+    #[test]
+    fn test_audit_log_append_only_no_update() {
+        let mut db = in_memory_db();
+        db.log_audit_event("first", None, "info").unwrap();
+
+        // Attempt to UPDATE the audit log should fail due to trigger
+        let result = db.conn.execute(
+            "UPDATE audit_log SET event = 'modified'",
+            [],
+        );
+        assert!(result.is_err(), "Audit log should be append-only (no updates)");
+    }
+
+    #[test]
+    fn test_audit_log_append_only_no_delete() {
+        let mut db = in_memory_db();
+        db.log_audit_event("first", None, "info").unwrap();
+
+        // Attempt to DELETE from audit log should fail due to trigger
+        let result = db.conn.execute("DELETE FROM audit_log", []);
+        assert!(result.is_err(), "Audit log should be append-only (no deletes)");
+    }
+
+    #[test]
+    fn test_speaker_alias_upsert() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
+
+        db.upsert_speaker_alias("r1", "speaker_0", Some("Alice"), Some("#ff0000"), 100)
+            .unwrap();
+
+        let aliases = db.get_speaker_aliases("r1").unwrap();
+        assert_eq!(aliases.len(), 1);
+        let (name, color, count) = &aliases["speaker_0"];
+        assert_eq!(name.as_deref(), Some("Alice"));
+        assert_eq!(color.as_deref(), Some("#ff0000"));
+        assert_eq!(*count, 100);
+
+        // Upsert to rename
+        db.upsert_speaker_alias("r1", "speaker_0", Some("Bob"), None, 0)
+            .unwrap();
+        let aliases2 = db.get_speaker_aliases("r1").unwrap();
+        let (name2, color2, count2) = &aliases2["speaker_0"];
+        assert_eq!(name2.as_deref(), Some("Bob"));
+        assert_eq!(color2.as_deref(), Some("#ff0000")); // color preserved
+        assert_eq!(*count2, 100); // count preserved when 0 passed
     }
 }

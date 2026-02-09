@@ -1,5 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  startDictation as tauriStartDictation,
+  stopDictation as tauriStopDictation,
+  startRecording as tauriStartRecording,
+  stopRecording as tauriStopRecording,
+} from "@/lib/tauri";
 import { listen } from "@tauri-apps/api/event";
 
 interface RecordingState {
@@ -10,37 +15,41 @@ interface RecordingState {
   isSystemAudioActive: boolean;
 }
 
+const INITIAL_STATE: RecordingState = {
+  isRecording: false,
+  recordingId: null,
+  recordingMode: null,
+  duration: 0,
+  isSystemAudioActive: false,
+};
+
 export function useRecording() {
-  const [state, setState] = useState<RecordingState>({
-    isRecording: false,
-    recordingId: null,
-    recordingMode: null,
-    duration: 0,
-    isSystemAudioActive: false,
-  });
-  const [timer, setTimer] = useState<NodeJS.Timeout | null>(null);
+  const [state, setState] = useState<RecordingState>(INITIAL_STATE);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
 
   const startTimer = useCallback(() => {
+    clearTimer();
     const startTime = Date.now();
-    const interval = setInterval(() => {
+    timerRef.current = setInterval(() => {
       setState((prev) => ({
         ...prev,
         duration: Math.floor((Date.now() - startTime) / 1000),
       }));
     }, 1000);
-    setTimer(interval);
-  }, []);
-
-  const stopTimer = useCallback(() => {
-    if (timer) {
-      clearInterval(timer);
-      setTimer(null);
-    }
-  }, [timer]);
+  }, [clearTimer]);
 
   const startDictation = useCallback(async () => {
     try {
-      await invoke("start_dictation");
+      await tauriStartDictation();
       setState({
         isRecording: true,
         recordingId: null,
@@ -56,29 +65,21 @@ export function useRecording() {
 
   const stopDictation = useCallback(async () => {
     try {
-      const text = await invoke<string>("stop_dictation");
-      stopTimer();
-      setState({
-        isRecording: false,
-        recordingId: null,
-        recordingMode: null,
-        duration: 0,
-        isSystemAudioActive: false,
-      });
+      const text = await tauriStopDictation();
+      clearTimer();
+      setState(INITIAL_STATE);
       return text;
     } catch (error) {
       console.error("Failed to stop dictation:", error);
-      stopTimer();
+      clearTimer();
       return null;
     }
-  }, [stopTimer]);
+  }, [clearTimer]);
 
   const startMeeting = useCallback(
     async (options: { mic: boolean; systemAudio: boolean; projectId: string }) => {
       try {
-        const recordingId = await invoke<string>("start_recording", {
-          options,
-        });
+        const recordingId = await tauriStartRecording(options);
         setState({
           isRecording: true,
           recordingId,
@@ -97,22 +98,17 @@ export function useRecording() {
   );
 
   const stopMeeting = useCallback(async () => {
-    if (!state.recordingId) return;
+    const currentId = stateRef.current.recordingId;
+    if (!currentId) return;
     try {
-      await invoke("stop_recording", { recordingId: state.recordingId });
-      stopTimer();
-      setState({
-        isRecording: false,
-        recordingId: null,
-        recordingMode: null,
-        duration: 0,
-        isSystemAudioActive: false,
-      });
+      await tauriStopRecording(currentId);
+      clearTimer();
+      setState(INITIAL_STATE);
     } catch (error) {
       console.error("Failed to stop meeting:", error);
-      stopTimer();
+      clearTimer();
     }
-  }, [state.recordingId, stopTimer]);
+  }, [clearTimer]);
 
   const formatDuration = useCallback((seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -120,35 +116,34 @@ export function useRecording() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   }, []);
 
+  // Register hotkey listeners once — use refs to avoid stale closures
   useEffect(() => {
-    // Listen for global hold-to-record hotkey lifecycle.
     let unlistenPressed: (() => void) | undefined;
     let unlistenReleased: (() => void) | undefined;
-    
-    const setupListener = async () => {
+
+    const setup = async () => {
       unlistenPressed = await listen("dictation-hotkey-pressed", () => {
-        if (!state.isRecording) {
+        if (!stateRef.current.isRecording) {
           startDictation();
         }
       });
 
       unlistenReleased = await listen("dictation-hotkey-released", () => {
-        if (state.isRecording && state.recordingMode === "dictation") {
+        const s = stateRef.current;
+        if (s.isRecording && s.recordingMode === "dictation") {
           stopDictation();
         }
       });
     };
-    
-    setupListener();
-    
+
+    setup();
+
     return () => {
-      if (timer) {
-        clearInterval(timer);
-      }
+      clearTimer();
       unlistenPressed?.();
       unlistenReleased?.();
     };
-  }, [timer, state.isRecording, state.recordingMode, startDictation, stopDictation]);
+  }, [startDictation, stopDictation, clearTimer]);
 
   return {
     ...state,

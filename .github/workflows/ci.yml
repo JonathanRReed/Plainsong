@@ -37,8 +37,20 @@ jobs:
       - name: Typecheck frontend
         run: npx tsc --noEmit
 
+      - name: Frontend tests
+        run: npm test
+
       - name: Build frontend
         run: npm run build
+
+      - name: Rust format check
+        run: cargo fmt --check
+        working-directory: nautilus-bot/src-tauri
+
+      - name: Rust clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: nautilus-bot/src-tauri
+        continue-on-error: true
 
       - name: Rust check
         run: cargo check --all-targets

@@ -204,7 +204,9 @@ impl AudioCapture {
 
         self.is_dictating.store(false, Ordering::SeqCst);
         if let Some(handle) = self.dictation_thread.take() {
-            let _ = handle.join();
+            if let Err(e) = handle.join() {
+                tracing::warn!("Dictation thread join error: {:?}", e);
+            }
         }
 
         // Collect samples from buffer
@@ -417,14 +419,18 @@ impl AudioCapture {
         let _ = session.stop_sender.send(());
         session.capture_stop_flag.store(false, Ordering::SeqCst);
         if let Some(handle) = session.capture_handle.take() {
-            let _ = handle.join();
+            if let Err(e) = handle.join() {
+                tracing::warn!("Capture thread join error: {:?}", e);
+            }
         }
         if let Some(mut mixed_capture) = session.mixed_capture.take() {
             mixed_capture.stop();
         }
 
         if let Some(handle) = session.writer_handle.take() {
-            let _ = handle.join();
+            if let Err(e) = handle.join() {
+                tracing::warn!("Writer thread join error: {:?}", e);
+            }
         }
 
         let path = session.audio_path;

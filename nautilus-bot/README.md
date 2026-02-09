@@ -295,12 +295,18 @@ Located at:
 
 ### Running Tests
 ```bash
-# Rust tests
-cd src-tauri
-cargo test
+# Frontend tests (Vitest)
+npm test
 
-# TypeScript checks
-npm run typecheck
+# TypeScript typecheck
+npx tsc --noEmit
+
+# Rust tests (39 tests: DB, crypto, audio, export, diarization)
+cd src-tauri
+cargo test --lib
+
+# Full CI check
+npx tsc --noEmit && npm test && cd src-tauri && cargo test --lib
 ```
 
 ### Building for Production

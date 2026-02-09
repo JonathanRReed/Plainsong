@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Component, useState, type ErrorInfo, type ReactNode } from "react";
 import { Sidebar } from "@/components/sidebar";
 import { RecordingOverlay } from "@/components/recording-overlay";
 import { DashboardView } from "@/components/views/dashboard-view";
@@ -10,43 +10,94 @@ import { SettingsView } from "@/components/views/settings-view-simple";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/theme-provider";
 
-function App() {
-  const [activeView, setActiveView] = useState("dashboard");
-  const [sidebarCollapsed] = useState(false);
+export type ViewId =
+  | "dashboard"
+  | "projects"
+  | "recordings"
+  | "dictation"
+  | "exports"
+  | "settings";
 
-  const renderView = () => {
-    switch (activeView) {
-      case "dashboard":
-        return <DashboardView />;
-      case "projects":
-        return <ProjectsView />;
-      case "recordings":
-        return <RecordingsView />;
-      case "dictation":
-        return <DictationView />;
-      case "exports":
-        return <ExportsView />;
-      case "settings":
-        return <SettingsView />;
-      default:
-        return <DashboardView />;
+interface ErrorBoundaryProps {
+  children: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Uncaught error:", error, info);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex-1 flex items-center justify-center p-8">
+          <div className="max-w-md text-center space-y-4">
+            <h2 className="text-xl font-semibold text-destructive">
+              Something went wrong
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              {this.state.error?.message ?? "An unexpected error occurred."}
+            </p>
+            <button
+              type="button"
+              className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm"
+              onClick={() => this.setState({ hasError: false, error: null })}
+            >
+              Try Again
+            </button>
+          </div>
+        </div>
+      );
     }
-  };
+
+    return this.props.children;
+  }
+}
+
+const VIEW_COMPONENTS: Record<ViewId, () => ReactNode> = {
+  dashboard: () => <DashboardView />,
+  projects: () => <ProjectsView />,
+  recordings: () => <RecordingsView />,
+  dictation: () => <DictationView />,
+  exports: () => <ExportsView />,
+  settings: () => <SettingsView />,
+};
+
+function App() {
+  const [activeView, setActiveView] = useState<ViewId>("dashboard");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  const renderView = VIEW_COMPONENTS[activeView] ?? VIEW_COMPONENTS.dashboard;
 
   return (
     <ThemeProvider>
       <TooltipProvider>
         <div className="flex h-screen bg-background text-foreground">
-          <Sidebar 
-            activeView={activeView} 
-            onViewChange={setActiveView}
+          <Sidebar
+            activeView={activeView}
+            onViewChange={(v) => setActiveView(v as ViewId)}
             isCollapsed={sidebarCollapsed}
+            onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
           />
-          
-          <main className="flex-1 overflow-hidden">
-            {renderView()}
-          </main>
-          
+
+          <ErrorBoundary>
+            <main className="flex-1 overflow-hidden">{renderView()}</main>
+          </ErrorBoundary>
+
           <RecordingOverlay isDictation={activeView === "dictation"} />
         </div>
       </TooltipProvider>
