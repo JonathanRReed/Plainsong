@@ -210,14 +210,12 @@ fn extract_citations(response: &str, transcript: &str) -> Vec<Citation> {
         if line.contains('"') {
             let parts: Vec<&str> = line.split('"').collect();
             for (i, part) in parts.iter().enumerate() {
-                if i % 2 == 1 && !part.is_empty() {
-                    if transcript.contains(part) {
-                        citations.push(Citation {
-                            text: part.to_string(),
-                            start_time: None,
-                            end_time: None,
-                        });
-                    }
+                if i % 2 == 1 && !part.is_empty() && transcript.contains(part) {
+                    citations.push(Citation {
+                        text: part.to_string(),
+                        start_time: None,
+                        end_time: None,
+                    });
                 }
             }
         }

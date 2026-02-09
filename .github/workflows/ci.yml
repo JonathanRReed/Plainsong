@@ -40,6 +40,9 @@ jobs:
       - name: Frontend tests
         run: npm test
 
+      - name: Frontend dependency audit
+        run: npm audit --audit-level=moderate
+
       - name: Build frontend
         run: npm run build
 
@@ -50,10 +53,17 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --all-targets -- -D warnings
         working-directory: nautilus-bot/src-tauri
-        continue-on-error: true
 
       - name: Rust check
         run: cargo check --all-targets
+        working-directory: nautilus-bot/src-tauri
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+        working-directory: nautilus-bot/src-tauri
+
+      - name: Rust dependency audit
+        run: cargo audit
         working-directory: nautilus-bot/src-tauri
 
       - name: Rust unit tests

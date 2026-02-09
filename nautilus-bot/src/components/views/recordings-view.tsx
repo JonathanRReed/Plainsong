@@ -14,6 +14,7 @@ import { WaveformVisualizer } from "@/components/waveform-visualizer";
 import { AiAnalysisPanel } from "@/components/ai-analysis-panel";
 import {
   getRecordingWaveform,
+  openRecordingAudio,
   getSpeakers,
   getTranscript,
   renameSpeaker,
@@ -113,8 +114,7 @@ export function RecordingsView() {
   const handlePlayAudio = async (recording: Recording) => {
     if (recording.audioPath) {
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("plugin:shell|open", { path: recording.audioPath });
+        await openRecordingAudio(recording.id);
       } catch (err) {
         console.error("Failed to open audio file:", err);
       }

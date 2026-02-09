@@ -594,7 +594,7 @@ impl BackupManager {
 
 impl Default for BackupManager {
     fn default() -> Self {
-        let config = load_persisted_backup_config().unwrap_or_else(BackupConfig::default);
+        let config = load_persisted_backup_config().unwrap_or_default();
         Self::new(config)
     }
 }
@@ -739,14 +739,28 @@ async fn sync_to_rclone(
         .ok_or_else(|| anyhow::anyhow!("No rclone remote configured"))?;
 
     // Validate remote name contains only safe characters (alphanumeric, dash, underscore)
-    if !remote.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-        return Err(anyhow::anyhow!("Invalid rclone remote name: contains unsafe characters"));
+    if !remote
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(anyhow::anyhow!(
+            "Invalid rclone remote name: contains unsafe characters"
+        ));
     }
 
     let folder = config.cloud_folder.trim_matches('/');
     // Validate folder path contains no shell-unsafe characters
-    if folder.contains("..") || folder.chars().any(|c| matches!(c, ';' | '&' | '|' | '`' | '$' | '(' | ')' | '{' | '}' | '\'' | '"' | '\\' | '\n')) {
-        return Err(anyhow::anyhow!("Invalid cloud folder path: contains unsafe characters"));
+    if folder.contains("..")
+        || folder.chars().any(|c| {
+            matches!(
+                c,
+                ';' | '&' | '|' | '`' | '$' | '(' | ')' | '{' | '}' | '\'' | '"' | '\\' | '\n'
+            )
+        })
+    {
+        return Err(anyhow::anyhow!(
+            "Invalid cloud folder path: contains unsafe characters"
+        ));
     }
     let backup_id = source
         .file_name()

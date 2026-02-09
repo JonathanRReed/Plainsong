@@ -116,33 +116,30 @@ impl VoiceActivityDetector {
                 }
                 segment_energies.push(*energy);
                 silence_count = 0;
-            } else {
-                if in_speech {
-                    silence_count += 1;
-                    if silence_count >= min_silence_frames {
-                        // End of speech
-                        let speech_end =
-                            (i - silence_count + 1 + padding_frames).min(frames.len() - 1);
-                        let speech_duration = speech_end.saturating_sub(speech_start);
+            } else if in_speech {
+                silence_count += 1;
+                if silence_count >= min_silence_frames {
+                    // End of speech
+                    let speech_end = (i - silence_count + 1 + padding_frames).min(frames.len() - 1);
+                    let speech_duration = speech_end.saturating_sub(speech_start);
 
-                        if speech_duration >= min_speech_frames {
-                            let avg_energy = if !segment_energies.is_empty() {
-                                segment_energies.iter().sum::<f32>() / segment_energies.len() as f32
-                            } else {
-                                threshold
-                            };
+                    if speech_duration >= min_speech_frames {
+                        let avg_energy = if !segment_energies.is_empty() {
+                            segment_energies.iter().sum::<f32>() / segment_energies.len() as f32
+                        } else {
+                            threshold
+                        };
 
-                            segments.push(SpeechSegment {
-                                start: speech_start as f64 * frame_size as f64 / sample_rate as f64,
-                                end: speech_end as f64 * frame_size as f64 / sample_rate as f64,
-                                avg_energy_db: avg_energy,
-                                confidence: ((avg_energy - threshold) / 20.0).min(1.0).max(0.0),
-                            });
-                        }
-
-                        in_speech = false;
-                        segment_energies.clear();
+                        segments.push(SpeechSegment {
+                            start: speech_start as f64 * frame_size as f64 / sample_rate as f64,
+                            end: speech_end as f64 * frame_size as f64 / sample_rate as f64,
+                            avg_energy_db: avg_energy,
+                            confidence: ((avg_energy - threshold) / 20.0).clamp(0.0, 1.0),
+                        });
                     }
+
+                    in_speech = false;
+                    segment_energies.clear();
                 }
             }
         }
@@ -163,7 +160,7 @@ impl VoiceActivityDetector {
                     start: speech_start as f64 * frame_size as f64 / sample_rate as f64,
                     end: speech_end as f64 * frame_size as f64 / sample_rate as f64,
                     avg_energy_db: avg_energy,
-                    confidence: ((avg_energy - threshold) / 20.0).min(1.0).max(0.0),
+                    confidence: ((avg_energy - threshold) / 20.0).clamp(0.0, 1.0),
                 });
             }
         }

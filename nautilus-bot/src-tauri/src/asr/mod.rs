@@ -4,7 +4,7 @@ pub mod parakeet;
 pub mod whisper;
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::Path;
 
 /// ASR Provider trait for modular transcription support
 #[async_trait::async_trait]
@@ -22,7 +22,7 @@ pub trait AsrProvider: Send + Sync {
     fn model_info(&self) -> ModelInfo;
 
     /// Transcribe audio file
-    async fn transcribe(&self, audio_path: &PathBuf) -> anyhow::Result<TranscriptionResult>;
+    async fn transcribe(&self, audio_path: &Path) -> anyhow::Result<TranscriptionResult>;
 
     /// Transcribe audio bytes
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> anyhow::Result<TranscriptionResult>;

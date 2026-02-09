@@ -102,7 +102,7 @@ fn export_markdown(
         output.push_str(&format!("- **Type:** {}\n", recording.source_type));
         output.push_str(&format!("- **Status:** {}\n", recording.status));
         output.push_str(&format!("- **Recording ID:** {}\n", recording.id));
-        output.push_str("\n");
+        output.push('\n');
     }
 
     // Transcript
@@ -130,7 +130,7 @@ fn export_markdown(
         output.push_str(&format!("- **Language:** {}\n", t.language));
         output.push_str(&format!("- **Model:** {}\n", t.model));
         output.push_str(&format!("- **Confidence:** {:.1}%\n", t.confidence * 100.0));
-        output.push_str("\n");
+        output.push('\n');
     } else {
         output.push_str("*Transcript not yet available*\n\n");
     }

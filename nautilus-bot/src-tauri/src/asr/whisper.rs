@@ -1,7 +1,7 @@
 use super::{AsrProvider, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct WhisperProvider {
     model_path: PathBuf,
@@ -165,7 +165,7 @@ impl AsrProvider for WhisperProvider {
         }
     }
 
-    async fn transcribe(&self, audio_path: &PathBuf) -> Result<TranscriptionResult> {
+    async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
         let ctx = self
             .ctx
             .as_ref()
@@ -277,7 +277,7 @@ impl AsrProvider for WhisperProvider {
             tracing::info!(
                 "Download progress: {:.1}% ({}/s)",
                 progress.percentage,
-                crate::download::format_bytes(progress.bytes_downloaded as u64)
+                crate::download::format_bytes(progress.bytes_downloaded)
             );
         };
 

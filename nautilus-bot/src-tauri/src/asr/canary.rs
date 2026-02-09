@@ -1,7 +1,7 @@
 use super::{AsrProvider, DownloadStatus, ModelInfo, TranscriptionResult};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct CanaryProvider {
     model_path: PathBuf,
@@ -99,7 +99,7 @@ impl AsrProvider for CanaryProvider {
         }
     }
 
-    async fn transcribe(&self, audio_path: &PathBuf) -> Result<TranscriptionResult> {
+    async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
         let _ = audio_path;
         Err(anyhow::anyhow!(
             "Canary inference is not implemented in this build. Use the Whisper provider."
@@ -208,15 +208,7 @@ fn compute_canary_mel_spectrogram(audio: &[f32], _sample_rate: u32) -> Vec<f32> 
     let n_fft = 400; // 25ms window
 
     let num_frames = (audio.len().saturating_sub(n_fft)) / hop_length + 1;
-    let mut spectrogram = Vec::with_capacity(num_frames * num_mels);
-
     // Simplified: return zeros for now
     // Real implementation would compute proper mel spectrogram
-    for _ in 0..num_frames {
-        for _ in 0..num_mels {
-            spectrogram.push(0.0);
-        }
-    }
-
-    spectrogram
+    vec![0.0; num_frames * num_mels]
 }

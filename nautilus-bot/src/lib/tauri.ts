@@ -32,6 +32,10 @@ export async function stopRecording(recordingId: string): Promise<void> {
   await invoke("stop_recording", { recordingId });
 }
 
+export async function openRecordingAudio(recordingId: string): Promise<void> {
+  await invoke("open_recording_audio", { recordingId });
+}
+
 export async function getWaveformData(recordingId: string): Promise<number[]> {
   return await invoke("get_waveform_data", { recordingId });
 }

@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use hound::{WavReader, WavSpec};
-use std::path::PathBuf;
+use std::path::Path;
 
 /// Load and preprocess audio file for ASR
 ///
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 /// - Resample to 16kHz
 /// - Convert to f32 samples
 /// - Normalize to [-1.0, 1.0]
-pub fn load_audio_file(path: &PathBuf) -> Result<Vec<f32>> {
+pub fn load_audio_file(path: &Path) -> Result<Vec<f32>> {
     tracing::info!("Loading audio file: {:?}", path);
 
     // Check file extension
@@ -33,7 +33,7 @@ pub fn load_audio_file(path: &PathBuf) -> Result<Vec<f32>> {
 }
 
 /// Load WAV file and preprocess
-fn load_wav_file(path: &PathBuf) -> Result<Vec<f32>> {
+fn load_wav_file(path: &Path) -> Result<Vec<f32>> {
     let reader = WavReader::open(path).context("Failed to open WAV file")?;
 
     let spec = reader.spec();
@@ -73,7 +73,7 @@ fn load_wav_file(path: &PathBuf) -> Result<Vec<f32>> {
 }
 
 /// Load raw PCM file (assumes 16-bit signed, 16kHz, mono)
-fn load_raw_pcm(path: &PathBuf) -> Result<Vec<f32>> {
+fn load_raw_pcm(path: &Path) -> Result<Vec<f32>> {
     let data = std::fs::read(path).context("Failed to read PCM file")?;
 
     // Convert bytes to i16 samples
@@ -165,7 +165,7 @@ fn resample(input: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
 
 /// Save audio data to WAV file
 #[allow(dead_code)]
-pub fn save_wav_file(path: &PathBuf, samples: &[f32], sample_rate: u32) -> Result<()> {
+pub fn save_wav_file(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
     let spec = WavSpec {
         channels: 1,
         sample_rate,
@@ -217,7 +217,7 @@ pub fn pre_emphasis(samples: &mut [f32], coeff: f32) {
     }
 
     for i in (1..samples.len()).rev() {
-        samples[i] = samples[i] - coeff * samples[i - 1];
+        samples[i] -= coeff * samples[i - 1];
     }
 }
 

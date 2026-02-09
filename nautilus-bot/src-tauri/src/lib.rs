@@ -17,6 +17,7 @@ mod text;
 mod transcription;
 
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::Mutex;
@@ -398,6 +399,47 @@ async fn get_transcript(
 
 #[tauri::command]
 #[allow(non_snake_case)]
+async fn open_recording_audio(
+    state: tauri::State<'_, AppState>,
+    recordingId: String,
+) -> Result<(), String> {
+    let recording = {
+        let db = state.db.lock().await;
+        db.get_recording(&recordingId)
+            .map_err(|e| e.to_string())?
+            .ok_or("Recording not found")?
+    };
+
+    if recording.audio_path.trim().is_empty() {
+        return Err("Recording has no audio file path".to_string());
+    }
+
+    let canonical_audio =
+        canonicalize_existing_absolute_path(&recording.audio_path, "recording audio path")?;
+    if !canonical_audio.is_file() {
+        return Err(format!(
+            "Recording audio path is not a file: {}",
+            canonical_audio.display()
+        ));
+    }
+    ensure_path_in_approved_roots(&canonical_audio, "recording audio path")?;
+
+    open_path_in_default_app(&canonical_audio)?;
+
+    let mut db = state.db.lock().await;
+    let details = serde_json::json!({
+        "recording_id": &recordingId,
+        "audio_path": canonical_audio.to_string_lossy().to_string(),
+    });
+    if let Err(e) = db.log_audit_event("recording_audio_opened", Some(details), "info") {
+        tracing::warn!("Failed to log audit event: {}", e);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
 async fn get_waveform_data(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -630,23 +672,17 @@ async fn export_recording_v2(
 async fn verify_evidence_bundle(
     targetPath: String,
 ) -> Result<transcription::EvidenceVerificationResult, String> {
-    let path = std::path::Path::new(&targetPath);
-    if !path.exists() {
-        return Err("File does not exist".to_string());
-    }
-    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
-    let data_dir = dirs::data_dir()
-        .ok_or("Could not find data directory")?
-        .join("Nautilus");
-    let home_dir = dirs::home_dir().ok_or("Could not find home directory")?;
-    let canonical_str = canonical.to_string_lossy();
-    if !canonical.starts_with(&data_dir) && !canonical.starts_with(&home_dir) {
+    let canonical = canonicalize_existing_absolute_path(&targetPath, "targetPath")?;
+    if !canonical.is_file() {
         return Err(format!(
-            "Refusing to read file outside user directories: {}",
-            canonical_str
+            "targetPath must be a file, got: {}",
+            canonical.display()
         ));
     }
-    transcription::verify_evidence_bundle_file(&targetPath).map_err(|e| e.to_string())
+    ensure_path_in_approved_roots(&canonical, "targetPath")?;
+
+    let canonical_str = canonical.to_string_lossy().to_string();
+    transcription::verify_evidence_bundle_file(&canonical_str).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -671,7 +707,9 @@ async fn delete_recording(
     recordingId: String,
 ) -> Result<(), String> {
     let mut db = state.db.lock().await;
-    let audio_path = db.delete_recording(&recordingId).map_err(|e| e.to_string())?;
+    let audio_path = db
+        .delete_recording(&recordingId)
+        .map_err(|e| e.to_string())?;
 
     // Try to delete the audio file from disk
     if !audio_path.is_empty() {
@@ -829,8 +867,20 @@ async fn list_downloaded_models() -> Result<Vec<download::DownloadedModel>, Stri
 async fn delete_model(path: String) -> Result<(), String> {
     let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
 
-    let path = std::path::PathBuf::from(path);
-    manager.delete_model(&path).await.map_err(|e| e.to_string())
+    let canonical = canonicalize_existing_absolute_path(&path, "path")?;
+    let models_root = nautilus_data_root()?.join("models");
+    let models_root = models_root.canonicalize().unwrap_or(models_root);
+    if !canonical.starts_with(&models_root) {
+        return Err(format!(
+            "Refusing to delete model outside managed directory '{}': {}",
+            models_root.display(),
+            canonical.display()
+        ));
+    }
+    manager
+        .delete_model(&canonical)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -964,8 +1014,17 @@ async fn generate_waveform_svg(
 ) -> Result<String, String> {
     use crate::audio::waveform;
 
-    let data =
-        waveform::generate_waveform_from_file(&recording_path, 200).map_err(|e| e.to_string())?;
+    let canonical_path = canonicalize_existing_absolute_path(&recording_path, "recording_path")?;
+    if !canonical_path.is_file() {
+        return Err(format!(
+            "recording_path must be a file, got: {}",
+            canonical_path.display()
+        ));
+    }
+    ensure_path_in_approved_roots(&canonical_path, "recording_path")?;
+
+    let data = waveform::generate_waveform_from_file(&canonical_path.to_string_lossy(), 200)
+        .map_err(|e| e.to_string())?;
 
     let svg = waveform::export_waveform_svg(&data, width, height, "#3b82f6");
     Ok(svg)
@@ -988,7 +1047,15 @@ async fn create_backup(
     state: tauri::State<'_, AppState>,
     data_dir: String,
 ) -> Result<backup::BackupInfo, String> {
-    let path = std::path::PathBuf::from(data_dir);
+    let path = canonicalize_existing_absolute_path(&data_dir, "data_dir")?;
+    let expected_data_root = nautilus_data_root()?;
+    if path != expected_data_root {
+        return Err(format!(
+            "data_dir must be Nautilus data directory '{}', got '{}'",
+            expected_data_root.display(),
+            path.display()
+        ));
+    }
     let backup_manager = state.backup_manager.lock().await;
     backup_manager
         .create_backup(&path)
@@ -1016,7 +1083,15 @@ async fn restore_backup(
     backup_id: String,
     data_dir: String,
 ) -> Result<(), String> {
-    let path = std::path::PathBuf::from(data_dir);
+    let path = canonicalize_existing_absolute_path(&data_dir, "data_dir")?;
+    let expected_data_root = nautilus_data_root()?;
+    if path != expected_data_root {
+        return Err(format!(
+            "data_dir must be Nautilus data directory '{}', got '{}'",
+            expected_data_root.display(),
+            path.display()
+        ));
+    }
     let backup_manager = state.backup_manager.lock().await;
     backup_manager
         .restore_backup(&backup_id, &path)
@@ -1078,9 +1153,18 @@ async fn export_backup_archive(
     backupId: String,
     targetPath: String,
 ) -> Result<(), String> {
+    let canonical_target = canonicalize_existing_absolute_path(&targetPath, "targetPath")?;
+    if !canonical_target.is_dir() {
+        return Err(format!(
+            "targetPath must be an existing directory, got '{}'",
+            canonical_target.display()
+        ));
+    }
+    ensure_path_in_approved_roots(&canonical_target, "targetPath")?;
+
     let backup_manager = state.backup_manager.lock().await;
     backup_manager
-        .export_backup(&backupId, std::path::Path::new(&targetPath))
+        .export_backup(&backupId, &canonical_target)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1099,11 +1183,8 @@ pub fn run() {
     tracing_subscriber::fmt::init();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_process::init())
         .manage(AppState {
             db: Arc::new(Mutex::new(
                 db::Database::new().expect("Failed to initialize database"),
@@ -1164,6 +1245,7 @@ pub fn run() {
             get_recordings,
             get_recording,
             get_transcript,
+            open_recording_audio,
             get_waveform_data,
             get_recording_waveform,
             analyze_recording,
@@ -1286,4 +1368,133 @@ fn fallback_citations_from_response(
             end_time: Some(segment.end_time),
         })
         .collect()
+}
+
+fn canonicalize_existing_absolute_path(raw_path: &str, label: &str) -> Result<PathBuf, String> {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{} cannot be empty", label));
+    }
+
+    let candidate = PathBuf::from(trimmed);
+    if !candidate.is_absolute() {
+        return Err(format!(
+            "{} must be an absolute path, got '{}'",
+            label, trimmed
+        ));
+    }
+    if !candidate.exists() {
+        return Err(format!("{} does not exist: '{}'", label, trimmed));
+    }
+
+    candidate
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve {} '{}': {}", label, trimmed, e))
+}
+
+fn nautilus_data_root() -> Result<PathBuf, String> {
+    let root = dirs::data_dir()
+        .ok_or("Could not find data directory")?
+        .join("Nautilus");
+    std::fs::create_dir_all(&root).map_err(|e| {
+        format!(
+            "Failed to prepare Nautilus data root '{}': {}",
+            root.display(),
+            e
+        )
+    })?;
+    Ok(root.canonicalize().unwrap_or(root))
+}
+
+fn approved_path_roots() -> Result<Vec<PathBuf>, String> {
+    let mut roots = Vec::new();
+
+    roots.push(nautilus_data_root()?);
+
+    let config_root = dirs::config_dir()
+        .ok_or("Could not find config directory")?
+        .join("Nautilus");
+    if let Err(e) = std::fs::create_dir_all(&config_root) {
+        tracing::warn!(
+            "Failed to prepare Nautilus config root '{}': {}",
+            config_root.display(),
+            e
+        );
+    } else {
+        roots.push(config_root.canonicalize().unwrap_or(config_root));
+    }
+
+    let documents_base = dirs::document_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
+        .ok_or("Could not find documents directory")?;
+    let documents_root = documents_base.join("Nautilus");
+    if let Err(e) = std::fs::create_dir_all(&documents_root) {
+        tracing::warn!(
+            "Failed to prepare Nautilus documents root '{}': {}",
+            documents_root.display(),
+            e
+        );
+    } else {
+        roots.push(documents_root.canonicalize().unwrap_or(documents_root));
+    }
+
+    if roots.is_empty() {
+        return Err("No approved Nautilus roots are available".to_string());
+    }
+    Ok(roots)
+}
+
+fn ensure_path_in_approved_roots(path: &Path, label: &str) -> Result<(), String> {
+    let roots = approved_path_roots()?;
+    if roots.iter().any(|root| path.starts_with(root)) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "{} '{}' is outside approved Nautilus roots",
+        label,
+        path.display()
+    ))
+}
+
+fn open_path_in_default_app(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
+        .arg(path)
+        .status()
+        .map_err(|e| format!("Failed to launch 'open' for '{}': {}", path.display(), e))?;
+
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(path)
+        .status()
+        .map_err(|e| {
+            format!(
+                "Failed to launch Windows opener for '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let status = std::process::Command::new("xdg-open")
+        .arg(path)
+        .status()
+        .map_err(|e| {
+            format!(
+                "Failed to launch 'xdg-open' for '{}': {}",
+                path.display(),
+                e
+            )
+        })?;
+
+    if !status.success() {
+        return Err(format!(
+            "Default app open command failed for '{}'",
+            path.display()
+        ));
+    }
+
+    Ok(())
 }

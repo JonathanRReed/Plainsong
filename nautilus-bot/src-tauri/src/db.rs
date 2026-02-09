@@ -11,6 +11,9 @@ use chrono::Utc;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::fs;
+
+pub type SpeakerAlias = (Option<String>, Option<String>, i64);
+
 pub struct Database {
     conn: Connection,
 }
@@ -231,14 +234,14 @@ impl Database {
                 name: row.get(1)?,
                 description: row.get(2)?,
                 parent_id: row.get(3)?,
-                created_at: row
-                    .get::<_, String>(4)?
-                    .parse()
-                    .unwrap_or_else(|e| { tracing::warn!("Project created_at parse error: {}", e); Utc::now() }),
-                updated_at: row
-                    .get::<_, String>(5)?
-                    .parse()
-                    .unwrap_or_else(|e| { tracing::warn!("Project updated_at parse error: {}", e); Utc::now() }),
+                created_at: row.get::<_, String>(4)?.parse().unwrap_or_else(|e| {
+                    tracing::warn!("Project created_at parse error: {}", e);
+                    Utc::now()
+                }),
+                updated_at: row.get::<_, String>(5)?.parse().unwrap_or_else(|e| {
+                    tracing::warn!("Project updated_at parse error: {}", e);
+                    Utc::now()
+                }),
                 encrypted: row.get::<_, i32>(6)? != 0,
                 key_salt: row.get(7)?,
                 key_hint: row.get(8)?,
@@ -454,10 +457,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_speaker_aliases(
-        &self,
-        recording_id: &str,
-    ) -> Result<HashMap<String, (Option<String>, Option<String>, i64)>> {
+    pub fn get_speaker_aliases(&self, recording_id: &str) -> Result<HashMap<String, SpeakerAlias>> {
         let mut stmt = self.conn.prepare(
             "SELECT speaker_id, name, color, sample_count
              FROM speaker_aliases WHERE recording_id = ?1",
@@ -524,10 +524,7 @@ impl Database {
             "UPDATE recordings SET project_id = 'inbox', updated_at = ?1 WHERE project_id = ?2",
             params![Utc::now().to_rfc3339(), project_id],
         )?;
-        tx.execute(
-            "DELETE FROM projects WHERE id = ?1",
-            params![project_id],
-        )?;
+        tx.execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
         tx.commit()?;
         Ok(())
     }
@@ -671,8 +668,10 @@ mod tests {
     #[test]
     fn test_get_recordings_filtered_by_project() {
         let mut db = in_memory_db();
-        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
-        db.create_recording(&sample_recording("r2", "other")).unwrap();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.create_recording(&sample_recording("r2", "other"))
+            .unwrap();
 
         let all = db.get_recordings(None).unwrap();
         assert_eq!(all.len(), 2);
@@ -685,7 +684,8 @@ mod tests {
     #[test]
     fn test_update_recording_status() {
         let mut db = in_memory_db();
-        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
         db.update_recording_status("r1", "completed").unwrap();
 
         let rec = db.get_recording("r1").unwrap().unwrap();
@@ -695,7 +695,8 @@ mod tests {
     #[test]
     fn test_save_and_get_transcript() {
         let mut db = in_memory_db();
-        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
 
         let transcript = sample_transcript("r1");
         db.save_transcript(&transcript).unwrap();
@@ -710,7 +711,8 @@ mod tests {
     #[test]
     fn test_rename_recording() {
         let mut db = in_memory_db();
-        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
         db.rename_recording("r1", "New Title").unwrap();
 
         let rec = db.get_recording("r1").unwrap().unwrap();
@@ -720,7 +722,8 @@ mod tests {
     #[test]
     fn test_delete_recording_removes_transcript() {
         let mut db = in_memory_db();
-        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
         db.save_transcript(&sample_transcript("r1")).unwrap();
 
         let audio_path = db.delete_recording("r1").unwrap();
@@ -733,8 +736,11 @@ mod tests {
     #[test]
     fn test_delete_project_reassigns_recordings() {
         let mut db = in_memory_db();
-        let proj = db.create_project(&sample_project("p1", "ToDelete")).unwrap();
-        db.create_recording(&sample_recording("r1", &proj.id)).unwrap();
+        let proj = db
+            .create_project(&sample_project("p1", "ToDelete"))
+            .unwrap();
+        db.create_recording(&sample_recording("r1", &proj.id))
+            .unwrap();
 
         db.delete_project(&proj.id).unwrap();
 
@@ -750,8 +756,12 @@ mod tests {
     #[test]
     fn test_audit_log_append() {
         let mut db = in_memory_db();
-        db.log_audit_event("test_event", Some(serde_json::json!({"key": "value"})), "info")
-            .unwrap();
+        db.log_audit_event(
+            "test_event",
+            Some(serde_json::json!({"key": "value"})),
+            "info",
+        )
+        .unwrap();
 
         let log = db.get_audit_log().unwrap();
         assert_eq!(log.len(), 1);
@@ -765,11 +775,13 @@ mod tests {
         db.log_audit_event("first", None, "info").unwrap();
 
         // Attempt to UPDATE the audit log should fail due to trigger
-        let result = db.conn.execute(
-            "UPDATE audit_log SET event = 'modified'",
-            [],
+        let result = db
+            .conn
+            .execute("UPDATE audit_log SET event = 'modified'", []);
+        assert!(
+            result.is_err(),
+            "Audit log should be append-only (no updates)"
         );
-        assert!(result.is_err(), "Audit log should be append-only (no updates)");
     }
 
     #[test]
@@ -779,13 +791,17 @@ mod tests {
 
         // Attempt to DELETE from audit log should fail due to trigger
         let result = db.conn.execute("DELETE FROM audit_log", []);
-        assert!(result.is_err(), "Audit log should be append-only (no deletes)");
+        assert!(
+            result.is_err(),
+            "Audit log should be append-only (no deletes)"
+        );
     }
 
     #[test]
     fn test_speaker_alias_upsert() {
         let mut db = in_memory_db();
-        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
 
         db.upsert_speaker_alias("r1", "speaker_0", Some("Alice"), Some("#ff0000"), 100)
             .unwrap();

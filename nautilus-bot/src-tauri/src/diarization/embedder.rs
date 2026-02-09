@@ -378,12 +378,14 @@ impl EmbeddingClusterer {
                 break;
             }
 
-            let (i, j) = closest_pair.unwrap();
+            let Some((i, j)) = closest_pair else {
+                break;
+            };
 
             // Merge cluster j into i
-            for k in 0..n {
-                if cluster_labels[k] == j {
-                    cluster_labels[k] = i;
+            for label in cluster_labels.iter_mut().take(n) {
+                if *label == j {
+                    *label = i;
                 }
             }
 
@@ -409,7 +411,7 @@ impl EmbeddingClusterer {
 
         cluster_labels
             .into_iter()
-            .map(|l| *label_map.get(&l).unwrap())
+            .map(|l| label_map.get(&l).copied().unwrap_or_default())
             .collect()
     }
 

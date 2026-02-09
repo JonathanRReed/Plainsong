@@ -89,7 +89,7 @@ impl NoiseGate {
             // Apply attack/release
             if voice_detected {
                 // Attack - reduce gain reduction (open gate)
-                self.gain_reduction = self.gain_reduction * self.attack_coef;
+                self.gain_reduction *= self.attack_coef;
             } else {
                 // Release - increase gain reduction (close gate)
                 self.gain_reduction =

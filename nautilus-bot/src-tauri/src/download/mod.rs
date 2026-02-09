@@ -202,7 +202,7 @@ impl DownloadManager {
                         provider: "whisper".to_string(),
                         path: entry.path(),
                         size_bytes: metadata.len(),
-                        downloaded_at: metadata.modified()?.into(),
+                        downloaded_at: metadata.modified()?,
                     });
                 }
             }

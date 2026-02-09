@@ -1,7 +1,7 @@
 use super::{AsrProvider, DownloadStatus, ModelInfo, TranscriptionResult};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct ParakeetProvider {
     model_path: PathBuf,
@@ -58,7 +58,7 @@ impl AsrProvider for ParakeetProvider {
         }
     }
 
-    async fn transcribe(&self, audio_path: &PathBuf) -> Result<TranscriptionResult> {
+    async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
         let _ = audio_path;
         Err(anyhow::anyhow!(
             "Parakeet inference is not implemented in this build. Use the Whisper provider."
@@ -90,7 +90,7 @@ impl AsrProvider for ParakeetProvider {
             tracing::info!(
                 "Parakeet download progress: {:.1}% ({}/s)",
                 progress.percentage,
-                crate::download::format_bytes(progress.bytes_downloaded as u64)
+                crate::download::format_bytes(progress.bytes_downloaded)
             );
         };
 
@@ -124,8 +124,7 @@ fn compute_log_mel_spectrogram(audio: &[f32], _sample_rate: u32) -> Vec<f32> {
     let hop_length = 160; // 10ms at 16kHz
     let n_fft = 400; // 25ms window
 
-    let num_frames = (audio.len() - n_fft) / hop_length + 1;
-    let mut spectrogram = Vec::with_capacity(num_frames * num_mels);
+    let num_frames = (audio.len().saturating_sub(n_fft)) / hop_length + 1;
 
     // Simplified: just return zeros for now
     // Real implementation would:
@@ -133,13 +132,7 @@ fn compute_log_mel_spectrogram(audio: &[f32], _sample_rate: u32) -> Vec<f32> {
     // 2. Compute FFT
     // 3. Apply mel filterbank
     // 4. Take log
-    for _ in 0..num_frames {
-        for _ in 0..num_mels {
-            spectrogram.push(0.0);
-        }
-    }
-
-    spectrogram
+    vec![0.0; num_frames * num_mels]
 }
 
 /// Decode CTC tokens to text
@@ -149,7 +142,7 @@ fn compute_log_mel_spectrogram(audio: &[f32], _sample_rate: u32) -> Vec<f32> {
 fn decode_tokens(tokens: &[i64]) -> String {
     // Simple character mapping for demonstration
     // Real implementation would use the SentencePiece or BPE tokenizer
-    let alphabet = " abcdefghijklmnopqrstuvwxyz'";
+    let alphabet = b" abcdefghijklmnopqrstuvwxyz'";
     let mut result = String::new();
     let mut prev_token = -1i64;
 
@@ -162,8 +155,8 @@ fn decode_tokens(tokens: &[i64]) -> String {
 
         // Map token to character
         let idx = (token - 1) as usize;
-        if idx < alphabet.len() {
-            result.push(alphabet.chars().nth(idx).unwrap());
+        if let Some(byte) = alphabet.get(idx) {
+            result.push(char::from(*byte));
         }
 
         prev_token = token;

@@ -5,7 +5,7 @@ use super::{
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
 /// Manages multiple ASR providers
@@ -57,7 +57,7 @@ impl AsrManager {
     }
 
     /// Transcribe using the default provider
-    pub async fn transcribe(&self, audio_path: &PathBuf) -> Result<TranscriptionResult> {
+    pub async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
         let provider_type = self.get_default_provider().await;
         let provider = AsrProviderFactory::create(provider_type);
         provider.transcribe(audio_path).await
@@ -75,7 +75,7 @@ impl AsrManager {
     pub async fn transcribe_with_provider(
         &self,
         provider_type: AsrProviderType,
-        audio_path: &PathBuf,
+        audio_path: &Path,
     ) -> Result<TranscriptionResult> {
         let provider = AsrProviderFactory::create(provider_type);
         provider.transcribe(audio_path).await
@@ -113,7 +113,7 @@ impl AsrManager {
     }
 
     /// Compare providers with benchmark
-    pub async fn benchmark_providers(&self, test_audio: &PathBuf) -> Vec<BenchmarkResult> {
+    pub async fn benchmark_providers(&self, test_audio: &Path) -> Vec<BenchmarkResult> {
         let mut results = Vec::new();
 
         for provider_type in AsrProviderType::all() {

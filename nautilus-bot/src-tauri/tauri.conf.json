@@ -37,11 +37,6 @@
   "productName": "Nautilus",
   "version": "1.0.0",
   "identifier": "com.nautilus.app",
-  "plugins": {
-    "shell": {
-      "open": true
-    }
-  },
   "app": {
     "macOSPrivateApi": true,
     "security": {

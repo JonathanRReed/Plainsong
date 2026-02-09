@@ -338,32 +338,32 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
 
           <Card>
             <CardHeader>
-              <CardTitle>Provider Comparison</CardTitle>
+              <CardTitle>Provider Status</CardTitle>
               <CardDescription>
-                Key differences between available ASR providers
+                Production availability for ASR providers in this build
               </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="space-y-4 text-sm">
                 <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">🏆 Canary Qwen 2.5B</p>
+                  <p className="font-medium mb-1">🌍 Whisper (Enabled)</p>
                   <p className="text-muted-foreground">
-                    Highest accuracy (5.63% WER) but requires more memory (2.5GB). 
-                    Best for when accuracy is critical.
+                    Production transcription provider in this build. Supports model downloads and
+                    end-to-end transcription.
                   </p>
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">⚡ Parakeet TDT 0.6B</p>
+                  <p className="font-medium mb-1">⚡ Parakeet (Not enabled)</p>
                   <p className="text-muted-foreground">
-                    Fastest transcription (3386x RTF). Only 600MB model size. 
-                    Best for real-time applications.
+                    Model download path exists, but inference is not enabled in this production
+                    build.
                   </p>
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">🌍 Whisper Large V3</p>
+                  <p className="font-medium mb-1">🏆 Canary (Not enabled)</p>
                   <p className="text-muted-foreground">
-                    Most widely supported, 99 languages, good balance of speed and accuracy. 
-                    Best general-purpose choice.
+                    Model download path exists, but inference is not enabled in this production
+                    build.
                   </p>
                 </div>
               </div>

@@ -127,7 +127,7 @@ impl DiarizationEngine {
         let smoothed = clusterer.smooth_segments(&segments, &labels);
 
         let mut speaker_segments = Vec::new();
-        let mut unique_labels: Vec<usize> = labels.iter().cloned().collect();
+        let mut unique_labels: Vec<usize> = labels.to_vec();
         unique_labels.sort();
         unique_labels.dedup();
 
