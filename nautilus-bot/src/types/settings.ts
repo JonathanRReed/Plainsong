@@ -22,6 +22,8 @@ export interface AudioSettings {
 
 export interface TranscriptionSettings {
   defaultProvider: string;
+  selectedModelId: string;
+  allowWhisperFallback: boolean;
   autoTranscribe: boolean;
   enableDiarization: boolean;
   intelligentPunctuation: boolean;
@@ -38,6 +40,8 @@ export interface UiSettings {
   windowPosition: [number, number] | null;
   windowSize: [number, number] | null;
   fontSize: number;
+  showDictationPopup: boolean;
+  showRecordingPopup: boolean;
 }
 
 export interface ExportSettings {
@@ -61,6 +65,7 @@ export interface PrivacySettings {
 export interface KeyboardShortcuts {
   toggleRecording: string;
   toggleDictation: string;
+  toggleDictationAlternates?: string[];
   openWindow: string;
   quickExport: string;
   focusSearch: string;

@@ -28,6 +28,11 @@ export interface Transcript {
   language: string;
   confidence: number;
   model: string;
+  modelId?: string | null;
+  requestedProvider?: string | null;
+  actualProvider?: string | null;
+  fallbackUsed?: boolean | null;
+  fallbackReason?: string | null;
   createdAt?: string;
 }
 

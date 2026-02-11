@@ -25,6 +25,11 @@ pub struct Transcript {
     pub language: String,
     pub confidence: f64,
     pub model: String,
+    pub model_id: Option<String>,
+    pub requested_provider: Option<String>,
+    pub actual_provider: Option<String>,
+    pub fallback_used: Option<bool>,
+    pub fallback_reason: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

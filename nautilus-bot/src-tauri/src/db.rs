@@ -137,10 +137,36 @@ impl Database {
                 language TEXT,
                 confidence REAL,
                 model TEXT,
+                model_id TEXT,
+                requested_provider TEXT,
+                actual_provider TEXT,
+                fallback_used INTEGER,
+                fallback_reason TEXT,
                 created_at TEXT NOT NULL
             )",
             [],
         )?;
+
+        // Backward-compatible migrations for existing local DBs.
+        let _ = self
+            .conn
+            .execute("ALTER TABLE transcripts ADD COLUMN model_id TEXT", []);
+        let _ = self.conn.execute(
+            "ALTER TABLE transcripts ADD COLUMN requested_provider TEXT",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE transcripts ADD COLUMN actual_provider TEXT",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE transcripts ADD COLUMN fallback_used INTEGER",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE transcripts ADD COLUMN fallback_reason TEXT",
+            [],
+        );
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS audit_log (
@@ -319,17 +345,22 @@ impl Database {
         }
     }
 
-    pub fn update_recording_path(&mut self, recording_id: &str, audio_path: &str) -> Result<()> {
+    pub fn update_recording_path(
+        &mut self,
+        recording_id: &str,
+        audio_path: &str,
+        duration_seconds: i64,
+    ) -> Result<()> {
         self.conn.execute(
-            "UPDATE recordings SET audio_path = ?1, status = 'completed', updated_at = ?2 WHERE id = ?3",
-            params![audio_path, Utc::now().to_rfc3339(), recording_id],
+            "UPDATE recordings SET audio_path = ?1, duration = ?2, status = 'completed', updated_at = ?3 WHERE id = ?4",
+            params![audio_path, duration_seconds, Utc::now().to_rfc3339(), recording_id],
         )?;
         Ok(())
     }
 
     pub fn get_transcript(&self, recording_id: &str) -> Result<Option<Transcript>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, recording_id, segments, full_text, language, confidence, model, created_at
+            "SELECT id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, fallback_used, fallback_reason, created_at
              FROM transcripts WHERE recording_id = ?1",
         )?;
 
@@ -346,8 +377,13 @@ impl Database {
                 language: row.get(4)?,
                 confidence: row.get(5)?,
                 model: row.get(6)?,
+                model_id: row.get(7)?,
+                requested_provider: row.get(8)?,
+                actual_provider: row.get(9)?,
+                fallback_used: row.get::<_, Option<i64>>(10)?.map(|value| value != 0),
+                fallback_reason: row.get(11)?,
                 created_at: row
-                    .get::<_, String>(7)?
+                    .get::<_, String>(12)?
                     .parse()
                     .unwrap_or_else(|_| Utc::now()),
             })
@@ -387,6 +423,18 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_recording_duration(
+        &mut self,
+        recording_id: &str,
+        duration_seconds: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE recordings SET duration = ?1, updated_at = ?2 WHERE id = ?3",
+            params![duration_seconds, Utc::now().to_rfc3339(), recording_id],
+        )?;
+        Ok(())
+    }
+
     pub fn save_transcript(&mut self, transcript: &Transcript) -> Result<()> {
         let segments_json = serde_json::to_string(&transcript.segments)?;
 
@@ -396,8 +444,8 @@ impl Database {
             params![&transcript.recording_id],
         )?;
         tx.execute(
-            "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, fallback_used, fallback_reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 &transcript.id,
                 &transcript.recording_id,
@@ -406,6 +454,11 @@ impl Database {
                 &transcript.language,
                 transcript.confidence,
                 &transcript.model,
+                &transcript.model_id,
+                &transcript.requested_provider,
+                &transcript.actual_provider,
+                transcript.fallback_used.map(|value| if value { 1 } else { 0 }),
+                &transcript.fallback_reason,
                 transcript.created_at.to_rfc3339()
             ],
         )?;
@@ -632,6 +685,11 @@ mod tests {
             language: "en".to_string(),
             confidence: 0.95,
             model: "whisper-base".to_string(),
+            model_id: Some("base.en".to_string()),
+            requested_provider: Some("whisper".to_string()),
+            actual_provider: Some("whisper".to_string()),
+            fallback_used: Some(false),
+            fallback_reason: None,
             created_at: Utc::now(),
         }
     }

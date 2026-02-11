@@ -11,6 +11,26 @@ interface WaveformVisualizerProps {
   barGap?: number;
 }
 
+function resolveCanvasHsl(token: "active" | "trusted" | "muted-foreground", alpha?: number): string {
+  if (typeof window === "undefined") {
+    if (token === "active") return alpha === undefined ? "#f97316" : `rgba(249, 115, 22, ${alpha})`;
+    if (token === "trusted") return alpha === undefined ? "#3b82f6" : `rgba(59, 130, 246, ${alpha})`;
+    return alpha === undefined ? "#94a3b8" : `rgba(148, 163, 184, ${alpha})`;
+  }
+
+  const hslValue = getComputedStyle(document.documentElement)
+    .getPropertyValue(`--${token}`)
+    .trim();
+
+  if (!hslValue) {
+    if (token === "active") return alpha === undefined ? "#f97316" : `rgba(249, 115, 22, ${alpha})`;
+    if (token === "trusted") return alpha === undefined ? "#3b82f6" : `rgba(59, 130, 246, ${alpha})`;
+    return alpha === undefined ? "#94a3b8" : `rgba(148, 163, 184, ${alpha})`;
+  }
+
+  return alpha === undefined ? `hsl(${hslValue})` : `hsl(${hslValue} / ${alpha})`;
+}
+
 export function WaveformVisualizer({
   data,
   isRecording = false,
@@ -46,7 +66,7 @@ export function WaveformVisualizer({
       ctx.beginPath();
       ctx.moveTo(0, centerY);
       ctx.lineTo(width, centerY);
-      ctx.strokeStyle = "hsl(var(--muted-foreground))";
+      ctx.strokeStyle = resolveCanvasHsl("muted-foreground");
       ctx.lineWidth = 1;
       ctx.stroke();
       return;
@@ -80,11 +100,11 @@ export function WaveformVisualizer({
       // Create gradient
       const gradient = ctx.createLinearGradient(0, y, 0, y + barHeight);
       if (isRecording) {
-        gradient.addColorStop(0, "hsl(var(--active))");
-        gradient.addColorStop(1, "hsl(var(--active) / 0.5)");
+        gradient.addColorStop(0, resolveCanvasHsl("active"));
+        gradient.addColorStop(1, resolveCanvasHsl("active", 0.5));
       } else {
-        gradient.addColorStop(0, "hsl(var(--trusted))");
-        gradient.addColorStop(1, "hsl(var(--trusted) / 0.5)");
+        gradient.addColorStop(0, resolveCanvasHsl("trusted"));
+        gradient.addColorStop(1, resolveCanvasHsl("trusted", 0.5));
       }
       
       ctx.fillStyle = gradient;
@@ -93,7 +113,7 @@ export function WaveformVisualizer({
 
     // Add glow effect when recording
     if (isRecording) {
-      ctx.shadowColor = "hsl(var(--active))";
+      ctx.shadowColor = resolveCanvasHsl("active");
       ctx.shadowBlur = 10;
     }
   }, [data, height, barWidth, barGap, isRecording]);

@@ -1,14 +1,35 @@
 import { useState, useEffect, useRef } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { cn } from "@/lib/utils";
 import { useRecording } from "@/hooks/use-recording";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Keyboard, Mic, Square, Zap, Save, Command } from "lucide-react";
+import { Keyboard, Mic, Square, Zap, Save } from "lucide-react";
+
+interface DictationTextReadyEvent {
+  text: string;
+  pasted?: boolean;
+  copied?: boolean;
+  pasteError?: string | null;
+  requestedProvider?: string;
+  actualProvider?: string;
+  fallbackUsed?: boolean;
+  fallbackReason?: string | null;
+  modelId?: string;
+}
 
 export function DictationView() {
   const { isRecording, formattedDuration, startDictation, stopDictation } = useRecording();
+  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  const hotkeyLabel = isMac
+    ? "Cmd + Shift + Space or Ctrl + Shift + Space"
+    : "Ctrl + Shift + Space";
   const [transcribedText, setTranscribedText] = useState("");
+  const [lastProvider, setLastProvider] = useState<string | null>(null);
+  const [lastModelId, setLastModelId] = useState<string | null>(null);
+  const [pasteStatus, setPasteStatus] = useState<string | null>(null);
+  const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
   const [saveToInbox, setSaveToInbox] = useState(true);
   const [hotkeyPressed, setHotkeyPressed] = useState(false);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -16,7 +37,7 @@ export function DictationView() {
   useEffect(() => {
     // Listen for hotkey visual feedback
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.shiftKey && e.code === "Space") {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "Space") {
         setHotkeyPressed(true);
         
         // Clear any existing timeout
@@ -35,6 +56,47 @@ export function DictationView() {
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
       }
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    const setup = async () => {
+      unlisten = await listen<DictationTextReadyEvent>("dictation-text-ready", (event) => {
+        const payload = event.payload;
+        const text = payload?.text ?? "";
+        if (text) {
+          setTranscribedText(text);
+        }
+        if (payload?.actualProvider) {
+          setLastProvider(payload.actualProvider);
+        }
+        if (payload?.modelId) {
+          setLastModelId(payload.modelId);
+        }
+        if (payload?.fallbackUsed) {
+          setFallbackNotice(
+            payload.fallbackReason
+              ? `Fallback used: ${payload.fallbackReason}`
+              : "Fallback to Whisper was used."
+          );
+        } else {
+          setFallbackNotice(null);
+        }
+        if (payload?.pasted) {
+          setPasteStatus("Pasted into focused app");
+        } else if (payload?.copied) {
+          setPasteStatus(payload?.pasteError ?? "Copied to clipboard");
+        } else if (payload?.pasteError) {
+          setPasteStatus(payload.pasteError);
+        } else {
+          setPasteStatus(null);
+        }
+      });
+    };
+    void setup();
+    return () => {
+      unlisten?.();
     };
   }, []);
 
@@ -68,8 +130,8 @@ export function DictationView() {
                 hotkeyPressed ? "bg-active text-active-foreground border-active scale-105" : "bg-muted"
               )}
             >
-              <Command className="h-4 w-4" />
-              <span className="font-mono font-medium">Ctrl + Shift + Space</span>
+              <Keyboard className="h-4 w-4" />
+              <span className="font-mono font-medium">{hotkeyLabel}</span>
               <span className="text-muted-foreground ml-2">to hold</span>
             </div>
             <div className="flex items-center gap-2">
@@ -135,7 +197,7 @@ export function DictationView() {
                     <div className="text-center">
                       <p className="text-lg font-medium">Ready to capture</p>
                       <p className="text-muted-foreground mt-1">
-                        Hold and keep pressed: Ctrl + Shift + Space, release to transcribe
+                        Hold and keep pressed: {hotkeyLabel}, release to transcribe
                       </p>
                     </div>
                     <Button 
@@ -204,7 +266,9 @@ export function DictationView() {
               <CardHeader className="flex flex-row items-center justify-between">
                 <div>
                   <CardTitle>Last Transcription</CardTitle>
-                  <CardDescription>Text copied to clipboard</CardDescription>
+                  <CardDescription>
+                    {pasteStatus ?? "Latest dictation result"}
+                  </CardDescription>
                 </div>
                 <Button 
                   variant="outline" 
@@ -219,6 +283,13 @@ export function DictationView() {
                 <div className="p-4 bg-muted rounded-lg">
                   <p className="whitespace-pre-wrap">{transcribedText}</p>
                 </div>
+                {(lastProvider || lastModelId || fallbackNotice) && (
+                  <div className="mt-3 space-y-1 text-xs text-muted-foreground">
+                    {lastProvider && <p>Provider: {lastProvider}</p>}
+                    {lastModelId && <p>Model: {lastModelId}</p>}
+                    {fallbackNotice && <p className="text-amber-500">{fallbackNotice}</p>}
+                  </div>
+                )}
               </CardContent>
             </Card>
           )}

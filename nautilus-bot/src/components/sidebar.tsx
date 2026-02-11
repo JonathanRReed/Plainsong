@@ -5,6 +5,7 @@ import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { useRecording } from "@/hooks/use-recording";
 
 interface SidebarProps {
   activeView: string;
@@ -23,6 +24,8 @@ const navItems = [
 ];
 
 export function Sidebar({ activeView, onViewChange, isCollapsed = false, onToggleCollapse }: SidebarProps) {
+  const { isRecording, formattedDuration, recordingMode } = useRecording();
+
   return (
     <TooltipProvider>
       <div className={cn(
@@ -90,6 +93,22 @@ export function Sidebar({ activeView, onViewChange, isCollapsed = false, onToggl
         <Separator />
         
         <div className="p-4 space-y-3">
+          {isRecording && (
+            <div
+              className={cn(
+                "flex items-center gap-2 rounded-md border border-active/40 bg-active/10 px-2 py-1 text-xs",
+                isCollapsed && "justify-center"
+              )}
+            >
+              <div className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+              {!isCollapsed && (
+                <span className="font-medium text-active">
+                  {recordingMode === "meeting" ? "Meeting" : "Dictation"} {formattedDuration}
+                </span>
+              )}
+            </div>
+          )}
+
           <div className={cn(
             "flex items-center gap-2",
             isCollapsed && "justify-center"

@@ -91,6 +91,10 @@ impl Default for AudioSettings {
 pub struct TranscriptionSettings {
     /// Default ASR provider
     pub default_provider: String,
+    /// Selected model identifier for local model backends
+    pub selected_model_id: String,
+    /// If true, fallback to Whisper when selected provider fails
+    pub allow_whisper_fallback: bool,
     /// Auto-transcribe after recording
     pub auto_transcribe: bool,
     /// Enable speaker diarization
@@ -109,8 +113,10 @@ impl Default for TranscriptionSettings {
     fn default() -> Self {
         Self {
             default_provider: "whisper".to_string(),
+            selected_model_id: "base.en".to_string(),
+            allow_whisper_fallback: false,
             auto_transcribe: true,
-            enable_diarization: false,
+            enable_diarization: true,
             intelligent_punctuation: true,
             language: None,
             num_speakers: 0,
@@ -137,6 +143,10 @@ pub struct UiSettings {
     pub window_size: Option<(u32, u32)>,
     /// Font size
     pub font_size: u32,
+    /// Show dictation overlay popup
+    pub show_dictation_popup: bool,
+    /// Show meeting recording overlay popup
+    pub show_recording_popup: bool,
 }
 
 impl Default for UiSettings {
@@ -149,6 +159,8 @@ impl Default for UiSettings {
             window_position: None,
             window_size: None,
             font_size: 14,
+            show_dictation_popup: true,
+            show_recording_popup: true,
         }
     }
 }
@@ -223,6 +235,8 @@ pub struct KeyboardShortcuts {
     pub toggle_recording: String,
     /// Toggle dictation mode
     pub toggle_dictation: String,
+    /// Additional dictation bindings for platform parity (macOS command key, etc.)
+    pub toggle_dictation_alternates: Vec<String>,
     /// Open main window
     pub open_window: String,
     /// Quick export
@@ -235,11 +249,24 @@ impl Default for KeyboardShortcuts {
     fn default() -> Self {
         Self {
             toggle_recording: "Ctrl+Shift+R".to_string(),
-            toggle_dictation: "Ctrl+Shift+D".to_string(),
+            toggle_dictation: "Ctrl+Shift+Space".to_string(),
+            toggle_dictation_alternates: default_dictation_alternate_shortcuts(),
             open_window: "Ctrl+Shift+N".to_string(),
             quick_export: "Ctrl+Shift+E".to_string(),
             focus_search: "Ctrl+Shift+F".to_string(),
         }
+    }
+}
+
+fn default_dictation_alternate_shortcuts() -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        vec!["Cmd+Shift+Space".to_string()]
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Vec::new()
     }
 }
 

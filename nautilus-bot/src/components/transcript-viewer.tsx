@@ -160,6 +160,7 @@ export function TranscriptViewer({
               const firstSegment = group[0];
               const speakerId = firstSegment.speakerId || "Unknown";
               const speakerName = speakerNames[speakerId];
+              const canRenameSpeaker = speakerId !== "Unknown";
               
               // Check if this group is currently playing
               const isActive = currentTime !== undefined && 
@@ -184,8 +185,8 @@ export function TranscriptViewer({
                     <SpeakerBadge
                       speakerId={speakerId}
                       speakerName={speakerName}
-                      isEditing={isEditingSpeakers}
-                      onRename={(name) => handleRenameSpeaker(speakerId, name)}
+                      isEditing={isEditingSpeakers && canRenameSpeaker}
+                      onRename={canRenameSpeaker ? (name) => handleRenameSpeaker(speakerId, name) : undefined}
                     />
                   </div>
 

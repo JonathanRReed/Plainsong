@@ -1,10 +1,28 @@
 export interface AsrProviderInfo {
-  providerType: "whisper";
+  providerType: AsrProviderType;
   name: string;
   description: string;
   isAvailable: boolean;
+  inferenceEnabled: boolean;
   modelInfo: AsrModelInfo;
   downloadStatus: DownloadStatus;
+  runtimeStatus: AsrRuntimeStatus;
+  runtimeMessage?: string;
+  runtimeDetails: AsrRuntimeDetails;
+}
+
+export type AsrRuntimeStatus = "ready" | "missing_runtime" | "missing_model" | "error";
+
+export interface AsrRuntimeDetails {
+  pythonPath?: string;
+  modelPath?: string;
+}
+
+export interface AsrRuntimeDiagnostics {
+  providerType: AsrProviderType;
+  runtimeStatus: AsrRuntimeStatus;
+  runtimeMessage?: string;
+  runtimeDetails: AsrRuntimeDetails;
 }
 
 export interface AsrModelInfo {
@@ -19,22 +37,25 @@ export interface AsrModelInfo {
   sourceUrl: string;
 }
 
-export interface DownloadStatus {
-  NotDownloaded?: {};
-  Downloading?: { progress: number };
-  Downloaded?: {};
-  Error?: { 0: string };
-}
+export type DownloadStatus =
+  | "NotDownloaded"
+  | "Downloaded"
+  | "Downloading"
+  | "Error"
+  | { NotDownloaded: Record<string, never> }
+  | { Downloaded: Record<string, never> }
+  | { Downloading: { progress: number } }
+  | { Error: string | { 0: string } };
 
 export interface BenchmarkResult {
-  providerType: "whisper";
+  providerType: AsrProviderType;
   providerName: string;
   processingTimeMs: number;
   transcription: string;
   confidence: number;
 }
 
-export type AsrProviderType = "whisper";
+export type AsrProviderType = "whisper" | "parakeet" | "canary" | "distil_whisper";
 
 // LLM Types
 export interface LlmAnalysisResult {

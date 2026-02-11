@@ -1,6 +1,8 @@
 pub mod canary;
+pub mod distil_whisper;
 pub mod manager;
 pub mod parakeet;
+pub mod python_runtime;
 pub mod whisper;
 
 use serde::{Deserialize, Serialize};
@@ -59,6 +61,11 @@ pub struct TranscriptionResult {
     pub confidence: f64,
     pub processing_time_ms: u64,
     pub model_name: String,
+    pub model_id: String,
+    pub requested_provider: AsrProviderType,
+    pub actual_provider: AsrProviderType,
+    pub fallback_used: bool,
+    pub fallback_reason: Option<String>,
 }
 
 /// Transcript segment with timing
@@ -87,11 +94,17 @@ pub enum AsrProviderType {
     Whisper,
     Parakeet,
     Canary,
+    DistilWhisper,
 }
 
 impl AsrProviderType {
     pub fn all() -> Vec<AsrProviderType> {
-        vec![AsrProviderType::Whisper]
+        vec![
+            AsrProviderType::Whisper,
+            AsrProviderType::Parakeet,
+            AsrProviderType::Canary,
+            AsrProviderType::DistilWhisper,
+        ]
     }
 
     #[allow(dead_code)]
@@ -100,6 +113,7 @@ impl AsrProviderType {
             AsrProviderType::Whisper => "OpenAI Whisper",
             AsrProviderType::Parakeet => "NVIDIA Parakeet TDT",
             AsrProviderType::Canary => "NVIDIA Canary Qwen",
+            AsrProviderType::DistilWhisper => "Distil Whisper",
         }
     }
 }
@@ -109,13 +123,23 @@ pub struct AsrProviderFactory;
 
 impl AsrProviderFactory {
     pub fn create(provider_type: AsrProviderType) -> Box<dyn AsrProvider> {
+        Self::create_with_model(provider_type, None)
+    }
+
+    pub fn create_with_model(
+        provider_type: AsrProviderType,
+        selected_model_id: Option<&str>,
+    ) -> Box<dyn AsrProvider> {
         match provider_type {
-            AsrProviderType::Whisper => Box::new(whisper::WhisperProvider::new()),
+            AsrProviderType::Whisper => Box::new(whisper::WhisperProvider::new(selected_model_id)),
             AsrProviderType::Parakeet => Box::new(parakeet::ParakeetProvider::new()),
             AsrProviderType::Canary => Box::new(canary::CanaryProvider::new()),
+            AsrProviderType::DistilWhisper => Box::new(distil_whisper::DistilWhisperProvider::new(
+                selected_model_id,
+            )),
         }
     }
 }
 
 // Re-export manager types
-pub use manager::{AsrManager, BenchmarkResult, ProviderInfo};
+pub use manager::{AsrManager, BenchmarkResult, ProviderInfo, RuntimeDiagnostics};

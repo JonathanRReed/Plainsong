@@ -79,6 +79,9 @@ indicatif = { version = "0.17", optional = true }
 genpdf = { version = "0.2", optional = true }
 base64 = { version = "0.21", optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+
 [features]
 default = ["custom-protocol", "asr-all"]
 custom-protocol = ["tauri/custom-protocol"]
@@ -87,7 +90,7 @@ custom-protocol = ["tauri/custom-protocol"]
 asr-whisper = ["whisper-rs", "download-manager"]
 asr-parakeet = ["ort", "ndarray", "download-manager", "audio-processing"]
 asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager", "audio-processing"]
-asr-all = ["asr-whisper", "asr-parakeet", "asr-canary"]
+asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization"]
 
 # SQLCipher for encrypted SQLite (optional, requires OpenSSL)
 sqlcipher = ["rusqlite/sqlcipher", "libsqlite3-sys/sqlcipher"]

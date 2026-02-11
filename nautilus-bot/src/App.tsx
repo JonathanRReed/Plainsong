@@ -1,6 +1,10 @@
-import { Component, useState, type ErrorInfo, type ReactNode } from "react";
+import { Component, useMemo, useState, type ErrorInfo, type ReactNode } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Sidebar } from "@/components/sidebar";
 import { RecordingOverlay } from "@/components/recording-overlay";
+import { RecordingProvider } from "@/hooks/use-recording";
+import { DictationPopup } from "@/components/popups/dictation-popup";
+import { RecordingPopup } from "@/components/popups/recording-popup";
 import { DashboardView } from "@/components/views/dashboard-view";
 import { ProjectsView } from "@/components/views/projects-view";
 import { RecordingsView } from "@/components/views/recordings-view";
@@ -77,29 +81,62 @@ const VIEW_COMPONENTS: Record<ViewId, () => ReactNode> = {
   settings: () => <SettingsView />,
 };
 
+type OverlayMode = "dictation" | "recording" | null;
+
+function getOverlayMode(): OverlayMode {
+  if (typeof window === "undefined") return null;
+  const overlay = new URLSearchParams(window.location.search).get("overlay");
+  if (overlay === "dictation" || overlay === "recording") {
+    return overlay;
+  }
+
+  try {
+    const label = getCurrentWindow().label;
+    if (label === "dictation-overlay") return "dictation";
+    if (label === "recording-overlay") return "recording";
+  } catch {
+    // Not in a Tauri runtime window.
+  }
+
+  return null;
+}
+
 function App() {
+  const overlayMode = useMemo(getOverlayMode, []);
   const [activeView, setActiveView] = useState<ViewId>("dashboard");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  if (overlayMode) {
+    return (
+      <ThemeProvider>
+        <TooltipProvider>
+          {overlayMode === "dictation" ? <DictationPopup /> : <RecordingPopup />}
+        </TooltipProvider>
+      </ThemeProvider>
+    );
+  }
 
   const renderView = VIEW_COMPONENTS[activeView] ?? VIEW_COMPONENTS.dashboard;
 
   return (
     <ThemeProvider>
       <TooltipProvider>
-        <div className="flex h-screen bg-background text-foreground">
-          <Sidebar
-            activeView={activeView}
-            onViewChange={(v) => setActiveView(v as ViewId)}
-            isCollapsed={sidebarCollapsed}
-            onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
-          />
+        <ErrorBoundary>
+          <RecordingProvider>
+            <div className="flex h-screen bg-background text-foreground">
+              <Sidebar
+                activeView={activeView}
+                onViewChange={(v) => setActiveView(v as ViewId)}
+                isCollapsed={sidebarCollapsed}
+                onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
+              />
 
-          <ErrorBoundary>
-            <main className="flex-1 overflow-hidden">{renderView()}</main>
-          </ErrorBoundary>
+              <main className="flex-1 overflow-hidden">{renderView()}</main>
+              <RecordingOverlay isDictation={activeView === "dictation"} />
+            </div>
+          </RecordingProvider>
+        </ErrorBoundary>
 
-          <RecordingOverlay isDictation={activeView === "dictation"} />
-        </div>
       </TooltipProvider>
     </ThemeProvider>
   );

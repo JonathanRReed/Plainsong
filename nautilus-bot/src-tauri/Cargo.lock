@@ -3365,6 +3365,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "chrono",
+ "core-graphics",
  "cpal",
  "crossbeam",
  "dirs 5.0.1",

@@ -208,6 +208,63 @@ impl DownloadManager {
             }
         }
 
+        // Check Parakeet models
+        let parakeet_dir = self.models_dir.join("parakeet");
+        if parakeet_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&parakeet_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let metadata = entry.metadata().await?;
+                if metadata.is_file() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    models.push(DownloadedModel {
+                        name: format!("Parakeet {}", name),
+                        provider: "parakeet".to_string(),
+                        path: entry.path(),
+                        size_bytes: metadata.len(),
+                        downloaded_at: metadata.modified()?,
+                    });
+                }
+            }
+        }
+
+        // Check Canary models
+        let canary_dir = self.models_dir.join("canary");
+        if canary_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&canary_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let metadata = entry.metadata().await?;
+                if metadata.is_file() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    models.push(DownloadedModel {
+                        name: format!("Canary {}", name),
+                        provider: "canary".to_string(),
+                        path: entry.path(),
+                        size_bytes: metadata.len(),
+                        downloaded_at: metadata.modified()?,
+                    });
+                }
+            }
+        }
+
+        // Check Distil Whisper models
+        let distil_dir = self.models_dir.join("distil_whisper");
+        if distil_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&distil_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let metadata = entry.metadata().await?;
+                if metadata.is_file() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    models.push(DownloadedModel {
+                        name: format!("Distil {}", name),
+                        provider: "distil_whisper".to_string(),
+                        path: entry.path(),
+                        size_bytes: metadata.len(),
+                        downloaded_at: metadata.modified()?,
+                    });
+                }
+            }
+        }
+
         Ok(models)
     }
 
@@ -351,6 +408,15 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
             size_mb: 2900.0,
             url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin"
                 .to_string(),
+            sha256: None,
+        },
+        WhisperModelInfo {
+            name: "large-v3-turbo".to_string(),
+            file_name: "ggml-large-v3-turbo.bin".to_string(),
+            size_mb: 1620.0,
+            url:
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
+                    .to_string(),
             sha256: None,
         },
     ];

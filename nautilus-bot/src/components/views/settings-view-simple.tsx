@@ -10,10 +10,12 @@ import {
   createBackupDefault,
   clearProviderSecret,
   getBackupConfig,
+  getPermissionDiagnostics,
   getBackupSetupReport,
   getSettings,
   hasProviderSecret,
   listBackups,
+  openPermissionSettings,
   saveSettings,
   saveBackupConfig,
   setProviderSecret,
@@ -21,6 +23,7 @@ import {
   verifyBackupCloudConnection,
 } from "@/lib/tauri";
 import type { BackupConfig, BackupInfo, CloudSetupReport } from "@/lib/tauri";
+import type { PermissionDiagnostics } from "@/lib/tauri";
 import type { Settings } from "@/types/settings";
 import {
   AlertCircle,
@@ -55,6 +58,7 @@ export function SettingsView() {
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
   const [backupSetupReport, setBackupSetupReport] = useState<CloudSetupReport | null>(null);
+  const [permissionDiagnostics, setPermissionDiagnostics] = useState<PermissionDiagnostics | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -63,10 +67,12 @@ export function SettingsView() {
         const loaded = await getSettings();
         const loadedBackupConfig = await getBackupConfig();
         const loadedBackups = await listBackups();
+        const permissions = await getPermissionDiagnostics();
         if (mounted) {
           setSettings(loaded);
           setBackupConfig(loadedBackupConfig);
           setBackups(loadedBackups);
+          setPermissionDiagnostics(permissions);
         }
       } catch (e) {
         if (mounted) {
@@ -225,6 +231,180 @@ export function SettingsView() {
                       })
                     }
                   />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Automatic speaker naming</Label>
+                    <p className="text-sm text-muted-foreground">
+                      Run diarization and label speakers after transcription
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.transcription.enableDiarization}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: { ...settings.transcription, enableDiarization: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Default local model</Label>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={settings.transcription.selectedModelId}
+                    onChange={(e) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          selectedModelId: e.target.value,
+                        },
+                      })
+                    }
+                  >
+                    <option value="base.en">Whisper base.en</option>
+                    <option value="large-v3">Whisper large-v3</option>
+                    <option value="large-v3-turbo">Whisper large-v3-turbo</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Allow Whisper fallback</Label>
+                    <p className="text-sm text-muted-foreground">
+                      If selected provider fails, fallback to Whisper instead of hard failing
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.transcription.allowWhisperFallback}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          allowWhisperFallback: checked,
+                        },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="h-px bg-border" />
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Show dictation popup</Label>
+                    <p className="text-sm text-muted-foreground">
+                      Floating status while hotkey dictation runs
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.ui.showDictationPopup}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        ui: { ...settings.ui, showDictationPopup: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Show recording popup</Label>
+                    <p className="text-sm text-muted-foreground">
+                      Floating status while meeting recording is active
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.ui.showRecordingPopup}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        ui: { ...settings.ui, showRecordingPopup: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="h-px bg-border" />
+
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <Label>Permission diagnostics</Label>
+                      <p className="text-sm text-muted-foreground">
+                        Validate microphone, accessibility, and automation permissions
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={async () => {
+                        const diagnostics = await getPermissionDiagnostics();
+                        setPermissionDiagnostics(diagnostics);
+                      }}
+                    >
+                      Refresh
+                    </Button>
+                  </div>
+                  {permissionDiagnostics && (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-sm">
+                      <div className="p-2 rounded border">
+                        <p className="font-medium">Microphone</p>
+                        <p className={permissionDiagnostics.microphoneReady ? "text-green-500" : "text-amber-500"}>
+                          {permissionDiagnostics.microphoneReady ? "Ready" : "Not ready"}
+                        </p>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="mt-1 px-0"
+                          onClick={() => void openPermissionSettings("microphone")}
+                        >
+                          Open settings
+                        </Button>
+                      </div>
+                      <div className="p-2 rounded border">
+                        <p className="font-medium">Accessibility</p>
+                        <p className={permissionDiagnostics.accessibilityReady ? "text-green-500" : "text-amber-500"}>
+                          {permissionDiagnostics.accessibilityReady ? "Ready" : "Needs grant"}
+                        </p>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="mt-1 px-0"
+                          onClick={() => void openPermissionSettings("accessibility")}
+                        >
+                          Open settings
+                        </Button>
+                      </div>
+                      <div className="p-2 rounded border">
+                        <p className="font-medium">Automation</p>
+                        <p className={permissionDiagnostics.automationReady ? "text-green-500" : "text-amber-500"}>
+                          {permissionDiagnostics.automationReady ? "Ready" : "Needs grant"}
+                        </p>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="mt-1 px-0"
+                          onClick={() => void openPermissionSettings("automation")}
+                        >
+                          Open settings
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                  {permissionDiagnostics?.notes?.length ? (
+                    <div className="text-xs text-muted-foreground space-y-1">
+                      {permissionDiagnostics.notes.map((note) => (
+                        <p key={note}>{note}</p>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               </CardContent>
             </Card>

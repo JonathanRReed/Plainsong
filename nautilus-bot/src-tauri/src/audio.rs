@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct AudioCapture {
     is_dictating: Arc<AtomicBool>,
@@ -204,8 +204,17 @@ impl AudioCapture {
 
         self.is_dictating.store(false, Ordering::SeqCst);
         if let Some(handle) = self.dictation_thread.take() {
-            if let Err(e) = handle.join() {
-                tracing::warn!("Dictation thread join error: {:?}", e);
+            let (done_tx, done_rx) = bounded::<()>(1);
+            std::thread::spawn(move || {
+                if let Err(e) = handle.join() {
+                    tracing::warn!("Dictation thread join error: {:?}", e);
+                }
+                let _ = done_tx.send(());
+            });
+            if done_rx.recv_timeout(Duration::from_millis(500)).is_err() {
+                tracing::warn!(
+                    "Timed out waiting for dictation capture thread to join; continuing stop path"
+                );
             }
         }
 
@@ -215,12 +224,29 @@ impl AudioCapture {
             samples.push(sample);
         }
 
+        boost_quiet_audio(&mut samples);
+        ensure_min_duration(&mut samples, self.dictation_sample_rate, 1.0);
+
         tracing::info!("Dictation stopped, captured {} samples", samples.len());
 
         // Convert to WAV format
         let wav_data = encode_wav(&samples, self.dictation_sample_rate, 1)?;
 
         Ok(wav_data)
+    }
+
+    pub fn abort_dictation(&mut self) {
+        self.is_dictating.store(false, Ordering::SeqCst);
+
+        if let Some(handle) = self.dictation_thread.take() {
+            std::thread::spawn(move || {
+                if let Err(e) = handle.join() {
+                    tracing::warn!("Dictation thread join error during abort: {:?}", e);
+                }
+            });
+        }
+
+        while self.dictation_buffer.pop().is_some() {}
     }
 
     pub fn start_recording(&mut self, options: RecordingOptions) -> Result<String> {
@@ -498,6 +524,14 @@ impl AudioCapture {
     pub fn is_dictating(&self) -> bool {
         self.is_dictating.load(Ordering::SeqCst)
     }
+
+    pub fn is_recording(&self) -> bool {
+        self.active_recording.is_some()
+    }
+
+    pub fn has_microphone_input(&self) -> bool {
+        self.host.default_input_device().is_some()
+    }
 }
 
 fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Result<Vec<u8>> {
@@ -560,8 +594,10 @@ fn write_wav_file(
             recv(receiver) -> msg => {
                 match msg {
                     Ok(samples) => {
+                        let mut samples = samples;
+                        boost_quiet_audio(&mut samples);
                         for sample in samples {
-                            wav_writer.write_sample((sample * 32767.0) as i16)?;
+                            wav_writer.write_sample((sample.clamp(-1.0, 1.0) * 32767.0) as i16)?;
                         }
                     }
                     Err(_) => break,
@@ -586,4 +622,36 @@ fn compute_file_hash(path: &PathBuf) -> Result<String> {
     std::io::copy(&mut file, &mut hasher)?;
     let result = hasher.finalize();
     Ok(format!("{:x}", result))
+}
+
+fn boost_quiet_audio(samples: &mut [f32]) {
+    if samples.is_empty() {
+        return;
+    }
+
+    let peak = samples.iter().fold(0.0_f32, |current_peak, sample| {
+        current_peak.max(sample.abs())
+    });
+
+    if peak <= 0.0 || peak >= 0.30 {
+        return;
+    }
+
+    let gain = (0.45 / peak).clamp(1.0, 2.8);
+    for sample in samples.iter_mut() {
+        *sample = (*sample * gain).clamp(-1.0, 1.0);
+    }
+}
+
+fn ensure_min_duration(samples: &mut Vec<f32>, sample_rate: u32, min_seconds: f32) {
+    if sample_rate == 0 || min_seconds <= 0.0 {
+        return;
+    }
+
+    let min_samples = (sample_rate as f32 * min_seconds).ceil() as usize;
+    if samples.len() >= min_samples {
+        return;
+    }
+
+    samples.resize(min_samples, 0.0);
 }

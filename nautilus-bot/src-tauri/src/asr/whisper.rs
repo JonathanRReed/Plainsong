@@ -1,4 +1,6 @@
-use super::{AsrProvider, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult};
+use super::{
+    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult,
+};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -7,22 +9,25 @@ pub struct WhisperProvider {
     model_path: PathBuf,
     #[allow(dead_code)]
     models_dir: PathBuf,
+    model_id: String,
     ctx: Option<whisper_rs::WhisperContext>,
 }
 
 impl WhisperProvider {
-    pub fn new() -> Self {
+    pub fn new(selected_model_id: Option<&str>) -> Self {
         let models_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Nautilus")
             .join("models")
             .join("whisper");
 
-        let model_path = models_dir.join("ggml-base.en.bin");
+        let model_id = sanitize_model_id(selected_model_id.unwrap_or("base.en"));
+        let model_path = models_dir.join(format!("ggml-{}.bin", model_id));
 
         let mut provider = Self {
             model_path: model_path.clone(),
             models_dir,
+            model_id,
             ctx: None,
         };
 
@@ -51,82 +56,8 @@ impl WhisperProvider {
         Ok(())
     }
 
-    /// Get list of available models
-    #[allow(dead_code)]
-    pub fn get_available_models() -> Vec<WhisperModel> {
-        vec![
-            WhisperModel {
-                name: "tiny".to_string(),
-                file_name: "ggml-tiny.bin".to_string(),
-                #[allow(dead_code)]
-                size_mb: 75.0,
-                parameters: "39M".to_string(),
-                languages: vec!["multilingual".to_string()],
-                wer: 18.0,
-                url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
-                    .to_string(),
-            },
-            WhisperModel {
-                name: "tiny.en".to_string(),
-                file_name: "ggml-tiny.en.bin".to_string(),
-                size_mb: 75.0,
-                parameters: "39M".to_string(),
-                languages: vec!["en".to_string()],
-                wer: 14.0,
-                url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin"
-                    .to_string(),
-            },
-            WhisperModel {
-                name: "base".to_string(),
-                file_name: "ggml-base.bin".to_string(),
-                size_mb: 142.0,
-                parameters: "74M".to_string(),
-                languages: vec!["multilingual".to_string()],
-                wer: 14.0,
-                url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-                    .to_string(),
-            },
-            WhisperModel {
-                name: "base.en".to_string(),
-                file_name: "ggml-base.en.bin".to_string(),
-                size_mb: 142.0,
-                parameters: "74M".to_string(),
-                languages: vec!["en".to_string()],
-                wer: 11.0,
-                url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
-                    .to_string(),
-            },
-            WhisperModel {
-                name: "small".to_string(),
-                file_name: "ggml-small.bin".to_string(),
-                size_mb: 466.0,
-                parameters: "244M".to_string(),
-                languages: vec!["multilingual".to_string()],
-                wer: 10.0,
-                url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
-                    .to_string(),
-            },
-            WhisperModel {
-                name: "medium".to_string(),
-                file_name: "ggml-medium.bin".to_string(),
-                size_mb: 1.5,
-                parameters: "769M".to_string(),
-                languages: vec!["multilingual".to_string()],
-                wer: 8.0,
-                url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
-                    .to_string(),
-            },
-            WhisperModel {
-                name: "large-v3".to_string(),
-                file_name: "ggml-large-v3.bin".to_string(),
-                size_mb: 2.9,
-                parameters: "1550M".to_string(),
-                languages: vec!["multilingual".to_string()],
-                wer: 6.0,
-                url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin"
-                    .to_string(),
-            },
-        ]
+    fn model_spec(&self) -> WhisperModelSpec {
+        whisper_model_spec(&self.model_id)
     }
 }
 
@@ -146,11 +77,12 @@ impl AsrProvider for WhisperProvider {
     }
 
     fn model_info(&self) -> ModelInfo {
+        let spec = self.model_spec();
         ModelInfo {
             name: "Whisper".to_string(),
-            version: "large-v3".to_string(),
-            size_mb: 2900.0,
-            parameters: "1550M".to_string(),
+            version: spec.id.to_string(),
+            size_mb: spec.size_mb,
+            parameters: spec.parameters.to_string(),
             languages: vec![
                 "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar",
                 "sv", "it", "id", "hi", "fi", "vi",
@@ -158,10 +90,10 @@ impl AsrProvider for WhisperProvider {
             .into_iter()
             .map(|s| s.to_string())
             .collect(),
-            word_error_rate: Some(6.0),
-            real_time_factor: Some(1.5),
+            word_error_rate: Some(spec.wer),
+            real_time_factor: Some(spec.real_time_factor),
             license: "MIT".to_string(),
-            source_url: "https://github.com/openai/whisper".to_string(),
+            source_url: spec.url.to_string(),
         }
     }
 
@@ -241,7 +173,12 @@ impl AsrProvider for WhisperProvider {
             language: "en".to_string(),
             confidence: 0.9,
             processing_time_ms: processing_time,
-            model_name: "whisper-base.en".to_string(),
+            model_name: format!("whisper-{}", self.model_id),
+            model_id: self.model_id.clone(),
+            requested_provider: AsrProviderType::Whisper,
+            actual_provider: AsrProviderType::Whisper,
+            fallback_used: false,
+            fallback_reason: None,
         })
     }
 
@@ -265,13 +202,7 @@ impl AsrProvider for WhisperProvider {
 
         let manager = DownloadManager::new()?;
 
-        // Extract model name from path (e.g., "ggml-base.en.bin" -> "base.en")
-        let model_name = self
-            .model_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.strip_prefix("ggml-"))
-            .unwrap_or("base.en");
+        let model_name = self.model_id.as_str();
 
         let progress_callback = |progress: crate::download::DownloadProgress| {
             tracing::info!(
@@ -286,7 +217,7 @@ impl AsrProvider for WhisperProvider {
             .await?;
 
         // Reload the model
-        let mut provider = Self::new();
+        let mut provider = Self::new(Some(model_name));
         if let Err(e) = provider.load_model() {
             tracing::error!("Failed to load model after download: {}", e);
         }
@@ -295,19 +226,95 @@ impl AsrProvider for WhisperProvider {
     }
 }
 
-pub struct WhisperModel {
-    #[allow(dead_code)]
-    pub name: String,
-    #[allow(dead_code)]
-    pub file_name: String,
-    #[allow(dead_code)]
-    pub size_mb: f64,
-    #[allow(dead_code)]
-    pub parameters: String,
-    #[allow(dead_code)]
-    pub languages: Vec<String>,
-    #[allow(dead_code)]
-    pub wer: f64,
-    #[allow(dead_code)]
-    pub url: String,
+#[derive(Clone, Copy)]
+struct WhisperModelSpec {
+    id: &'static str,
+    size_mb: f64,
+    parameters: &'static str,
+    wer: f64,
+    real_time_factor: f64,
+    url: &'static str,
+}
+
+fn sanitize_model_id(model_id: &str) -> String {
+    match model_id {
+        "large-v3-turbo" => "large-v3-turbo".to_string(),
+        "large-v3" => "large-v3".to_string(),
+        "medium" => "medium".to_string(),
+        "medium.en" => "medium.en".to_string(),
+        "small" => "small".to_string(),
+        "small.en" => "small.en".to_string(),
+        "base" => "base".to_string(),
+        _ => "base.en".to_string(),
+    }
+}
+
+fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
+    match model_id {
+        "large-v3-turbo" => WhisperModelSpec {
+            id: "large-v3-turbo",
+            size_mb: 1620.0,
+            parameters: "809M",
+            wer: 6.4,
+            real_time_factor: 0.7,
+            url:
+                "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+        },
+        "large-v3" => WhisperModelSpec {
+            id: "large-v3",
+            size_mb: 2900.0,
+            parameters: "1550M",
+            wer: 6.0,
+            real_time_factor: 1.5,
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+        },
+        "medium" => WhisperModelSpec {
+            id: "medium",
+            size_mb: 1500.0,
+            parameters: "769M",
+            wer: 8.0,
+            real_time_factor: 1.0,
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
+        },
+        "medium.en" => WhisperModelSpec {
+            id: "medium.en",
+            size_mb: 1500.0,
+            parameters: "769M",
+            wer: 8.2,
+            real_time_factor: 1.0,
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin",
+        },
+        "small" => WhisperModelSpec {
+            id: "small",
+            size_mb: 466.0,
+            parameters: "244M",
+            wer: 10.0,
+            real_time_factor: 0.8,
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        },
+        "small.en" => WhisperModelSpec {
+            id: "small.en",
+            size_mb: 466.0,
+            parameters: "244M",
+            wer: 10.4,
+            real_time_factor: 0.8,
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin",
+        },
+        "base" => WhisperModelSpec {
+            id: "base",
+            size_mb: 142.0,
+            parameters: "74M",
+            wer: 14.0,
+            real_time_factor: 0.5,
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+        },
+        _ => WhisperModelSpec {
+            id: "base.en",
+            size_mb: 142.0,
+            parameters: "74M",
+            wer: 11.0,
+            real_time_factor: 0.5,
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+        },
+    }
 }

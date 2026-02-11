@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
+import { normalizeDownloadStatus } from "@/lib/download-status";
+import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
 import { invoke } from "@tauri-apps/api/core";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -16,7 +18,8 @@ import {
   Globe, 
   Clock,
   BarChart3,
-  FileAudio
+  FileAudio,
+  Zap
 } from "lucide-react";
 
 interface AsrProviderManagerProps {
@@ -28,6 +31,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   const [defaultProvider, setDefaultProvider] = useState<AsrProviderType>("whisper");
   const [isLoading, setIsLoading] = useState(false);
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResult[]>([]);
+  const [providerErrors, setProviderErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     loadProviders();
@@ -53,11 +57,27 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   };
 
   const handleSetDefault = async (providerType: AsrProviderType) => {
+    const selected = providers.find((provider) => provider.providerType === providerType);
+    if (!selected?.inferenceEnabled) {
+      console.warn(`${providerType} is not enabled for inference in this build`);
+      return;
+    }
+
     try {
       await invoke("set_default_asr_provider", { providerType });
       setDefaultProvider(providerType);
+      setProviderErrors((previous) => {
+        const next = { ...previous };
+        delete next[providerType];
+        return next;
+      });
     } catch (error) {
       console.error("Failed to set default provider:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      setProviderErrors((previous) => ({
+        ...previous,
+        [providerType]: message.replace(/^Error invoking command '[^']+':\s*/i, ""),
+      }));
     }
   };
 
@@ -89,57 +109,54 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     switch (type) {
       case "whisper":
         return <Globe className="h-5 w-5" />;
+      case "distil_whisper":
+        return <Zap className="h-5 w-5" />;
       default:
         return <Cpu className="h-5 w-5" />;
     }
   };
 
   const getDownloadStatusBadge = (status: AsrProviderInfo["downloadStatus"]) => {
-    if (!status) return null;
-    
-    const statusObj = status as Record<string, unknown>;
-    
-    if ("Downloaded" in statusObj) {
-      return (
-        <Badge variant="default" className="bg-green-600">
-          <Check className="h-3 w-3 mr-1" />
-          Ready
-        </Badge>
-      );
-    } else if ("NotDownloaded" in statusObj) {
-      return (
-        <Badge variant="secondary">
-          <Download className="h-3 w-3 mr-1" />
-          Download Required
-        </Badge>
-      );
-    } else if ("Downloading" in statusObj) {
-      const progress = (statusObj.Downloading as { progress: number })?.progress || 0;
-      return (
-        <div className="flex items-center gap-2">
-          <Progress value={progress} className="w-20 h-2" />
-          <span className="text-xs text-muted-foreground">{progress.toFixed(0)}%</span>
-        </div>
-      );
-    } else if ("Error" in statusObj) {
-      return (
-        <Badge variant="destructive">
-          <AlertCircle className="h-3 w-3 mr-1" />
-          Error
-        </Badge>
-      );
-    }
-    return null;
-  };
+    const normalizedStatus = normalizeDownloadStatus(status);
 
-  const isDownloaded = (status: AsrProviderInfo["downloadStatus"]): boolean => {
-    if (!status) return false;
-    return typeof status === "object" && "Downloaded" in (status as Record<string, unknown>);
+    switch (normalizedStatus.kind) {
+      case "downloaded":
+        return (
+          <Badge variant="default" className="bg-green-600">
+            <Check className="h-3 w-3 mr-1" />
+            Ready
+          </Badge>
+        );
+      case "not_downloaded":
+        return (
+          <Badge variant="secondary">
+            <Download className="h-3 w-3 mr-1" />
+            Download Required
+          </Badge>
+        );
+      case "downloading": {
+        const progress = normalizedStatus.progress ?? 0;
+        return (
+          <div className="flex items-center gap-2">
+            <Progress value={progress} className="w-20 h-2" />
+            <span className="text-xs text-muted-foreground">{progress.toFixed(0)}%</span>
+          </div>
+        );
+      }
+      case "error":
+        return (
+          <Badge variant="destructive">
+            <AlertCircle className="h-3 w-3 mr-1" />
+            Error
+          </Badge>
+        );
+      default:
+        return null;
+    }
   };
 
   const isNotDownloaded = (status: AsrProviderInfo["downloadStatus"]): boolean => {
-    if (!status) return false;
-    return typeof status === "object" && "NotDownloaded" in (status as Record<string, unknown>);
+    return normalizeDownloadStatus(status).kind === "not_downloaded";
   };
 
   return (
@@ -159,7 +176,14 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 </CardContent>
               </Card>
             ) : (
-              providers.map((provider) => (
+              providers.map((provider) => {
+                const selection = getProviderSelectionStatus(provider);
+                const runtimeIssue =
+                  selection.reason === "runtime_unavailable"
+                    ? provider.runtimeMessage ?? "Runtime setup required."
+                    : null;
+                const providerError = providerErrors[provider.providerType];
+                return (
                 <Card 
                   key={provider.providerType}
                   className={cn(
@@ -246,6 +270,20 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                         <Badge variant="outline" className="text-xs">
                           {provider.modelInfo?.license || "Unknown"}
                         </Badge>
+                        {selection.reason === "runtime_unavailable" && (
+                          <Badge variant="secondary" className="text-xs">
+                            {provider.runtimeStatus === "missing_runtime"
+                              ? "Runtime setup required"
+                              : provider.runtimeStatus === "missing_model"
+                                ? "Model files missing"
+                                : "Runtime error"}
+                          </Badge>
+                        )}
+                        {!provider.inferenceEnabled && (
+                          <Badge variant="secondary" className="text-xs">
+                            Not enabled
+                          </Badge>
+                        )}
                         {provider.modelInfo?.sourceUrl && (
                           <a
                             href={provider.modelInfo.sourceUrl}
@@ -258,13 +296,28 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                         )}
                       </div>
                       <div className="flex items-center gap-2">
-                        {isDownloaded(provider.downloadStatus) ? (
+                        {selection.selectable ? (
                           <Button
                             variant={defaultProvider === provider.providerType ? "default" : "outline"}
                             size="sm"
                             onClick={() => handleSetDefault(provider.providerType)}
                           >
                             {defaultProvider === provider.providerType ? "Default" : "Set Default"}
+                          </Button>
+                        ) : selection.reason === "runtime_unavailable" ? (
+                          <>
+                            <Button size="sm" variant="outline" disabled>
+                              Runtime setup required
+                            </Button>
+                            {defaultProvider === provider.providerType && provider.providerType !== "whisper" && (
+                              <Button size="sm" variant="secondary" onClick={() => handleSetDefault("whisper")}>
+                                Switch to Whisper
+                              </Button>
+                            )}
+                          </>
+                        ) : selection.reason === "not_enabled" ? (
+                          <Button size="sm" variant="outline" disabled>
+                            Not enabled
                           </Button>
                         ) : isNotDownloaded(provider.downloadStatus) ? (
                           <Button
@@ -278,9 +331,15 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                         ) : null}
                       </div>
                     </div>
+                    {(runtimeIssue || providerError) && (
+                      <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                        {providerError ?? runtimeIssue}
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
-              ))
+                );
+              })
             )}
           </div>
         </TabsContent>
@@ -348,22 +407,28 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 <div className="p-3 bg-muted/50 rounded-lg">
                   <p className="font-medium mb-1">🌍 Whisper (Enabled)</p>
                   <p className="text-muted-foreground">
-                    Production transcription provider in this build. Supports model downloads and
-                    end-to-end transcription.
+                    Production local transcription provider. Supports model selection including
+                    turbo variants.
                   </p>
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">⚡ Parakeet (Not enabled)</p>
+                  <p className="font-medium mb-1">⚡ Parakeet (Enabled when runtime ready)</p>
                   <p className="text-muted-foreground">
-                    Model download path exists, but inference is not enabled in this production
-                    build.
+                    Uses a local NeMo runtime bridge. Provider becomes selectable only when model
+                    files and runtime health checks are both ready.
                   </p>
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">🏆 Canary (Not enabled)</p>
+                  <p className="font-medium mb-1">🏎️ Distil Whisper (Enabled)</p>
                   <p className="text-muted-foreground">
-                    Model download path exists, but inference is not enabled in this production
-                    build.
+                    Native local Distil runtime using model artifacts from distil-large-v3.5.
+                  </p>
+                </div>
+                <div className="p-3 bg-muted/50 rounded-lg">
+                  <p className="font-medium mb-1">🏆 Canary (Enabled when runtime ready)</p>
+                  <p className="text-muted-foreground">
+                    Uses local model artifacts plus a Python runtime bridge; selectable when both
+                    download and runtime health checks pass.
                   </p>
                 </div>
               </div>

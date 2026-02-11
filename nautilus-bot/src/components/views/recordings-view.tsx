@@ -10,13 +10,14 @@ import { useRecordings } from "@/hooks/use-recordings";
 import { useRecording } from "@/hooks/use-recording";
 import { ConsentDialog } from "@/components/recording-overlay";
 import { TranscriptViewer, TranscriptSearch } from "@/components/transcript-viewer";
-import { WaveformVisualizer } from "@/components/waveform-visualizer";
+import { RecordingWaveform, WaveformVisualizer } from "@/components/waveform-visualizer";
 import { AiAnalysisPanel } from "@/components/ai-analysis-panel";
 import {
   getRecordingWaveform,
   openRecordingAudio,
   getSpeakers,
   getTranscript,
+  runDiarization,
   renameSpeaker,
   deleteRecording,
   renameRecording,
@@ -39,7 +40,7 @@ import {
 
 export function RecordingsView() {
   const { recordings, refetch } = useRecordings();
-  const { startMeeting, stopMeeting, isRecording } = useRecording();
+  const { startMeeting, stopMeeting, isRecording, recordingId, formattedDuration } = useRecording();
   const [showConsent, setShowConsent] = useState(false);
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null);
   const [showRecordingDetail, setShowRecordingDetail] = useState(false);
@@ -48,6 +49,9 @@ export function RecordingsView() {
   const [waveformData, setWaveformData] = useState<number[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
+  const [isRunningDiarization, setIsRunningDiarization] = useState(false);
+  const [diarizationMessage, setDiarizationMessage] = useState<string | null>(null);
+  const [diarizationError, setDiarizationError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<Recording | null>(null);
   const [showRenameDialog, setShowRenameDialog] = useState<Recording | null>(null);
@@ -62,7 +66,10 @@ export function RecordingsView() {
   }, [isRecording, refetch]);
 
   const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean }) => {
-    await startMeeting({ ...options, projectId: "default" });
+    const startedId = await startMeeting({ ...options, projectId: "default" });
+    if (startedId) {
+      refetch();
+    }
     setShowConsent(false);
   };
 
@@ -73,6 +80,8 @@ export function RecordingsView() {
     setSpeakerNames({});
     setWaveformData([]);
     setSearchQuery("");
+    setDiarizationMessage(null);
+    setDiarizationError(null);
 
     try {
       const [transcript, waveform, speakers] = await Promise.all([
@@ -109,6 +118,32 @@ export function RecordingsView() {
     }
     setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
     await renameSpeaker(selectedRecording.id, speakerId, newName);
+  };
+
+  const handleRunDiarization = async () => {
+    if (!selectedRecording) {
+      return;
+    }
+
+    setIsRunningDiarization(true);
+    setDiarizationMessage(null);
+    setDiarizationError(null);
+
+    try {
+      const result = await runDiarization(selectedRecording.id);
+      await loadRecordingDetail(selectedRecording);
+      setDiarizationMessage(
+        `Speaker identification complete (${result.speakers.length} speakers found).`
+      );
+    } catch (error) {
+      setDiarizationError(
+        error instanceof Error
+          ? error.message
+          : "Speaker identification failed. Diarization model may not be available."
+      );
+    } finally {
+      setIsRunningDiarization(false);
+    }
   };
 
   const handlePlayAudio = async (recording: Recording) => {
@@ -163,6 +198,11 @@ export function RecordingsView() {
     });
   }, [selectedTranscript, searchQuery]);
 
+  const hasSpeakerLabels = useMemo(
+    () => Boolean(selectedTranscript?.segments.some((segment) => Boolean(segment.speakerId))),
+    [selectedTranscript]
+  );
+
   return (
     <div className="h-full flex flex-col">
       <div className="p-6 border-b flex items-center justify-between">
@@ -187,6 +227,25 @@ export function RecordingsView() {
 
       <ScrollArea className="flex-1">
         <div className="p-6">
+          {isRecording && recordingId && (
+            <Card className="mb-4 border-active/40 bg-active/5">
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between gap-4 mb-3">
+                  <div>
+                    <p className="text-sm font-medium text-active">Recording in progress</p>
+                    <p className="text-xs text-muted-foreground">Meeting capture is live</p>
+                  </div>
+                  <div className="font-mono text-lg font-semibold">{formattedDuration}</div>
+                </div>
+                <RecordingWaveform
+                  recordingId={recordingId}
+                  isRecording={isRecording}
+                  height={56}
+                />
+              </CardContent>
+            </Card>
+          )}
+
           {recordings.length === 0 ? (
             <div className="text-center py-12">
               <FileAudio className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
@@ -307,6 +366,8 @@ export function RecordingsView() {
             setSpeakerNames({});
             setWaveformData([]);
             setSearchQuery("");
+            setDiarizationMessage(null);
+            setDiarizationError(null);
             setDetailError(null);
           }
         }}
@@ -345,6 +406,38 @@ export function RecordingsView() {
                 </div>
               ) : selectedTranscript ? (
                 <>
+                  {!hasSpeakerLabels && (
+                    <div className="mb-3 rounded-lg border p-3 bg-muted/40">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="text-sm">
+                          <p className="font-medium">No speaker labels detected</p>
+                          <p className="text-muted-foreground">
+                            Run speaker identification to label multiple speakers in this transcript.
+                          </p>
+                        </div>
+                        <Button
+                          size="sm"
+                          onClick={handleRunDiarization}
+                          disabled={isRunningDiarization}
+                        >
+                          {isRunningDiarization ? (
+                            <>
+                              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                              Identifying...
+                            </>
+                          ) : (
+                            "Identify Speakers"
+                          )}
+                        </Button>
+                      </div>
+                      {diarizationMessage && (
+                        <p className="text-xs text-green-700 mt-2">{diarizationMessage}</p>
+                      )}
+                      {diarizationError && (
+                        <p className="text-xs text-destructive mt-2">{diarizationError}</p>
+                      )}
+                    </div>
+                  )}
                   <TranscriptSearch
                     onSearch={setSearchQuery}
                     className="mb-4"

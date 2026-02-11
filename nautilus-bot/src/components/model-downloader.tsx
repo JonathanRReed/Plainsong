@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
+import type { AsrProviderType } from "@/types/asr";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -36,7 +37,34 @@ const WHISPER_MODELS = [
   { name: "small.en", sizeMb: 466, description: "Better accuracy, English only", englishOnly: true },
   { name: "medium", sizeMb: 1500, description: "High accuracy", englishOnly: false },
   { name: "medium.en", sizeMb: 1500, description: "High accuracy, English only", englishOnly: true },
+  { name: "large-v3-turbo", sizeMb: 1620, description: "Low-latency turbo model", englishOnly: false },
   { name: "large-v3", sizeMb: 2900, description: "Best accuracy, multilingual", englishOnly: false },
+];
+
+const PROVIDER_BUNDLES: Array<{
+  providerType: AsrProviderType;
+  label: string;
+  description: string;
+  indicator: string;
+}> = [
+  {
+    providerType: "distil_whisper",
+    label: "Distil Whisper local",
+    description: "Downloads Distil Whisper local runtime artifacts (distil-large-v3.5).",
+    indicator: "distil_whisper/model.safetensors",
+  },
+  {
+    providerType: "parakeet",
+    label: "NVIDIA Parakeet v3",
+    description: "Downloads the local NeMo model bundle for Parakeet TDT 0.6B v3.",
+    indicator: "parakeet-tdt-0.6b-v3.nemo",
+  },
+  {
+    providerType: "canary",
+    label: "NVIDIA Canary local",
+    description: "Downloads Canary local model assets for on-device transcription.",
+    indicator: "model.safetensors",
+  },
 ];
 
 export function ModelDownloader({ className }: ModelDownloaderProps) {
@@ -125,6 +153,21 @@ export function ModelDownloader({ className }: ModelDownloaderProps) {
     }
   };
 
+  const handleProviderBundleDownload = async (providerType: AsrProviderType) => {
+    setDownloadingModel(providerType);
+    setDownloadProgress(0);
+    try {
+      await invoke("download_asr_models", { providerType });
+      await loadDownloadedModels();
+      await loadAvailableSpace();
+    } catch (error) {
+      console.error(`Failed to download ${providerType} models:`, error);
+    } finally {
+      setDownloadingModel(null);
+      setDownloadProgress(0);
+    }
+  };
+
   const handleDelete = async (path: string) => {
     if (!confirm("Are you sure you want to delete this model?")) return;
     
@@ -182,6 +225,58 @@ export function ModelDownloader({ className }: ModelDownloaderProps) {
         </CardContent>
       </Card>
 
+      {/* Provider Bundles */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-lg">Provider Bundles</CardTitle>
+          <CardDescription>Download complete model bundles for non-Whisper providers</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {PROVIDER_BUNDLES.map((bundle) => {
+            const downloaded = downloadedModels.some(
+              (m) =>
+                m.provider === bundle.providerType ||
+                m.path.includes(bundle.indicator)
+            );
+            const downloading = downloadingModel === bundle.providerType;
+            return (
+              <div
+                key={bundle.providerType}
+                className={cn(
+                  "flex items-center justify-between p-4 border rounded-lg",
+                  downloaded && "bg-muted/50 border-green-200 dark:border-green-800"
+                )}
+              >
+                <div>
+                  <p className="font-medium">{bundle.label}</p>
+                  <p className="text-sm text-muted-foreground">{bundle.description}</p>
+                </div>
+                {downloading ? (
+                  <div className="w-32 space-y-1">
+                    <Progress value={downloadProgress || 40} className="h-2" />
+                    <p className="text-xs text-center text-muted-foreground">Downloading</p>
+                  </div>
+                ) : downloaded ? (
+                  <Button variant="ghost" size="sm" disabled>
+                    <Check className="h-4 w-4 mr-2" />
+                    Downloaded
+                  </Button>
+                ) : (
+                  <Button
+                    size="sm"
+                    onClick={() => handleProviderBundleDownload(bundle.providerType)}
+                    disabled={Boolean(downloadingModel)}
+                  >
+                    <Download className="h-4 w-4 mr-2" />
+                    Download
+                  </Button>
+                )}
+              </div>
+            );
+          })}
+        </CardContent>
+      </Card>
+
       {/* Downloaded Models */}
       {downloadedModels.length > 0 && (
         <Card>
@@ -234,7 +329,7 @@ export function ModelDownloader({ className }: ModelDownloaderProps) {
             Available Models
           </CardTitle>
           <CardDescription>
-            Download Whisper models for local transcription
+            Download Whisper-family models for local transcription
           </CardDescription>
         </CardHeader>
         <CardContent>

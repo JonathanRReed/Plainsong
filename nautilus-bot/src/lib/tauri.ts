@@ -5,6 +5,7 @@ import type {
   Transcript,
   AuditLogEntry,
   AsrProviderInfo, 
+  AsrRuntimeDiagnostics,
   AsrProviderType, 
   BenchmarkResult,
   LlmAnalysisResult,
@@ -18,6 +19,10 @@ export async function startDictation(): Promise<void> {
 
 export async function stopDictation(): Promise<string> {
   return await invoke("stop_dictation");
+}
+
+export async function forceStopDictation(): Promise<string> {
+  return await invoke("force_stop_dictation");
 }
 
 export async function startRecording(options: {
@@ -145,6 +150,12 @@ export async function getAsrProviders(): Promise<AsrProviderInfo[]> {
   return await invoke("get_asr_providers");
 }
 
+export async function getAsrRuntimeDiagnostics(
+  providerType: AsrProviderType
+): Promise<AsrRuntimeDiagnostics> {
+  return await invoke("get_asr_runtime_diagnostics", { providerType });
+}
+
 export async function getDefaultAsrProvider(): Promise<AsrProviderType> {
   return await invoke("get_default_asr_provider");
 }
@@ -199,6 +210,23 @@ export async function checkSystemAudioAvailability(): Promise<boolean> {
 
 export async function getLoopbackDeviceName(): Promise<string | null> {
   return await invoke("get_loopback_device_name");
+}
+
+export interface PermissionDiagnostics {
+  microphoneReady: boolean;
+  accessibilityReady: boolean;
+  automationReady: boolean;
+  notes: string[];
+}
+
+export async function getPermissionDiagnostics(): Promise<PermissionDiagnostics> {
+  return await invoke("get_permission_diagnostics");
+}
+
+export async function openPermissionSettings(
+  section: "microphone" | "accessibility" | "automation"
+): Promise<void> {
+  await invoke("open_permission_settings", { section });
 }
 
 // Model Download APIs
