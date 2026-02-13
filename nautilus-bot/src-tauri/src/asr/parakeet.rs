@@ -105,6 +105,12 @@ except Exception as exc:
     }
 }
 
+impl Default for ParakeetProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl AsrProvider for ParakeetProvider {
     fn name(&self) -> &str {

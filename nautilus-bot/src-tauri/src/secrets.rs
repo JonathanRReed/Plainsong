@@ -35,3 +35,41 @@ pub fn has_provider_secret(provider: &str) -> Result<bool> {
             .with_context(|| format!("failed to check secret for provider '{provider}'")),
     }
 }
+
+pub fn get_provider_secret(provider: &str) -> Result<Option<String>> {
+    let entry = entry_for(provider)?;
+    match entry.get_password() {
+        Ok(value) if !value.is_empty() => Ok(Some(value)),
+        Ok(_) => Ok(None),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!(e))
+            .with_context(|| format!("failed to read secret for provider '{provider}'")),
+    }
+}
+
+pub fn set_internal_secret(key: &str, secret: &str) -> Result<()> {
+    entry_for(key)?
+        .set_password(secret)
+        .with_context(|| format!("failed to persist internal secret '{key}'"))
+}
+
+pub fn get_internal_secret(key: &str) -> Result<Option<String>> {
+    match entry_for(key)?.get_password() {
+        Ok(value) if !value.is_empty() => Ok(Some(value)),
+        Ok(_) => Ok(None),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!(e))
+            .with_context(|| format!("failed to read internal secret '{key}'")),
+    }
+}
+
+#[allow(dead_code)]
+pub fn clear_internal_secret(key: &str) -> Result<()> {
+    let entry = entry_for(key)?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(anyhow::anyhow!(e))
+            .with_context(|| format!("failed to clear internal secret '{key}'")),
+    }
+}

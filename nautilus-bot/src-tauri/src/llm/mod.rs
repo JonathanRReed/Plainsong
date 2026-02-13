@@ -16,7 +16,11 @@ mod gemini;
 mod ollama;
 mod openai;
 
+pub use anthropic::AnthropicClient;
+pub use cloud::OllamaCloudClient;
+pub use gemini::GeminiClient;
 pub use ollama::OllamaClient;
+pub use openai::OpenAIClient;
 
 /// Provider type for LLM selection
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

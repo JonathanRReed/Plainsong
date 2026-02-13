@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 
 mod embedder;
 
@@ -81,11 +81,7 @@ impl DiarizationEngine {
     }
 
     /// Run diarization on audio file
-    pub async fn diarize(
-        &mut self,
-        audio_path: &PathBuf,
-        duration: f64,
-    ) -> Result<DiarizationResult> {
+    pub async fn diarize(&mut self, audio_path: &Path, duration: f64) -> Result<DiarizationResult> {
         tracing::info!("Running speaker diarization for {:.1}s audio", duration);
         self.diarize_real(audio_path, duration).await
     }
@@ -93,7 +89,7 @@ impl DiarizationEngine {
     /// Real diarization using speaker embeddings and clustering
     async fn diarize_real(
         &mut self,
-        audio_path: &PathBuf,
+        audio_path: &Path,
         duration: f64,
     ) -> Result<DiarizationResult> {
         let segments = generate_segments(duration, 2.0, 1.0);
@@ -197,7 +193,7 @@ impl Default for DiarizationEngine {
 }
 
 /// Run diarization with strict real-model requirement.
-pub async fn run_diarization(audio_path: &PathBuf) -> Result<DiarizationResult> {
+pub async fn run_diarization(audio_path: &Path) -> Result<DiarizationResult> {
     if !DiarizationEngine::is_real_available() {
         return Err(anyhow::anyhow!(
             "Real diarization model is not available. Install/configure diarization models first."
@@ -210,7 +206,7 @@ pub async fn run_diarization(audio_path: &PathBuf) -> Result<DiarizationResult> 
 }
 
 /// Get audio file duration
-async fn get_audio_duration(audio_path: &PathBuf) -> Result<f64> {
+async fn get_audio_duration(audio_path: &Path) -> Result<f64> {
     use hound::WavReader;
 
     let reader = WavReader::open(audio_path)?;
@@ -221,6 +217,7 @@ async fn get_audio_duration(audio_path: &PathBuf) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[tokio::test]
     async fn test_diarization_requires_real_model() {

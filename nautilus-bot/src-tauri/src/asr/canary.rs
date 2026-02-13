@@ -111,6 +111,12 @@ except Exception as exc:
     }
 }
 
+impl Default for CanaryProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl AsrProvider for CanaryProvider {
     fn name(&self) -> &str {

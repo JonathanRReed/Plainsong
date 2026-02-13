@@ -35,37 +35,79 @@ jobs:
         run: npm ci
 
       - name: Typecheck frontend
+        id: typecheck
         run: npx tsc --noEmit
 
       - name: Frontend tests
+        id: frontend_tests
         run: npm test
 
       - name: Frontend dependency audit
+        id: npm_audit
         run: npm audit --audit-level=moderate
 
       - name: Build frontend
+        id: frontend_build
         run: npm run build
 
       - name: Rust format check
+        id: rust_fmt
         run: cargo fmt --check
         working-directory: nautilus-bot/src-tauri
 
       - name: Rust clippy
+        id: rust_clippy
         run: cargo clippy --all-targets -- -D warnings
         working-directory: nautilus-bot/src-tauri
 
       - name: Rust check
+        id: rust_check
         run: cargo check --all-targets
         working-directory: nautilus-bot/src-tauri
 
       - name: Install cargo-audit
+        id: install_cargo_audit
         run: cargo install cargo-audit --locked
         working-directory: nautilus-bot/src-tauri
 
       - name: Rust dependency audit
-        run: cargo audit
+        id: rust_audit
+        run: ./scripts/run-cargo-audit-policy.sh
         working-directory: nautilus-bot/src-tauri
 
       - name: Rust unit tests
+        id: rust_tests
         run: cargo test --lib
         working-directory: nautilus-bot/src-tauri
+
+      - name: Create release gate report
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p ci-artifacts
+          report="ci-artifacts/release-gates-${{ matrix.os }}.md"
+          {
+            echo "# Release Gate Report (${{ matrix.os }})"
+            echo
+            echo "Generated at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo
+            echo "| Gate | Outcome |"
+            echo "| --- | --- |"
+            echo "| npx tsc --noEmit | ${{ steps.typecheck.outcome }} |"
+            echo "| npm test | ${{ steps.frontend_tests.outcome }} |"
+            echo "| npm audit --audit-level=moderate | ${{ steps.npm_audit.outcome }} |"
+            echo "| npm run build | ${{ steps.frontend_build.outcome }} |"
+            echo "| cargo fmt --check | ${{ steps.rust_fmt.outcome }} |"
+            echo "| cargo clippy --all-targets -- -D warnings | ${{ steps.rust_clippy.outcome }} |"
+            echo "| cargo check --all-targets | ${{ steps.rust_check.outcome }} |"
+            echo "| cargo install cargo-audit --locked | ${{ steps.install_cargo_audit.outcome }} |"
+            echo "| ./scripts/run-cargo-audit-policy.sh | ${{ steps.rust_audit.outcome }} |"
+            echo "| cargo test --lib | ${{ steps.rust_tests.outcome }} |"
+          } > "$report"
+
+      - name: Upload release gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-gates-${{ matrix.os }}
+          path: nautilus-bot/ci-artifacts/release-gates-${{ matrix.os }}.md

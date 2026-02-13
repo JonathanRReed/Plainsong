@@ -1,49 +1,35 @@
-# Packaged App QA Matrix (macOS)
+# Packaged App QA Matrix (macOS + Windows)
+
+Date: 2026-02-13
 
 ## Scope
-- Validate dictation/meeting parity behaviors against Superwhisper and Granola expectations.
-- Validate provider truthfulness (`requested_provider` vs `actual_provider`) for Whisper, Parakeet, Distil Whisper, and Canary.
-- Validate popup resilience when the main window is hidden/minimized.
+- Dictation reliability and fallback behavior parity.
+- Meeting recording pipeline reliability.
+- Security controls: remote-processing policy, vault behavior, export boundary checks, integrity verification.
 
-## Build Under Test
-- Date: `2026-02-11`
-- App build: `npm run tauri build`
-- macOS version:
-- Hardware:
+## Automated Gate Snapshot (this run)
+- `npm test`: pass
+- `npx tsc --noEmit`: pass
+- `npm run build`: pass
+- `cargo fmt --check`: pass
+- `cargo clippy --all-targets -- -D warnings`: pass
+- `cargo check --all-targets`: pass
+- `cargo test --lib`: pass
+- `cargo test --tests`: pass
+- `cargo audit -f src-tauri/Cargo.lock`: pass (warnings only)
 
-## Permissions Prerequisites
-- Microphone granted to Nautilus.
-- Accessibility granted to Nautilus.
-- Confirm diagnostics in Settings show:
-  - `Microphone: Ready`
-  - `Accessibility: Ready`
-  - `Automation: Ready` (or copied-only fallback message is shown)
+## Manual Matrix
+| OS | Area | Scenario | Expected | Status | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| macOS | Dictation hotkey | Hold and release hotkey in focused external editor | Ends within 500 ms; text pasted or copied with explicit outcome | Pending | Not executed in this run |
+| macOS | Provider fallback transparency | Break selected runtime with fallback disabled/enabled | No silent fallback; metadata fields explicit | Pending | Not executed in this run |
+| macOS | Vault runtime | Lock vault and open encrypted recording | Access denied until unlock | Pending | Not executed in this run |
+| macOS | Export boundary | Export to path outside configured `exportRoot` | Backend rejects target path | Pending | Not executed in this run |
+| Windows | Dictation copy fallback | Dictation into app where simulated paste unavailable | `copied=true` and user-visible copied-only status | Pending | Not executed in this run |
+| Windows | Recording-to-transcript | Start/stop recording and wait for transcript completion | Recording status reaches `completed` with transcript | Pending | Not executed in this run |
+| Windows | Remote policy | Select remote provider while `remoteProcessingEnabled=false` | Backend hard deny with policy error | Pending | Not executed in this run |
+| Windows | Integrity check | Verify tampered evidence bundle/model artifact | Verification fails deterministically | Pending | Not executed in this run |
 
-## Functional Matrix
+## Release target for completion
+- Required for launch “beat” claim: all matrix rows pass on dedicated macOS + Windows test machines.
 
-| Area | Scenario | Expected |
-|---|---|---|
-| Dictation hotkey | Hold `Ctrl+Shift+Space` 2-5s, release | Stops within 500ms, phase transitions `recording -> stopping -> transcribing -> done/error` |
-| Dictation failsafe | Hold hotkey, then trigger `Ctrl+Shift+Escape` | Capture force-stops and session recovers to `idle` |
-| Dictation paste | Focus external app text field and run dictation | Text is pasted; if blocked, copied-only status with remediation text |
-| Popup resilience | Start dictation, hide main app window | Dictation popup remains visible and operable (`Stop`, `Hide`, `Open app`) |
-| Meeting popup | Start meeting capture, hide main app | Recording popup remains visible with timer + waveform + stop action |
-| Provider truth | Set provider to Parakeet, transcribe | Metadata reports `requested=parakeet`, `actual=parakeet`, `fallback_used=false` |
-| Provider truth | Set provider to Distil, transcribe | Metadata reports `requested=distil_whisper`, `actual=distil_whisper`, `fallback_used=false` |
-| Provider truth | Set provider to Canary, transcribe | Metadata reports `requested=canary`, `actual=canary`, `fallback_used=false` |
-| Fallback policy | Disable `allowWhisperFallback`, break selected provider runtime | Provider-specific error shown; no silent Whisper substitution |
-| Fallback opt-in | Enable `allowWhisperFallback`, break selected provider runtime | Result metadata reports `actual=whisper`, `fallback_used=true`, with reason |
-
-## Model Runtime Readiness
-
-| Provider | Download complete | Runtime ready | Selectable |
-|---|---|---|---|
-| Whisper | ggml model exists | N/A (native Rust runtime) | Yes |
-| Parakeet | `.nemo` exists | `python3` + `nemo.collections.asr` available | Yes |
-| Distil Whisper | required HF files in `models/distil_whisper` | `python3` + `torch` + `transformers` available | Yes |
-| Canary | required HF files in `models/canary` | `python3` + `torch` + `transformers` available | Yes |
-
-## Regression Notes
-- If hotkey appears stuck in `recording`, capture logs and verify release event + watchdog path.
-- If app opens blank, capture frontend console + Tauri logs for route/window creation errors.
-- If external paste fails in dev, verify packaged build behavior before marking bug (dev apps often have permission edge cases).

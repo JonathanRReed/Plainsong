@@ -1,6 +1,6 @@
 # Launch Checklist (macOS + Windows GA)
 
-Date: 2026-02-09
+Date: 2026-02-13
 
 ## Automated Gates
 
@@ -11,37 +11,34 @@ Date: 2026-02-09
 - [x] `cargo clippy --all-targets -- -D warnings`
 - [x] `cargo check --all-targets`
 - [x] `cargo test --lib`
-- [x] `npm audit --audit-level=moderate`
-- [ ] `cargo audit` (blocked by advisory DB network fetch failures)
+- [x] `cargo test --tests`
+- [x] `cargo audit -f src-tauri/Cargo.lock` via `src-tauri/scripts/run-cargo-audit-policy.sh`
 
-## Security / Command Surface
+## Security-Critical Implementation Gates
 
-- [x] Renderer direct shell-open removed for recordings audio
-- [x] Backend `open_recording_audio` command added with path/root checks
-- [x] Path validation added for `targetPath`, `data_dir`, `path`, `recording_path`
-- [x] Tauri capability surface reduced (removed shell/fs/process permissions)
-- [x] Tauri plugin surface reduced (removed shell/fs/process plugin init)
+- [x] Remote analysis egress denied by default; explicit opt-in required.
+- [x] Remote provider credentials sourced from OS keyring in backend analysis paths.
+- [x] Vault lifecycle commands wired (`unlock_vault`, `lock_vault`, `migrate_to_encrypted_storage`, `get_security_status`).
+- [x] SQLCipher mode enabled in default build feature graph.
+- [x] Recording artifacts encrypted at rest (`.enc`) with authenticated encryption.
+- [x] Export target path constrained to configured safe root / approved roots.
+- [x] Non-Whisper model download checksum verification enabled.
 
-## Claims / Docs Parity
+## Reliability / Parity Gates
 
-- [x] README updated to reflect actual production ASR availability
-- [x] ASR UI provider status updated to avoid unsupported production claims
-- [x] Claims parity matrix created
+- [x] Windows clipboard copy fallback implemented in backend.
+- [x] ASR runtime integration tests replaced with real assertions.
+- [ ] macOS packaged manual QA matrix completed and attached.
+- [ ] Windows packaged manual QA matrix completed and attached.
 
-## Runtime E2E
+## Competitive Evidence Gates
 
-- [x] Local macOS automated validation complete
-- [ ] macOS manual end-to-end matrix (recording, dictation, export, backup, cloud, failure paths)
-- [ ] Windows manual end-to-end matrix (recording, dictation, export, backup, cloud, failure paths)
-
-## Hard-Requirement Integrations
-
-- [ ] Ollama installed/running and analysis flows validated end-to-end
-- [ ] rclone configured and cloud sync flows validated end-to-end
-- [ ] iCloud path validation (if enabled) validated end-to-end
+- [x] `COMPETITIVE_SCORECARD.md` published.
+- [x] Beat-threshold criteria documented.
+- [ ] Dictation >=99% end-to-end success validated in packaged manual matrix.
 
 ## Final Sign-off
 
-- [ ] Zero open P0/P1 findings
-- [ ] Go/No-Go decision documented
-- [ ] Rollback/containment plan documented
+- [ ] Zero open P0/P1 launch blockers.
+- [ ] Go/No-Go decision approved with attached macOS + Windows QA evidence.
+

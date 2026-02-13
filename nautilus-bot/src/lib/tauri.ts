@@ -313,6 +313,32 @@ export async function clearProviderSecret(provider: string): Promise<void> {
   await invoke("clear_provider_secret", { provider });
 }
 
+export interface SecurityStatus {
+  vaultInitialized: boolean;
+  vaultUnlocked: boolean;
+  databaseEncrypted: boolean;
+  recordingsEncrypted: boolean;
+  llmProvider: string;
+  remoteProcessingEnabled: boolean;
+  exportRoot: string | null;
+}
+
+export async function getSecurityStatus(): Promise<SecurityStatus> {
+  return await invoke("get_security_status");
+}
+
+export async function unlockVault(password: string): Promise<void> {
+  await invoke("unlock_vault", { password });
+}
+
+export async function lockVault(): Promise<void> {
+  await invoke("lock_vault");
+}
+
+export async function migrateToEncryptedStorage(password: string): Promise<void> {
+  await invoke("migrate_to_encrypted_storage", { password });
+}
+
 export type CloudProvider = "one_drive" | "google_drive" | "proton_drive" | "i_cloud";
 
 export interface BackupConfig {

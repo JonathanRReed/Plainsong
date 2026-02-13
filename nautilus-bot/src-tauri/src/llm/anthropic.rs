@@ -16,10 +16,14 @@ pub struct AnthropicClient {
 impl AnthropicClient {
     /// Create a new Anthropic client
     pub fn new() -> Self {
-        let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+        Self::with_api_key(None)
+    }
+
+    pub fn with_api_key(api_key: Option<String>) -> Self {
+        let resolved_api_key = api_key.or_else(|| std::env::var("ANTHROPIC_API_KEY").ok());
 
         Self {
-            api_key,
+            api_key: resolved_api_key,
             client: reqwest::Client::new(),
         }
     }

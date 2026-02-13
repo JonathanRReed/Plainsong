@@ -212,6 +212,14 @@ pub struct PrivacySettings {
     pub cloud_sync: bool,
     /// Allow remote provider processing (local-first default)
     pub remote_processing_enabled: bool,
+    /// Default analysis LLM provider
+    pub llm_provider: String,
+    /// Optional absolute export root constraint
+    pub export_root: Option<PathBuf>,
+    /// Whether vault migration has completed
+    pub vault_initialized: bool,
+    /// Salt used to derive recording-encryption key material
+    pub vault_salt: Option<String>,
 }
 
 impl Default for PrivacySettings {
@@ -223,6 +231,10 @@ impl Default for PrivacySettings {
             audit_logging: true,
             cloud_sync: false,
             remote_processing_enabled: false,
+            llm_provider: "ollama".to_string(),
+            export_root: None,
+            vault_initialized: false,
+            vault_salt: None,
         }
     }
 }

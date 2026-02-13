@@ -203,7 +203,7 @@ pub fn export(
     recording: &Recording,
     transcript: Option<&crate::models::Transcript>,
     format: &str,
-    _target: Option<&str>,
+    target: Option<&str>,
 ) -> Result<String> {
     // Parse format
     let export_format = format
@@ -211,7 +211,10 @@ pub fn export(
         .unwrap_or(ExportFormat::Markdown);
 
     // Get export path
-    let export_path = export::get_default_export_path(recording, export_format);
+    let export_path = match target {
+        Some(path) => PathBuf::from(path),
+        None => export::get_default_export_path(recording, export_format),
+    };
 
     // Create parent directory
     if let Some(parent) = export_path.parent() {

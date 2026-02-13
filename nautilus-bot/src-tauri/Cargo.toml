@@ -83,7 +83,7 @@ base64 = { version = "0.21", optional = true }
 core-graphics = "0.24"
 
 [features]
-default = ["custom-protocol", "asr-all"]
+default = ["custom-protocol", "asr-all", "sqlcipher"]
 custom-protocol = ["tauri/custom-protocol"]
 
 # ASR Provider Features
@@ -93,7 +93,7 @@ asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "
 asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization"]
 
 # SQLCipher for encrypted SQLite (optional, requires OpenSSL)
-sqlcipher = ["rusqlite/sqlcipher", "libsqlite3-sys/sqlcipher"]
+sqlcipher = ["rusqlite/sqlcipher", "libsqlite3-sys/bundled-sqlcipher"]
 
 # Supporting features
 download-manager = ["indicatif"]

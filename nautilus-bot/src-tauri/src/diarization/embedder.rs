@@ -14,7 +14,7 @@ use ort::{
     session::{builder::GraphOptimizationLevel, Session, SessionOutputs},
     value::{Tensor, ValueType},
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // Re-export Array1 for use in mod.rs
 
@@ -54,7 +54,7 @@ impl SpeakerEmbeddingExtractor {
     /// Returns a vector of (start_time, end_time, embedding) tuples
     pub async fn extract_embeddings(
         &self,
-        audio_path: &PathBuf,
+        audio_path: &Path,
         segments: &[(f64, f64)], // (start_sec, end_sec) chunks
     ) -> Result<Vec<(f64, f64, Array1<f32>)>> {
         // Load audio
@@ -101,7 +101,7 @@ impl SpeakerEmbeddingExtractor {
 }
 
 #[cfg(feature = "diarization")]
-fn load_embedding_session(model_path: &PathBuf) -> Result<Session> {
+fn load_embedding_session(model_path: &Path) -> Result<Session> {
     if !model_path.exists() {
         return Err(anyhow!(
             "Diarization model file not found: {}",
@@ -284,7 +284,7 @@ impl SpeakerEmbeddingExtractor {
 
     pub async fn extract_embeddings(
         &self,
-        _audio_path: &PathBuf,
+        _audio_path: &Path,
         _segments: &[(f64, f64)],
     ) -> Result<Vec<(f64, f64, Array1<f32>)>> {
         Ok(Vec::new())

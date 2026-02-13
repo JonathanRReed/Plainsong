@@ -74,6 +74,7 @@ impl DownloadManager {
         }
 
         let response = request.send().await?;
+        let expected_sha256 = extract_sha256_from_headers(response.headers());
 
         // Get total size
         let total_size = response
@@ -127,6 +128,23 @@ impl DownloadManager {
 
         // Rename temp file to final destination
         tokio::fs::rename(&temp_path, destination).await?;
+
+        if let Some(expected_sha256) = expected_sha256 {
+            let actual_sha256 = calculate_sha256(destination).await?;
+            if actual_sha256 != expected_sha256 {
+                tokio::fs::remove_file(destination).await.ok();
+                return Err(anyhow::anyhow!(
+                    "Integrity verification failed for {}. Expected sha256 {}, got {}",
+                    destination.display(),
+                    expected_sha256,
+                    actual_sha256
+                ));
+            }
+            tracing::info!(
+                "Integrity verified for {} via response checksum metadata",
+                destination.display()
+            );
+        }
 
         tracing::info!("Downloaded {} to {:?}", url, destination);
 
@@ -436,6 +454,33 @@ async fn calculate_sha256(path: &PathBuf) -> Result<String> {
     Ok(format!("{:x}", result))
 }
 
+fn extract_sha256_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers
+        .get("x-linked-etag")
+        .or_else(|| headers.get("etag"))
+        .and_then(|value| value.to_str().ok())
+        .and_then(extract_sha256_from_header_value)
+}
+
+fn extract_sha256_from_header_value(raw: &str) -> Option<String> {
+    let mut value = raw.trim();
+    if let Some(stripped) = value.strip_prefix("W/") {
+        value = stripped.trim();
+    }
+    value = value.trim_matches('"');
+
+    if let Some(stripped) = value.strip_prefix("sha256:") {
+        value = stripped.trim();
+    }
+
+    let lowered = value.to_ascii_lowercase();
+    if lowered.len() == 64 && lowered.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Some(lowered);
+    }
+
+    None
+}
+
 /// Format bytes to human-readable string
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
@@ -469,5 +514,19 @@ mod tests {
         let info = info.unwrap();
         assert_eq!(info.file_name, "ggml-base.en.bin");
         assert_eq!(info.size_mb, 142.0);
+    }
+
+    #[test]
+    fn test_extract_sha256_from_header_value() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            extract_sha256_from_header_value(&format!("\"{}\"", digest)),
+            Some(digest.to_string())
+        );
+        assert_eq!(
+            extract_sha256_from_header_value(&format!("W/\"sha256:{}\"", digest)),
+            Some(digest.to_string())
+        );
+        assert_eq!(extract_sha256_from_header_value("\"not-a-digest\""), None);
     }
 }

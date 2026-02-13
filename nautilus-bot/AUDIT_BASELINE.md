@@ -1,11 +1,9 @@
 # Nautilus Audit Baseline
 
-## Verification Snapshot
+Date: 2026-02-13
+Scope: launch-readiness baseline for macOS + Windows
 
-- Date: 2026-02-09
-- Scope: strict launch-readiness baseline for macOS + Windows GA
-
-### Command Gates
+## Command Gates (local execution snapshot)
 
 - `npm test`: pass
 - `npx tsc --noEmit`: pass
@@ -14,35 +12,34 @@
 - `cargo clippy --all-targets -- -D warnings`: pass
 - `cargo check --all-targets`: pass
 - `cargo test --lib`: pass
-- `npm audit --audit-level=moderate`: pass
-- `cargo audit`: blocked (RustSec advisory DB fetch network failure in this environment)
+- `cargo test --tests`: pass
+- `cargo audit -f Cargo.lock`: pass for vulnerabilities using policy script `src-tauri/scripts/run-cargo-audit-policy.sh`
 
-## Material Baseline Changes From This Audit
+## Security Hardening Baseline
 
-1. Renderer direct shell open was removed from recordings flow.
-2. Backend command `open_recording_audio` was added with approved-root validation.
-3. Path hardening was added for command inputs (`targetPath`, `data_dir`, `path`, `recording_path`).
-4. Tauri capability surface was reduced by removing shell/fs/process permissions.
-5. Tauri runtime plugin surface was reduced by removing shell/fs/process plugin init.
-6. README and ASR provider UI copy were aligned to shipped production behavior (Whisper enabled, Parakeet/Canary not enabled).
-7. CI was tightened to fail on clippy warnings and include dependency audit steps.
+1. Backend remote-provider policy enforcement added for all analysis commands.
+2. Provider secret handling is keyring-backed in backend command execution path.
+3. Vault lifecycle and encryption status commands implemented and exposed to frontend.
+4. SQLCipher-enabled build path wired in default features (`src-tauri/Cargo.toml`).
+5. Recording artifacts now support authenticated at-rest encryption (`.enc`) and runtime decrypt flow.
+6. Export targets are validated against configured safe root / approved roots.
+7. Non-Whisper model downloads now validate checksum metadata.
+8. Evidence bundle tamper detection tests remain passing.
 
-## Open Blockers (Strict Launch Policy)
+## Residual Risks / Open Items
 
 ### P1
 
-1. Rust advisory gate remains incomplete due `cargo audit` network fetch failure.
-- Owner: release engineering
-- Exit criteria: successful `cargo audit` run with evidence archived in launch report.
+1. Packaged manual QA matrix remains incomplete on both macOS and Windows.
+- Exit criteria: complete `/docs/packaged-app-qa-matrix.md` with executed evidence.
 
-2. Windows manual runtime E2E matrix is pending.
-- Owner: QA / release
-- Exit criteria: complete matrix attached for recording/dictation/export/backup/cloud/failure paths.
+### P2
 
-3. Hard-required integration runtime checks (Ollama + rclone/iCloud) are pending.
-- Owner: integrations
-- Exit criteria: successful and failure-mode validation evidence attached.
+1. `cargo audit` warning set is policy-accepted but non-empty (unmaintained ecosystem dependencies).
+- Mitigation: accepted advisory IDs are documented in `src-tauri/audit.toml` and enforced via `src-tauri/scripts/run-cargo-audit-policy.sh`.
+- Exit criteria: shrink warning set during dependency refresh cycles.
 
 ## Sign-off State
 
-- Current state: **NO-GO** until all P1 items above are closed.
+Current state: **NO-GO** until manual QA matrix evidence is attached for both launch OS targets.
+

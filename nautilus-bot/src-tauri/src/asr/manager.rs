@@ -154,7 +154,10 @@ impl AsrManager {
 
         match primary_result {
             Ok(mut result) => {
-                self.last_runtime_errors.write().await.remove(&provider_type);
+                self.last_runtime_errors
+                    .write()
+                    .await
+                    .remove(&provider_type);
                 result.requested_provider = provider_type;
                 result.actual_provider = provider_type;
                 result.fallback_used = false;
@@ -378,9 +381,10 @@ fn runtime_diagnostics_for_provider(
 
     match provider_type {
         AsrProviderType::Whisper => {
-            let model_path = models_root
-                .join("whisper")
-                .join(format!("ggml-{}.bin", sanitize_whisper_model_id(selected_model_id)));
+            let model_path = models_root.join("whisper").join(format!(
+                "ggml-{}.bin",
+                sanitize_whisper_model_id(selected_model_id)
+            ));
             if !model_path.exists() {
                 return RuntimeDiagnosticsInternal {
                     runtime_status: RuntimeStatus::MissingModel,
@@ -406,11 +410,9 @@ fn runtime_diagnostics_for_provider(
             }
             RuntimeDiagnosticsInternal {
                 runtime_status: RuntimeStatus::Error,
-                runtime_message: Some(
-                    last_error
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "Whisper model exists but failed to initialize.".to_string()),
-                ),
+                runtime_message: Some(last_error.map(ToString::to_string).unwrap_or_else(|| {
+                    "Whisper model exists but failed to initialize.".to_string()
+                })),
                 runtime_details: RuntimeDetails {
                     model_path: Some(model_path.to_string_lossy().to_string()),
                     python_path: None,
@@ -419,7 +421,8 @@ fn runtime_diagnostics_for_provider(
         }
         AsrProviderType::Parakeet => {
             let model_path = models_root.join("parakeet").join(PARAKEET_MODEL_FILE);
-            let python = super::python_runtime::find_python_with_imports("import nemo.collections.asr");
+            let python =
+                super::python_runtime::find_python_with_imports("import nemo.collections.asr");
             runtime_from_model_and_python(
                 provider_available,
                 model_path,
@@ -436,8 +439,9 @@ fn runtime_diagnostics_for_provider(
             let model_ready = CANARY_REQUIRED_FILES
                 .iter()
                 .all(|file_name| model_dir.join(file_name).exists());
-            let python =
-                super::python_runtime::find_python_with_imports("import torch; import transformers");
+            let python = super::python_runtime::find_python_with_imports(
+                "import torch; import transformers",
+            );
             runtime_from_model_dir_and_python(
                 provider_available,
                 model_dir,
@@ -455,8 +459,9 @@ fn runtime_diagnostics_for_provider(
             let model_ready = DISTIL_REQUIRED_FILES
                 .iter()
                 .all(|file_name| model_dir.join(file_name).exists());
-            let python =
-                super::python_runtime::find_python_with_imports("import torch; import transformers");
+            let python = super::python_runtime::find_python_with_imports(
+                "import torch; import transformers",
+            );
             runtime_from_model_dir_and_python(
                 provider_available,
                 model_dir,
@@ -472,6 +477,7 @@ fn runtime_diagnostics_for_provider(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn runtime_from_model_and_python(
     provider_available: bool,
     model_path: PathBuf,
@@ -529,6 +535,7 @@ fn runtime_from_model_and_python(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn runtime_from_model_dir_and_python(
     provider_available: bool,
     model_dir: PathBuf,

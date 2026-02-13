@@ -12,17 +12,21 @@ import {
   getBackupConfig,
   getPermissionDiagnostics,
   getBackupSetupReport,
+  getSecurityStatus,
   getSettings,
   hasProviderSecret,
+  lockVault,
   listBackups,
+  migrateToEncryptedStorage,
   openPermissionSettings,
   saveSettings,
   saveBackupConfig,
   setProviderSecret,
   syncBackupToCloud,
+  unlockVault,
   verifyBackupCloudConnection,
 } from "@/lib/tauri";
-import type { BackupConfig, BackupInfo, CloudSetupReport } from "@/lib/tauri";
+import type { BackupConfig, BackupInfo, CloudSetupReport, SecurityStatus } from "@/lib/tauri";
 import type { PermissionDiagnostics } from "@/lib/tauri";
 import type { Settings } from "@/types/settings";
 import {
@@ -59,6 +63,8 @@ export function SettingsView() {
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
   const [backupSetupReport, setBackupSetupReport] = useState<CloudSetupReport | null>(null);
   const [permissionDiagnostics, setPermissionDiagnostics] = useState<PermissionDiagnostics | null>(null);
+  const [securityStatus, setSecurityStatus] = useState<SecurityStatus | null>(null);
+  const [vaultPassword, setVaultPassword] = useState("");
 
   useEffect(() => {
     let mounted = true;
@@ -68,11 +74,13 @@ export function SettingsView() {
         const loadedBackupConfig = await getBackupConfig();
         const loadedBackups = await listBackups();
         const permissions = await getPermissionDiagnostics();
+        const security = await getSecurityStatus();
         if (mounted) {
           setSettings(loaded);
           setBackupConfig(loadedBackupConfig);
           setBackups(loadedBackups);
           setPermissionDiagnostics(permissions);
+          setSecurityStatus(security);
         }
       } catch (e) {
         if (mounted) {
@@ -110,6 +118,8 @@ export function SettingsView() {
     setError(null);
     try {
       await saveSettings(next);
+      const refreshed = await getSecurityStatus();
+      setSecurityStatus(refreshed);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save settings");
     } finally {
@@ -443,7 +453,7 @@ export function SettingsView() {
                       Remote processing
                     </Label>
                     <p className="text-sm text-muted-foreground">
-                      Allow cloud providers for transcription/analysis
+                      Allow cloud providers for analysis
                     </p>
                   </div>
                   <Switch
@@ -455,6 +465,121 @@ export function SettingsView() {
                       })
                     }
                   />
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Default analysis provider</Label>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={settings.privacy.llmProvider}
+                    onChange={(e) =>
+                      void updateSettings({
+                        ...settings,
+                        privacy: { ...settings.privacy, llmProvider: e.target.value },
+                      })
+                    }
+                  >
+                    <option value="ollama">Ollama (Local)</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="gemini">Google Gemini</option>
+                    <option value="ollama-cloud">Ollama Cloud</option>
+                  </select>
+                  {!settings.privacy.remoteProcessingEnabled && settings.privacy.llmProvider !== "ollama" ? (
+                    <p className="text-sm text-amber-600">
+                      Remote provider is selected, but remote processing is disabled. Analysis commands will be blocked until policy is enabled.
+                    </p>
+                  ) : null}
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Export root (absolute path)</Label>
+                  <Input
+                    placeholder="/Users/you/Documents/Nautilus"
+                    value={settings.privacy.exportRoot ?? ""}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      void updateSettings({
+                        ...settings,
+                        privacy: {
+                          ...settings.privacy,
+                          exportRoot: e.target.value.trim() ? e.target.value.trim() : null,
+                        },
+                      })
+                    }
+                  />
+                  <p className="text-sm text-muted-foreground">
+                    When set, exports are restricted to this root.
+                  </p>
+                </div>
+
+                <div className="h-px bg-border" />
+
+                <div className="space-y-2">
+                  <Label>Vault password</Label>
+                  <Input
+                    type="password"
+                    placeholder="Enter vault password"
+                    value={vaultPassword}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setVaultPassword(e.target.value)}
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      disabled={!vaultPassword.trim()}
+                      onClick={async () => {
+                        setError(null);
+                        try {
+                          await unlockVault(vaultPassword.trim());
+                          setVaultPassword("");
+                          setSecurityStatus(await getSecurityStatus());
+                        } catch (e) {
+                          setError(e instanceof Error ? e.message : "Failed to unlock vault");
+                        }
+                      }}
+                    >
+                      Unlock Vault
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={async () => {
+                        setError(null);
+                        try {
+                          await lockVault();
+                          setSecurityStatus(await getSecurityStatus());
+                        } catch (e) {
+                          setError(e instanceof Error ? e.message : "Failed to lock vault");
+                        }
+                      }}
+                    >
+                      Lock Vault
+                    </Button>
+                    <Button
+                      disabled={!vaultPassword.trim()}
+                      onClick={async () => {
+                        setError(null);
+                        try {
+                          await migrateToEncryptedStorage(vaultPassword.trim());
+                          setVaultPassword("");
+                          setSecurityStatus(await getSecurityStatus());
+                        } catch (e) {
+                          setError(
+                            e instanceof Error
+                              ? e.message
+                              : "Failed to migrate to encrypted storage"
+                          );
+                        }
+                      }}
+                    >
+                      Migrate to Encrypted Storage
+                    </Button>
+                  </div>
+                  {securityStatus ? (
+                    <div className="text-sm text-muted-foreground space-y-1">
+                      <p>Vault initialized: {securityStatus.vaultInitialized ? "yes" : "no"}</p>
+                      <p>Vault unlocked: {securityStatus.vaultUnlocked ? "yes" : "no"}</p>
+                      <p>Database encrypted: {securityStatus.databaseEncrypted ? "yes" : "no"}</p>
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="flex items-center justify-between">
@@ -802,6 +927,16 @@ export function SettingsView() {
                     <option value="gemini">Google Gemini</option>
                     <option value="ollama-cloud">Ollama Cloud</option>
                   </select>
+                  {!settings.privacy.remoteProcessingEnabled ? (
+                    <p className="text-xs text-amber-600">
+                      Remote processing is disabled. Stored cloud keys will not be used until policy is enabled.
+                    </p>
+                  ) : null}
+                  {settings.privacy.llmProvider === provider && settings.privacy.remoteProcessingEnabled && !hasApiKey ? (
+                    <p className="text-xs text-amber-600">
+                      Selected analysis provider has no stored key. Analysis requests will fail with a credential error.
+                    </p>
+                  ) : null}
                 </div>
 
                 <div className="space-y-2">

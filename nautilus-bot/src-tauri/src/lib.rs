@@ -1,4 +1,4 @@
-mod asr;
+pub mod asr;
 mod audio;
 mod backup;
 mod crypto;
@@ -17,6 +17,7 @@ mod text;
 mod transcription;
 
 use anyhow::Result;
+use rand::RngCore;
 use regex::Regex;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -44,11 +45,16 @@ pub struct AppState {
     dictation_runtime_state: Arc<Mutex<DictationSessionState>>,
     dictation_overlay_state: Arc<StdMutex<DictationOverlayState>>,
     recording_overlay_state: Arc<StdMutex<RecordingOverlayState>>,
+    vault_state: Arc<Mutex<VaultRuntimeState>>,
 }
 
 const DICTATION_OVERLAY_LABEL: &str = "dictation-overlay";
 const RECORDING_OVERLAY_LABEL: &str = "recording-overlay";
 const DICTATION_MAX_DURATION_SECONDS: u64 = 120;
+const VAULT_DB_KEY_SECRET: &str = "vault_db_key";
+const VAULT_UNLOCK_CHECK_SECRET: &str = "vault_unlock_check";
+const VAULT_RECORDING_KEY_SALT_LEN: usize = 16;
+const VAULT_UNLOCK_CHECK_PLAINTEXT: &[u8] = b"nautilus-vault-check";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DictationSessionState {
@@ -121,6 +127,80 @@ struct PermissionDiagnostics {
     accessibility_ready: bool,
     automation_ready: bool,
     notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnalysisProvider {
+    Ollama,
+    OpenAi,
+    Anthropic,
+    Gemini,
+    OllamaCloud,
+}
+
+impl AnalysisProvider {
+    fn from_settings_value(value: &str) -> Self {
+        match value {
+            "openai" => Self::OpenAi,
+            "anthropic" => Self::Anthropic,
+            "gemini" => Self::Gemini,
+            "ollama-cloud" => Self::OllamaCloud,
+            _ => Self::Ollama,
+        }
+    }
+
+    fn as_settings_value(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
+            Self::OllamaCloud => "ollama-cloud",
+        }
+    }
+
+    fn is_remote(self) -> bool {
+        !matches!(self, Self::Ollama)
+    }
+
+    fn provider_secret_name(self) -> Option<&'static str> {
+        match self {
+            Self::OpenAi => Some("openai"),
+            Self::Anthropic => Some("anthropic"),
+            Self::Gemini => Some("gemini"),
+            Self::OllamaCloud => Some("ollama-cloud"),
+            Self::Ollama => None,
+        }
+    }
+
+    fn default_model(self) -> &'static str {
+        match self {
+            Self::Ollama => "llama3.2",
+            Self::OpenAi => "gpt-4o-mini",
+            Self::Anthropic => "claude-3-5-sonnet-latest",
+            Self::Gemini => "gemini-1.5-flash",
+            Self::OllamaCloud => "llama3.2",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct VaultRuntimeState {
+    unlocked: bool,
+    db_encrypted: bool,
+    recording_key: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SecurityStatus {
+    vault_initialized: bool,
+    vault_unlocked: bool,
+    database_encrypted: bool,
+    recordings_encrypted: bool,
+    llm_provider: String,
+    remote_processing_enabled: bool,
+    export_root: Option<String>,
 }
 
 #[tauri::command]
@@ -209,7 +289,7 @@ fn open_permission_settings(section: String) -> Result<(), String> {
         if !status.success() {
             return Err("Failed to open System Settings".to_string());
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -244,19 +324,27 @@ async fn run_diarization(
     state: tauri::State<'_, AppState>,
     recordingId: String,
 ) -> Result<diarization::DiarizationResult, String> {
-    let (audio_path, transcript_opt) = {
+    let (recording_audio_path, transcript_opt) = {
         let db = state.db.lock().await;
         let recording = db
             .get_recording(&recordingId)
             .map_err(|e| e.to_string())?
             .ok_or("Recording not found")?;
         let transcript = db.get_transcript(&recordingId).map_err(|e| e.to_string())?;
-        (std::path::PathBuf::from(recording.audio_path), transcript)
+        (recording.audio_path, transcript)
     };
+
+    let (audio_path, cleanup_path) = resolve_audio_path_for_runtime(
+        state.inner(),
+        &recording_audio_path,
+        "recording audio path",
+    )
+    .await?;
 
     let diarization = diarization::run_diarization(&audio_path)
         .await
         .map_err(|e| e.to_string())?;
+    cleanup_temp_file(cleanup_path);
 
     let mut inferred_aliases = std::collections::HashMap::new();
     if let Some(mut transcript) = transcript_opt {
@@ -492,6 +580,7 @@ async fn stop_recording(
     let asr_manager = Arc::clone(&state.asr_manager);
     let db_clone = Arc::clone(&state.db);
     let settings_manager_clone = Arc::clone(&state.settings_manager);
+    let vault_state_clone = Arc::clone(&state.vault_state);
     let recording_id_clone = recordingId.clone();
     let audio_path_clone = audio_path.clone();
 
@@ -618,6 +707,67 @@ async fn stop_recording(
                     tracing::error!("Failed to update recording status: {}", e);
                 }
 
+                let encrypt_recordings = {
+                    let settings_manager = settings_manager_clone.lock().await;
+                    settings_manager.settings().privacy.encrypt_recordings
+                };
+                if encrypt_recordings {
+                    let recording_key = {
+                        let vault_state = vault_state_clone.lock().await;
+                        if vault_state.unlocked {
+                            vault_state.recording_key
+                        } else {
+                            None
+                        }
+                    };
+
+                    if let Some(key) = recording_key {
+                        match encrypt_recording_file_in_place(&path, &key) {
+                            Ok(encrypted_path) => {
+                                let encrypted_path_string =
+                                    encrypted_path.to_string_lossy().to_string();
+                                let duration_seconds =
+                                    compute_wav_duration_seconds(&audio_path_clone);
+                                if let Err(error) = db.update_recording_path(
+                                    &recording_id_clone,
+                                    &encrypted_path_string,
+                                    duration_seconds,
+                                ) {
+                                    tracing::warn!(
+                                        "Failed to update encrypted recording path for {}: {}",
+                                        recording_id_clone,
+                                        error
+                                    );
+                                } else if let Err(error) = db.log_audit_event(
+                                    "recording_encrypted",
+                                    Some(serde_json::json!({
+                                        "recording_id": &recording_id_clone,
+                                        "encrypted_audio_path": &encrypted_path_string
+                                    })),
+                                    "info",
+                                ) {
+                                    tracing::warn!(
+                                        "Failed to log recording encryption event: {}",
+                                        error
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    "Failed to encrypt recording artifact for {}: {}",
+                                    recording_id_clone,
+                                    error
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Recording encryption is enabled but vault is locked; leaving '{}' unencrypted",
+                            recording_id_clone
+                        );
+                    }
+                }
+
                 // Log audit event
                 let details = serde_json::json!({
                     "recording_id": &recording_id_clone,
@@ -670,7 +820,10 @@ async fn get_recordings(
 
     let mut repaired_durations: Vec<(String, i64)> = Vec::new();
     for recording in &mut recordings {
-        if recording.duration <= 0 && !recording.audio_path.trim().is_empty() {
+        if recording.duration <= 0
+            && !recording.audio_path.trim().is_empty()
+            && !recording.audio_path.ends_with(".enc")
+        {
             let duration = compute_wav_duration_seconds(&recording.audio_path);
             if duration > 0 {
                 recording.duration = duration;
@@ -742,7 +895,17 @@ async fn open_recording_audio(
     }
     ensure_path_in_approved_roots(&canonical_audio, "recording audio path")?;
 
-    open_path_in_default_app(&canonical_audio)?;
+    let (resolved_path, cleanup_path) = resolve_audio_path_for_runtime(
+        state.inner(),
+        canonical_audio.to_string_lossy().as_ref(),
+        "recording audio path",
+    )
+    .await?;
+
+    open_path_in_default_app(&resolved_path)?;
+    if let Some(path) = cleanup_path {
+        schedule_temp_file_cleanup(path, Duration::from_secs(120));
+    }
 
     let mut db = state.db.lock().await;
     let details = serde_json::json!({
@@ -784,12 +947,21 @@ async fn get_recording_waveform(
         return Ok(Vec::new());
     }
 
-    crate::audio::waveform::generate_waveform_from_file(
+    let (runtime_path, cleanup_path) = resolve_audio_path_for_runtime(
+        state.inner(),
         &recording.audio_path,
+        "recording audio path",
+    )
+    .await?;
+
+    let result = crate::audio::waveform::generate_waveform_from_file(
+        runtime_path.to_string_lossy().as_ref(),
         points.unwrap_or(400),
     )
     .map(|data| data.samples)
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string());
+    cleanup_temp_file(cleanup_path);
+    result
 }
 
 #[tauri::command]
@@ -807,13 +979,18 @@ async fn analyze_recording(
             .ok_or("Transcript not found")?
     };
 
-    // Use Ollama for analysis
-    let model = model.unwrap_or_else(|| "llama3.2".to_string());
-    let mut result = state
-        .ollama_client
-        .analyze_transcript(&transcript.full_text, &query, &model)
-        .await
-        .map_err(|e| e.to_string())?;
+    let model_name = model.unwrap_or_default();
+    let mut result = run_analysis_with_selected_provider(
+        state.inner(),
+        &transcript.full_text,
+        &query,
+        if model_name.trim().is_empty() {
+            None
+        } else {
+            Some(model_name.as_str())
+        },
+    )
+    .await?;
 
     hydrate_citation_ranges(&mut result, &transcript.segments);
     if result.citations.is_empty() {
@@ -825,7 +1002,7 @@ async fn analyze_recording(
     let details = serde_json::json!({
         "recording_id": &recordingId,
         "query": &query,
-        "model": &model
+        "model": &result.model
     });
     if let Err(e) = db.log_audit_event("analysis_completed", Some(details), "info") {
         tracing::warn!("Failed to log audit event: {}", e);
@@ -848,12 +1025,9 @@ async fn summarize_recording(
             .ok_or("Transcript not found")?
     };
 
-    let model = model.unwrap_or_else(|| "llama3.2".to_string());
-    let summary = state
-        .ollama_client
-        .summarize(&transcript.full_text, &model)
-        .await
-        .map_err(|e| e.to_string())?;
+    let summary =
+        run_summary_with_selected_provider(state.inner(), &transcript.full_text, model.as_deref())
+            .await?;
 
     Ok(summary)
 }
@@ -872,12 +1046,12 @@ async fn extract_action_items(
             .ok_or("Transcript not found")?
     };
 
-    let model = model.unwrap_or_else(|| "llama3.2".to_string());
-    let items = state
-        .ollama_client
-        .extract_action_items(&transcript.full_text, &model)
-        .await
-        .map_err(|e| e.to_string())?;
+    let items = run_action_items_with_selected_provider(
+        state.inner(),
+        &transcript.full_text,
+        model.as_deref(),
+    )
+    .await?;
 
     Ok(items)
 }
@@ -915,15 +1089,23 @@ async fn export_recording(
         (recording, transcript)
     };
 
-    let export_path =
-        transcription::export(&recording, transcript.as_ref(), &format, target.as_deref())
-            .map_err(|e| e.to_string())?;
+    let validated_target = match target.as_deref() {
+        Some(path) => Some(validate_export_target_path(state.inner(), path).await?),
+        None => None,
+    };
+    let export_path = transcription::export(
+        &recording,
+        transcript.as_ref(),
+        &format,
+        validated_target.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
 
     // Log audit event
     let details = serde_json::json!({
         "recording_id": &recordingId,
         "format": &format,
-        "target": target,
+        "target": validated_target,
         "export_path": &export_path
     });
     let mut db = state.db.lock().await;
@@ -956,6 +1138,11 @@ async fn export_recording_v2(
         (recording, transcript, audit_log)
     };
 
+    let validated_target = match target.as_deref() {
+        Some(path) => Some(validate_export_target_path(state.inner(), path).await?),
+        None => None,
+    };
+
     let redaction_level = redactionLevel.unwrap_or_else(|| "basic".to_string());
     let preview_mode = preview.unwrap_or(false);
     let result = transcription::export_with_policy(
@@ -963,7 +1150,7 @@ async fn export_recording_v2(
         transcript.as_ref(),
         &audit_log,
         &format,
-        target.as_deref(),
+        validated_target.as_deref(),
         &redaction_level,
         preview_mode,
     )
@@ -972,7 +1159,7 @@ async fn export_recording_v2(
     let details = serde_json::json!({
         "recording_id": &recordingId,
         "format": &format,
-        "target": &target,
+        "target": &validated_target,
         "preview": preview_mode,
         "redaction_level": &redaction_level,
         "export_path": &result.export_path
@@ -1099,7 +1286,10 @@ async fn get_asr_runtime_diagnostics(
     state: tauri::State<'_, AppState>,
     providerType: asr::AsrProviderType,
 ) -> Result<asr::RuntimeDiagnostics, String> {
-    Ok(state.asr_manager.get_runtime_diagnostics(providerType).await)
+    Ok(state
+        .asr_manager
+        .get_runtime_diagnostics(providerType)
+        .await)
 }
 
 #[tauri::command]
@@ -1125,13 +1315,16 @@ async fn set_default_asr_provider(
 
     let provider = state.asr_manager.get_provider(providerType).await;
     if !provider.is_available() {
-        let diagnostics = state.asr_manager.get_runtime_diagnostics(providerType).await;
-        return Err(format!(
-            "{}",
-            diagnostics
-                .runtime_message
-                .unwrap_or_else(|| format!("ASR provider '{}' is not available in this build", provider.name()))
-        ));
+        let diagnostics = state
+            .asr_manager
+            .get_runtime_diagnostics(providerType)
+            .await;
+        return Err(diagnostics.runtime_message.unwrap_or_else(|| {
+            format!(
+                "ASR provider '{}' is not available in this build",
+                provider.name()
+            )
+        }));
     }
     state.asr_manager.set_default_provider(providerType).await;
 
@@ -1249,7 +1442,7 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<settings::Set
 #[tauri::command]
 async fn save_settings(
     state: tauri::State<'_, AppState>,
-    settings: settings::Settings,
+    mut settings: settings::Settings,
 ) -> Result<(), String> {
     state
         .asr_manager
@@ -1271,6 +1464,16 @@ async fn save_settings(
         }
     }
 
+    settings.privacy.llm_provider =
+        AnalysisProvider::from_settings_value(&settings.privacy.llm_provider)
+            .as_settings_value()
+            .to_string();
+
+    if let Some(export_root) = settings.privacy.export_root.as_ref() {
+        let canonical_root = canonicalize_or_create_absolute_path(export_root, "exportRoot")?;
+        settings.privacy.export_root = Some(canonical_root);
+    }
+
     let mut settings_manager = state.settings_manager.lock().await;
     *settings_manager.settings_mut() = settings;
     settings_manager.save().map_err(|e| e.to_string())
@@ -1278,17 +1481,49 @@ async fn save_settings(
 
 #[tauri::command]
 async fn has_provider_secret(provider: String) -> Result<bool, String> {
-    secrets::has_provider_secret(&provider).map_err(|e| e.to_string())
+    let normalized = normalize_provider_secret_name(&provider)?;
+    secrets::has_provider_secret(normalized).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn set_provider_secret(provider: String, secret: String) -> Result<(), String> {
-    secrets::set_provider_secret(&provider, &secret).map_err(|e| e.to_string())
+    let normalized = normalize_provider_secret_name(&provider)?;
+    secrets::set_provider_secret(normalized, &secret).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn clear_provider_secret(provider: String) -> Result<(), String> {
-    secrets::clear_provider_secret(&provider).map_err(|e| e.to_string())
+    let normalized = normalize_provider_secret_name(&provider)?;
+    secrets::clear_provider_secret(normalized).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_security_status(state: tauri::State<'_, AppState>) -> Result<SecurityStatus, String> {
+    build_security_status(state.inner()).await
+}
+
+#[tauri::command]
+async fn unlock_vault(state: tauri::State<'_, AppState>, password: String) -> Result<(), String> {
+    unlock_vault_runtime(state.inner(), &password).await
+}
+
+#[tauri::command]
+async fn lock_vault(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let mut vault_state = state.vault_state.lock().await;
+    if let Some(mut key) = vault_state.recording_key.take() {
+        use zeroize::Zeroize;
+        key.zeroize();
+    }
+    vault_state.unlocked = false;
+    Ok(())
+}
+
+#[tauri::command]
+async fn migrate_to_encrypted_storage(
+    state: tauri::State<'_, AppState>,
+    password: String,
+) -> Result<(), String> {
+    migrate_storage_encryption(state.inner(), &password).await
 }
 
 // VAD and noise suppression commands
@@ -1373,7 +1608,7 @@ async fn export_with_template(
 // Waveform commands
 #[tauri::command]
 async fn generate_waveform_svg(
-    _state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, AppState>,
     recording_path: String,
     width: u32,
     height: u32,
@@ -1389,8 +1624,16 @@ async fn generate_waveform_svg(
     }
     ensure_path_in_approved_roots(&canonical_path, "recording_path")?;
 
-    let data = waveform::generate_waveform_from_file(&canonical_path.to_string_lossy(), 200)
+    let (runtime_path, cleanup_path) = resolve_audio_path_for_runtime(
+        state.inner(),
+        canonical_path.to_string_lossy().as_ref(),
+        "recording_path",
+    )
+    .await?;
+
+    let data = waveform::generate_waveform_from_file(&runtime_path.to_string_lossy(), 200)
         .map_err(|e| e.to_string())?;
+    cleanup_temp_file(cleanup_path);
 
     let svg = waveform::export_waveform_svg(&data, width, height, "#3b82f6");
     Ok(svg)
@@ -1837,11 +2080,7 @@ async fn stop_dictation_session_for_session(
             let mut runtime_state = state.dictation_runtime_state.lock().await;
             *runtime_state = DictationSessionState::Done;
         }
-        let done_message = if let Some(error_message) = paste_error.as_deref() {
-            Some(error_message)
-        } else {
-            None
-        };
+        let done_message = paste_error.as_deref();
         emit_dictation_state(
             app,
             "done",
@@ -2024,7 +2263,11 @@ async fn handle_global_dictation_released(app: AppHandle) {
 }
 
 async fn active_dictation_session_id(state: &AppState) -> Option<u64> {
-    state.dictation_session_tracker.lock().await.active_session_id
+    state
+        .dictation_session_tracker
+        .lock()
+        .await
+        .active_session_id
 }
 
 async fn set_dictation_hotkey_flags(state: &AppState, active: bool, release_pending: bool) {
@@ -2127,6 +2370,7 @@ fn spawn_hotkey_release_fallback_monitor(app: AppHandle, session_id: u64) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_dictation_state(
     app: &AppHandle,
     phase: &str,
@@ -2277,17 +2521,707 @@ fn show_main_window(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn normalize_provider_secret_name(provider: &str) -> Result<&'static str, String> {
+    let normalized = provider.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "openai" => Ok("openai"),
+        "anthropic" => Ok("anthropic"),
+        "gemini" => Ok("gemini"),
+        "ollama-cloud" | "ollama_cloud" | "ollamacloud" => Ok("ollama-cloud"),
+        "ollama" => Err("Local Ollama does not require a stored API key".to_string()),
+        _ => Err(format!(
+            "Unsupported provider '{}'. Expected one of: openai, anthropic, gemini, ollama-cloud",
+            provider
+        )),
+    }
+}
+
+fn canonicalize_or_create_absolute_path(raw_path: &Path, label: &str) -> Result<PathBuf, String> {
+    if !raw_path.is_absolute() {
+        return Err(format!(
+            "{} must be an absolute path, got '{}'",
+            label,
+            raw_path.display()
+        ));
+    }
+
+    if raw_path.exists() {
+        return raw_path.canonicalize().map_err(|e| {
+            format!(
+                "Failed to resolve {} '{}': {}",
+                label,
+                raw_path.display(),
+                e
+            )
+        });
+    }
+
+    std::fs::create_dir_all(raw_path)
+        .map_err(|e| format!("Failed to create {} '{}': {}", label, raw_path.display(), e))?;
+    raw_path.canonicalize().map_err(|e| {
+        format!(
+            "Failed to resolve {} '{}': {}",
+            label,
+            raw_path.display(),
+            e
+        )
+    })
+}
+
+async fn validate_export_target_path(state: &AppState, raw_target: &str) -> Result<String, String> {
+    let trimmed = raw_target.trim();
+    if trimmed.is_empty() {
+        return Err("target cannot be empty".to_string());
+    }
+
+    let candidate = PathBuf::from(trimmed);
+    if !candidate.is_absolute() {
+        return Err(format!(
+            "target must be an absolute path, got '{}'",
+            candidate.display()
+        ));
+    }
+
+    let export_root = {
+        let settings_manager = state.settings_manager.lock().await;
+        settings_manager.settings().privacy.export_root.clone()
+    };
+
+    let resolved_target = if candidate.exists() {
+        let canonical = canonicalize_existing_absolute_path(trimmed, "target")?;
+        if canonical.is_dir() {
+            return Err(format!(
+                "target must be a file path, got directory '{}'",
+                canonical.display()
+            ));
+        }
+        canonical
+    } else {
+        let Some(parent) = candidate.parent() else {
+            return Err(format!(
+                "target must include a parent directory, got '{}'",
+                candidate.display()
+            ));
+        };
+        let canonical_parent = canonicalize_or_create_absolute_path(parent, "target parent")?;
+        let Some(file_name) = candidate.file_name() else {
+            return Err(format!(
+                "target must include a file name, got '{}'",
+                candidate.display()
+            ));
+        };
+        canonical_parent.join(file_name)
+    };
+
+    if let Some(root) = export_root {
+        let canonical_root = canonicalize_or_create_absolute_path(&root, "exportRoot")?;
+        if !resolved_target.starts_with(&canonical_root) {
+            return Err(format!(
+                "target '{}' is outside configured exportRoot '{}'",
+                resolved_target.display(),
+                canonical_root.display()
+            ));
+        }
+    } else {
+        let parent_to_check = resolved_target
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| resolved_target.clone());
+        ensure_path_in_approved_roots(&parent_to_check, "target")?;
+    }
+
+    Ok(resolved_target.to_string_lossy().to_string())
+}
+
+async fn selected_analysis_provider_and_settings(
+    state: &AppState,
+) -> (AnalysisProvider, bool, String) {
+    let settings_manager = state.settings_manager.lock().await;
+    let settings = settings_manager.settings();
+    (
+        AnalysisProvider::from_settings_value(&settings.privacy.llm_provider),
+        settings.privacy.remote_processing_enabled,
+        settings.privacy.llm_provider.clone(),
+    )
+}
+
+fn enforce_remote_provider_policy(
+    provider: AnalysisProvider,
+    remote_processing_enabled: bool,
+) -> Result<(), String> {
+    if provider.is_remote() && !remote_processing_enabled {
+        return Err(format!(
+            "Remote provider '{}' is blocked by policy. Enable Settings > Security > Remote processing to continue.",
+            provider.as_settings_value()
+        ));
+    }
+    Ok(())
+}
+
+fn missing_provider_secret_error(provider: AnalysisProvider) -> String {
+    format!(
+        "Missing provider secret for '{}'. Add an API key in Settings > AI & Keys.",
+        provider.as_settings_value()
+    )
+}
+
+fn provider_secret_for(provider: AnalysisProvider) -> Result<String, String> {
+    let Some(secret_name) = provider.provider_secret_name() else {
+        return Err(format!(
+            "Provider '{}' does not use API keys",
+            provider.as_settings_value()
+        ));
+    };
+
+    match secrets::get_provider_secret(secret_name).map_err(|e| e.to_string())? {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        _ => Err(missing_provider_secret_error(provider)),
+    }
+}
+
+async fn run_analysis_with_selected_provider(
+    state: &AppState,
+    transcript: &str,
+    query: &str,
+    model: Option<&str>,
+) -> Result<llm::AnalysisResult, String> {
+    let (provider, remote_processing_enabled, configured_provider) =
+        selected_analysis_provider_and_settings(state).await;
+
+    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
+
+    let selected_model = model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| provider.default_model());
+
+    match provider {
+        AnalysisProvider::Ollama => state
+            .ollama_client
+            .analyze_transcript(transcript, query, selected_model)
+            .await
+            .map_err(|e| e.to_string()),
+        AnalysisProvider::OpenAi => {
+            let api_key = provider_secret_for(provider)?;
+            llm::OpenAIClient::with_api_key(Some(api_key))
+                .analyze_transcript(transcript, query, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::Anthropic => {
+            let api_key = provider_secret_for(provider)?;
+            llm::AnthropicClient::with_api_key(Some(api_key))
+                .analyze_transcript(transcript, query, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::Gemini => {
+            let api_key = provider_secret_for(provider)?;
+            llm::GeminiClient::with_api_key(Some(api_key))
+                .analyze_transcript(transcript, query, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::OllamaCloud => {
+            let api_key = provider_secret_for(provider)?;
+            llm::OllamaCloudClient::with_api_key(Some(api_key))
+                .analyze_transcript(transcript, query, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    }
+    .map_err(|error| {
+        format!(
+            "Analysis provider '{}' failed (configured '{}'): {}",
+            provider.as_settings_value(),
+            configured_provider,
+            error
+        )
+    })
+}
+
+async fn run_summary_with_selected_provider(
+    state: &AppState,
+    transcript: &str,
+    model: Option<&str>,
+) -> Result<String, String> {
+    let (provider, remote_processing_enabled, _) =
+        selected_analysis_provider_and_settings(state).await;
+    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
+
+    let selected_model = model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| provider.default_model());
+
+    match provider {
+        AnalysisProvider::Ollama => state
+            .ollama_client
+            .summarize(transcript, selected_model)
+            .await
+            .map_err(|e| e.to_string()),
+        AnalysisProvider::OpenAi => {
+            let api_key = provider_secret_for(provider)?;
+            llm::OpenAIClient::with_api_key(Some(api_key))
+                .summarize(transcript, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::Anthropic => {
+            let api_key = provider_secret_for(provider)?;
+            llm::AnthropicClient::with_api_key(Some(api_key))
+                .summarize(transcript, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::Gemini => {
+            let api_key = provider_secret_for(provider)?;
+            llm::GeminiClient::with_api_key(Some(api_key))
+                .summarize(transcript, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::OllamaCloud => {
+            let api_key = provider_secret_for(provider)?;
+            llm::OllamaCloudClient::with_api_key(Some(api_key))
+                .summarize(transcript, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+async fn run_action_items_with_selected_provider(
+    state: &AppState,
+    transcript: &str,
+    model: Option<&str>,
+) -> Result<Vec<llm::ActionItem>, String> {
+    let (provider, remote_processing_enabled, _) =
+        selected_analysis_provider_and_settings(state).await;
+    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
+
+    let selected_model = model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| provider.default_model());
+
+    match provider {
+        AnalysisProvider::Ollama => state
+            .ollama_client
+            .extract_action_items(transcript, selected_model)
+            .await
+            .map_err(|e| e.to_string()),
+        AnalysisProvider::OpenAi => {
+            let api_key = provider_secret_for(provider)?;
+            llm::OpenAIClient::with_api_key(Some(api_key))
+                .extract_action_items(transcript, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::Anthropic => {
+            let api_key = provider_secret_for(provider)?;
+            llm::AnthropicClient::with_api_key(Some(api_key))
+                .extract_action_items(transcript, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::Gemini => {
+            let api_key = provider_secret_for(provider)?;
+            llm::GeminiClient::with_api_key(Some(api_key))
+                .extract_action_items(transcript, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::OllamaCloud => {
+            let api_key = provider_secret_for(provider)?;
+            llm::OllamaCloudClient::with_api_key(Some(api_key))
+                .extract_action_items(transcript, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+async fn build_security_status(state: &AppState) -> Result<SecurityStatus, String> {
+    let (privacy, vault_unlocked, db_encrypted) = {
+        let settings_manager = state.settings_manager.lock().await;
+        let privacy = settings_manager.settings().privacy.clone();
+        let vault_state = state.vault_state.lock().await;
+        (privacy, vault_state.unlocked, vault_state.db_encrypted)
+    };
+
+    Ok(SecurityStatus {
+        vault_initialized: privacy.vault_initialized,
+        vault_unlocked,
+        database_encrypted: db_encrypted,
+        recordings_encrypted: privacy.encrypt_recordings,
+        llm_provider: AnalysisProvider::from_settings_value(&privacy.llm_provider)
+            .as_settings_value()
+            .to_string(),
+        remote_processing_enabled: privacy.remote_processing_enabled,
+        export_root: privacy
+            .export_root
+            .map(|path| path.to_string_lossy().to_string()),
+    })
+}
+
+async fn unlock_vault_runtime(state: &AppState, password: &str) -> Result<(), String> {
+    let password = password.trim();
+    if password.is_empty() {
+        return Err("Vault password cannot be empty".to_string());
+    }
+
+    let (vault_initialized, existing_salt) = {
+        let settings_manager = state.settings_manager.lock().await;
+        (
+            settings_manager.settings().privacy.vault_initialized,
+            settings_manager.settings().privacy.vault_salt.clone(),
+        )
+    };
+
+    let salt = if let Some(value) = existing_salt.as_deref() {
+        crate::crypto::ProjectKeyManager::salt_from_string(value)
+            .map_err(|e| format!("Invalid vault salt in settings: {}", e))?
+    } else {
+        let mut generated = [0u8; VAULT_RECORDING_KEY_SALT_LEN];
+        rand::thread_rng().fill_bytes(&mut generated);
+        generated
+    };
+
+    let recording_key = crate::crypto::ProjectKeyManager::derive_key(password, &salt);
+
+    if vault_initialized {
+        let Some(blob_hex) =
+            secrets::get_internal_secret(VAULT_UNLOCK_CHECK_SECRET).map_err(|e| e.to_string())?
+        else {
+            return Err("Vault is initialized but unlock verifier is missing".to_string());
+        };
+        let blob = hex::decode(blob_hex).map_err(|e| format!("Invalid unlock verifier: {}", e))?;
+        let plaintext = crate::crypto::ProjectKeyManager::decrypt(&blob, &recording_key)
+            .map_err(|_| "Invalid vault password".to_string())?;
+        if plaintext != VAULT_UNLOCK_CHECK_PLAINTEXT {
+            return Err("Invalid vault password".to_string());
+        }
+    } else {
+        let mut settings_manager = state.settings_manager.lock().await;
+        if settings_manager.settings().privacy.vault_salt.is_none() {
+            settings_manager.settings_mut().privacy.vault_salt =
+                Some(crate::crypto::ProjectKeyManager::salt_to_string(&salt));
+            settings_manager.save().map_err(|e| e.to_string())?;
+        }
+    }
+
+    let db_encrypted = {
+        let db = state.db.lock().await;
+        db.is_encrypted().map_err(|e| e.to_string())?
+    };
+
+    let mut vault_state = state.vault_state.lock().await;
+    if let Some(mut previous_key) = vault_state.recording_key.take() {
+        use zeroize::Zeroize;
+        previous_key.zeroize();
+    }
+    vault_state.unlocked = true;
+    vault_state.db_encrypted = db_encrypted;
+    vault_state.recording_key = Some(recording_key);
+
+    Ok(())
+}
+
+async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<(), String> {
+    let password = password.trim();
+    if password.len() < 8 {
+        return Err("Vault password must be at least 8 characters".to_string());
+    }
+
+    let (already_initialized, existing_salt) = {
+        let settings_manager = state.settings_manager.lock().await;
+        (
+            settings_manager.settings().privacy.vault_initialized,
+            settings_manager.settings().privacy.vault_salt.clone(),
+        )
+    };
+
+    let salt = if let Some(value) = existing_salt.as_deref() {
+        crate::crypto::ProjectKeyManager::salt_from_string(value)
+            .map_err(|e| format!("Invalid vault salt in settings: {}", e))?
+    } else {
+        let mut generated = [0u8; VAULT_RECORDING_KEY_SALT_LEN];
+        rand::thread_rng().fill_bytes(&mut generated);
+        generated
+    };
+
+    let recording_key = crate::crypto::ProjectKeyManager::derive_key(password, &salt);
+
+    if !already_initialized {
+        let mut db_key_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut db_key_bytes);
+        let db_key = hex::encode(db_key_bytes);
+
+        #[cfg(feature = "sqlcipher")]
+        {
+            let db = state.db.lock().await;
+            db.change_key(&db_key).map_err(|e| e.to_string())?;
+        }
+        #[cfg(not(feature = "sqlcipher"))]
+        {
+            let _ = &db_key;
+            tracing::warn!(
+                "sqlcipher feature is disabled in this build; database encryption migration skipped"
+            );
+        }
+
+        let verifier =
+            crate::crypto::ProjectKeyManager::encrypt(VAULT_UNLOCK_CHECK_PLAINTEXT, &recording_key)
+                .map_err(|e| e.to_string())?;
+        secrets::set_internal_secret(VAULT_UNLOCK_CHECK_SECRET, &hex::encode(verifier))
+            .map_err(|e| e.to_string())?;
+        secrets::set_internal_secret(VAULT_DB_KEY_SECRET, &db_key).map_err(|e| e.to_string())?;
+    }
+
+    let recordings = {
+        let db = state.db.lock().await;
+        db.get_recordings(None).map_err(|e| e.to_string())?
+    };
+
+    for recording in recordings {
+        if recording.audio_path.trim().is_empty() || recording.audio_path.ends_with(".enc") {
+            continue;
+        }
+        let original_duration = compute_wav_duration_seconds(&recording.audio_path);
+        let encrypted_path =
+            encrypt_recording_file_in_place(Path::new(&recording.audio_path), &recording_key)?;
+        let mut db = state.db.lock().await;
+        db.update_recording_path(
+            &recording.id,
+            encrypted_path.to_string_lossy().as_ref(),
+            original_duration,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    {
+        let mut settings_manager = state.settings_manager.lock().await;
+        let privacy = &mut settings_manager.settings_mut().privacy;
+        privacy.encrypt_recordings = true;
+        privacy.vault_initialized = true;
+        privacy.vault_salt = Some(crate::crypto::ProjectKeyManager::salt_to_string(&salt));
+        settings_manager.save().map_err(|e| e.to_string())?;
+    }
+
+    let db_encrypted = {
+        let db = state.db.lock().await;
+        db.is_encrypted().map_err(|e| e.to_string())?
+    };
+
+    let mut vault_state = state.vault_state.lock().await;
+    vault_state.unlocked = true;
+    vault_state.db_encrypted = db_encrypted;
+    if let Some(mut previous_key) = vault_state.recording_key.take() {
+        use zeroize::Zeroize;
+        previous_key.zeroize();
+    }
+    vault_state.recording_key = Some(recording_key);
+
+    Ok(())
+}
+
+fn encrypted_output_path(path: &Path) -> PathBuf {
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("enc"))
+        .unwrap_or(false)
+    {
+        return path.to_path_buf();
+    }
+
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if !ext.is_empty() => path.with_extension(format!("{}.enc", ext)),
+        _ => path.with_extension("enc"),
+    }
+}
+
+fn encrypt_recording_file_in_place(path: &Path, key: &[u8; 32]) -> Result<PathBuf, String> {
+    let canonical = path.canonicalize().map_err(|e| {
+        format!(
+            "Failed to resolve recording path '{}': {}",
+            path.display(),
+            e
+        )
+    })?;
+    if !canonical.is_file() {
+        return Err(format!(
+            "recording path must point to a file, got '{}'",
+            canonical.display()
+        ));
+    }
+    ensure_path_in_approved_roots(&canonical, "recording path")?;
+
+    if canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("enc"))
+        .unwrap_or(false)
+    {
+        return Ok(canonical);
+    }
+
+    let plaintext = std::fs::read(&canonical).map_err(|e| {
+        format!(
+            "Failed to read recording '{}' for encryption: {}",
+            canonical.display(),
+            e
+        )
+    })?;
+    let ciphertext = crate::crypto::ProjectKeyManager::encrypt(&plaintext, key).map_err(|e| {
+        format!(
+            "Failed to encrypt recording '{}': {}",
+            canonical.display(),
+            e
+        )
+    })?;
+
+    let output_path = encrypted_output_path(&canonical);
+    let temp_path = output_path.with_extension("enc.tmp");
+    std::fs::write(&temp_path, ciphertext).map_err(|e| {
+        format!(
+            "Failed to write encrypted recording '{}' : {}",
+            temp_path.display(),
+            e
+        )
+    })?;
+    std::fs::rename(&temp_path, &output_path).map_err(|e| {
+        format!(
+            "Failed to finalize encrypted recording '{}' : {}",
+            output_path.display(),
+            e
+        )
+    })?;
+    std::fs::remove_file(&canonical).map_err(|e| {
+        format!(
+            "Failed to remove plaintext recording '{}' after encryption: {}",
+            canonical.display(),
+            e
+        )
+    })?;
+
+    Ok(output_path)
+}
+
+async fn resolve_audio_path_for_runtime(
+    state: &AppState,
+    audio_path: &str,
+    label: &str,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let canonical = canonicalize_existing_absolute_path(audio_path, label)?;
+    if !canonical.is_file() {
+        return Err(format!("{} is not a file: {}", label, canonical.display()));
+    }
+    ensure_path_in_approved_roots(&canonical, label)?;
+
+    let is_encrypted = canonical
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("enc"))
+        .unwrap_or(false);
+    if !is_encrypted {
+        return Ok((canonical, None));
+    }
+
+    let key = {
+        let vault_state = state.vault_state.lock().await;
+        if !vault_state.unlocked {
+            return Err(
+                "Vault is locked. Unlock vault before opening encrypted recordings.".to_string(),
+            );
+        }
+        vault_state.recording_key
+    }
+    .ok_or_else(|| "Vault is unlocked but no runtime recording key is available".to_string())?;
+
+    let encrypted_bytes = tokio::fs::read(&canonical).await.map_err(|e| {
+        format!(
+            "Failed to read encrypted recording '{}': {}",
+            canonical.display(),
+            e
+        )
+    })?;
+    let decrypted_bytes = crate::crypto::ProjectKeyManager::decrypt(&encrypted_bytes, &key)
+        .map_err(|_| {
+            format!(
+                "Failed to decrypt recording '{}'. Verify vault password and retry.",
+                canonical.display()
+            )
+        })?;
+
+    let runtime_dir = nautilus_data_root()?
+        .join("runtime")
+        .join("decrypted-audio");
+    tokio::fs::create_dir_all(&runtime_dir).await.map_err(|e| {
+        format!(
+            "Failed to prepare runtime decrypted-audio directory '{}': {}",
+            runtime_dir.display(),
+            e
+        )
+    })?;
+
+    let temp_path = runtime_dir.join(format!("{}.wav", uuid::Uuid::new_v4()));
+    tokio::fs::write(&temp_path, decrypted_bytes)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to write runtime decrypted audio '{}': {}",
+                temp_path.display(),
+                e
+            )
+        })?;
+
+    Ok((temp_path.clone(), Some(temp_path)))
+}
+
+fn cleanup_temp_file(path: Option<PathBuf>) {
+    if let Some(path) = path {
+        if let Err(error) = std::fs::remove_file(&path) {
+            tracing::warn!(
+                "Failed to clean up temp file '{}': {}",
+                path.display(),
+                error
+            );
+        }
+    }
+}
+
+fn schedule_temp_file_cleanup(path: PathBuf, delay: Duration) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(delay).await;
+        cleanup_temp_file(Some(path));
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt::init();
+
+    let initial_db_key = secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
+        .map_err(|e| e.to_string())
+        .ok()
+        .flatten();
+    let database = db::Database::new_with_key(initial_db_key.as_deref())
+        .or_else(|error| {
+            tracing::warn!(
+                "Failed to open database with stored key (falling back to default): {}",
+                error
+            );
+            db::Database::new()
+        })
+        .expect("Failed to initialize database");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(AppState {
-            db: Arc::new(Mutex::new(
-                db::Database::new().expect("Failed to initialize database"),
-            )),
+            db: Arc::new(Mutex::new(database)),
             audio_capture: Arc::new(Mutex::new(audio::AudioCapture::new())),
             asr_manager: Arc::new(asr::AsrManager::new()),
             ollama_client: Arc::new(llm::OllamaClient::new()),
@@ -2304,6 +3238,7 @@ pub fn run() {
             dictation_runtime_state: Arc::new(Mutex::new(DictationSessionState::Idle)),
             dictation_overlay_state: Arc::new(StdMutex::new(DictationOverlayState::default())),
             recording_overlay_state: Arc::new(StdMutex::new(RecordingOverlayState::default())),
+            vault_state: Arc::new(Mutex::new(VaultRuntimeState::default())),
         })
         .setup(|app| {
             let state = app.state::<AppState>();
@@ -2354,6 +3289,15 @@ pub fn run() {
                         }
                     }
                 }
+
+                let db_encrypted = {
+                    let db = state.db.lock().await;
+                    db.is_encrypted().unwrap_or(false)
+                };
+                {
+                    let mut vault_state = state.vault_state.lock().await;
+                    vault_state.db_encrypted = db_encrypted;
+                }
             });
 
             #[cfg(desktop)]
@@ -2370,13 +3314,9 @@ pub fn run() {
                 let cmd_shift_space =
                     Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space);
 
-                let mut shortcut_bindings = vec![
-                    ctrl_shift_space.clone(),
-                    ctrl_shift_n.clone(),
-                    ctrl_shift_escape.clone(),
-                ];
+                let mut shortcut_bindings = vec![ctrl_shift_space, ctrl_shift_n, ctrl_shift_escape];
                 #[cfg(target_os = "macos")]
-                shortcut_bindings.push(cmd_shift_space.clone());
+                shortcut_bindings.push(cmd_shift_space);
 
                 match tauri_plugin_global_shortcut::Builder::new()
                     .with_shortcuts(shortcut_bindings)
@@ -2527,6 +3467,10 @@ pub fn run() {
             has_provider_secret,
             set_provider_secret,
             clear_provider_secret,
+            get_security_status,
+            unlock_vault,
+            lock_vault,
+            migrate_to_encrypted_storage,
             set_vad_enabled,
             set_noise_suppression_enabled,
             get_audio_settings,
@@ -2675,6 +3619,7 @@ fn is_generic_speaker_name(name: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -2704,6 +3649,32 @@ mod tests {
         ];
         let aliases = infer_speaker_aliases_from_segments(&segments);
         assert_eq!(aliases.get("S2").map(String::as_str), Some("Ro Khanan"));
+    }
+
+    #[test]
+    fn remote_provider_policy_denies_when_disabled() {
+        let denied = enforce_remote_provider_policy(AnalysisProvider::OpenAi, false);
+        assert!(denied.is_err());
+
+        let allowed = enforce_remote_provider_policy(AnalysisProvider::Ollama, false);
+        assert!(allowed.is_ok());
+    }
+
+    #[test]
+    fn provider_secret_name_normalization_is_strict() {
+        assert_eq!(normalize_provider_secret_name("OpenAI").unwrap(), "openai");
+        assert_eq!(
+            normalize_provider_secret_name("ollama_cloud").unwrap(),
+            "ollama-cloud"
+        );
+        assert!(normalize_provider_secret_name("ollama").is_err());
+        assert!(normalize_provider_secret_name("unknown-provider").is_err());
+    }
+
+    #[test]
+    fn canonicalize_or_create_requires_absolute_path() {
+        let err = canonicalize_or_create_absolute_path(Path::new("relative/path"), "testPath");
+        assert!(err.is_err());
     }
 }
 
@@ -2967,19 +3938,36 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
         if !copy_status.success() {
             return Err("pbcopy exited with failure status".to_string());
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "windows")]
     {
-        let _ = text;
-        return Err("Clipboard copy is not implemented on Windows yet.".to_string());
+        use std::process::{Command, Stdio};
+
+        let mut clip = Command::new("cmd")
+            .args(["/C", "clip"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to launch clip.exe: {}", e))?;
+        if let Some(stdin) = clip.stdin.as_mut() {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|e| format!("Failed to write text to clipboard: {}", e))?;
+        }
+        let status = clip
+            .wait()
+            .map_err(|e| format!("Failed waiting for clip.exe: {}", e))?;
+        if !status.success() {
+            return Err("clip.exe exited with failure status".to_string());
+        }
+        Ok(())
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let _ = text;
-        return Err("Clipboard copy is not implemented on this platform yet.".to_string());
+        Err("Clipboard copy is not implemented on this platform yet.".to_string())
     }
 }
 
@@ -3066,11 +4054,11 @@ fn paste_text_systemwide(text: &str) -> PasteOutcome {
             tracing::warn!("Failed to restore previous clipboard: {}", restore_error);
         }
 
-        return PasteOutcome {
+        PasteOutcome {
             pasted: true,
             copied: true,
             error: None,
-        };
+        }
     }
 
     #[cfg(not(target_os = "macos"))]

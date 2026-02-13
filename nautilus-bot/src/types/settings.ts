@@ -60,6 +60,10 @@ export interface PrivacySettings {
   auditLogging: boolean;
   cloudSync: boolean;
   remoteProcessingEnabled: boolean;
+  llmProvider: string;
+  exportRoot: string | null;
+  vaultInitialized: boolean;
+  vaultSalt: string | null;
 }
 
 export interface KeyboardShortcuts {
