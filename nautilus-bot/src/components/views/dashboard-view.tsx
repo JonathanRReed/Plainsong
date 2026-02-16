@@ -1,14 +1,40 @@
-import { useMemo } from "react";
+import { useMemo, useState, type ChangeEvent } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import { useProjects } from "@/hooks/use-projects";
 import { useRecordings } from "@/hooks/use-recordings";
+import { analyzeRecordings, searchTranscripts } from "@/lib/tauri";
 import { Folder, FileAudio, Clock, Activity } from "lucide-react";
 
 export function DashboardView() {
   const { projects } = useProjects();
   const { recordings } = useRecordings();
+  const [globalQuery, setGlobalQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<Array<{
+    recordingId: string;
+    recordingTitle: string;
+    projectId: string;
+    segmentId: string;
+    text: string;
+    startTime: number;
+    endTime: number;
+    score: number;
+  }>>([]);
+  const [selectedRecordingIds, setSelectedRecordingIds] = useState<string[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [analysisQuery, setAnalysisQuery] = useState("");
+  const [multiAnalysisResult, setMultiAnalysisResult] = useState<string | null>(null);
+  const [multiAnalysisCitations, setMultiAnalysisCitations] = useState<Array<{
+    text: string;
+    startTime?: number;
+    endTime?: number;
+    recordingId?: string;
+  }>>([]);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
 
   const recentRecordings = useMemo(() => recordings.slice(0, 10), [recordings]);
   const totalDuration = useMemo(() => recordings.reduce((acc, r) => acc + r.duration, 0), [recordings]);
@@ -20,6 +46,37 @@ export function DashboardView() {
     acc[key].push(recording);
     return acc;
   }, {}), [recordings]);
+
+  const runGlobalSearch = async () => {
+    if (!globalQuery.trim()) return;
+    setIsSearching(true);
+    setAnalysisError(null);
+    try {
+      const hits = await searchTranscripts(globalQuery.trim(), 25);
+      setSearchResults(hits);
+      const uniqueIds = [...new Set(hits.map((hit) => hit.recordingId))];
+      setSelectedRecordingIds(uniqueIds);
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : "Transcript search failed");
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const runMultiRecordingAnalysis = async () => {
+    if (!analysisQuery.trim() || selectedRecordingIds.length === 0) return;
+    setIsAnalyzing(true);
+    setAnalysisError(null);
+    try {
+      const result = await analyzeRecordings(selectedRecordingIds, analysisQuery.trim());
+      setMultiAnalysisResult(result.response);
+      setMultiAnalysisCitations(result.citations);
+    } catch (error) {
+      setAnalysisError(error instanceof Error ? error.message : "Cross-recording analysis failed");
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
 
   return (
     <div className="h-full flex flex-col">
@@ -74,6 +131,87 @@ export function DashboardView() {
             </Card>
           </div>
           
+          <Card>
+            <CardHeader>
+              <CardTitle>Cross-Recording Search</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex gap-2">
+                <Input
+                  value={globalQuery}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setGlobalQuery(event.target.value)}
+                  placeholder="Search across all transcripts..."
+                />
+                <Button onClick={runGlobalSearch} disabled={isSearching || !globalQuery.trim()}>
+                  {isSearching ? "Searching..." : "Search"}
+                </Button>
+              </div>
+
+              {searchResults.length > 0 && (
+                <div className="space-y-2 max-h-48 overflow-y-auto rounded-md border p-2">
+                  {searchResults.map((hit) => {
+                    const isSelected = selectedRecordingIds.includes(hit.recordingId);
+                    return (
+                      <label key={`${hit.recordingId}-${hit.segmentId}`} className="flex items-start gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={(event) => {
+                            setSelectedRecordingIds((prev) => {
+                              if (event.target.checked) {
+                                return [...new Set([...prev, hit.recordingId])];
+                              }
+                              return prev.filter((id) => id !== hit.recordingId);
+                            });
+                          }}
+                        />
+                        <div>
+                          <p className="font-medium">{hit.recordingTitle}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {hit.startTime.toFixed(1)}s - {hit.endTime.toFixed(1)}s · {hit.text}
+                          </p>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <Input
+                  value={analysisQuery}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) => setAnalysisQuery(event.target.value)}
+                  placeholder="Ask across selected recordings..."
+                />
+                <Button
+                  onClick={runMultiRecordingAnalysis}
+                  disabled={isAnalyzing || !analysisQuery.trim() || selectedRecordingIds.length === 0}
+                >
+                  {isAnalyzing ? "Analyzing..." : "Analyze"}
+                </Button>
+              </div>
+
+              {analysisError && (
+                <p className="text-sm text-destructive">{analysisError}</p>
+              )}
+
+              {multiAnalysisResult && (
+                <div className="space-y-2 rounded-md border p-3 text-sm">
+                  <p className="whitespace-pre-wrap">{multiAnalysisResult}</p>
+                  {multiAnalysisCitations.length > 0 && (
+                    <div className="space-y-1 border-t pt-2">
+                      {multiAnalysisCitations.map((citation, index) => (
+                        <p key={index} className="text-xs text-muted-foreground">
+                          [{citation.recordingId ?? "recording"}] {citation.startTime?.toFixed(1)}s-{citation.endTime?.toFixed(1)}s: {citation.text}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           <Tabs defaultValue="recent" className="space-y-4">
             <TabsList>
               <TabsTrigger value="recent">Recent Recordings</TabsTrigger>

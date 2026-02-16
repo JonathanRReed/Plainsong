@@ -30,6 +30,9 @@ export interface TranscriptionSettings {
   language: string | null;
   numSpeakers: number;
   saveRawTranscript: boolean;
+  dictationSaveToInbox: boolean;
+  dictationProfile: "speed" | "accuracy";
+  dictationProjectId: string;
 }
 
 export interface UiSettings {

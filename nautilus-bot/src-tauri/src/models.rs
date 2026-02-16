@@ -77,6 +77,32 @@ pub struct RecordingOptions {
     pub project_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DictationProfile {
+    #[default]
+    Speed,
+    Accuracy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DictationStartOptions {
+    pub save_to_inbox: bool,
+    pub project_id: Option<String>,
+    pub profile: DictationProfile,
+}
+
+impl Default for DictationStartOptions {
+    fn default() -> Self {
+        Self {
+            save_to_inbox: true,
+            project_id: Some("inbox".to_string()),
+            profile: DictationProfile::Speed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
@@ -100,9 +126,44 @@ pub struct AuditLogEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub recording_id: String,
+    pub recording_title: String,
+    pub project_id: String,
+    pub segment_id: String,
+    pub text: String,
+    pub start_time: f64,
+    pub end_time: f64,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsrBenchmarkEntry {
+    pub id: String,
+    pub provider_type: String,
+    pub provider_name: String,
+    pub model_id: String,
+    pub runtime_status: String,
+    pub processing_time_ms: i64,
+    pub confidence: f64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExportResponse {
     pub format: String,
     pub redaction_level: String,
+    pub preview: bool,
+    pub export_path: Option<String>,
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateExportResponse {
+    pub template_id: String,
     pub preview: bool,
     pub export_path: Option<String>,
     pub content: Option<String>,

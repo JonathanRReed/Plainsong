@@ -65,6 +65,7 @@ export function SettingsView() {
   const [permissionDiagnostics, setPermissionDiagnostics] = useState<PermissionDiagnostics | null>(null);
   const [securityStatus, setSecurityStatus] = useState<SecurityStatus | null>(null);
   const [vaultPassword, setVaultPassword] = useState("");
+  const [cloudReadinessMessage, setCloudReadinessMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -989,6 +990,60 @@ export function SettingsView() {
                     Clear Key
                   </Button>
                   {hasApiKey && <span className="text-sm text-muted-foreground">Stored securely</span>}
+                </div>
+
+                <div className="h-px bg-border" />
+
+                <div className="space-y-2">
+                  <Label>Guided cloud onboarding</Label>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={async () => {
+                        setError(null);
+                        const checks: string[] = [];
+                        if (!settings.privacy.remoteProcessingEnabled) {
+                          checks.push("Remote processing is disabled.");
+                        }
+                        const keyPresent = await hasProviderSecret(provider);
+                        if (!keyPresent) {
+                          checks.push(`No API key stored for ${provider}.`);
+                        }
+                        if (checks.length === 0) {
+                          setCloudReadinessMessage("Cloud readiness checks passed.");
+                        } else {
+                          setCloudReadinessMessage(checks.join(" "));
+                        }
+                      }}
+                    >
+                      Run Readiness Check
+                    </Button>
+                    {!settings.privacy.remoteProcessingEnabled && (
+                      <Button
+                        onClick={async () => {
+                          const confirmed = window.confirm(
+                            "Enable remote processing? This allows transcript text to be sent to cloud providers."
+                          );
+                          if (!confirmed) {
+                            return;
+                          }
+                          await updateSettings({
+                            ...settings,
+                            privacy: {
+                              ...settings.privacy,
+                              remoteProcessingEnabled: true,
+                            },
+                          });
+                          setCloudReadinessMessage("Remote processing enabled. Run readiness check again.");
+                        }}
+                      >
+                        Enable Remote Processing (Opt-in)
+                      </Button>
+                    )}
+                  </div>
+                  {cloudReadinessMessage ? (
+                    <p className="text-xs text-muted-foreground">{cloudReadinessMessage}</p>
+                  ) : null}
                 </div>
               </CardContent>
             </Card>

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { AsrProviderInfo, AsrProviderType, BenchmarkResult } from "@/types";
+import type { AsrBenchmarkEntry, AsrProviderInfo, AsrProviderType, BenchmarkResult } from "@/types";
 import { 
   Download, 
   Check, 
@@ -31,11 +31,16 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   const [defaultProvider, setDefaultProvider] = useState<AsrProviderType>("whisper");
   const [isLoading, setIsLoading] = useState(false);
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResult[]>([]);
+  const [benchmarkHistory, setBenchmarkHistory] = useState<AsrBenchmarkEntry[]>([]);
+  const [benchmarkFileName, setBenchmarkFileName] = useState<string | null>(null);
+  const [isBenchmarking, setIsBenchmarking] = useState(false);
   const [providerErrors, setProviderErrors] = useState<Record<string, string>>({});
+  const benchmarkFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     loadProviders();
     loadDefaultProvider();
+    loadBenchmarkHistory();
   }, []);
 
   const loadProviders = async () => {
@@ -94,14 +99,38 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   };
 
   const runBenchmark = async () => {
-    const testPath = "/path/to/test/audio.wav";
+    const selectedFile = benchmarkFileInputRef.current?.files?.[0];
+    if (!selectedFile) {
+      console.warn("No benchmark audio file selected");
+      return;
+    }
+    const isWav = selectedFile.name.toLowerCase().endsWith(".wav");
+    if (!isWav) {
+      console.warn("Benchmark requires WAV audio");
+      return;
+    }
+
+    setIsBenchmarking(true);
     try {
-      const results = await invoke<BenchmarkResult[]>("benchmark_asr_providers", {
-        testAudioPath: testPath,
+      const fileBytes = new Uint8Array(await selectedFile.arrayBuffer());
+      const results = await invoke<BenchmarkResult[]>("benchmark_asr_providers_bytes", {
+        audioBytes: Array.from(fileBytes),
       });
       setBenchmarkResults(results);
+      await loadBenchmarkHistory();
     } catch (error) {
       console.error("Benchmark failed:", error);
+    } finally {
+      setIsBenchmarking(false);
+    }
+  };
+
+  const loadBenchmarkHistory = async () => {
+    try {
+      const history = await invoke<AsrBenchmarkEntry[]>("list_asr_benchmarks", { limit: 20 });
+      setBenchmarkHistory(history);
+    } catch (error) {
+      console.error("Failed to load benchmark history:", error);
     }
   };
 
@@ -157,6 +186,26 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
 
   const isNotDownloaded = (status: AsrProviderInfo["downloadStatus"]): boolean => {
     return normalizeDownloadStatus(status).kind === "not_downloaded";
+  };
+
+  const providerSetupCommand = (providerType: AsrProviderType): string => {
+    switch (providerType) {
+      case "parakeet":
+        return "python -m pip install 'nemo_toolkit[asr]' torch";
+      case "canary":
+      case "distil_whisper":
+        return "python -m pip install torch transformers";
+      default:
+        return "No runtime setup required for Whisper";
+    }
+  };
+
+  const copySetupCommand = async (providerType: AsrProviderType) => {
+    try {
+      await navigator.clipboard.writeText(providerSetupCommand(providerType));
+    } catch (error) {
+      console.error("Failed to copy setup command:", error);
+    }
   };
 
   return (
@@ -309,6 +358,16 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                             <Button size="sm" variant="outline" disabled>
                               Runtime setup required
                             </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void copySetupCommand(provider.providerType)}
+                            >
+                              Copy setup command
+                            </Button>
+                            <Button size="sm" variant="outline" onClick={() => void loadProviders()}>
+                              Re-check runtime
+                            </Button>
                             {defaultProvider === provider.providerType && provider.providerType !== "whisper" && (
                               <Button size="sm" variant="secondary" onClick={() => handleSetDefault("whisper")}>
                                 Switch to Whisper
@@ -332,8 +391,20 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                       </div>
                     </div>
                     {(runtimeIssue || providerError) && (
-                      <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                        {providerError ?? runtimeIssue}
+                      <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                        <p>{providerError ?? runtimeIssue}</p>
+                        {selection.reason === "runtime_unavailable" && (
+                          <>
+                            <p className="text-amber-100">
+                              Suggested setup: <span className="font-mono">{providerSetupCommand(provider.providerType)}</span>
+                            </p>
+                            {provider.runtimeDetails?.pythonPath ? (
+                              <p className="text-amber-100">
+                                Detected Python: <span className="font-mono">{provider.runtimeDetails.pythonPath}</span>
+                              </p>
+                            ) : null}
+                          </>
+                        )}
                       </div>
                     )}
                   </CardContent>
@@ -360,11 +431,29 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 <div className="text-center">
                   <FileAudio className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
                   <p className="text-sm text-muted-foreground mb-4">
-                    Upload a test audio file to benchmark all available providers
+                    Upload a WAV test audio file to benchmark all available providers
                   </p>
-                  <Button onClick={runBenchmark} disabled={benchmarkResults.length > 0}>
+                  <input
+                    ref={benchmarkFileInputRef}
+                    type="file"
+                    accept=".wav,audio/wav"
+                    className="hidden"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] ?? null;
+                      setBenchmarkFileName(file?.name ?? null);
+                    }}
+                  />
+                  <div className="flex flex-col items-center gap-2">
+                    <Button variant="outline" onClick={() => benchmarkFileInputRef.current?.click()}>
+                      Choose WAV File
+                    </Button>
+                    {benchmarkFileName ? (
+                      <p className="text-xs text-muted-foreground">{benchmarkFileName}</p>
+                    ) : null}
+                  </div>
+                  <Button className="mt-3" onClick={runBenchmark} disabled={isBenchmarking || !benchmarkFileName}>
                     <Clock className="h-4 w-4 mr-2" />
-                    Run Benchmark
+                    {isBenchmarking ? "Running..." : "Run Benchmark"}
                   </Button>
                 </div>
               </div>
@@ -387,6 +476,28 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                           {(result.processingTimeMs / 1000).toFixed(2)}s
                         </p>
                         <p className="text-xs text-muted-foreground">Processing time</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {benchmarkHistory.length > 0 && (
+                <div className="space-y-2 pt-2">
+                  <p className="text-xs font-medium text-muted-foreground">Recent benchmark history</p>
+                  {benchmarkHistory.map((entry) => (
+                    <div key={entry.id} className="flex items-center justify-between rounded-lg border p-2 text-xs">
+                      <div>
+                        <p className="font-medium">{entry.providerName}</p>
+                        <p className="text-muted-foreground">
+                          {entry.modelId} · {entry.runtimeStatus}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p>{(entry.processingTimeMs / 1000).toFixed(2)}s</p>
+                        <p className="text-muted-foreground">
+                          {(entry.confidence * 100).toFixed(1)}%
+                        </p>
                       </div>
                     </div>
                   ))}

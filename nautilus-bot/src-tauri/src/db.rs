@@ -8,7 +8,7 @@
 use crate::models::*;
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, types::Value, Connection};
 use std::collections::HashMap;
 use std::fs;
 
@@ -191,6 +191,56 @@ impl Database {
             )",
             [],
         )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS asr_benchmarks (
+                id TEXT PRIMARY KEY,
+                provider_type TEXT NOT NULL,
+                provider_name TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                runtime_status TEXT NOT NULL,
+                processing_time_ms INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        // Use FTS5 for cross-recording transcript retrieval.
+        let fts_ready = self
+            .conn
+            .execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(
+                    recording_id UNINDEXED,
+                    segment_id UNINDEXED,
+                    text,
+                    start_time UNINDEXED,
+                    end_time UNINDEXED
+                )",
+                [],
+            )
+            .is_ok();
+
+        if fts_ready {
+            let _ = self.conn.execute("DELETE FROM transcript_fts", []);
+            let _ = self.conn.execute(
+                "INSERT INTO transcript_fts (recording_id, segment_id, text, start_time, end_time)
+                 SELECT
+                    t.recording_id,
+                    COALESCE(json_extract(seg.value, '$.id'), ''),
+                    COALESCE(json_extract(seg.value, '$.text'), ''),
+                    COALESCE(json_extract(seg.value, '$.startTime'), 0),
+                    COALESCE(json_extract(seg.value, '$.endTime'), 0)
+                 FROM transcripts t
+                 JOIN json_each(t.segments) AS seg
+                 WHERE json_valid(t.segments)",
+                [],
+            );
+        } else {
+            tracing::warn!(
+                "transcript_fts table unavailable; cross-recording search will be limited"
+            );
+        }
 
         self.conn.execute(
             "CREATE TRIGGER IF NOT EXISTS audit_log_no_update
@@ -462,8 +512,294 @@ impl Database {
                 transcript.created_at.to_rfc3339()
             ],
         )?;
+
+        let _ = tx.execute(
+            "DELETE FROM transcript_fts WHERE recording_id = ?1",
+            params![&transcript.recording_id],
+        );
+        for segment in &transcript.segments {
+            let _ = tx.execute(
+                "INSERT INTO transcript_fts (recording_id, segment_id, text, start_time, end_time)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    &transcript.recording_id,
+                    &segment.id,
+                    &segment.text,
+                    segment.start_time,
+                    segment.end_time
+                ],
+            );
+        }
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn save_asr_benchmark(&mut self, entry: &AsrBenchmarkEntry) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO asr_benchmarks (
+                id, provider_type, provider_name, model_id, runtime_status, processing_time_ms, confidence, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                &entry.id,
+                &entry.provider_type,
+                &entry.provider_name,
+                &entry.model_id,
+                &entry.runtime_status,
+                entry.processing_time_ms,
+                entry.confidence,
+                entry.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_asr_benchmarks(&self, limit: usize) -> Result<Vec<AsrBenchmarkEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, provider_type, provider_name, model_id, runtime_status, processing_time_ms, confidence, created_at
+             FROM asr_benchmarks
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )?;
+
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(AsrBenchmarkEntry {
+                id: row.get(0)?,
+                provider_type: row.get(1)?,
+                provider_name: row.get(2)?,
+                model_id: row.get(3)?,
+                runtime_status: row.get(4)?,
+                processing_time_ms: row.get(5)?,
+                confidence: row.get(6)?,
+                created_at: row
+                    .get::<_, String>(7)?
+                    .parse()
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    pub fn search_transcripts(
+        &self,
+        query: &str,
+        limit: usize,
+        project_ids: Option<&[String]>,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_transcripts_filtered(query, limit, project_ids, None)
+    }
+
+    pub fn search_transcripts_in_recordings(
+        &self,
+        query: &str,
+        limit: usize,
+        recording_ids: &[String],
+    ) -> Result<Vec<SearchHit>> {
+        self.search_transcripts_filtered(query, limit, None, Some(recording_ids))
+    }
+
+    fn search_transcripts_filtered(
+        &self,
+        query: &str,
+        limit: usize,
+        project_ids: Option<&[String]>,
+        recording_ids: Option<&[String]>,
+    ) -> Result<Vec<SearchHit>> {
+        let fts_query = build_fts_query(query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut sql = String::from(
+            "SELECT
+                f.recording_id,
+                COALESCE(r.title, ''),
+                COALESCE(r.project_id, ''),
+                COALESCE(f.segment_id, ''),
+                COALESCE(f.text, ''),
+                COALESCE(f.start_time, 0),
+                COALESCE(f.end_time, 0),
+                bm25(transcript_fts)
+             FROM transcript_fts f
+             JOIN recordings r ON r.id = f.recording_id
+             WHERE transcript_fts MATCH ?1",
+        );
+
+        let mut values: Vec<Value> = vec![Value::from(fts_query)];
+        let mut placeholder = 2;
+
+        if let Some(projects) = project_ids {
+            if !projects.is_empty() {
+                sql.push_str(" AND r.project_id IN (");
+                for (index, project_id) in projects.iter().enumerate() {
+                    if index > 0 {
+                        sql.push_str(", ");
+                    }
+                    sql.push('?');
+                    sql.push_str(&placeholder.to_string());
+                    values.push(Value::from(project_id.clone()));
+                    placeholder += 1;
+                }
+                sql.push(')');
+            }
+        }
+
+        if let Some(recordings) = recording_ids {
+            if !recordings.is_empty() {
+                sql.push_str(" AND f.recording_id IN (");
+                for (index, recording_id) in recordings.iter().enumerate() {
+                    if index > 0 {
+                        sql.push_str(", ");
+                    }
+                    sql.push('?');
+                    sql.push_str(&placeholder.to_string());
+                    values.push(Value::from(recording_id.clone()));
+                    placeholder += 1;
+                }
+                sql.push(')');
+            }
+        }
+
+        sql.push_str(" ORDER BY bm25(transcript_fts) ASC LIMIT ?");
+        sql.push_str(&placeholder.to_string());
+        values.push(Value::from(limit as i64));
+
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    "FTS query unavailable ({}); using LIKE fallback search",
+                    error
+                );
+                return self.search_transcripts_without_fts(
+                    query,
+                    limit,
+                    project_ids,
+                    recording_ids,
+                );
+            }
+        };
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            let start_time = row
+                .get::<_, Option<f64>>(5)?
+                .or_else(|| {
+                    row.get::<_, String>(5)
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                })
+                .unwrap_or(0.0);
+            let end_time = row
+                .get::<_, Option<f64>>(6)?
+                .or_else(|| {
+                    row.get::<_, String>(6)
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                })
+                .unwrap_or(0.0);
+            Ok(SearchHit {
+                recording_id: row.get(0)?,
+                recording_title: row.get(1)?,
+                project_id: row.get(2)?,
+                segment_id: row.get(3)?,
+                text: row.get(4)?,
+                start_time,
+                end_time,
+                score: row.get(7)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    fn search_transcripts_without_fts(
+        &self,
+        query: &str,
+        limit: usize,
+        project_ids: Option<&[String]>,
+        recording_ids: Option<&[String]>,
+    ) -> Result<Vec<SearchHit>> {
+        let normalized_query = query.trim().to_lowercase();
+        if normalized_query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut sql = String::from(
+            "SELECT t.recording_id, r.title, r.project_id, t.segments
+             FROM transcripts t
+             JOIN recordings r ON r.id = t.recording_id
+             WHERE 1=1",
+        );
+        let mut values: Vec<Value> = Vec::new();
+        let mut placeholder = 1;
+
+        if let Some(projects) = project_ids {
+            if !projects.is_empty() {
+                sql.push_str(" AND r.project_id IN (");
+                for (index, project_id) in projects.iter().enumerate() {
+                    if index > 0 {
+                        sql.push_str(", ");
+                    }
+                    sql.push('?');
+                    sql.push_str(&placeholder.to_string());
+                    values.push(Value::from(project_id.clone()));
+                    placeholder += 1;
+                }
+                sql.push(')');
+            }
+        }
+
+        if let Some(recordings) = recording_ids {
+            if !recordings.is_empty() {
+                sql.push_str(" AND t.recording_id IN (");
+                for (index, recording_id) in recordings.iter().enumerate() {
+                    if index > 0 {
+                        sql.push_str(", ");
+                    }
+                    sql.push('?');
+                    sql.push_str(&placeholder.to_string());
+                    values.push(Value::from(recording_id.clone()));
+                    placeholder += 1;
+                }
+                sql.push(')');
+            }
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut results = Vec::new();
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (recording_id, recording_title, project_id, segments_json) = row?;
+            let segments: Vec<TranscriptSegment> =
+                serde_json::from_str(&segments_json).unwrap_or_default();
+
+            for segment in segments {
+                let text_lower = segment.text.to_lowercase();
+                if !text_lower.contains(&normalized_query) {
+                    continue;
+                }
+                results.push(SearchHit {
+                    recording_id: recording_id.clone(),
+                    recording_title: recording_title.clone(),
+                    project_id: project_id.clone(),
+                    segment_id: segment.id,
+                    text: segment.text,
+                    start_time: segment.start_time,
+                    end_time: segment.end_time,
+                    score: 0.0,
+                });
+            }
+        }
+
+        results.truncate(limit);
+        Ok(results)
     }
 
     pub fn update_transcript_segments(
@@ -633,6 +969,24 @@ impl Database {
 
         entries.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
     }
+}
+
+fn build_fts_query(query: &str) -> String {
+    let tokens: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .map(|token| token.trim().to_lowercase())
+        .filter(|token| token.len() >= 2)
+        .collect();
+
+    if tokens.is_empty() {
+        return String::new();
+    }
+
+    tokens
+        .into_iter()
+        .map(|token| format!("{}*", token))
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 #[cfg(test)]
@@ -879,5 +1233,53 @@ mod tests {
         assert_eq!(name2.as_deref(), Some("Bob"));
         assert_eq!(color2.as_deref(), Some("#ff0000")); // color preserved
         assert_eq!(*count2, 100); // count preserved when 0 passed
+    }
+
+    #[test]
+    fn test_search_transcripts_finds_segments() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.create_recording(&sample_recording("r2", "inbox"))
+            .unwrap();
+
+        let mut t1 = sample_transcript("r1");
+        t1.segments[0].text = "Discuss launch readiness and QA evidence".to_string();
+        t1.full_text = t1.segments[0].text.clone();
+        db.save_transcript(&t1).unwrap();
+
+        let mut t2 = sample_transcript("r2");
+        t2.segments[0].text = "Weekly standup and project updates".to_string();
+        t2.full_text = t2.segments[0].text.clone();
+        db.save_transcript(&t2).unwrap();
+
+        let hits = db.search_transcripts("launch qa", 10, None).unwrap();
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].recording_id, "r1");
+    }
+
+    #[test]
+    fn test_save_and_list_asr_benchmarks() {
+        let mut db = in_memory_db();
+        let entry = AsrBenchmarkEntry {
+            id: "bench-1".to_string(),
+            provider_type: "whisper".to_string(),
+            provider_name: "Whisper".to_string(),
+            model_id: "large-v3-turbo".to_string(),
+            runtime_status: "ready".to_string(),
+            processing_time_ms: 1234,
+            confidence: 0.91,
+            created_at: Utc::now(),
+        };
+        db.save_asr_benchmark(&entry).unwrap();
+        let rows = db.list_asr_benchmarks(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provider_type, "whisper");
+    }
+
+    #[test]
+    fn test_build_fts_query_sanitizes_input() {
+        let query = build_fts_query("launch-ready?! qa");
+        assert_eq!(query, "launch* OR ready* OR qa*");
     }
 }

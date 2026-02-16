@@ -217,6 +217,8 @@ fn extract_citations(response: &str, transcript: &str) -> Vec<Citation> {
                         text: part.to_string(),
                         start_time: None,
                         end_time: None,
+                        recording_id: None,
+                        certainty: None,
                     });
                 }
             }

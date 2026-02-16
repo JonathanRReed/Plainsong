@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { cn } from "@/lib/utils";
 import { useRecording } from "@/hooks/use-recording";
+import { useProjects } from "@/hooks/use-projects";
+import { getSettings, saveSettings } from "@/lib/tauri";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -21,6 +23,7 @@ interface DictationTextReadyEvent {
 
 export function DictationView() {
   const { isRecording, formattedDuration, startDictation, stopDictation } = useRecording();
+  const { projects } = useProjects();
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
   const hotkeyLabel = isMac
     ? "Cmd + Shift + Space or Ctrl + Shift + Space"
@@ -31,8 +34,41 @@ export function DictationView() {
   const [pasteStatus, setPasteStatus] = useState<string | null>(null);
   const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
   const [saveToInbox, setSaveToInbox] = useState(true);
+  const [dictationProfile, setDictationProfile] = useState<"speed" | "accuracy">("speed");
+  const [defaultProjectId, setDefaultProjectId] = useState("inbox");
   const [hotkeyPressed, setHotkeyPressed] = useState(false);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    void getSettings()
+      .then((settings) => {
+        if (!mounted) return;
+        setSaveToInbox(settings.transcription.dictationSaveToInbox);
+        setDictationProfile(settings.transcription.dictationProfile);
+        setDefaultProjectId(settings.transcription.dictationProjectId || "inbox");
+      })
+      .catch((error) => {
+        console.warn("Failed to load dictation preferences:", error);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const persistDictationPreferences = async (
+    updates: Partial<{ saveToInbox: boolean; profile: "speed" | "accuracy"; projectId: string }>
+  ) => {
+    try {
+      const settings = await getSettings();
+      settings.transcription.dictationSaveToInbox = updates.saveToInbox ?? saveToInbox;
+      settings.transcription.dictationProfile = updates.profile ?? dictationProfile;
+      settings.transcription.dictationProjectId = updates.projectId ?? defaultProjectId;
+      await saveSettings(settings);
+    } catch (error) {
+      console.warn("Failed to persist dictation preferences:", error);
+    }
+  };
 
   useEffect(() => {
     // Listen for hotkey visual feedback
@@ -139,7 +175,11 @@ export function DictationView() {
                 type="checkbox"
                 id="saveToInbox"
                 checked={saveToInbox}
-                onChange={(e) => setSaveToInbox(e.target.checked)}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  setSaveToInbox(next);
+                  void persistDictationPreferences({ saveToInbox: next });
+                }}
                 className="h-4 w-4"
               />
               <label htmlFor="saveToInbox" className="text-sm text-muted-foreground">
@@ -203,7 +243,13 @@ export function DictationView() {
                     <Button 
                       variant="active" 
                       size="lg" 
-                      onClick={startDictation}
+                      onClick={() =>
+                        void startDictation({
+                          saveToInbox,
+                          projectId: defaultProjectId,
+                          profile: dictationProfile,
+                        })
+                      }
                       className="mt-4"
                     >
                       <Mic className="h-4 w-4 mr-2" />
@@ -303,7 +349,15 @@ export function DictationView() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Transcription Model</label>
-                  <select className="w-full p-2 border rounded-md bg-background">
+                  <select
+                    className="w-full p-2 border rounded-md bg-background"
+                    value={dictationProfile}
+                    onChange={(event) => {
+                      const profile = event.target.value as "speed" | "accuracy";
+                      setDictationProfile(profile);
+                      void persistDictationPreferences({ profile });
+                    }}
+                  >
                     <option value="speed">Speed (Whisper Turbo)</option>
                     <option value="accuracy">Accuracy (Whisper Large)</option>
                   </select>
@@ -311,8 +365,21 @@ export function DictationView() {
                 
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Default Project</label>
-                  <select className="w-full p-2 border rounded-md bg-background">
+                  <select
+                    className="w-full p-2 border rounded-md bg-background"
+                    value={defaultProjectId}
+                    onChange={(event) => {
+                      const nextProjectId = event.target.value;
+                      setDefaultProjectId(nextProjectId);
+                      void persistDictationPreferences({ projectId: nextProjectId });
+                    }}
+                  >
                     <option value="inbox">Inbox</option>
+                    {projects.map((project) => (
+                      <option key={project.id} value={project.id}>
+                        {project.name}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>

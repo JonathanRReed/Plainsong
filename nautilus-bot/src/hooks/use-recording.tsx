@@ -11,6 +11,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
+  type DictationStartOptions,
   startDictation as tauriStartDictation,
   startRecording as tauriStartRecording,
   stopDictation as tauriStopDictation,
@@ -31,7 +32,7 @@ interface DictationStateChangedEvent {
 }
 
 interface MeetingRecordingStateChangedEvent {
-  phase: "idle" | "recording" | "error";
+  phase: "idle" | "recording" | "transcribing" | "error";
   recordingId?: string | null;
   startedAtMs?: number | null;
   systemAudioActive?: boolean | null;
@@ -39,7 +40,7 @@ interface MeetingRecordingStateChangedEvent {
 
 interface RecordingContextValue extends RecordingState {
   formattedDuration: string;
-  startDictation: () => Promise<void>;
+  startDictation: (options?: DictationStartOptions) => Promise<void>;
   stopDictation: () => Promise<string | null>;
   startMeeting: (options: {
     mic: boolean;
@@ -86,9 +87,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     }, 1000);
   }, [clearTimer]);
 
-  const startDictation = useCallback(async () => {
+  const startDictation = useCallback(async (options?: DictationStartOptions) => {
     try {
-      await tauriStartDictation();
+      await tauriStartDictation(options);
       setState({
         isRecording: true,
         recordingId: null,
@@ -191,6 +192,17 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
               isSystemAudioActive: Boolean(payload.systemAudioActive),
             });
             startTimer(payload.startedAtMs);
+            return;
+          }
+
+          if (payload.phase === "transcribing") {
+            clearTimer();
+            setState((prev) => ({
+              ...prev,
+              isRecording: false,
+              recordingMode: "meeting",
+              recordingId: payload.recordingId ?? prev.recordingId,
+            }));
             return;
           }
 

@@ -43,14 +43,17 @@ pub struct AppState {
     dictation_watchdog_generation: Arc<Mutex<u64>>,
     dictation_session_tracker: Arc<Mutex<DictationSessionTracker>>,
     dictation_runtime_state: Arc<Mutex<DictationSessionState>>,
+    dictation_start_options: Arc<Mutex<models::DictationStartOptions>>,
     dictation_overlay_state: Arc<StdMutex<DictationOverlayState>>,
     recording_overlay_state: Arc<StdMutex<RecordingOverlayState>>,
+    streaming_transcriber: Arc<streaming::StreamingTranscriber>,
     vault_state: Arc<Mutex<VaultRuntimeState>>,
 }
 
 const DICTATION_OVERLAY_LABEL: &str = "dictation-overlay";
 const RECORDING_OVERLAY_LABEL: &str = "recording-overlay";
 const DICTATION_MAX_DURATION_SECONDS: u64 = 120;
+const STREAMING_PREVIEW_MAX_SECONDS: f64 = 90.0;
 const VAULT_DB_KEY_SECRET: &str = "vault_db_key";
 const VAULT_UNLOCK_CHECK_SECRET: &str = "vault_unlock_check";
 const VAULT_RECORDING_KEY_SALT_LEN: usize = 16;
@@ -70,6 +73,16 @@ enum DictationSessionState {
 struct DictationSessionTracker {
     next_session_id: u64,
     active_session_id: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct AnalysisContextSegment {
+    recording_id: String,
+    recording_title: String,
+    segment_id: String,
+    text: String,
+    start_time: f64,
+    end_time: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -464,8 +477,13 @@ async fn rename_speaker(
 async fn start_dictation(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    options: Option<models::DictationStartOptions>,
 ) -> Result<(), String> {
-    start_dictation_session(state.inner(), &app, "manual")
+    let resolved_options = match options {
+        Some(provided) => provided,
+        None => default_dictation_start_options(state.inner()).await,
+    };
+    start_dictation_session(state.inner(), &app, "manual", resolved_options)
         .await
         .map(|_| ())
 }
@@ -573,11 +591,19 @@ async fn stop_recording(
         tracing::warn!("Failed to log audit event: {}", e);
     }
 
-    emit_recording_state(&app, "idle", None, None, None, None);
-    hide_overlay_window(&app, RECORDING_OVERLAY_LABEL);
+    emit_recording_state(
+        &app,
+        "transcribing",
+        Some(recordingId.as_str()),
+        None,
+        None,
+        Some("Processing transcript"),
+    );
 
     // Trigger transcription in background using ASR manager
+    let app_handle = app.clone();
     let asr_manager = Arc::clone(&state.asr_manager);
+    let streaming_transcriber = Arc::clone(&state.streaming_transcriber);
     let db_clone = Arc::clone(&state.db);
     let settings_manager_clone = Arc::clone(&state.settings_manager);
     let vault_state_clone = Arc::clone(&state.vault_state);
@@ -586,6 +612,31 @@ async fn stop_recording(
 
     tokio::spawn(async move {
         let path = std::path::PathBuf::from(&audio_path_clone);
+        let preview_task = {
+            let app = app_handle.clone();
+            let recording_id = recording_id_clone.clone();
+            let path = path.clone();
+            let streaming_transcriber = Arc::clone(&streaming_transcriber);
+            let asr_manager = Arc::clone(&asr_manager);
+            tokio::spawn(async move {
+                if let Err(error) = emit_streaming_transcription_previews(
+                    &app,
+                    streaming_transcriber,
+                    asr_manager,
+                    &recording_id,
+                    &path,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "Streaming preview failed for recording {}: {}",
+                        recording_id,
+                        error
+                    );
+                }
+            })
+        };
+
         match asr_manager.transcribe(&path).await {
             Ok(result) => {
                 tracing::info!("Transcription completed for {}", recording_id_clone);
@@ -801,6 +852,10 @@ async fn stop_recording(
                 }
             }
         }
+
+        preview_task.abort();
+        emit_recording_state(&app_handle, "idle", None, None, None, None);
+        hide_overlay_window(&app_handle, RECORDING_OVERLAY_LABEL);
     });
 
     Ok(())
@@ -972,18 +1027,64 @@ async fn analyze_recording(
     query: String,
     model: Option<String>,
 ) -> Result<llm::AnalysisResult, String> {
-    let transcript = {
+    let (recording, transcript) = {
         let db = state.db.lock().await;
-        db.get_transcript(&recordingId)
+        let recording = db
+            .get_recording(&recordingId)
             .map_err(|e| e.to_string())?
-            .ok_or("Transcript not found")?
+            .ok_or("Recording not found")?;
+        let transcript = db
+            .get_transcript(&recordingId)
+            .map_err(|e| e.to_string())?
+            .ok_or("Transcript not found")?;
+        (recording, transcript)
     };
+
+    let mut context_segments = transcript
+        .segments
+        .iter()
+        .map(|segment| AnalysisContextSegment {
+            recording_id: recordingId.clone(),
+            recording_title: recording.title.clone(),
+            segment_id: segment.id.clone(),
+            text: segment.text.clone(),
+            start_time: segment.start_time,
+            end_time: segment.end_time,
+        })
+        .collect::<Vec<_>>();
+    if context_segments.is_empty() {
+        return Err("Transcript contains no segments for grounded analysis".to_string());
+    }
+    if context_segments.len() > 140 {
+        context_segments.truncate(140);
+    }
+
+    let transcript_context = context_segments
+        .iter()
+        .map(|segment| {
+            format!(
+                "[recordingId:{}|title:{}|segmentId:{}|startTime:{:.2}|endTime:{:.2}] {}",
+                segment.recording_id,
+                segment.recording_title,
+                segment.segment_id,
+                segment.start_time,
+                segment.end_time,
+                segment.text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let strict_query = format!(
+        "{}\n\nReturn JSON only with schema:\n{{\"response\":\"string\",\"citations\":[{{\"recordingId\":\"string\",\"startTime\":number,\"endTime\":number,\"text\":\"string\",\"certainty\":number}}]}}\nCitations must use exact recordingId/startTime/endTime from provided transcript lines.",
+        query
+    );
 
     let model_name = model.unwrap_or_default();
     let mut result = run_analysis_with_selected_provider(
         state.inner(),
-        &transcript.full_text,
-        &query,
+        &transcript_context,
+        &strict_query,
         if model_name.trim().is_empty() {
             None
         } else {
@@ -992,10 +1093,12 @@ async fn analyze_recording(
     )
     .await?;
 
-    hydrate_citation_ranges(&mut result, &transcript.segments);
-    if result.citations.is_empty() {
-        result.citations = fallback_citations_from_response(&result.response, &transcript.segments);
-    }
+    let structured = parse_structured_analysis_json(&result.response).ok_or_else(|| {
+        "Model response did not include required JSON citation payload".to_string()
+    })?;
+    let validated_citations = validate_structured_citations(&structured.1, &context_segments)?;
+    result.response = structured.0;
+    result.citations = validated_citations;
 
     // Log audit event
     let mut db = state.db.lock().await;
@@ -1054,6 +1157,140 @@ async fn extract_action_items(
     .await?;
 
     Ok(items)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn search_transcripts(
+    state: tauri::State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+    projectIds: Option<Vec<String>>,
+) -> Result<Vec<models::SearchHit>, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let db = state.db.lock().await;
+    db.search_transcripts(trimmed, limit.unwrap_or(20).min(200), projectIds.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn analyze_recordings(
+    state: tauri::State<'_, AppState>,
+    recordingIds: Vec<String>,
+    query: String,
+    model: Option<String>,
+) -> Result<llm::AnalysisResult, String> {
+    if recordingIds.is_empty() {
+        return Err("recordingIds cannot be empty".to_string());
+    }
+
+    let mut context_segments: Vec<AnalysisContextSegment> = Vec::new();
+    {
+        let db = state.db.lock().await;
+        let search_hits = db
+            .search_transcripts_in_recordings(&query, 40, &recordingIds)
+            .map_err(|e| e.to_string())?;
+
+        if !search_hits.is_empty() {
+            context_segments.extend(search_hits.into_iter().map(|hit| AnalysisContextSegment {
+                recording_id: hit.recording_id,
+                recording_title: hit.recording_title,
+                segment_id: hit.segment_id,
+                text: hit.text,
+                start_time: hit.start_time,
+                end_time: hit.end_time,
+            }));
+        } else {
+            for recording_id in &recordingIds {
+                let recording = match db.get_recording(recording_id).map_err(|e| e.to_string())? {
+                    Some(value) => value,
+                    None => continue,
+                };
+                let transcript = match db.get_transcript(recording_id).map_err(|e| e.to_string())? {
+                    Some(value) => value,
+                    None => continue,
+                };
+
+                context_segments.extend(transcript.segments.iter().take(8).map(|segment| {
+                    AnalysisContextSegment {
+                        recording_id: recording_id.clone(),
+                        recording_title: recording.title.clone(),
+                        segment_id: segment.id.clone(),
+                        text: segment.text.clone(),
+                        start_time: segment.start_time,
+                        end_time: segment.end_time,
+                    }
+                }));
+            }
+        }
+    }
+
+    if context_segments.is_empty() {
+        return Err("No transcript context found for selected recordings".to_string());
+    }
+
+    let transcript_context = context_segments
+        .iter()
+        .map(|segment| {
+            format!(
+                "[recordingId:{}|title:{}|segmentId:{}|startTime:{:.2}|endTime:{:.2}] {}",
+                segment.recording_id,
+                segment.recording_title,
+                segment.segment_id,
+                segment.start_time,
+                segment.end_time,
+                segment.text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let strict_query = format!(
+        "{}\n\nReturn JSON only with schema:\n{{\"response\":\"string\",\"citations\":[{{\"recordingId\":\"string\",\"startTime\":number,\"endTime\":number,\"text\":\"string\",\"certainty\":number}}]}}\nCitations must use exact recordingId/startTime/endTime from provided transcript lines.",
+        query
+    );
+
+    let model_name = model.unwrap_or_default();
+    let mut result = run_analysis_with_selected_provider(
+        state.inner(),
+        &transcript_context,
+        &strict_query,
+        if model_name.trim().is_empty() {
+            None
+        } else {
+            Some(model_name.as_str())
+        },
+    )
+    .await?;
+
+    let structured = parse_structured_analysis_json(&result.response).ok_or_else(|| {
+        "Model response did not include required JSON citation payload".to_string()
+    })?;
+
+    let validated_citations = validate_structured_citations(&structured.1, &context_segments)?;
+    result.response = structured.0;
+    result.citations = validated_citations;
+
+    let mut db = state.db.lock().await;
+    if let Err(error) = db.log_audit_event(
+        "analysis_multi_recording_completed",
+        Some(serde_json::json!({
+            "recording_ids": recordingIds,
+            "query": query,
+            "model": result.model,
+            "citation_count": result.citations.len()
+        })),
+        "info",
+    ) {
+        tracing::warn!("Failed to log multi-recording analysis event: {}", error);
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1358,7 +1595,34 @@ async fn benchmark_asr_providers(
     testAudioPath: String,
 ) -> Result<Vec<asr::BenchmarkResult>, String> {
     let path = std::path::PathBuf::from(testAudioPath);
-    Ok(state.asr_manager.benchmark_providers(&path).await)
+    let results = state.asr_manager.benchmark_providers(&path).await;
+    persist_benchmark_results(state.inner(), &results).await;
+    Ok(results)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn benchmark_asr_providers_bytes(
+    state: tauri::State<'_, AppState>,
+    audioBytes: Vec<u8>,
+) -> Result<Vec<asr::BenchmarkResult>, String> {
+    let temp_path =
+        std::env::temp_dir().join(format!("nautilus-benchmark-{}.wav", uuid::Uuid::new_v4()));
+    std::fs::write(&temp_path, audioBytes).map_err(|e| e.to_string())?;
+    let results = state.asr_manager.benchmark_providers(&temp_path).await;
+    let _ = std::fs::remove_file(&temp_path);
+    persist_benchmark_results(state.inner(), &results).await;
+    Ok(results)
+}
+
+#[tauri::command]
+async fn list_asr_benchmarks(
+    state: tauri::State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<models::AsrBenchmarkEntry>, String> {
+    let db = state.db.lock().await;
+    db.list_asr_benchmarks(limit.unwrap_or(50))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1444,6 +1708,7 @@ async fn save_settings(
     state: tauri::State<'_, AppState>,
     mut settings: settings::Settings,
 ) -> Result<(), String> {
+    let dictation_options = dictation_options_from_settings(&settings);
     state
         .asr_manager
         .set_selected_model_id(settings.transcription.selected_model_id.clone())
@@ -1468,6 +1733,18 @@ async fn save_settings(
         AnalysisProvider::from_settings_value(&settings.privacy.llm_provider)
             .as_settings_value()
             .to_string();
+    settings.transcription.dictation_profile = dictation_profile_to_settings_value(
+        &dictation_profile_from_settings_value(&settings.transcription.dictation_profile),
+    )
+    .to_string();
+    if settings
+        .transcription
+        .dictation_project_id
+        .trim()
+        .is_empty()
+    {
+        settings.transcription.dictation_project_id = "inbox".to_string();
+    }
 
     if let Some(export_root) = settings.privacy.export_root.as_ref() {
         let canonical_root = canonicalize_or_create_absolute_path(export_root, "exportRoot")?;
@@ -1476,7 +1753,12 @@ async fn save_settings(
 
     let mut settings_manager = state.settings_manager.lock().await;
     *settings_manager.settings_mut() = settings;
-    settings_manager.save().map_err(|e| e.to_string())
+    settings_manager.save().map_err(|e| e.to_string())?;
+
+    let mut active_dictation_options = state.dictation_start_options.lock().await;
+    *active_dictation_options = dictation_options;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -1570,7 +1852,9 @@ async fn export_with_template(
     state: tauri::State<'_, AppState>,
     recordingId: String,
     templateId: String,
-) -> Result<String, String> {
+    target: Option<String>,
+    preview: Option<bool>,
+) -> Result<models::TemplateExportResponse, String> {
     use export::templates::RenderData;
 
     let (recording, transcript) = {
@@ -1597,12 +1881,73 @@ async fn export_with_template(
         summary: None,
     };
 
-    let result = state
+    let rendered = state
         .template_manager
         .render(&templateId, &render_data)
         .map_err(|e| e.to_string())?;
 
-    Ok(result)
+    let preview_mode = preview.unwrap_or(true);
+    if preview_mode {
+        return Ok(models::TemplateExportResponse {
+            template_id: templateId,
+            preview: true,
+            export_path: None,
+            content: Some(rendered),
+        });
+    }
+
+    let template = state
+        .template_manager
+        .get_template(&templateId)
+        .ok_or_else(|| format!("Template not found: {}", templateId))?;
+    let export_path = match target.as_deref() {
+        Some(path) => validate_export_target_path(state.inner(), path).await?,
+        None => {
+            let fallback = export::get_default_export_path(&recording, export::ExportFormat::Text);
+            fallback
+                .with_extension(template_format_extension(&template.format))
+                .to_string_lossy()
+                .to_string()
+        }
+    };
+
+    let export_path_buf = std::path::PathBuf::from(&export_path);
+    if let Some(parent) = export_path_buf.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create export directory '{}': {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+    std::fs::write(&export_path_buf, rendered).map_err(|e| {
+        format!(
+            "Failed to write template export '{}': {}",
+            export_path_buf.display(),
+            e
+        )
+    })?;
+
+    let mut db = state.db.lock().await;
+    if let Err(error) = db.log_audit_event(
+        "recording_template_exported",
+        Some(serde_json::json!({
+            "recording_id": &recordingId,
+            "template_id": &templateId,
+            "target": &export_path
+        })),
+        "info",
+    ) {
+        tracing::warn!("Failed to log template export audit event: {}", error);
+    }
+
+    Ok(models::TemplateExportResponse {
+        template_id: templateId,
+        preview: false,
+        export_path: Some(export_path),
+        content: None,
+    })
 }
 
 // Waveform commands
@@ -1796,6 +2141,7 @@ async fn start_dictation_session(
     state: &AppState,
     app: &AppHandle,
     source: &str,
+    options: models::DictationStartOptions,
 ) -> Result<u64, String> {
     {
         let mut runtime_state = state.dictation_runtime_state.lock().await;
@@ -1823,6 +2169,11 @@ async fn start_dictation_session(
             }
             return Err(error.to_string());
         }
+    }
+
+    {
+        let mut active_options = state.dictation_start_options.lock().await;
+        *active_options = options;
     }
 
     if should_show_dictation_overlay(state).await {
@@ -1978,9 +2329,21 @@ async fn stop_dictation_session_for_session(
         None,
     );
 
+    let dictation_options = state.dictation_start_options.lock().await.clone();
+    let previous_model_id = state.asr_manager.selected_model_id().await;
+    let dictation_model_id = dictation_profile_to_model_id(&dictation_options.profile);
+    state
+        .asr_manager
+        .set_selected_model_id(dictation_model_id.to_string())
+        .await;
+
     let result = match state.asr_manager.transcribe_bytes(&audio_data).await {
         Ok(result) => result,
         Err(error) => {
+            state
+                .asr_manager
+                .set_selected_model_id(previous_model_id.clone())
+                .await;
             let message = error.to_string();
             {
                 let mut runtime_state = state.dictation_runtime_state.lock().await;
@@ -2006,6 +2369,10 @@ async fn stop_dictation_session_for_session(
             return Err(message);
         }
     };
+    state
+        .asr_manager
+        .set_selected_model_id(previous_model_id.clone())
+        .await;
 
     let mut pasted = false;
     let mut copied = false;
@@ -2105,6 +2472,70 @@ async fn stop_dictation_session_for_session(
     }
 
     let mut db = state.db.lock().await;
+    if dictation_options.save_to_inbox && !result.text.trim().is_empty() {
+        let recording_id = uuid::Uuid::new_v4().to_string();
+        let project_id = dictation_options
+            .project_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("inbox");
+        let duration_seconds = compute_wav_duration_seconds_from_bytes(&audio_data);
+        let now = chrono::Utc::now();
+        let recording = models::Recording {
+            id: recording_id.clone(),
+            title: format!(
+                "Dictation {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M")
+            ),
+            project_id: project_id.to_string(),
+            duration: duration_seconds,
+            created_at: now,
+            updated_at: now,
+            source_type: "dictation".to_string(),
+            audio_path: String::new(),
+            status: "completed".to_string(),
+        };
+
+        if let Err(error) = db.create_recording(&recording) {
+            tracing::warn!("Failed to persist dictation recording: {}", error);
+        } else {
+            let transcript = models::Transcript {
+                id: uuid::Uuid::new_v4().to_string(),
+                recording_id: recording_id.clone(),
+                segments: result
+                    .segments
+                    .iter()
+                    .map(|segment| models::TranscriptSegment {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        start_time: segment.start_time,
+                        end_time: segment.end_time,
+                        text: segment.text.clone(),
+                        speaker_id: None,
+                        confidence: segment.confidence,
+                    })
+                    .collect(),
+                full_text: result.text.clone(),
+                language: result.language.clone(),
+                confidence: result.confidence,
+                model: result.model_name.clone(),
+                model_id: Some(result.model_id.clone()),
+                requested_provider: Some(
+                    asr_provider_to_settings_value(result.requested_provider).to_string(),
+                ),
+                actual_provider: Some(
+                    asr_provider_to_settings_value(result.actual_provider).to_string(),
+                ),
+                fallback_used: Some(result.fallback_used),
+                fallback_reason: result.fallback_reason.clone(),
+                created_at: now,
+            };
+
+            if let Err(error) = db.save_transcript(&transcript) {
+                tracing::warn!("Failed to persist dictation transcript: {}", error);
+            }
+        }
+    }
+
     let details = serde_json::json!({
         "stop_reason": stop_reason,
         "session_id": session_id,
@@ -2119,7 +2550,11 @@ async fn stop_dictation_session_for_session(
         "pasted": pasted,
         "copied": copied,
         "paste_error": paste_error,
-        "outcome": outcome
+        "outcome": outcome,
+        "save_to_inbox": dictation_options.save_to_inbox,
+        "dictation_project_id": dictation_options.project_id,
+        "dictation_profile": dictation_profile_to_settings_value(&dictation_options.profile),
+        "dictation_model_id": dictation_model_id,
     });
     if let Err(e) = db.log_audit_event("dictation_completed", Some(details), "info") {
         tracing::warn!("Failed to log audit event: {}", e);
@@ -2222,7 +2657,8 @@ async fn handle_global_dictation_pressed(app: AppHandle) {
     }
     set_dictation_hotkey_flags(state.inner(), true, true).await;
 
-    let session_id = match start_dictation_session(state.inner(), &app, "hotkey").await {
+    let options = default_dictation_start_options(state.inner()).await;
+    let session_id = match start_dictation_session(state.inner(), &app, "hotkey", options).await {
         Ok(id) => id,
         Err(error) => {
             set_dictation_hotkey_flags(state.inner(), false, false).await;
@@ -3216,6 +3652,12 @@ pub fn run() {
             db::Database::new()
         })
         .expect("Failed to initialize database");
+    let settings_manager = settings::SettingsManager::new().expect("Failed to initialize settings");
+    let initial_dictation_options = dictation_options_from_settings(settings_manager.settings());
+    let asr_manager = Arc::new(asr::AsrManager::new());
+    let streaming_transcriber = Arc::new(streaming::StreamingTranscriber::new(Arc::clone(
+        &asr_manager,
+    )));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -3223,12 +3665,10 @@ pub fn run() {
         .manage(AppState {
             db: Arc::new(Mutex::new(database)),
             audio_capture: Arc::new(Mutex::new(audio::AudioCapture::new())),
-            asr_manager: Arc::new(asr::AsrManager::new()),
+            asr_manager,
             ollama_client: Arc::new(llm::OllamaClient::new()),
             integration_manager: Arc::new(integrations::IntegrationManager::new()),
-            settings_manager: Arc::new(Mutex::new(
-                settings::SettingsManager::new().expect("Failed to initialize settings"),
-            )),
+            settings_manager: Arc::new(Mutex::new(settings_manager)),
             backup_manager: Arc::new(Mutex::new(backup::BackupManager::default())),
             template_manager: Arc::new(export::templates::TemplateManager::new()),
             dictation_hotkey_active: Arc::new(Mutex::new(false)),
@@ -3236,8 +3676,10 @@ pub fn run() {
             dictation_watchdog_generation: Arc::new(Mutex::new(0)),
             dictation_session_tracker: Arc::new(Mutex::new(DictationSessionTracker::default())),
             dictation_runtime_state: Arc::new(Mutex::new(DictationSessionState::Idle)),
+            dictation_start_options: Arc::new(Mutex::new(initial_dictation_options)),
             dictation_overlay_state: Arc::new(StdMutex::new(DictationOverlayState::default())),
             recording_overlay_state: Arc::new(StdMutex::new(RecordingOverlayState::default())),
+            streaming_transcriber,
             vault_state: Arc::new(Mutex::new(VaultRuntimeState::default())),
         })
         .setup(|app| {
@@ -3429,8 +3871,10 @@ pub fn run() {
             get_waveform_data,
             get_recording_waveform,
             analyze_recording,
+            analyze_recordings,
             summarize_recording,
             extract_action_items,
+            search_transcripts,
             get_ollama_status,
             list_ollama_models,
             export_recording,
@@ -3447,6 +3891,8 @@ pub fn run() {
             set_default_asr_provider,
             download_asr_models,
             benchmark_asr_providers,
+            benchmark_asr_providers_bytes,
+            list_asr_benchmarks,
             get_audit_log,
             download_whisper_model,
             list_downloaded_models,
@@ -3676,6 +4122,49 @@ mod tests {
         let err = canonicalize_or_create_absolute_path(Path::new("relative/path"), "testPath");
         assert!(err.is_err());
     }
+
+    #[test]
+    fn structured_analysis_parser_handles_embedded_json() {
+        let raw = "analysis:\n{\"response\":\"ok\",\"citations\":[{\"recordingId\":\"r1\",\"startTime\":1.0,\"endTime\":2.0,\"text\":\"hello\",\"certainty\":0.9}]}";
+        let parsed = parse_structured_analysis_json(raw).expect("parser should extract payload");
+        assert_eq!(parsed.0, "ok");
+        assert_eq!(parsed.1.len(), 1);
+    }
+
+    #[test]
+    fn structured_citation_validation_requires_matching_segment() {
+        let context = vec![AnalysisContextSegment {
+            recording_id: "r1".to_string(),
+            recording_title: "A".to_string(),
+            segment_id: "s1".to_string(),
+            text: "budget went up".to_string(),
+            start_time: 1.0,
+            end_time: 2.0,
+        }];
+
+        let unresolved = vec![StructuredCitationPayload {
+            recording_id: Some("r2".to_string()),
+            start_time: Some(4.0),
+            end_time: Some(6.0),
+            text: Some("missing".to_string()),
+            certainty: Some(0.7),
+        }];
+
+        assert!(validate_structured_citations(&unresolved, &context).is_err());
+
+        let resolved = vec![StructuredCitationPayload {
+            recording_id: Some("r1".to_string()),
+            start_time: Some(1.0),
+            end_time: Some(2.0),
+            text: Some("budget went up".to_string()),
+            certainty: Some(1.5),
+        }];
+        let validated = validate_structured_citations(&resolved, &context)
+            .expect("matching citation should validate");
+        assert_eq!(validated.len(), 1);
+        assert_eq!(validated[0].recording_id.as_deref(), Some("r1"));
+        assert_eq!(validated[0].certainty, Some(1.0));
+    }
 }
 
 fn default_speaker_color(index: usize) -> String {
@@ -3683,6 +4172,295 @@ fn default_speaker_color(index: usize) -> String {
         "#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#6366F1", "#14B8A6",
     ];
     COLORS[index % COLORS.len()].to_string()
+}
+
+async fn default_dictation_start_options(state: &AppState) -> models::DictationStartOptions {
+    let settings_manager = state.settings_manager.lock().await;
+    dictation_options_from_settings(settings_manager.settings())
+}
+
+fn dictation_options_from_settings(settings: &settings::Settings) -> models::DictationStartOptions {
+    models::DictationStartOptions {
+        save_to_inbox: settings.transcription.dictation_save_to_inbox,
+        project_id: Some(settings.transcription.dictation_project_id.clone()),
+        profile: dictation_profile_from_settings_value(&settings.transcription.dictation_profile),
+    }
+}
+
+fn dictation_profile_to_model_id(profile: &models::DictationProfile) -> &'static str {
+    match profile {
+        models::DictationProfile::Speed => "large-v3-turbo",
+        models::DictationProfile::Accuracy => "large-v3",
+    }
+}
+
+fn dictation_profile_to_settings_value(profile: &models::DictationProfile) -> &'static str {
+    match profile {
+        models::DictationProfile::Speed => "speed",
+        models::DictationProfile::Accuracy => "accuracy",
+    }
+}
+
+fn dictation_profile_from_settings_value(value: &str) -> models::DictationProfile {
+    match value {
+        "accuracy" => models::DictationProfile::Accuracy,
+        _ => models::DictationProfile::Speed,
+    }
+}
+
+async fn emit_streaming_transcription_previews(
+    app: &AppHandle,
+    streaming_transcriber: Arc<streaming::StreamingTranscriber>,
+    asr_manager: Arc<asr::AsrManager>,
+    recording_id: &str,
+    audio_path: &Path,
+) -> Result<(), String> {
+    let mut reader = hound::WavReader::open(audio_path).map_err(|e| {
+        format!(
+            "Failed to open recording '{}' for streaming preview: {}",
+            audio_path.display(),
+            e
+        )
+    })?;
+    let spec = reader.spec();
+    if spec.sample_rate == 0 {
+        return Err("Streaming preview requires non-zero sample rate".to_string());
+    }
+    if spec.channels == 0 {
+        return Err("Streaming preview requires at least one channel".to_string());
+    }
+
+    let provider = asr_manager.get_default_provider().await;
+    let selected_model_id = asr_manager.selected_model_id().await;
+    let (session_id, mut result_rx) = streaming_transcriber
+        .start_session(provider, spec.sample_rate, selected_model_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let app_handle = app.clone();
+    let event_recording_id = recording_id.to_string();
+    let receiver_task = tokio::spawn(async move {
+        while let Some(result) = result_rx.recv().await {
+            if result.text.trim().is_empty() {
+                continue;
+            }
+            if let Err(error) = app_handle.emit(
+                "recording-transcription-stream",
+                serde_json::json!({
+                    "recordingId": &event_recording_id,
+                    "isPartial": result.is_partial,
+                    "isFinal": result.is_final,
+                    "text": result.text,
+                    "startTime": result.start_time,
+                    "endTime": result.end_time,
+                    "confidence": result.confidence,
+                }),
+            ) {
+                tracing::warn!("Failed to emit streaming preview event: {}", error);
+                break;
+            }
+        }
+    });
+
+    let preview_limit_frames = (STREAMING_PREVIEW_MAX_SECONDS * spec.sample_rate as f64) as usize;
+    let chunk_size = (spec.sample_rate / 2).max(1) as usize; // 0.5s chunks
+    let channel_count = spec.channels as usize;
+    let mut mono_chunk: Vec<f32> = Vec::with_capacity(chunk_size);
+    let mut channel_accumulator: Vec<f32> = Vec::with_capacity(channel_count);
+    let mut frames_processed = 0usize;
+
+    for sample in reader.samples::<i16>() {
+        let normalized = sample.map_err(|e| e.to_string())? as f32 / i16::MAX as f32;
+        channel_accumulator.push(normalized);
+        if channel_accumulator.len() < channel_count {
+            continue;
+        }
+
+        let mono = channel_accumulator.iter().copied().sum::<f32>() / channel_count as f32;
+        channel_accumulator.clear();
+        mono_chunk.push(mono);
+        frames_processed += 1;
+
+        if mono_chunk.len() >= chunk_size {
+            streaming_transcriber
+                .feed_audio(&session_id, &mono_chunk)
+                .await
+                .map_err(|e| e.to_string())?;
+            mono_chunk.clear();
+        }
+        if frames_processed >= preview_limit_frames {
+            break;
+        }
+    }
+
+    if !mono_chunk.is_empty() {
+        streaming_transcriber
+            .feed_audio(&session_id, &mono_chunk)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    let _ = streaming_transcriber
+        .finalize_session(&session_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let _ = receiver_task.await;
+    Ok(())
+}
+
+fn compute_wav_duration_seconds_from_bytes(audio_data: &[u8]) -> i64 {
+    let cursor = std::io::Cursor::new(audio_data);
+    match hound::WavReader::new(cursor) {
+        Ok(reader) => {
+            let spec = reader.spec();
+            if spec.sample_rate == 0 {
+                return 0;
+            }
+            (reader.duration() as f64 / spec.sample_rate as f64).round() as i64
+        }
+        Err(error) => {
+            tracing::warn!(
+                "Failed to compute in-memory dictation duration from bytes: {}",
+                error
+            );
+            0
+        }
+    }
+}
+
+async fn persist_benchmark_results(state: &AppState, results: &[asr::BenchmarkResult]) {
+    if results.is_empty() {
+        return;
+    }
+
+    let model_id = state.asr_manager.selected_model_id().await;
+    let mut entries = Vec::new();
+    for result in results {
+        let runtime = state
+            .asr_manager
+            .get_runtime_diagnostics(result.provider_type)
+            .await;
+        entries.push(models::AsrBenchmarkEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            provider_type: asr_provider_to_settings_value(result.provider_type).to_string(),
+            provider_name: result.provider_name.clone(),
+            model_id: model_id.clone(),
+            runtime_status: format!("{:?}", runtime.runtime_status).to_lowercase(),
+            processing_time_ms: result.processing_time_ms as i64,
+            confidence: result.confidence,
+            created_at: chrono::Utc::now(),
+        });
+    }
+
+    let mut db = state.db.lock().await;
+    for entry in entries {
+        if let Err(error) = db.save_asr_benchmark(&entry) {
+            tracing::warn!("Failed to persist ASR benchmark entry: {}", error);
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StructuredCitationPayload {
+    recording_id: Option<String>,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
+    text: Option<String>,
+    certainty: Option<f64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct StructuredAnalysisPayload {
+    response: String,
+    citations: Vec<StructuredCitationPayload>,
+}
+
+fn parse_structured_analysis_json(raw: &str) -> Option<(String, Vec<StructuredCitationPayload>)> {
+    let parse_direct = serde_json::from_str::<StructuredAnalysisPayload>(raw).ok();
+    let payload = if let Some(value) = parse_direct {
+        value
+    } else {
+        let start = raw.find('{')?;
+        let end = raw.rfind('}')?;
+        if start >= end {
+            return None;
+        }
+        serde_json::from_str::<StructuredAnalysisPayload>(&raw[start..=end]).ok()?
+    };
+
+    Some((payload.response, payload.citations))
+}
+
+fn validate_structured_citations(
+    citations: &[StructuredCitationPayload],
+    context_segments: &[AnalysisContextSegment],
+) -> Result<Vec<llm::Citation>, String> {
+    if citations.is_empty() {
+        return Err("Model returned no citations".to_string());
+    }
+
+    let mut validated = Vec::new();
+
+    for citation in citations {
+        let text = citation.text.as_deref().map(str::trim).unwrap_or_default();
+        let record_filter = citation
+            .recording_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        let matched = context_segments.iter().find(|segment| {
+            if let Some(recording_id) = record_filter {
+                if segment.recording_id != recording_id {
+                    return false;
+                }
+            }
+
+            let timing_match = if let (Some(start), Some(end)) =
+                (citation.start_time, citation.end_time)
+            {
+                (segment.start_time - start).abs() <= 0.75 && (segment.end_time - end).abs() <= 0.75
+            } else {
+                true
+            };
+
+            if !timing_match {
+                return false;
+            }
+
+            if text.is_empty() {
+                return true;
+            }
+
+            let seg_text = segment.text.to_lowercase();
+            let cit_text = text.to_lowercase();
+            seg_text.contains(&cit_text) || cit_text.contains(&seg_text)
+        });
+
+        let Some(segment) = matched else {
+            return Err("Model returned unresolved citation payload".to_string());
+        };
+
+        let certainty = citation
+            .certainty
+            .map(|value| value.clamp(0.0, 1.0))
+            .unwrap_or(0.85);
+
+        validated.push(llm::Citation {
+            text: if text.is_empty() {
+                segment.text.clone()
+            } else {
+                text.to_string()
+            },
+            start_time: Some(segment.start_time),
+            end_time: Some(segment.end_time),
+            recording_id: Some(segment.recording_id.clone()),
+            certainty: Some(certainty),
+        });
+    }
+
+    Ok(validated)
 }
 
 fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static str {
@@ -3704,6 +4482,17 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
     }
 }
 
+fn template_format_extension(format: &export::templates::ExportFormat) -> &'static str {
+    match format {
+        export::templates::ExportFormat::Markdown => "md",
+        export::templates::ExportFormat::PlainText => "txt",
+        export::templates::ExportFormat::Html => "html",
+        export::templates::ExportFormat::Json => "json",
+        export::templates::ExportFormat::Csv => "csv",
+        export::templates::ExportFormat::Pdf => "pdf",
+    }
+}
+
 fn compute_wav_duration_seconds(audio_path: &str) -> i64 {
     match hound::WavReader::open(audio_path) {
         Ok(reader) => {
@@ -3722,66 +4511,6 @@ fn compute_wav_duration_seconds(audio_path: &str) -> i64 {
             0
         }
     }
-}
-
-fn hydrate_citation_ranges(
-    result: &mut llm::AnalysisResult,
-    segments: &[models::TranscriptSegment],
-) {
-    for citation in &mut result.citations {
-        if citation.start_time.is_some() && citation.end_time.is_some() {
-            continue;
-        }
-        let citation_text = citation.text.trim().to_lowercase();
-        if citation_text.is_empty() {
-            continue;
-        }
-        if let Some(segment) = segments.iter().find(|segment| {
-            let segment_text = segment.text.to_lowercase();
-            segment_text.contains(&citation_text) || citation_text.contains(&segment_text)
-        }) {
-            citation.start_time = Some(segment.start_time);
-            citation.end_time = Some(segment.end_time);
-        }
-    }
-}
-
-fn fallback_citations_from_response(
-    response: &str,
-    segments: &[models::TranscriptSegment],
-) -> Vec<llm::Citation> {
-    use std::collections::HashSet;
-
-    let tokens: HashSet<String> = response
-        .split(|c: char| !c.is_alphanumeric())
-        .map(|token| token.trim().to_lowercase())
-        .filter(|token| token.len() >= 5)
-        .collect();
-
-    let mut scored: Vec<(&models::TranscriptSegment, usize)> = segments
-        .iter()
-        .map(|segment| {
-            let seg_text = segment.text.to_lowercase();
-            let score = tokens
-                .iter()
-                .filter(|token| seg_text.contains(*token))
-                .count();
-            (segment, score)
-        })
-        .filter(|(_, score)| *score > 0)
-        .collect();
-
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
-    scored.truncate(3);
-
-    scored
-        .into_iter()
-        .map(|(segment, _)| llm::Citation {
-            text: segment.text.clone(),
-            start_time: Some(segment.start_time),
-            end_time: Some(segment.end_time),
-        })
-        .collect()
 }
 
 fn canonicalize_existing_absolute_path(raw_path: &str, label: &str) -> Result<PathBuf, String> {

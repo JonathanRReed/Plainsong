@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -15,10 +15,21 @@ import {
 import { getWaveformData, stopRecording } from "@/lib/tauri";
 
 interface MeetingRecordingStateChangedEvent {
-  phase: "idle" | "recording" | "error";
+  phase: "idle" | "recording" | "transcribing" | "error";
   recordingId?: string | null;
   startedAtMs?: number | null;
   systemAudioActive?: boolean | null;
+  message?: string | null;
+}
+
+interface RecordingTranscriptionStreamEvent {
+  recordingId: string;
+  isPartial: boolean;
+  isFinal: boolean;
+  text: string;
+  startTime?: number;
+  endTime?: number;
+  confidence?: number;
 }
 
 export function RecordingPopup() {
@@ -26,13 +37,23 @@ export function RecordingPopup() {
   const [recordingId, setRecordingId] = useState<string | null>(null);
   const [startedAtMs, setStartedAtMs] = useState<number | null>(null);
   const [systemAudioActive, setSystemAudioActive] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcriptionPreview, setTranscriptionPreview] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [stopping, setStopping] = useState(false);
   const [compact, setCompact] = useState(false);
   const [levels, setLevels] = useState<number[]>([]);
+  const recordingIdRef = useRef<string | null>(null);
+  const isTranscribingRef = useRef(false);
+
+  useEffect(() => {
+    recordingIdRef.current = recordingId;
+    isTranscribingRef.current = isTranscribing;
+  }, [isTranscribing, recordingId]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let unlistenStream: (() => void) | undefined;
 
     const setup = async () => {
       try {
@@ -45,6 +66,10 @@ export function RecordingPopup() {
             typeof initialState.startedAtMs === "number" ? initialState.startedAtMs : Date.now()
           );
           setSystemAudioActive(Boolean(initialState.systemAudioActive));
+          setIsTranscribing(false);
+        } else if (initialState.phase === "transcribing" && initialState.recordingId) {
+          setRecordingId(initialState.recordingId);
+          setIsTranscribing(true);
         }
       } catch (error) {
         console.error("Failed to load initial recording popup state:", error);
@@ -60,23 +85,55 @@ export function RecordingPopup() {
               typeof payload.startedAtMs === "number" ? payload.startedAtMs : Date.now()
             );
             setSystemAudioActive(Boolean(payload.systemAudioActive));
+            setIsTranscribing(false);
+            setTranscriptionPreview("");
+            setStopping(false);
+            return;
+          }
+
+          if (payload.phase === "transcribing" && payload.recordingId) {
+            setRecordingId(payload.recordingId);
+            setIsTranscribing(true);
+            setStopping(false);
             return;
           }
 
           setRecordingId(null);
           setStartedAtMs(null);
           setSystemAudioActive(false);
+          setIsTranscribing(false);
+          setTranscriptionPreview("");
           setStopping(false);
+        }
+      );
+
+      unlistenStream = await listen<RecordingTranscriptionStreamEvent>(
+        "recording-transcription-stream",
+        (event) => {
+          const currentRecordingId = recordingIdRef.current;
+          const currentTranscribing = isTranscribingRef.current;
+          if (event.payload.recordingId !== currentRecordingId && !currentTranscribing) {
+            return;
+          }
+          if (event.payload.text.trim()) {
+            setTranscriptionPreview(event.payload.text);
+          }
+          if (event.payload.isFinal) {
+            setIsTranscribing(false);
+          }
         }
       );
     };
 
     void setup();
-    return () => unlisten?.();
+    return () => {
+      unlisten?.();
+      unlistenStream?.();
+    };
   }, []);
 
   useEffect(() => {
-    if (!recordingId) {
+    if (!recordingId || isTranscribing) {
       setElapsed(0);
       return;
     }
@@ -88,10 +145,10 @@ export function RecordingPopup() {
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [recordingId, startedAtMs]);
+  }, [isTranscribing, recordingId, startedAtMs]);
 
   useEffect(() => {
-    if (!recordingId) {
+    if (!recordingId || isTranscribing) {
       setLevels([]);
       return;
     }
@@ -121,7 +178,7 @@ export function RecordingPopup() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [recordingId]);
+  }, [isTranscribing, recordingId]);
 
   const elapsedText = useMemo(() => {
     const mins = Math.floor(elapsed / 60);
@@ -216,7 +273,7 @@ export function RecordingPopup() {
           <div className="flex items-center gap-3">
             {!compact && (
               <div className="flex h-8 items-end gap-1">
-                {(levels.length ? levels : [0.15, 0.35, 0.2, 0.4]).map((level, idx) => (
+                {(levels.length ? levels : isTranscribing ? [0.25, 0.3, 0.25, 0.3] : [0.15, 0.35, 0.2, 0.4]).map((level, idx) => (
                   <span
                     key={`${idx}-${Math.round(level * 100)}`}
                     className="w-1 rounded-full bg-cyan-300/90 transition-all"
@@ -228,8 +285,8 @@ export function RecordingPopup() {
             <div>
               <p className="text-sm font-semibold">Meeting recording</p>
               <p className="text-xs text-slate-300">
-                Live capture in progress
-                {systemAudioActive && (
+                {isTranscribing ? "Generating transcript preview" : "Live capture in progress"}
+                {systemAudioActive && !isTranscribing && (
                   <span className="ml-2 inline-flex items-center gap-1">
                     <Monitor className="h-3 w-3" />
                     System audio
@@ -241,17 +298,24 @@ export function RecordingPopup() {
 
           <div className="flex items-center gap-3">
             <span className="font-mono text-sm text-cyan-200">{elapsedText}</span>
-            <button
-              type="button"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-rose-500/90 text-white hover:bg-rose-500 disabled:opacity-50"
-              onClick={handleStop}
-              disabled={stopping}
-              aria-label="Stop recording"
-            >
-              <Square className="h-4 w-4 fill-current" />
-            </button>
+            {!isTranscribing && (
+              <button
+                type="button"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-rose-500/90 text-white hover:bg-rose-500 disabled:opacity-50"
+                onClick={handleStop}
+                disabled={stopping}
+                aria-label="Stop recording"
+              >
+                <Square className="h-4 w-4 fill-current" />
+              </button>
+            )}
           </div>
         </div>
+        {isTranscribing && (
+          <div className="mt-2 rounded-lg border border-cyan-300/20 bg-slate-900/70 p-2 text-xs text-slate-200">
+            {transcriptionPreview || "Preparing transcript preview..."}
+          </div>
+        )}
       </div>
     </div>
   );

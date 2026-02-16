@@ -1,6 +1,6 @@
 # Packaged App QA Matrix (macOS + Windows)
 
-Date: 2026-02-13
+Date: 2026-02-16
 
 ## Scope
 - Dictation reliability and fallback behavior parity.
@@ -33,3 +33,8 @@ Date: 2026-02-13
 ## Release target for completion
 - Required for launch “beat” claim: all matrix rows pass on dedicated macOS + Windows test machines.
 
+## Artifact Capture Policy
+- Capture one screen recording per matrix row showing the full scenario and result.
+- Attach one screenshot for terminal/app logs that includes timestamp and OS version.
+- Attach one exported artifact sample for export/integrity scenarios (bundle path + verification output).
+- Store artifacts under `qa-evidence/<YYYY-MM-DD>/<os>/<scenario-id>/` with a short `notes.md`.

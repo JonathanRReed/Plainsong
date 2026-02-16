@@ -141,9 +141,13 @@ impl AsrManager {
         provider_type: AsrProviderType,
         file_path: Option<&Path>,
         audio_data: Option<&[u8]>,
+        selected_model: Option<&str>,
     ) -> Result<TranscriptionResult> {
-        let selected_model = self.selected_model_id().await;
-        let provider = Self::provider_with_model(provider_type, Some(selected_model.as_str()));
+        let resolved_model = match selected_model {
+            Some(value) => value.to_string(),
+            None => self.selected_model_id().await,
+        };
+        let provider = Self::provider_with_model(provider_type, Some(resolved_model.as_str()));
         let fallback_allowed = self.allow_whisper_fallback().await;
 
         let primary_result = match (file_path, audio_data) {
@@ -163,7 +167,7 @@ impl AsrManager {
                 result.fallback_used = false;
                 result.fallback_reason = None;
                 if result.model_id.trim().is_empty() {
-                    result.model_id = selected_model;
+                    result.model_id = resolved_model.clone();
                 }
                 Ok(result)
             }
@@ -183,7 +187,7 @@ impl AsrManager {
 
                 let fallback_provider = Self::provider_with_model(
                     AsrProviderType::Whisper,
-                    Some(self.selected_model_id().await.as_str()),
+                    Some(resolved_model.as_str()),
                 );
                 let fallback_result = match (file_path, audio_data) {
                     (Some(path), None) => fallback_provider.transcribe(path).await,
@@ -211,14 +215,25 @@ impl AsrManager {
     /// Transcribe using the default provider
     pub async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
         let provider_type = self.get_default_provider().await;
-        self.transcribe_inner(provider_type, Some(audio_path), None)
+        self.transcribe_inner(provider_type, Some(audio_path), None, None)
             .await
     }
 
     /// Transcribe bytes using the default provider
     pub async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let provider_type = self.get_default_provider().await;
-        self.transcribe_inner(provider_type, None, Some(audio_data))
+        self.transcribe_inner(provider_type, None, Some(audio_data), None)
+            .await
+    }
+
+    /// Transcribe bytes with a specific provider.
+    pub async fn transcribe_bytes_with_provider(
+        &self,
+        provider_type: AsrProviderType,
+        audio_data: &[u8],
+        selected_model: Option<&str>,
+    ) -> Result<TranscriptionResult> {
+        self.transcribe_inner(provider_type, None, Some(audio_data), selected_model)
             .await
     }
 
@@ -229,7 +244,7 @@ impl AsrManager {
         provider_type: AsrProviderType,
         audio_path: &Path,
     ) -> Result<TranscriptionResult> {
-        self.transcribe_inner(provider_type, Some(audio_path), None)
+        self.transcribe_inner(provider_type, Some(audio_path), None, None)
             .await
     }
 

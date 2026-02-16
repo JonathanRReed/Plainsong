@@ -70,12 +70,36 @@ export interface LlmCitation {
   text: string;
   startTime?: number;
   endTime?: number;
+  recordingId?: string;
+  certainty?: number;
 }
 
 export interface ActionItem {
   task: string;
   assignee?: string;
   deadline?: string;
+}
+
+export interface SearchHit {
+  recordingId: string;
+  recordingTitle: string;
+  projectId: string;
+  segmentId: string;
+  text: string;
+  startTime: number;
+  endTime: number;
+  score: number;
+}
+
+export interface AsrBenchmarkEntry {
+  id: string;
+  providerType: string;
+  providerName: string;
+  modelId: string;
+  runtimeStatus: string;
+  processingTimeMs: number;
+  confidence: number;
+  createdAt: string;
 }
 
 export interface AnalysisTemplate {

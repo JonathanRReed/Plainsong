@@ -107,6 +107,12 @@ pub struct TranscriptionSettings {
     pub num_speakers: usize,
     /// Save raw transcript without formatting
     pub save_raw_transcript: bool,
+    /// Persist dictation outputs into project storage.
+    pub dictation_save_to_inbox: bool,
+    /// Dictation profile preference: speed or accuracy.
+    pub dictation_profile: String,
+    /// Target project for saved dictations.
+    pub dictation_project_id: String,
 }
 
 impl Default for TranscriptionSettings {
@@ -121,6 +127,9 @@ impl Default for TranscriptionSettings {
             language: None,
             num_speakers: 0,
             save_raw_transcript: false,
+            dictation_save_to_inbox: true,
+            dictation_profile: "speed".to_string(),
+            dictation_project_id: "inbox".to_string(),
         }
     }
 }

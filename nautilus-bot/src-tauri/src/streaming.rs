@@ -21,6 +21,8 @@ pub struct StreamingSession {
     transcript: Arc<Mutex<String>>,
     /// Provider type to use
     provider_type: crate::asr::AsrProviderType,
+    /// Model to use when the provider supports model selection
+    selected_model_id: String,
     /// Last processed position in buffer
     last_processed_pos: Arc<Mutex<usize>>,
     /// Minimum chunk size for transcription (in samples)
@@ -109,12 +111,16 @@ impl StreamingTranscriber {
     pub async fn start_session(
         &self,
         provider_type: crate::asr::AsrProviderType,
+        sample_rate: u32,
+        selected_model_id: String,
     ) -> Result<(String, mpsc::Receiver<StreamingResult>)> {
         let session_id = uuid::Uuid::new_v4().to_string();
         let (result_tx, result_rx) = mpsc::channel::<StreamingResult>(100);
 
-        // 5-minute buffer at 16kHz = 4.8M samples
-        let buffer_capacity = 5 * 60 * 16000;
+        let normalized_sample_rate = sample_rate.max(8_000);
+        let min_chunk_size = (normalized_sample_rate as usize) * 2; // 2 seconds
+        let overlap_size = (normalized_sample_rate as usize) / 2; // 0.5 second overlap
+        let buffer_capacity = (normalized_sample_rate as usize) * 60 * 5; // 5-minute ring buffer
 
         let session = StreamingSession {
             id: session_id.clone(),
@@ -122,10 +128,11 @@ impl StreamingTranscriber {
             result_tx,
             transcript: Arc::new(Mutex::new(String::new())),
             provider_type,
+            selected_model_id,
             last_processed_pos: Arc::new(Mutex::new(0)),
-            min_chunk_size: 16000 * 2, // 2 seconds at 16kHz
-            overlap_size: 16000 / 2,   // 0.5 second overlap
-            sample_rate: 16000,
+            min_chunk_size,
+            overlap_size,
+            sample_rate: normalized_sample_rate,
         };
 
         let handle = StreamingSessionHandle {
@@ -194,13 +201,19 @@ impl StreamingTranscriber {
                 let samples = buffer.get_samples(last_pos, remaining);
                 drop(buffer);
 
-                // Transcribe final chunk
-                let provider = crate::asr::AsrProviderFactory::create(session.provider_type);
-
                 // Convert samples to WAV bytes
                 let wav_bytes = samples_to_wav(&samples, session.sample_rate);
 
-                match provider.transcribe_bytes(&wav_bytes).await {
+                let final_result = self
+                    .asr_manager
+                    .transcribe_bytes_with_provider(
+                        session.provider_type,
+                        &wav_bytes,
+                        Some(session.selected_model_id.as_str()),
+                    )
+                    .await;
+
+                match final_result {
                     Ok(result) => {
                         let mut transcript = session.transcript.lock().await;
                         if !transcript.is_empty() && !result.text.is_empty() {
@@ -267,7 +280,7 @@ struct StreamingSessionHandle {
 #[allow(dead_code)]
 async fn process_chunk(
     session: &Arc<StreamingSession>,
-    _asr_manager: &crate::asr::AsrManager,
+    asr_manager: &crate::asr::AsrManager,
 ) -> Result<()> {
     let last_pos = *session.last_processed_pos.lock().await;
     let chunk_size = session.min_chunk_size;
@@ -287,11 +300,17 @@ async fn process_chunk(
     let samples = buffer.get_samples(last_pos, process_size);
     drop(buffer);
 
-    // Transcribe
-    let provider = crate::asr::AsrProviderFactory::create(session.provider_type);
     let wav_bytes = samples_to_wav(&samples, session.sample_rate);
 
-    match provider.transcribe_bytes(&wav_bytes).await {
+    let chunk_result = asr_manager
+        .transcribe_bytes_with_provider(
+            session.provider_type,
+            &wav_bytes,
+            Some(session.selected_model_id.as_str()),
+        )
+        .await;
+
+    match chunk_result {
         Ok(result) => {
             if !result.text.is_empty() {
                 let mut transcript = session.transcript.lock().await;

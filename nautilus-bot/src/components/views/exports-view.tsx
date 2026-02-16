@@ -1,7 +1,8 @@
-import { useMemo, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { useRecordings } from "@/hooks/use-recordings";
-import { exportRecordingV2, verifyEvidenceBundle } from "@/lib/tauri";
+import { exportRecordingV2, exportWithTemplate, listExportTemplates, verifyEvidenceBundle } from "@/lib/tauri";
 import type { EvidenceVerificationResult } from "@/lib/tauri";
+import type { ExportTemplate } from "@/lib/tauri";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -24,6 +25,11 @@ export function ExportsView() {
   const [isVerifying, setIsVerifying] = useState(false);
   const [verifyPath, setVerifyPath] = useState("");
   const [verificationResult, setVerificationResult] = useState<EvidenceVerificationResult | null>(null);
+  const [templates, setTemplates] = useState<ExportTemplate[]>([]);
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
+  const [templatePreview, setTemplatePreview] = useState("");
+  const [templateTargetPath, setTemplateTargetPath] = useState("");
+  const [lastTemplateExportPath, setLastTemplateExportPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const selectedRecording = useMemo(
@@ -36,6 +42,19 @@ export function ExportsView() {
       throw new Error("Select a recording first");
     }
   };
+
+  useEffect(() => {
+    void listExportTemplates()
+      .then((loadedTemplates) => {
+        setTemplates(loadedTemplates);
+        if (loadedTemplates.length > 0) {
+          setSelectedTemplateId(loadedTemplates[0].id);
+        }
+      })
+      .catch((e) => {
+        console.warn("Failed to load export templates:", e);
+      });
+  }, []);
 
   const generatePreview = async () => {
     setError(null);
@@ -90,6 +109,48 @@ export function ExportsView() {
       setError(e instanceof Error ? e.message : "Verification failed");
     } finally {
       setIsVerifying(false);
+    }
+  };
+
+  const generateTemplatePreview = async () => {
+    setError(null);
+    setIsWorking(true);
+    setLastTemplateExportPath(null);
+    try {
+      ensureRecording();
+      if (!selectedTemplateId) {
+        throw new Error("Select a template first");
+      }
+      const rendered = await exportWithTemplate(recordingId, selectedTemplateId, { preview: true });
+      setTemplatePreview(rendered.content ?? "");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Template preview failed");
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const exportTemplateNow = async () => {
+    setError(null);
+    setIsWorking(true);
+    setLastTemplateExportPath(null);
+    try {
+      ensureRecording();
+      if (!selectedTemplateId) {
+        throw new Error("Select a template first");
+      }
+      const result = await exportWithTemplate(recordingId, selectedTemplateId, {
+        preview: false,
+        target: templateTargetPath.trim() || undefined,
+      });
+      if (!result.exportPath) {
+        throw new Error("Template export did not return a file path");
+      }
+      setLastTemplateExportPath(result.exportPath);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Template export failed");
+    } finally {
+      setIsWorking(false);
     }
   };
 
@@ -176,6 +237,64 @@ export function ExportsView() {
                   Export
                 </Button>
               </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Template Export</CardTitle>
+              <CardDescription>Render transcript using built-in structured templates</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label>Template</Label>
+                <select
+                  className="w-full p-2 border rounded-md bg-background"
+                  value={selectedTemplateId}
+                  onChange={(e) => setSelectedTemplateId(e.target.value)}
+                >
+                  {templates.length === 0 ? (
+                    <option value="">No templates available</option>
+                  ) : (
+                    templates.map((template) => (
+                      <option key={template.id} value={template.id}>
+                        {template.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+              <Button
+                variant="outline"
+                onClick={generateTemplatePreview}
+                disabled={isWorking || !recordingId || !selectedTemplateId}
+              >
+                {isWorking ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+                Render Template Preview
+              </Button>
+              <div className="space-y-2">
+                <Label>Template export path (optional)</Label>
+                <Input
+                  value={templateTargetPath}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setTemplateTargetPath(e.target.value)}
+                  placeholder="/path/to/template-export.md"
+                />
+              </div>
+              <Button
+                onClick={exportTemplateNow}
+                disabled={isWorking || !recordingId || !selectedTemplateId}
+              >
+                {isWorking ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <FileOutput className="h-4 w-4 mr-2" />}
+                Export Template
+              </Button>
+              {lastTemplateExportPath && (
+                <p className="text-xs text-muted-foreground">
+                  Template exported to <span className="font-mono break-all">{lastTemplateExportPath}</span>
+                </p>
+              )}
+              <pre className="text-xs whitespace-pre-wrap p-3 rounded-md border bg-muted/30 min-h-[180px]">
+                {templatePreview || "No template preview generated yet."}
+              </pre>
             </CardContent>
           </Card>
 

@@ -64,6 +64,8 @@ pub struct Citation {
     pub text: String,
     pub start_time: Option<f64>,
     pub end_time: Option<f64>,
+    pub recording_id: Option<String>,
+    pub certainty: Option<f64>,
 }
 
 /// Action item

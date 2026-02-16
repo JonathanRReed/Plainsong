@@ -115,6 +115,35 @@ export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps
     }
   };
 
+  const citationCoverage = (() => {
+    if (!lastResult) return null;
+    const citations = lastResult.citations ?? [];
+    if (citations.length === 0) {
+      return { ratio: 0, avgCertainty: 0 };
+    }
+    const mappedCount = citations.filter(
+      (citation) =>
+        typeof citation.startTime === "number" &&
+        typeof citation.endTime === "number" &&
+        typeof citation.recordingId === "string" &&
+        citation.recordingId.trim().length > 0
+    ).length;
+    const certaintyValues = citations
+      .map((citation) => citation.certainty)
+      .filter((value): value is number => typeof value === "number");
+    const avgCertainty =
+      certaintyValues.length > 0
+        ? certaintyValues.reduce((sum, value) => sum + value, 0) / certaintyValues.length
+        : 0;
+    return {
+      ratio: mappedCount / citations.length,
+      avgCertainty,
+    };
+  })();
+  const showUncertaintyBanner =
+    citationCoverage !== null &&
+    (citationCoverage.ratio < 0.8 || citationCoverage.avgCertainty < 0.75);
+
   return (
     <div className={cn("space-y-4", className)}>
       {/* Template Buttons */}
@@ -201,9 +230,9 @@ export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps
               </div>
             </ScrollArea>
             
-            {lastResult.citations.length === 0 && (
+            {showUncertaintyBanner && (
               <div className="mt-4 p-2 rounded-md bg-amber-500/10 text-amber-700 text-xs">
-                Uncertainty: model response has no grounded citations for this transcript.
+                Uncertainty: citation coverage is below threshold (coverage {(((citationCoverage?.ratio ?? 0) * 100)).toFixed(0)}%, confidence {((citationCoverage?.avgCertainty ?? 0) * 100).toFixed(0)}%).
               </div>
             )}
 
@@ -211,12 +240,20 @@ export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps
               <div className="mt-4 pt-4 border-t">
                 <p className="text-xs text-muted-foreground mb-2">Citations:</p>
                 <div className="space-y-1">
-                  {lastResult.citations.map((citation: { text: string; startTime?: number; endTime?: number }, idx: number) => (
+                  {lastResult.citations.map((citation: { text: string; startTime?: number; endTime?: number; recordingId?: string; certainty?: number }, idx: number) => (
                     <p key={idx} className="text-xs text-muted-foreground italic">
                       &ldquo;{citation.text}&rdquo;
+                      {citation.recordingId ? (
+                        <span className="not-italic ml-1">[{citation.recordingId}]</span>
+                      ) : null}
                       {typeof citation.startTime === "number" && typeof citation.endTime === "number" ? (
                         <span className="not-italic ml-1">
                           ({citation.startTime.toFixed(1)}s - {citation.endTime.toFixed(1)}s)
+                        </span>
+                      ) : null}
+                      {typeof citation.certainty === "number" ? (
+                        <span className="not-italic ml-1">
+                          certainty {(citation.certainty * 100).toFixed(0)}%
                         </span>
                       ) : null}
                     </p>

@@ -9,12 +9,20 @@ import type {
   AsrProviderType, 
   BenchmarkResult,
   LlmAnalysisResult,
-  ActionItem 
+  ActionItem,
+  SearchHit,
+  AsrBenchmarkEntry,
 } from "@/types";
 import type { Settings } from "@/types/settings";
 
-export async function startDictation(): Promise<void> {
-  await invoke("start_dictation");
+export interface DictationStartOptions {
+  saveToInbox: boolean;
+  projectId?: string;
+  profile: "speed" | "accuracy";
+}
+
+export async function startDictation(options?: DictationStartOptions): Promise<void> {
+  await invoke("start_dictation", { options });
 }
 
 export async function stopDictation(): Promise<string> {
@@ -129,6 +137,52 @@ export async function verifyEvidenceBundle(targetPath: string): Promise<Evidence
   return await invoke("verify_evidence_bundle", { targetPath });
 }
 
+export interface ExportTemplateField {
+  id: string;
+  label: string;
+  type: string;
+  required: boolean;
+}
+
+export interface ExportTemplate {
+  id: string;
+  name: string;
+  description: string;
+  format: "markdown" | "plain_text" | "html" | "json" | "csv" | "pdf";
+  template: string;
+  includeSpeakers: boolean;
+  includeTimestamps: boolean;
+  includeConfidence: boolean;
+  customFields: Record<string, string>;
+}
+
+export interface TemplateExportResult {
+  templateId: string;
+  preview: boolean;
+  exportPath: string | null;
+  content: string | null;
+}
+
+export async function listExportTemplates(): Promise<ExportTemplate[]> {
+  return await invoke("list_export_templates");
+}
+
+export async function exportWithTemplate(
+  recordingId: string,
+  templateId: string,
+  options?: {
+    target?: string;
+    preview?: boolean;
+  }
+): Promise<TemplateExportResult> {
+  return await invoke("export_with_template", {
+    recordingId,
+    templateId,
+    target: options?.target,
+    preview: options?.preview,
+  });
+}
+
 export async function getProjects(): Promise<Project[]> {
   return await invoke("get_projects");
 }
@@ -172,6 +226,14 @@ export async function benchmarkAsrProviders(testAudioPath: string): Promise<Benc
   return await invoke("benchmark_asr_providers", { testAudioPath });
 }
 
+export async function benchmarkAsrProvidersBytes(audioBytes: Uint8Array): Promise<BenchmarkResult[]> {
+  return await invoke("benchmark_asr_providers_bytes", { audioBytes: Array.from(audioBytes) });
+}
+
+export async function listAsrBenchmarks(limit = 50): Promise<AsrBenchmarkEntry[]> {
+  return await invoke("list_asr_benchmarks", { limit });
+}
+
 // LLM / AI Analysis APIs
 export async function analyzeRecording(
   recordingId: string,
@@ -179,6 +241,14 @@ export async function analyzeRecording(
   model?: string
 ): Promise<LlmAnalysisResult> {
   return await invoke("analyze_recording", { recordingId, query, model });
+}
+
+export async function analyzeRecordings(
+  recordingIds: string[],
+  query: string,
+  model?: string
+): Promise<LlmAnalysisResult> {
+  return await invoke("analyze_recordings", { recordingIds, query, model });
 }
 
 export async function summarizeRecording(
@@ -193,6 +263,14 @@ export async function extractActionItems(
   model?: string
 ): Promise<ActionItem[]> {
   return await invoke("extract_action_items", { recordingId, model });
+}
+
+export async function searchTranscripts(
+  query: string,
+  limit = 20,
+  projectIds?: string[]
+): Promise<SearchHit[]> {
+  return await invoke("search_transcripts", { query, limit, projectIds });
 }
 
 export async function getOllamaStatus(): Promise<boolean> {
