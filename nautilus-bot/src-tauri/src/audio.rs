@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
+
 pub struct AudioCapture {
     is_dictating: Arc<AtomicBool>,
     dictation_buffer: Arc<crossbeam::queue::SegQueue<f32>>,
@@ -202,6 +204,8 @@ impl AudioCapture {
             return Err(anyhow::anyhow!("No dictation in progress"));
         }
 
+        // Capture a brief trailing window so very short utterances are less likely to be cut off.
+        std::thread::sleep(Duration::from_millis(DICTATION_STOP_CAPTURE_TAIL_MS));
         self.is_dictating.store(false, Ordering::SeqCst);
         if let Some(handle) = self.dictation_thread.take() {
             let (done_tx, done_rx) = bounded::<()>(1);

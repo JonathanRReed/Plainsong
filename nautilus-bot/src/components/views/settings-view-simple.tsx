@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type KeyboardEvent,
+} from "react";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,11 +20,13 @@ import {
   getBackupConfig,
   getPermissionDiagnostics,
   getBackupSetupReport,
+  getOllamaStatus,
   getSecurityStatus,
   getSettings,
   hasProviderSecret,
   lockVault,
   listBackups,
+  listOllamaModels,
   migrateToEncryptedStorage,
   openPermissionSettings,
   saveSettings,
@@ -46,11 +56,34 @@ import {
 } from "lucide-react";
 
 type TabId = "asr" | "general" | "security" | "storage" | "ai";
+type QueuedSettingsSave = {
+  version: number;
+  settings: Settings;
+};
+
+type SettingsSaveScheduler = {
+  nextVersion: number;
+  latestAppliedVersion: number;
+  pending: QueuedSettingsSave | null;
+  timer: ReturnType<typeof setTimeout> | null;
+  flushing: boolean;
+};
+
+const SETTINGS_SAVE_DEBOUNCE_MS = 350;
+
+function markSettingsPerf(markName: string) {
+  if (!import.meta.env.DEV || typeof performance === "undefined") {
+    return;
+  }
+  performance.mark(markName);
+  console.debug(`[perf] ${markName}`);
+}
 
 export function SettingsView() {
   const { theme, setTheme } = useTheme();
   const [activeTab, setActiveTab] = useState<TabId>("general");
-  const [settings, setSettings] = useState<Settings | null>(null);
+  const [draftSettings, setDraftSettings] = useState<Settings | null>(null);
+  const [persistedSettings, setPersistedSettings] = useState<Settings | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [provider, setProvider] = useState("openai");
@@ -66,34 +99,133 @@ export function SettingsView() {
   const [securityStatus, setSecurityStatus] = useState<SecurityStatus | null>(null);
   const [vaultPassword, setVaultPassword] = useState("");
   const [cloudReadinessMessage, setCloudReadinessMessage] = useState<string | null>(null);
+  const [ollamaAvailable, setOllamaAvailable] = useState<boolean | null>(null);
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+  const [hasLoadedSecurityTab, setHasLoadedSecurityTab] = useState(false);
+  const [hasLoadedStorageTab, setHasLoadedStorageTab] = useState(false);
+  const mountedRef = useRef(true);
+  const saveSchedulerRef = useRef<SettingsSaveScheduler>({
+    nextVersion: 0,
+    latestAppliedVersion: 0,
+    pending: null,
+    timer: null,
+    flushing: false,
+  });
+
+  const settings = draftSettings;
+
+  const applySecurityStatusFromSettings = useCallback((next: Settings) => {
+    setSecurityStatus((current) =>
+      current
+        ? {
+            ...current,
+            vaultInitialized: next.privacy.vaultInitialized,
+            recordingsEncrypted: next.privacy.encryptRecordings,
+            llmProvider: next.privacy.llmProvider,
+            remoteProcessingEnabled: next.privacy.remoteProcessingEnabled,
+            exportRoot: next.privacy.exportRoot ?? null,
+          }
+        : current
+    );
+  }, []);
+
+  const flushPendingSettingsSave = useCallback(
+    async (suppressUiState = false) => {
+      const scheduler = saveSchedulerRef.current;
+      if (scheduler.timer) {
+        clearTimeout(scheduler.timer);
+        scheduler.timer = null;
+      }
+      if (scheduler.flushing || !scheduler.pending) {
+        return;
+      }
+
+      scheduler.flushing = true;
+      if (!suppressUiState && mountedRef.current) {
+        setIsSaving(true);
+      }
+      markSettingsPerf("settings-save-flush-start");
+
+      try {
+        while (scheduler.pending) {
+          const queued = scheduler.pending;
+          scheduler.pending = null;
+
+          try {
+            await saveSettings(queued.settings);
+            if (queued.version >= scheduler.latestAppliedVersion) {
+              scheduler.latestAppliedVersion = queued.version;
+              if (mountedRef.current) {
+                setPersistedSettings(queued.settings);
+                applySecurityStatusFromSettings(queued.settings);
+              }
+            }
+          } catch (e) {
+            if (mountedRef.current) {
+              setError(e instanceof Error ? e.message : "Failed to save settings");
+            }
+          }
+        }
+      } finally {
+        scheduler.flushing = false;
+        if (!suppressUiState && mountedRef.current) {
+          setIsSaving(false);
+        }
+        markSettingsPerf("settings-save-flush-end");
+      }
+    },
+    [applySecurityStatusFromSettings]
+  );
+
+  const queueSettingsSave = useCallback(
+    (next: Settings, debounceMs = SETTINGS_SAVE_DEBOUNCE_MS) => {
+      const scheduler = saveSchedulerRef.current;
+      scheduler.nextVersion += 1;
+      scheduler.pending = {
+        version: scheduler.nextVersion,
+        settings: next,
+      };
+
+      if (scheduler.timer) {
+        clearTimeout(scheduler.timer);
+      }
+      scheduler.timer = setTimeout(() => {
+        void flushPendingSettingsSave();
+      }, debounceMs);
+      markSettingsPerf("settings-save-queued");
+    },
+    [flushPendingSettingsSave]
+  );
 
   useEffect(() => {
-    let mounted = true;
+    mountedRef.current = true;
+    markSettingsPerf("settings-initial-load-start");
+
     const load = async () => {
       try {
-        const loaded = await getSettings();
-        const loadedBackupConfig = await getBackupConfig();
-        const loadedBackups = await listBackups();
-        const permissions = await getPermissionDiagnostics();
-        const security = await getSecurityStatus();
-        if (mounted) {
-          setSettings(loaded);
+        const [loaded, loadedBackupConfig] = await Promise.all([
+          getSettings(),
+          getBackupConfig(),
+        ]);
+        if (mountedRef.current) {
+          setDraftSettings(loaded);
+          setPersistedSettings(loaded);
           setBackupConfig(loadedBackupConfig);
-          setBackups(loadedBackups);
-          setPermissionDiagnostics(permissions);
-          setSecurityStatus(security);
+          markSettingsPerf("settings-initial-load-complete");
         }
       } catch (e) {
-        if (mounted) {
+        if (mountedRef.current) {
           setError(e instanceof Error ? e.message : "Failed to load settings");
         }
       }
     };
-    load();
+
+    void load();
     return () => {
-      mounted = false;
+      mountedRef.current = false;
+      void flushPendingSettingsSave(true);
     };
-  }, []);
+  }, [flushPendingSettingsSave]);
 
   useEffect(() => {
     let mounted = true;
@@ -113,25 +245,146 @@ export function SettingsView() {
     };
   }, [provider]);
 
-  const updateSettings = async (next: Settings) => {
-    setSettings(next);
-    setIsSaving(true);
-    setError(null);
-    try {
-      await saveSettings(next);
-      const refreshed = await getSecurityStatus();
-      setSecurityStatus(refreshed);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save settings");
-    } finally {
-      setIsSaving(false);
-    }
-  };
+  useEffect(() => {
+    markSettingsPerf(`settings-tab-open:${activeTab}`);
+  }, [activeTab]);
 
-  const refreshBackups = async () => {
+  useEffect(() => {
+    if (activeTab !== "security" || hasLoadedSecurityTab) {
+      return;
+    }
+
+    let mounted = true;
+    markSettingsPerf("settings-security-load-start");
+    const loadSecurity = async () => {
+      try {
+        const [permissions, security] = await Promise.all([
+          getPermissionDiagnostics(),
+          getSecurityStatus(),
+        ]);
+        if (mounted) {
+          setPermissionDiagnostics(permissions);
+          setSecurityStatus(security);
+          setHasLoadedSecurityTab(true);
+          markSettingsPerf("settings-security-load-complete");
+        }
+      } catch (e) {
+        if (mounted) {
+          setError(e instanceof Error ? e.message : "Failed to load security details");
+        }
+      }
+    };
+    void loadSecurity();
+    return () => {
+      mounted = false;
+    };
+  }, [activeTab, hasLoadedSecurityTab]);
+
+  useEffect(() => {
+    if (activeTab !== "storage" || hasLoadedStorageTab) {
+      return;
+    }
+
+    let mounted = true;
+    markSettingsPerf("settings-storage-load-start");
+    const loadBackups = async () => {
+      try {
+        const loadedBackups = await listBackups();
+        if (mounted) {
+          setBackups(loadedBackups);
+          setHasLoadedStorageTab(true);
+          markSettingsPerf("settings-storage-load-complete");
+        }
+      } catch (e) {
+        if (mounted) {
+          setError(e instanceof Error ? e.message : "Failed to load backups");
+        }
+      }
+    };
+    void loadBackups();
+    return () => {
+      mounted = false;
+    };
+  }, [activeTab, hasLoadedStorageTab]);
+
+  useEffect(() => {
+    if (!settings) return;
+    const llmProvider = settings.privacy.llmProvider;
+    if (llmProvider === "openai" || llmProvider === "anthropic" || llmProvider === "gemini" || llmProvider === "ollama-cloud") {
+      setProvider(llmProvider);
+    }
+  }, [settings?.privacy.llmProvider]);
+
+  useEffect(() => {
+    if (activeTab !== "ai") {
+      return;
+    }
+    let mounted = true;
+    const loadOllama = async () => {
+      try {
+        const [available, models] = await Promise.all([
+          getOllamaStatus(),
+          listOllamaModels().catch(() => []),
+        ]);
+        if (mounted) {
+          setOllamaAvailable(available);
+          setOllamaModels(models);
+        }
+      } catch {
+        if (mounted) {
+          setOllamaAvailable(false);
+          setOllamaModels([]);
+        }
+      }
+    };
+    void loadOllama();
+    return () => {
+      mounted = false;
+    };
+  }, [activeTab]);
+
+  const updateSettings = useCallback(
+    (next: Settings, options?: { immediate?: boolean; debounceMs?: number }) => {
+      setDraftSettings(next);
+      setError(null);
+
+      if (options?.immediate) {
+        queueSettingsSave(next, 0);
+        void flushPendingSettingsSave();
+        return;
+      }
+      queueSettingsSave(next, options?.debounceMs ?? SETTINGS_SAVE_DEBOUNCE_MS);
+    },
+    [flushPendingSettingsSave, queueSettingsSave]
+  );
+
+  const refreshBackups = useCallback(async () => {
     const data = await listBackups();
     setBackups(data);
-  };
+    setHasLoadedStorageTab(true);
+  }, []);
+
+  const hasUnsavedChanges = useMemo(() => {
+    if (!draftSettings || !persistedSettings) {
+      return false;
+    }
+    return JSON.stringify(draftSettings) !== JSON.stringify(persistedSettings);
+  }, [draftSettings, persistedSettings]);
+
+  const handleSettingsTextBlur = useCallback(() => {
+    void flushPendingSettingsSave();
+  }, [flushPendingSettingsSave]);
+
+  const handleSettingsTextKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLInputElement>) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault();
+      void flushPendingSettingsSave();
+    },
+    [flushPendingSettingsSave]
+  );
 
   const tabList = useMemo(
     () => [
@@ -498,6 +751,8 @@ export function SettingsView() {
                   <Input
                     placeholder="/Users/you/Documents/Nautilus"
                     value={settings.privacy.exportRoot ?? ""}
+                    onBlur={handleSettingsTextBlur}
+                    onKeyDown={handleSettingsTextKeyDown}
                     onChange={(e: ChangeEvent<HTMLInputElement>) =>
                       void updateSettings({
                         ...settings,
@@ -615,6 +870,8 @@ export function SettingsView() {
                     type="number"
                     min={0}
                     value={settings.privacy.autoDeleteDays}
+                    onBlur={handleSettingsTextBlur}
+                    onKeyDown={handleSettingsTextKeyDown}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => {
                       const nextDays = Math.max(0, Number(e.target.value) || 0);
                       void updateSettings({
@@ -912,12 +1169,77 @@ export function SettingsView() {
           {activeTab === "ai" && (
             <Card>
               <CardHeader>
-                <CardTitle>Provider Credentials</CardTitle>
-                <CardDescription>Secrets are stored in OS secure credential storage</CardDescription>
+                <CardTitle>AI Provider & Credentials</CardTitle>
+                <CardDescription>Choose your default brain provider and manage cloud keys</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
                 <div className="space-y-2">
-                  <Label>Provider</Label>
+                  <Label>Default analysis provider</Label>
+                  <select
+                    value={settings.privacy.llmProvider}
+                    onChange={(event) =>
+                      void updateSettings({
+                        ...settings,
+                        privacy: { ...settings.privacy, llmProvider: event.target.value },
+                      })
+                    }
+                    className="w-full p-2 border rounded-md bg-background"
+                  >
+                    <option value="ollama">Ollama (Local)</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="gemini">Google Gemini</option>
+                    <option value="ollama-cloud">Ollama Cloud</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Used by summarize, Q&A, and action-item extraction.
+                  </p>
+                  {!settings.privacy.remoteProcessingEnabled && settings.privacy.llmProvider !== "ollama" ? (
+                    <p className="text-xs text-amber-600">
+                      Remote provider selected but remote processing is disabled.
+                    </p>
+                  ) : null}
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Remote processing policy</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Controls whether transcript text can be sent to cloud LLMs.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.privacy.remoteProcessingEnabled}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        privacy: { ...settings.privacy, remoteProcessingEnabled: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                {settings.privacy.llmProvider === "ollama" && (
+                  <div className="rounded-lg border p-3 space-y-2">
+                    <p className="text-sm font-medium">Local Ollama</p>
+                    <p className="text-xs text-muted-foreground">
+                      Status:{" "}
+                      {ollamaAvailable === null
+                        ? "Checking..."
+                        : ollamaAvailable
+                          ? "Available"
+                          : "Not reachable"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Models: {ollamaModels.length > 0 ? ollamaModels.join(", ") : "No local models detected"}
+                    </p>
+                  </div>
+                )}
+
+                <div className="h-px bg-border" />
+
+                <div className="space-y-2">
+                  <Label>Credential provider</Label>
                   <select
                     value={provider}
                     onChange={(e) => setProvider(e.target.value)}
@@ -1027,13 +1349,16 @@ export function SettingsView() {
                           if (!confirmed) {
                             return;
                           }
-                          await updateSettings({
-                            ...settings,
-                            privacy: {
-                              ...settings.privacy,
-                              remoteProcessingEnabled: true,
+                          updateSettings(
+                            {
+                              ...settings,
+                              privacy: {
+                                ...settings.privacy,
+                                remoteProcessingEnabled: true,
+                              },
                             },
-                          });
+                            { immediate: true }
+                          );
                           setCloudReadinessMessage("Remote processing enabled. Run readiness check again.");
                         }}
                       >
@@ -1051,6 +1376,9 @@ export function SettingsView() {
 
           {isSaving && (
             <div className="text-sm text-muted-foreground">Saving settings...</div>
+          )}
+          {!isSaving && hasUnsavedChanges && (
+            <div className="text-sm text-muted-foreground">Changes queued for save...</div>
           )}
         </div>
       </div>

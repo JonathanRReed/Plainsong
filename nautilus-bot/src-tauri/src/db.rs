@@ -127,6 +127,11 @@ impl Database {
             )",
             [],
         )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recordings_project_created_at
+             ON recordings(project_id, created_at DESC)",
+            [],
+        )?;
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS transcripts (
@@ -222,20 +227,12 @@ impl Database {
             .is_ok();
 
         if fts_ready {
-            let _ = self.conn.execute("DELETE FROM transcript_fts", []);
-            let _ = self.conn.execute(
-                "INSERT INTO transcript_fts (recording_id, segment_id, text, start_time, end_time)
-                 SELECT
-                    t.recording_id,
-                    COALESCE(json_extract(seg.value, '$.id'), ''),
-                    COALESCE(json_extract(seg.value, '$.text'), ''),
-                    COALESCE(json_extract(seg.value, '$.startTime'), 0),
-                    COALESCE(json_extract(seg.value, '$.endTime'), 0)
-                 FROM transcripts t
-                 JOIN json_each(t.segments) AS seg
-                 WHERE json_valid(t.segments)",
-                [],
-            );
+            if let Err(error) = self.backfill_transcript_fts_if_needed() {
+                tracing::warn!(
+                    "Failed to run transcript_fts startup backfill check: {}",
+                    error
+                );
+            }
         } else {
             tracing::warn!(
                 "transcript_fts table unavailable; cross-recording search will be limited"
@@ -265,6 +262,50 @@ impl Database {
              VALUES ('default', 'Inbox', 'Default inbox for new recordings', ?1, ?1)",
             [Utc::now().to_rfc3339()],
         )?;
+
+        Ok(())
+    }
+
+    fn backfill_transcript_fts_if_needed(&self) -> Result<()> {
+        let fts_row_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM transcript_fts", [], |row| row.get(0))?;
+        if fts_row_count > 0 {
+            return Ok(());
+        }
+
+        let transcript_row_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM transcripts WHERE json_valid(segments)",
+            [],
+            |row| row.get(0),
+        )?;
+        if transcript_row_count == 0 {
+            return Ok(());
+        }
+
+        #[cfg(debug_assertions)]
+        let start = std::time::Instant::now();
+
+        let inserted_rows = self.conn.execute(
+            "INSERT INTO transcript_fts (recording_id, segment_id, text, start_time, end_time)
+             SELECT
+                t.recording_id,
+                COALESCE(json_extract(seg.value, '$.id'), ''),
+                COALESCE(json_extract(seg.value, '$.text'), ''),
+                COALESCE(json_extract(seg.value, '$.startTime'), 0),
+                COALESCE(json_extract(seg.value, '$.endTime'), 0)
+             FROM transcripts t
+             JOIN json_each(t.segments) AS seg
+             WHERE json_valid(t.segments)",
+            [],
+        )?;
+
+        #[cfg(debug_assertions)]
+        tracing::debug!(
+            "Backfilled transcript_fts with {} rows in {:?}",
+            inserted_rows,
+            start.elapsed()
+        );
 
         Ok(())
     }
@@ -888,6 +929,10 @@ impl Database {
             params![recording_id],
         )?;
         tx.execute(
+            "DELETE FROM transcript_fts WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        tx.execute(
             "DELETE FROM recordings WHERE id = ?1",
             params![recording_id],
         )?;
@@ -1143,6 +1188,8 @@ mod tests {
 
         assert!(db.get_recording("r1").unwrap().is_none());
         assert!(db.get_transcript("r1").unwrap().is_none());
+        let hits = db.search_transcripts("hello", 10, None).unwrap();
+        assert!(hits.is_empty());
     }
 
     #[test]
@@ -1256,6 +1303,76 @@ mod tests {
         let hits = db.search_transcripts("launch qa", 10, None).unwrap();
         assert!(!hits.is_empty());
         assert_eq!(hits[0].recording_id, "r1");
+    }
+
+    #[test]
+    fn test_fts_startup_backfill_runs_once_when_empty() {
+        let db = in_memory_db();
+        db.conn
+            .execute(
+                "INSERT INTO transcripts (
+                    id, recording_id, segments, full_text, language, confidence, model, model_id,
+                    requested_provider, actual_provider, fallback_used, fallback_reason, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    "t-startup",
+                    "r-startup",
+                    "[{\"id\":\"seg-1\",\"startTime\":0,\"endTime\":1.2,\"text\":\"startup backfill\"}]",
+                    "startup backfill",
+                    "en",
+                    0.9,
+                    "whisper-base",
+                    "base.en",
+                    "whisper",
+                    "whisper",
+                    0,
+                    Option::<String>::None,
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
+
+        let before: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM transcript_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(before, 0);
+
+        db.backfill_transcript_fts_if_needed().unwrap();
+
+        let first_backfill_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM transcript_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(first_backfill_count, 1);
+
+        db.backfill_transcript_fts_if_needed().unwrap();
+        let second_backfill_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM transcript_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(second_backfill_count, 1);
+    }
+
+    #[test]
+    fn test_fts_startup_backfill_skips_when_already_populated() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_transcript("r1")).unwrap();
+
+        let before: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM transcript_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(before, 1);
+
+        db.backfill_transcript_fts_if_needed().unwrap();
+        let after: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM transcript_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after, 1);
     }
 
     #[test]

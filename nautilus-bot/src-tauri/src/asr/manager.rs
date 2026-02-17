@@ -24,7 +24,6 @@ const DISTIL_REQUIRED_FILES: [&str; 8] = [
 /// Manages multiple ASR providers
 #[allow(dead_code)]
 pub struct AsrManager {
-    providers: RwLock<HashMap<AsrProviderType, Box<dyn AsrProvider>>>,
     default_provider: RwLock<AsrProviderType>,
     selected_model_id: RwLock<String>,
     allow_whisper_fallback: RwLock<bool>,
@@ -41,14 +40,7 @@ impl AsrManager {
 
         std::fs::create_dir_all(&models_dir).ok();
 
-        let mut providers: HashMap<AsrProviderType, Box<dyn AsrProvider>> = HashMap::new();
-        for provider_type in AsrProviderType::all() {
-            let provider = AsrProviderFactory::create(provider_type);
-            providers.insert(provider_type, provider);
-        }
-
         Self {
-            providers: RwLock::new(providers),
             default_provider: RwLock::new(AsrProviderType::Whisper),
             selected_model_id: RwLock::new("base.en".to_string()),
             allow_whisper_fallback: RwLock::new(false),
@@ -252,15 +244,22 @@ impl AsrManager {
     pub async fn get_all_providers_info(&self) -> Result<Vec<ProviderInfo>, String> {
         let mut infos = Vec::new();
         let selected_model = self.selected_model_id().await;
+        let last_errors = self.last_runtime_errors.read().await.clone();
 
         for provider_type in AsrProviderType::all() {
             let provider = Self::provider_with_model(provider_type, Some(selected_model.as_str()));
-            let diagnostics = self.get_runtime_diagnostics(provider_type).await;
+            let is_available = provider.is_available();
+            let diagnostics = runtime_diagnostics_for_provider(
+                provider_type,
+                selected_model.as_str(),
+                is_available,
+                last_errors.get(&provider_type).map(String::as_str),
+            );
             infos.push(ProviderInfo {
                 provider_type,
                 name: provider.name().to_string(),
                 description: provider.description().to_string(),
-                is_available: provider.is_available(),
+                is_available,
                 inference_enabled: Self::is_provider_transcription_enabled(provider_type),
                 model_info: provider.model_info(),
                 download_status: provider.download_status(),

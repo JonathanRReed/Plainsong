@@ -1708,57 +1708,83 @@ async fn save_settings(
     state: tauri::State<'_, AppState>,
     mut settings: settings::Settings,
 ) -> Result<(), String> {
-    let dictation_options = dictation_options_from_settings(&settings);
-    state
-        .asr_manager
-        .set_selected_model_id(settings.transcription.selected_model_id.clone())
-        .await;
-    state
-        .asr_manager
-        .set_allow_whisper_fallback(settings.transcription.allow_whisper_fallback)
-        .await;
+    #[cfg(debug_assertions)]
+    let started = std::time::Instant::now();
 
-    if let Some(provider_type) =
-        asr_provider_from_settings_value(&settings.transcription.default_provider)
-    {
-        let provider = state.asr_manager.get_provider(provider_type).await;
-        if provider.is_available()
-            && asr::AsrManager::is_provider_transcription_enabled(provider_type)
-        {
-            state.asr_manager.set_default_provider(provider_type).await;
+    let previous_settings = {
+        let settings_manager = state.settings_manager.lock().await;
+        settings_manager.settings().clone()
+    };
+    let previous_default_provider = previous_settings.transcription.default_provider.clone();
+    let previous_export_root = previous_settings.privacy.export_root.clone();
+
+    let result: Result<(), String> = async {
+        let dictation_options = dictation_options_from_settings(&settings);
+        state
+            .asr_manager
+            .set_selected_model_id(settings.transcription.selected_model_id.clone())
+            .await;
+        state
+            .asr_manager
+            .set_allow_whisper_fallback(settings.transcription.allow_whisper_fallback)
+            .await;
+
+        if settings.transcription.default_provider != previous_default_provider {
+            if let Some(provider_type) =
+                asr_provider_from_settings_value(&settings.transcription.default_provider)
+            {
+                let provider = state.asr_manager.get_provider(provider_type).await;
+                if provider.is_available()
+                    && asr::AsrManager::is_provider_transcription_enabled(provider_type)
+                {
+                    state.asr_manager.set_default_provider(provider_type).await;
+                }
+            }
         }
+
+        settings.privacy.llm_provider =
+            AnalysisProvider::from_settings_value(&settings.privacy.llm_provider)
+                .as_settings_value()
+                .to_string();
+        settings.transcription.dictation_profile = dictation_profile_to_settings_value(
+            &dictation_profile_from_settings_value(&settings.transcription.dictation_profile),
+        )
+        .to_string();
+        if settings
+            .transcription
+            .dictation_project_id
+            .trim()
+            .is_empty()
+        {
+            settings.transcription.dictation_project_id = "inbox".to_string();
+        }
+
+        if settings.privacy.export_root != previous_export_root {
+            if let Some(export_root) = settings.privacy.export_root.as_ref() {
+                let canonical_root = canonicalize_or_create_absolute_path(export_root, "exportRoot")?;
+                settings.privacy.export_root = Some(canonical_root);
+            }
+        }
+
+        let mut settings_manager = state.settings_manager.lock().await;
+        *settings_manager.settings_mut() = settings;
+        settings_manager.save().map_err(|e| e.to_string())?;
+
+        let mut active_dictation_options = state.dictation_start_options.lock().await;
+        *active_dictation_options = dictation_options;
+
+        Ok(())
     }
+    .await;
 
-    settings.privacy.llm_provider =
-        AnalysisProvider::from_settings_value(&settings.privacy.llm_provider)
-            .as_settings_value()
-            .to_string();
-    settings.transcription.dictation_profile = dictation_profile_to_settings_value(
-        &dictation_profile_from_settings_value(&settings.transcription.dictation_profile),
-    )
-    .to_string();
-    if settings
-        .transcription
-        .dictation_project_id
-        .trim()
-        .is_empty()
-    {
-        settings.transcription.dictation_project_id = "inbox".to_string();
-    }
+    #[cfg(debug_assertions)]
+    tracing::debug!(
+        "save_settings completed in {:?} (ok: {})",
+        started.elapsed(),
+        result.is_ok()
+    );
 
-    if let Some(export_root) = settings.privacy.export_root.as_ref() {
-        let canonical_root = canonicalize_or_create_absolute_path(export_root, "exportRoot")?;
-        settings.privacy.export_root = Some(canonical_root);
-    }
-
-    let mut settings_manager = state.settings_manager.lock().await;
-    *settings_manager.settings_mut() = settings;
-    settings_manager.save().map_err(|e| e.to_string())?;
-
-    let mut active_dictation_options = state.dictation_start_options.lock().await;
-    *active_dictation_options = dictation_options;
-
-    Ok(())
+    result
 }
 
 #[tauri::command]
@@ -2331,10 +2357,11 @@ async fn stop_dictation_session_for_session(
 
     let dictation_options = state.dictation_start_options.lock().await.clone();
     let previous_model_id = state.asr_manager.selected_model_id().await;
-    let dictation_model_id = dictation_profile_to_model_id(&dictation_options.profile);
+    let dictation_model_id =
+        resolve_dictation_model_id(&dictation_options.profile, &previous_model_id);
     state
         .asr_manager
-        .set_selected_model_id(dictation_model_id.to_string())
+        .set_selected_model_id(dictation_model_id.clone())
         .await;
 
     let result = match state.asr_manager.transcribe_bytes(&audio_data).await {
@@ -3639,6 +3666,9 @@ fn schedule_temp_file_cleanup(path: PathBuf, delay: Duration) {
 pub fn run() {
     tracing_subscriber::fmt::init();
 
+    #[cfg(debug_assertions)]
+    let db_init_started = std::time::Instant::now();
+
     let initial_db_key = secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
         .map_err(|e| e.to_string())
         .ok()
@@ -3652,6 +3682,9 @@ pub fn run() {
             db::Database::new()
         })
         .expect("Failed to initialize database");
+    #[cfg(debug_assertions)]
+    tracing::debug!("Database initialization completed in {:?}", db_init_started.elapsed());
+
     let settings_manager = settings::SettingsManager::new().expect("Failed to initialize settings");
     let initial_dictation_options = dictation_options_from_settings(settings_manager.settings());
     let asr_manager = Arc::new(asr::AsrManager::new());
@@ -3713,12 +3746,9 @@ pub fn run() {
                 if let Some(provider_type) =
                     asr_provider_from_settings_value(&configured_provider)
                 {
-                    let provider = state.asr_manager.get_provider(provider_type).await;
-                    if provider.is_available()
-                        && asr::AsrManager::is_provider_transcription_enabled(provider_type)
-                    {
+                    if asr::AsrManager::is_provider_transcription_enabled(provider_type) {
                         state.asr_manager.set_default_provider(provider_type).await;
-                    } else if !asr::AsrManager::is_provider_transcription_enabled(provider_type) {
+                    } else {
                         let mut settings_manager = state.settings_manager.lock().await;
                         settings_manager.settings_mut().transcription.default_provider =
                             asr_provider_to_settings_value(asr::AsrProviderType::Whisper)
@@ -4191,6 +4221,58 @@ fn dictation_profile_to_model_id(profile: &models::DictationProfile) -> &'static
     match profile {
         models::DictationProfile::Speed => "large-v3-turbo",
         models::DictationProfile::Accuracy => "large-v3",
+    }
+}
+
+fn resolve_dictation_model_id(profile: &models::DictationProfile, fallback_model_id: &str) -> String {
+    let preferred = dictation_profile_to_model_id(profile);
+    if whisper_model_exists(preferred) {
+        return preferred.to_string();
+    }
+
+    if whisper_model_exists(fallback_model_id) {
+        let normalized_fallback = normalize_whisper_model_id(fallback_model_id);
+        tracing::warn!(
+            "Dictation profile model '{}' is unavailable; using selected model '{}'",
+            preferred,
+            normalized_fallback
+        );
+        return normalized_fallback.to_string();
+    }
+
+    if whisper_model_exists("base.en") {
+        tracing::warn!(
+            "Dictation profile model '{}' and selected model '{}' are unavailable; falling back to base.en",
+            preferred,
+            fallback_model_id
+        );
+        return "base.en".to_string();
+    }
+
+    preferred.to_string()
+}
+
+fn whisper_model_exists(model_id: &str) -> bool {
+    let root = match nautilus_data_root() {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+    root.join("models")
+        .join("whisper")
+        .join(format!("ggml-{}.bin", normalize_whisper_model_id(model_id)))
+        .exists()
+}
+
+fn normalize_whisper_model_id(model_id: &str) -> &'static str {
+    match model_id {
+        "large-v3-turbo" => "large-v3-turbo",
+        "large-v3" => "large-v3",
+        "medium" => "medium",
+        "medium.en" => "medium.en",
+        "small" => "small",
+        "small.en" => "small.en",
+        "base" => "base",
+        _ => "base.en",
     }
 }
 

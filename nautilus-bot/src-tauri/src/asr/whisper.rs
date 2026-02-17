@@ -3,14 +3,22 @@ use super::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+
+fn whisper_context_cache() -> &'static Mutex<HashMap<String, Arc<whisper_rs::WhisperContext>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<whisper_rs::WhisperContext>>>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 pub struct WhisperProvider {
     model_path: PathBuf,
     #[allow(dead_code)]
     models_dir: PathBuf,
     model_id: String,
-    ctx: Option<whisper_rs::WhisperContext>,
+    ctx: Option<Arc<whisper_rs::WhisperContext>>,
 }
 
 impl WhisperProvider {
@@ -31,8 +39,14 @@ impl WhisperProvider {
             ctx: None,
         };
 
-        // Try to load the model if it exists
+        // Try to load the model if it exists.
         if model_path.exists() {
+            if let Ok(cache) = whisper_context_cache().lock() {
+                if let Some(cached) = cache.get(&provider.model_id).cloned() {
+                    provider.ctx = Some(cached);
+                    return provider;
+                }
+            }
             if let Err(e) = provider.load_model() {
                 tracing::error!("Failed to load Whisper model: {}", e);
             }
@@ -42,14 +56,24 @@ impl WhisperProvider {
     }
 
     fn load_model(&mut self) -> Result<()> {
+        if let Ok(cache) = whisper_context_cache().lock() {
+            if let Some(cached) = cache.get(&self.model_id).cloned() {
+                self.ctx = Some(cached);
+                return Ok(());
+            }
+        }
+
         tracing::info!("Loading Whisper model from {:?}", self.model_path);
 
-        let ctx = whisper_rs::WhisperContext::new_with_params(
+        let ctx = Arc::new(whisper_rs::WhisperContext::new_with_params(
             &self.model_path.to_string_lossy(),
             whisper_rs::WhisperContextParameters::default(),
         )
-        .context("Failed to load Whisper model")?;
+        .context("Failed to load Whisper model")?);
 
+        if let Ok(mut cache) = whisper_context_cache().lock() {
+            cache.insert(self.model_id.clone(), Arc::clone(&ctx));
+        }
         self.ctx = Some(ctx);
         tracing::info!("Whisper model loaded successfully");
 

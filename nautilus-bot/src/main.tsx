@@ -27,6 +27,11 @@ if (overlayMode) {
   document.body.style.background = "transparent";
 }
 
+if (import.meta.env.DEV && typeof performance !== "undefined") {
+  performance.mark("app-bootstrap-start");
+  console.debug("[perf] app-bootstrap-start");
+}
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <App />

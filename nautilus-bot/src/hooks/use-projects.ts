@@ -3,25 +3,27 @@ import {
   getProjects,
   createProject as tauriCreateProject,
 } from "@/lib/tauri";
+import { useDataCache } from "@/hooks/data-cache-context";
 import type { Project } from "@/types";
 
 export function useProjects() {
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const cache = useDataCache();
+  const [projects, setProjects] = useState<Project[]>(() => cache.peekProjects() ?? []);
+  const [isLoading, setIsLoading] = useState(() => !cache.peekProjects());
   const [error, setError] = useState<string | null>(null);
 
-  const fetchProjects = useCallback(async () => {
+  const fetchProjects = useCallback(async (forceRefresh = false) => {
     setIsLoading(true);
     setError(null);
     try {
-      const data = await getProjects();
+      const data = await cache.getProjects(() => getProjects(), forceRefresh);
       setProjects(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch projects");
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [cache]);
 
   const createProject = useCallback(
     async (project: {
@@ -31,25 +33,29 @@ export function useProjects() {
     }) => {
       try {
         const newProject = await tauriCreateProject(project);
-        setProjects((prev) => [...prev, newProject]);
+        setProjects((prev) => {
+          const next = [...prev, newProject];
+          cache.setProjects(next);
+          return next;
+        });
         return newProject;
       } catch (err) {
         console.error("Failed to create project:", err);
         throw err;
       }
     },
-    []
+    [cache]
   );
 
   useEffect(() => {
-    fetchProjects();
+    void fetchProjects();
   }, [fetchProjects]);
 
   return {
     projects,
     isLoading,
     error,
-    refetch: fetchProjects,
+    refetch: () => fetchProjects(true),
     createProject,
   };
 }
