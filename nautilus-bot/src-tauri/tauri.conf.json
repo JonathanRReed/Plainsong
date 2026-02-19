@@ -37,13 +37,26 @@
   "productName": "Nautilus",
   "version": "1.0.0",
   "identifier": "com.nautilus.app",
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://updates.nautilusbot.com/updates/{{target}}/{{arch}}/{{current_version}}",
+        "https://updates.nautilusbot.com/updates/{{target}}/{{arch}}/{{current_version}}?channel={{channel}}"
+      ],
+      "dialog": false,
+      "pubkey": "TODO_REPLACE_WITH_OUTPUT_OF_tauri_signer_generate"
+    }
+  },
   "app": {
     "macOSPrivateApi": true,
     "security": {
-      "capabilities": ["main-capability"],
+      "capabilities": [
+        "main-capability"
+      ],
       "csp": {
         "default-src": "'self'",
-        "connect-src": "ipc: http://ipc.localhost",
+        "connect-src": "ipc: http://ipc.localhost https://nautilusbot.jonathanrreed.com",
         "img-src": "'self' asset: http://asset.localhost blob: data:",
         "style-src": "'unsafe-inline' 'self'",
         "font-src": "https://fonts.gstatic.com"

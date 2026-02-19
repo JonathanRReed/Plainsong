@@ -134,7 +134,7 @@ export function RecordingsView() {
       const available = await isDiarizationModelAvailable();
       if (!available) {
         setDiarizationError(
-          "Speaker identification requires a model that is not yet available. Use the Analysis tab above for AI-powered meeting summaries and action items."
+          "Speaker diarization is not yet available as a local model. Use the Analysis tab for AI-powered meeting summaries, action items, and speaker attribution."
         );
         setIsRunningDiarization(false);
         return;
@@ -146,15 +146,19 @@ export function RecordingsView() {
         `Speaker identification complete (${result.speakers.length} speakers found).`
       );
     } catch (error) {
-      setDiarizationError(
+      const msg =
         error instanceof Error
           ? error.message
-          : "Speaker identification failed. Use the Analysis tab for AI-powered features."
-      );
+          : typeof error === "string"
+            ? error
+            : "Speaker identification failed. Use the Analysis tab for AI-powered features.";
+      setDiarizationError(msg);
     } finally {
       setIsRunningDiarization(false);
     }
   };
+
+
 
   const handlePlayAudio = async (recording: Recording) => {
     if (recording.audioPath) {

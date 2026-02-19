@@ -8,41 +8,41 @@ import { useState } from "react";
 import { X, Clock, ExternalLink, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-const BUY_BASIC_URL = "https://nautilusbot.lemonsqueezy.com/buy/basic";
-const BUY_FRIENDS_URL = "https://nautilusbot.lemonsqueezy.com/buy/friends-club";
+const BUY_PRO_URL = "https://nautilusbot.lemonsqueezy.com/buy/pro"; // TODO: replace with your real LS Pro checkout URL
+const BUY_FRIENDS_URL = "https://nautilusbot.lemonsqueezy.com/buy/friends-club"; // TODO: replace with your real LS Friends Club checkout URL
 const DISMISS_KEY = "nautilus_nag_dismissed_at";
 const TRIAL_EXPIRED_KEY = "nautilus_trial_expired_at";
 
 function getDaysSinceExpiry(): number {
-  const raw = localStorage.getItem(TRIAL_EXPIRED_KEY);
-  if (!raw) {
-    localStorage.setItem(TRIAL_EXPIRED_KEY, String(Date.now()));
-    return 0;
-  }
-  return Math.floor((Date.now() - Number(raw)) / 86_400_000);
+    const raw = localStorage.getItem(TRIAL_EXPIRED_KEY);
+    if (!raw) {
+        localStorage.setItem(TRIAL_EXPIRED_KEY, String(Date.now()));
+        return 0;
+    }
+    return Math.floor((Date.now() - Number(raw)) / 86_400_000);
 }
 
 function getNagIntervalHours(daysExpired: number): number {
-  if (daysExpired >= 14) return 4;
-  if (daysExpired >= 7) return 12;
-  return 24;
+    if (daysExpired >= 14) return 4;
+    if (daysExpired >= 7) return 12;
+    return 24;
 }
 
 type Props = {
-  onActivate(): void;
+    onActivate(): void;
 };
 
 export function shouldShowNag(): boolean {
-  const raw = localStorage.getItem(DISMISS_KEY);
-  const daysExpired = getDaysSinceExpiry();
-  const intervalHours = getNagIntervalHours(daysExpired);
+    const raw = localStorage.getItem(DISMISS_KEY);
+    const daysExpired = getDaysSinceExpiry();
+    const intervalHours = getNagIntervalHours(daysExpired);
 
-  if (!raw) return true;
-  const dismissedAt = Number(raw);
-  if (Number.isNaN(dismissedAt)) return true;
+    if (!raw) return true;
+    const dismissedAt = Number(raw);
+    if (Number.isNaN(dismissedAt)) return true;
 
-  const hoursElapsed = (Date.now() - dismissedAt) / 3_600_000;
-  return hoursElapsed >= intervalHours;
+    const hoursElapsed = (Date.now() - dismissedAt) / 3_600_000;
+    return hoursElapsed >= intervalHours;
 }
 
 export function NagModal({ onActivate }: Props) {
@@ -98,14 +98,14 @@ export function NagModal({ onActivate }: Props) {
 
                         <div className="grid grid-cols-2 gap-2">
                             <Button
-                                id="nag-buy-basic-btn"
+                                id="nag-buy-pro-btn"
                                 variant="outline"
                                 size="sm"
                                 className="text-xs"
-                                onClick={() => { dismiss(); window.open(BUY_BASIC_URL, "_blank", "noopener,noreferrer"); }}
+                                onClick={() => { dismiss(); window.open(BUY_PRO_URL, "_blank", "noopener,noreferrer"); }}
                             >
                                 <ExternalLink className="mr-1 h-3.5 w-3.5" />
-                                Buy Basic
+                                Buy Pro
                             </Button>
                             <Button
                                 id="nag-buy-friends-btn"

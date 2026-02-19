@@ -31,7 +31,7 @@ const GRACE_PERIOD_DAYS: i64 = 7;
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
     None,
-    Basic,
+    Pro,
     FriendsClub,
 }
 
@@ -84,6 +84,8 @@ pub struct LicenseInfo {
     pub trial_days_remaining: i64,
     /// Whether to show a nag screen.
     pub nag_required: bool,
+    /// Whether the trial is currently active (within 30 days of first run).
+    pub trial_active: bool,
 }
 
 // ── Lemon Squeezy API response shapes ────────────────────────────────────────
@@ -144,7 +146,7 @@ fn state_path() -> Result<PathBuf> {
     Ok(dir.join(STATE_FILENAME))
 }
 
-fn load_state() -> LicenseState {
+pub(crate) fn load_state() -> LicenseState {
     let path = match state_path() {
         Ok(p) => p,
         Err(_) => return LicenseState::default(),
@@ -189,6 +191,7 @@ fn persist_state(state: &LicenseState) -> Result<()> {
 fn info_from_state(state: &LicenseState) -> LicenseInfo {
     let valid = is_valid(state);
     let (trial_days_remaining, nag_required) = trial_status(state, valid);
+    let trial_active = trial_days_remaining > 0;
     LicenseInfo {
         key: state.key.clone(),
         instance_id: state.instance_id.clone(),
@@ -200,6 +203,7 @@ fn info_from_state(state: &LicenseState) -> LicenseInfo {
         last_validated_at: state.last_validated_at.clone(),
         trial_days_remaining,
         nag_required,
+        trial_active,
     }
 }
 
@@ -245,9 +249,19 @@ fn tier_from_variant(variant_name: &str) -> Tier {
     if lower.contains("friend") || lower.contains("club") {
         Tier::FriendsClub
     } else if !variant_name.is_empty() {
-        Tier::Basic
+        Tier::Pro
     } else {
         Tier::None
+    }
+}
+
+/// Returns the activation limit for a given tier.
+/// Pro tier allows 5 activations, Friends Club allows 10.
+pub fn get_tier_activation_limit(tier: &Tier) -> u32 {
+    match tier {
+        Tier::Pro => 5,
+        Tier::FriendsClub => 10,
+        Tier::None => 0,
     }
 }
 
@@ -313,7 +327,9 @@ pub async fn activate_license(key: &str) -> Result<LicenseInfo, String> {
     if !parsed.activated {
         let msg = parsed.error.unwrap_or_else(|| "Activation failed.".to_string());
         return Err(if status == 422 && msg.contains("activation limit") {
-            "This key has reached its 5-device activation limit. Deactivate another computer first, or buy a new license.".to_string()
+            let tier = tier_from_variant(&parsed.meta.variant_name);
+            let limit = get_tier_activation_limit(&tier);
+            format!("This key has reached its {}-device activation limit. Deactivate another computer first, or buy a new license.", limit)
         } else {
             msg
         });
@@ -328,7 +344,12 @@ pub async fn activate_license(key: &str) -> Result<LicenseInfo, String> {
     state.instance_id = instance_id;
     state.tier = tier_from_variant(&parsed.meta.variant_name);
     state.ls_status = parsed.license_key.status;
-    state.activations_limit = if parsed.license_key.activation_limit == 0 { 5 } else { parsed.license_key.activation_limit };
+    // Use tier-specific activation limit if LS doesn't provide one
+    state.activations_limit = if parsed.license_key.activation_limit == 0 { 
+        get_tier_activation_limit(&state.tier)
+    } else { 
+        parsed.license_key.activation_limit 
+    };
     state.activations_usage = parsed.license_key.activation_usage;
     state.last_validated_at = chrono::Utc::now().to_rfc3339();
 

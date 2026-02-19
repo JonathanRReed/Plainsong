@@ -4,8 +4,8 @@ import { activateLicense } from "@/lib/tauri";
 import type { LicenseInfo } from "@/lib/tauri";
 
 // ── Update these with your real Lemon Squeezy checkout URLs ──────────────────
-const BUY_BASIC_URL = "https://nautilusbot.lemonsqueezy.com/buy/basic";
-const BUY_FRIENDS_URL = "https://nautilusbot.lemonsqueezy.com/buy/friends-club";
+const BUY_PRO_URL = "https://nautilusbot.lemonsqueezy.com/buy/pro"; // TODO: replace with your real LS Pro checkout URL
+const BUY_FRIENDS_URL = "https://nautilusbot.lemonsqueezy.com/buy/friends-club"; // TODO: replace with your real LS Friends Club checkout URL
 
 type Props = {
     onActivated(info: LicenseInfo): void;
@@ -108,11 +108,11 @@ export function ActivationModal({ onActivated, onCancel, overlay = true }: Props
                     <button
                         id="buy-basic-btn"
                         type="button"
-                        onClick={() => window.open(BUY_BASIC_URL, "_blank", "noopener,noreferrer")}
+                        onClick={() => window.open(BUY_PRO_URL, "_blank", "noopener,noreferrer")}
                         className="flex items-center justify-center gap-1.5 rounded-lg border border-border px-3 py-2.5 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
                     >
                         <ExternalLink className="h-3.5 w-3.5" />
-                        Buy Basic
+                        Buy Pro
                     </button>
                     <button
                         id="buy-friends-btn"

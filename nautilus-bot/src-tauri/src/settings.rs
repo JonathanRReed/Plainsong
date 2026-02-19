@@ -27,6 +27,8 @@ pub struct Settings {
     pub privacy: PrivacySettings,
     /// Keyboard shortcuts
     pub shortcuts: KeyboardShortcuts,
+    /// Update preferences
+    pub updates: UpdateSettings,
     /// Selected export template
     pub default_template: String,
     /// Theme
@@ -42,6 +44,7 @@ impl Default for Settings {
             export: ExportSettings::default(),
             privacy: PrivacySettings::default(),
             shortcuts: KeyboardShortcuts::default(),
+            updates: UpdateSettings::default(),
             default_template: "meeting".to_string(),
             theme: "system".to_string(),
         }
@@ -291,6 +294,69 @@ fn default_dictation_alternate_shortcuts() -> Vec<String> {
     #[cfg(not(target_os = "macos"))]
     {
         Vec::new()
+    }
+}
+
+/// Update channel (stable or beta)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    /// Stable releases for all entitled users
+    #[default]
+    Stable,
+    /// Beta releases for Friends Club tier only
+    Beta,
+}
+
+impl std::fmt::Display for UpdateChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateChannel::Stable => write!(f, "stable"),
+            UpdateChannel::Beta => write!(f, "beta"),
+        }
+    }
+}
+
+impl From<String> for UpdateChannel {
+    fn from(s: String) -> Self {
+        match s.to_lowercase().as_str() {
+            "beta" => UpdateChannel::Beta,
+            _ => UpdateChannel::Stable,
+        }
+    }
+}
+
+impl From<crate::update::UpdateChannel> for UpdateChannel {
+    fn from(channel: crate::update::UpdateChannel) -> Self {
+        match channel {
+            crate::update::UpdateChannel::Beta => UpdateChannel::Beta,
+            crate::update::UpdateChannel::Stable => UpdateChannel::Stable,
+        }
+    }
+}
+
+/// Update settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UpdateSettings {
+    /// Update channel (stable or beta)
+    pub channel: UpdateChannel,
+    /// Automatically check for updates on startup
+    pub auto_check: bool,
+    /// Timestamp of last update check (ISO 8601)
+    pub last_check_at: Option<String>,
+    /// Current app version (for detecting updates)
+    pub last_seen_version: Option<String>,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            channel: UpdateChannel::Stable,
+            auto_check: true,
+            last_check_at: None,
+            last_seen_version: None,
+        }
     }
 }
 

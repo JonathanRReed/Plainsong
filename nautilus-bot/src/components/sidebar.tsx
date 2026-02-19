@@ -53,7 +53,7 @@ function LicenseBadge({
 
   if (license.valid) {
     const isFriends = license.tier === "friends_club";
-    const label = isFriends ? "Friends Club" : "Licensed";
+    const label = isFriends ? "Friends Club" : "Pro";
     const icon = isFriends ? (
       <Star className="h-3.5 w-3.5 shrink-0 text-amber-500" />
     ) : (

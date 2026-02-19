@@ -16,6 +16,7 @@ mod settings;
 mod streaming;
 mod text;
 mod transcription;
+pub mod update;
 
 use anyhow::Result;
 use rand::RngCore;
@@ -485,7 +486,7 @@ fn is_diarization_model_available() -> bool {
 }
 
 #[tauri::command]
-async fn download_diarization_model(app: tauri::AppHandle) -> Result<(), String> {
+async fn download_diarization_model(_app: tauri::AppHandle) -> Result<(), String> {
     use crate::download::DownloadManager;
     
     let manager = DownloadManager::new().map_err(|e| e.to_string())?;
@@ -1353,17 +1354,30 @@ async fn list_ollama_cloud_models() -> Result<Vec<String>, String> {
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
     
+    // Log secret status (don't log the key itself!)
     if secret.is_empty() {
-        return Ok(vec![
-            "llama3.2".to_string(),
-            "llama3.3".to_string(),
-            "mistral".to_string(),
-            "codellama".to_string(),
-        ]);
+        tracing::warn!("list_ollama_cloud_models called but secret is empty");
+        println!("Ollama Cloud: Secret is empty");
+        return Ok(vec![]);
+    } else {
+        println!("Ollama Cloud: Secret found (len: {})", secret.len());
     }
     
     let client = llm::OllamaCloudClient::with_api_key(Some(secret));
-    client.list_models().await.map_err(|e| e.to_string())
+    
+    // Log intent
+    tracing::info!("Fetching Ollama Cloud models...");
+    
+    match client.list_models().await {
+        Ok(models) => {
+            tracing::info!("Ollama Cloud returned {} models", models.len());
+            Ok(models)
+        }
+        Err(e) => {
+            tracing::warn!("Ollama Cloud list_models failed: {}", e);
+            Err(e.to_string())
+        }
+    }
 }
 
 #[tauri::command]
@@ -1910,6 +1924,7 @@ async fn has_provider_secret(provider: String) -> Result<bool, String> {
 
 #[tauri::command]
 async fn set_provider_secret(provider: String, secret: String) -> Result<(), String> {
+    eprintln!("!!! BACKEND: set_provider_secret for '{}' (len: {}) !!!", provider, secret.len());
     let normalized = normalize_provider_secret_name(&provider)?;
     secrets::set_provider_secret(normalized, &secret).map_err(|e| e.to_string())
 }
@@ -1938,6 +1953,50 @@ async fn activate_license(key: String) -> Result<license::LicenseInfo, String> {
 #[tauri::command]
 async fn deactivate_license() -> Result<(), String> {
     license::deactivate_license().await
+}
+
+// ── Update Commands ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn check_for_updates(app: AppHandle) -> Result<Option<update::UpdateInfo>, String> {
+    let update_service = update::UpdateService::new(app);
+    update_service.check_for_updates().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let update_service = update::UpdateService::new(app);
+    update_service.install_update().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_update_status(app: AppHandle) -> Result<update::UpdateStatus, String> {
+    let update_service = update::UpdateService::new(app);
+    Ok(update_service.get_status().await)
+}
+
+#[tauri::command]
+async fn get_update_channel(app: AppHandle) -> Result<update::UpdateChannel, String> {
+    let update_service = update::UpdateService::new(app);
+    Ok(update_service.get_channel().await)
+}
+
+#[tauri::command]
+async fn set_update_channel(app: AppHandle, channel: update::UpdateChannel) -> Result<(), String> {
+    let update_service = update::UpdateService::new(app);
+    update_service.set_channel(channel).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn can_use_beta_channel(app: AppHandle) -> Result<bool, String> {
+    let update_service = update::UpdateService::new(app);
+    Ok(update_service.can_use_beta().await)
+}
+
+#[tauri::command]
+async fn get_update_lock_reason(app: AppHandle) -> Result<Option<String>, String> {
+    let update_service = update::UpdateService::new(app);
+    Ok(update_service.get_lock_reason().await)
 }
 
 #[tauri::command]
@@ -3136,10 +3195,11 @@ fn normalize_provider_secret_name(provider: &str) -> Result<&'static str, String
         "openai" => Ok("openai"),
         "anthropic" => Ok("anthropic"),
         "gemini" => Ok("gemini"),
+        "deepseek" => Ok("deepseek"),
         "ollama-cloud" | "ollama_cloud" | "ollamacloud" => Ok("ollama-cloud"),
         "ollama" => Err("Local Ollama does not require a stored API key".to_string()),
         _ => Err(format!(
-            "Unsupported provider '{}'. Expected one of: openai, anthropic, gemini, ollama-cloud",
+            "Unsupported provider '{}'. Expected one of: openai, anthropic, gemini, deepseek, ollama-cloud",
             provider
         )),
     }
@@ -4152,6 +4212,13 @@ pub fn run() {
             activate_license,
             validate_license,
             deactivate_license,
+            check_for_updates,
+            install_update,
+            get_update_status,
+            get_update_channel,
+            set_update_channel,
+            can_use_beta_channel,
+            get_update_lock_reason,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -45,7 +45,7 @@ import {
 } from "@/lib/tauri";
 import type { BackupConfig, BackupInfo, CloudSetupReport, SecurityStatus, LicenseInfo, DownloadedModel } from "@/lib/tauri";
 import type { PermissionDiagnostics } from "@/lib/tauri";
-import { validateLicense, deactivateLicense } from "@/lib/tauri";
+import { validateLicense, deactivateLicense, isDiarizationModelAvailable, downloadDiarizationModel } from "@/lib/tauri";
 import { isFeatureAllowed } from "@/hooks/use-license-features";
 import type { Settings } from "@/types/settings";
 import {
@@ -65,9 +65,11 @@ import {
   Loader2,
   XCircle,
   Download,
+  RefreshCw,
 } from "lucide-react";
+import { UpdateStatusWidget, BetaChannelToggle } from "@/components/update";
 
-type TabId = "asr" | "general" | "security" | "storage" | "ai" | "license";
+type TabId = "asr" | "general" | "security" | "storage" | "ai" | "license" | "updates";
 type QueuedSettingsSave = {
   version: number;
   settings: Settings;
@@ -114,6 +116,8 @@ export function SettingsView() {
   const [ollamaAvailable, setOllamaAvailable] = useState<boolean | null>(null);
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [ollamaCloudModels, setOllamaCloudModels] = useState<string[]>([]);
+  const [diarizationAvailable, setDiarizationAvailable] = useState(false);
+  const [diarizationDownloading, setDiarizationDownloading] = useState(false);
   const [openaiModels, setOpenaiModels] = useState<string[]>([]);
   const [anthropicModels, setAnthropicModels] = useState<string[]>([]);
   const [geminiModels, setGeminiModels] = useState<string[]>([]);
@@ -249,7 +253,7 @@ export function SettingsView() {
       void flushPendingSettingsSave(true);
     };
   }, [flushPendingSettingsSave]);
-  
+
   const handleDownloadModel = useCallback(async (modelName: string) => {
     setDownloadingModel(modelName);
     try {
@@ -271,10 +275,10 @@ export function SettingsView() {
           setHasApiKey(value);
         }
       })
-      .catch(() => {
-        if (mounted) {
-          setHasApiKey(false);
-        }
+      .catch((err) => {
+        // Log but don't reset — a keychain error in dev/unsigned builds should not
+        // wipe the "Stored securely" indicator from a successful save earlier.
+        console.warn("hasProviderSecret check failed:", err);
       });
     return () => {
       mounted = false;
@@ -346,14 +350,20 @@ export function SettingsView() {
   useEffect(() => {
     if (activeTab !== "license" || licenseInfo !== null) return;
     void validateLicense().then(setLicenseInfo).catch(() => {
-      setLicenseInfo({ key: "", instanceId: "", tier: "none", valid: false, lsStatus: "", activationsLimit: 5, activationsUsage: 0, lastValidatedAt: "", trialDaysRemaining: 30, nagRequired: false });
+      setLicenseInfo({ key: "", instanceId: "", tier: "none", valid: false, lsStatus: "", activationsLimit: 5, activationsUsage: 0, lastValidatedAt: "", trialDaysRemaining: 30, nagRequired: false, trialActive: true });
     });
   }, [activeTab, licenseInfo]);
 
   useEffect(() => {
     if (!settings) return;
     const llmProvider = settings.privacy.llmProvider;
-    if (llmProvider === "openai" || llmProvider === "anthropic" || llmProvider === "gemini" || llmProvider === "ollama-cloud") {
+    if (
+      llmProvider === "openai" ||
+      llmProvider === "anthropic" ||
+      llmProvider === "gemini" ||
+      llmProvider === "deepseek" ||
+      llmProvider === "ollama-cloud"
+    ) {
       setProvider(llmProvider);
     }
   }, [settings?.privacy.llmProvider]);
@@ -406,12 +416,20 @@ export function SettingsView() {
   }, []);
 
   useEffect(() => {
+    let mounted = true;
+    isDiarizationModelAvailable().then((avail) => {
+      if (mounted) setDiarizationAvailable(avail);
+    });
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
     if (activeTab !== "ai") {
       return;
     }
     let mounted = true;
     setModelsLoading(true);
-    
+
     const loadModels = async () => {
       try {
         const [ollamaAvail, ollamaList, ollamaCloudList, openaiList, anthropicList, geminiList, deepseekList] = await Promise.all([
@@ -423,7 +441,7 @@ export function SettingsView() {
           listGeminiModels().catch((e) => { console.error("Gemini error:", e); return []; }),
           listDeepSeekModels().catch((e) => { console.error("DeepSeek error:", e); return []; }),
         ]);
-        
+
         if (mounted) {
           setOllamaAvailable(ollamaAvail);
           setOllamaModels(ollamaList);
@@ -448,7 +466,7 @@ export function SettingsView() {
         }
       }
     };
-    
+
     void loadModels();
     return () => {
       mounted = false;
@@ -505,6 +523,7 @@ export function SettingsView() {
       { id: "security" as TabId, label: "Security", icon: Shield },
       { id: "storage" as TabId, label: "Storage", icon: Database },
       { id: "ai" as TabId, label: "AI & Keys", icon: Key },
+      { id: "updates" as TabId, label: "Updates", icon: RefreshCw },
       { id: "license" as TabId, label: "License", icon: Shield },
     ],
     []
@@ -706,15 +725,52 @@ export function SettingsView() {
                       Run diarization and label speakers after transcription
                     </p>
                   </div>
-                  <Switch
-                    checked={settings.transcription.enableDiarization}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: { ...settings.transcription, enableDiarization: checked },
-                      })
-                    }
-                  />
+                  {diarizationAvailable ? (
+                    <Switch
+                      checked={settings.transcription.enableDiarization}
+                      onCheckedChange={(checked) =>
+                        void updateSettings({
+                          ...settings,
+                          transcription: { ...settings.transcription, enableDiarization: checked },
+                        })
+                      }
+                    />
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={diarizationDownloading}
+                      onClick={async () => {
+                        setDiarizationDownloading(true);
+                        try {
+                          await downloadDiarizationModel();
+                          setDiarizationAvailable(true);
+                          // Auto-enable once downloaded
+                          updateSettings({
+                            ...settings,
+                            transcription: { ...settings.transcription, enableDiarization: true },
+                          });
+                        } catch (e) {
+                          const msg = e instanceof Error ? e.message : String(e); // Capture full error
+                          setError(`Download failed: ${msg}`);
+                        } finally {
+                          setDiarizationDownloading(false);
+                        }
+                      }}
+                    >
+                      {diarizationDownloading ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Downloading Model...
+                        </>
+                      ) : (
+                        <>
+                          <Download className="mr-2 h-4 w-4" />
+                          Download Model (~25MB)
+                        </>
+                      )}
+                    </Button>
+                  )}
                 </div>
 
                 <div className="space-y-2">
@@ -770,11 +826,11 @@ export function SettingsView() {
                       { id: "medium.en", name: "Whisper Medium EN", desc: "Best English", size: "1.5 GB" },
                     ].map((model) => {
                       const isDownloaded = downloadedModels.some(
-                        (d) => d.name.toLowerCase().includes(model.id.toLowerCase()) || 
-                               d.name.toLowerCase().includes(model.id.replace(".en", "-en").toLowerCase())
+                        (d) => d.name.toLowerCase().includes(model.id.toLowerCase()) ||
+                          d.name.toLowerCase().includes(model.id.replace(".en", "-en").toLowerCase())
                       );
                       const isDownloading = downloadingModel === model.id;
-                      
+
                       return (
                         <div key={model.id} className="flex items-center justify-between p-2 rounded border bg-muted/30">
                           <div className="flex-1 min-w-0">
@@ -1641,11 +1697,11 @@ export function SettingsView() {
                     Analysis model
                     {modelsLoading && <Loader2 className="h-3 w-3 animate-spin" />}
                   </Label>
-                  
+
                   {settings.privacy.llmProvider === "ollama" ? (
                     ollamaModels.length > 0 ? (
                       <select
-                        value={settings.privacy.llmModelId ?? ollamaModels[0] ?? "llama3.2"}
+                        value={settings.privacy.llmModelId ?? ollamaModels[0] ?? ""}
                         onChange={(e) =>
                           void updateSettings({
                             ...settings,
@@ -1664,163 +1720,129 @@ export function SettingsView() {
                       </div>
                     )
                   ) : settings.privacy.llmProvider === "openai" ? (
-                    <select
-                      value={settings.privacy.llmModelId ?? "gpt-4o-mini"}
-                      onChange={(e) =>
-                        void updateSettings({
-                          ...settings,
-                          privacy: { ...settings.privacy, llmModelId: e.target.value || null },
-                        })
-                      }
-                      className="w-full p-2 border rounded-md bg-background"
-                    >
-                      {openaiModels.length > 0 ? (
-                        openaiModels
+                    openaiModels.length > 0 ? (
+                      <select
+                        value={settings.privacy.llmModelId ?? openaiModels[0]}
+                        onChange={(e) =>
+                          void updateSettings({
+                            ...settings,
+                            privacy: { ...settings.privacy, llmModelId: e.target.value || null },
+                          })
+                        }
+                        className="w-full p-2 border rounded-md bg-background"
+                      >
+                        {openaiModels
                           .filter(m => m.includes("gpt") || m.includes("o1") || m.includes("o3") || m.includes("o4"))
                           .sort()
                           .map((model) => (
                             <option key={model} value={model}>{model}</option>
-                          ))
-                      ) : (
-                        <>
-                          <optgroup label="Latest (Recommended)">
-                            <option value="gpt-4.1">GPT-4.1 — Latest flagship</option>
-                            <option value="gpt-4.1-mini">GPT-4.1 Mini — Fast & cheap</option>
-                            <option value="o3">o3 — Advanced reasoning</option>
-                            <option value="o4-mini">o4-mini — Reasoning, affordable</option>
-                          </optgroup>
-                          <optgroup label="GPT-4 Series">
-                            <option value="gpt-4o">GPT-4o — Multimodal</option>
-                            <option value="gpt-4o-mini">GPT-4o Mini — Fast (Default)</option>
-                            <option value="gpt-4-turbo">GPT-4 Turbo — Legacy</option>
-                          </optgroup>
-                        </>
-                      )}
-                    </select>
+                          ))}
+                      </select>
+                    ) : (
+                      <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
+                        <p className="text-amber-700 dark:text-amber-400">Enter your OpenAI API key above to fetch available models.</p>
+                      </div>
+                    )
                   ) : settings.privacy.llmProvider === "anthropic" ? (
-                    <select
-                      value={settings.privacy.llmModelId ?? "claude-sonnet-4-20250514"}
-                      onChange={(e) =>
-                        void updateSettings({
-                          ...settings,
-                          privacy: { ...settings.privacy, llmModelId: e.target.value || null },
-                        })
-                      }
-                      className="w-full p-2 border rounded-md bg-background"
-                    >
-                      {anthropicModels.length > 0 ? (
-                        anthropicModels.map((model) => (
+                    anthropicModels.length > 0 ? (
+                      <select
+                        value={settings.privacy.llmModelId ?? anthropicModels[0]}
+                        onChange={(e) =>
+                          void updateSettings({
+                            ...settings,
+                            privacy: { ...settings.privacy, llmModelId: e.target.value || null },
+                          })
+                        }
+                        className="w-full p-2 border rounded-md bg-background"
+                      >
+                        {anthropicModels.map((model) => (
                           <option key={model} value={model}>{model}</option>
-                        ))
-                      ) : (
-                        <>
-                          <optgroup label="Claude 4 (Latest)">
-                            <option value="claude-opus-4-20250514">Claude Opus 4 — Most capable</option>
-                            <option value="claude-sonnet-4-20250514">Claude Sonnet 4 — Balanced (Default)</option>
-                          </optgroup>
-                          <optgroup label="Claude 3.5">
-                            <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet — Fast & smart</option>
-                            <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku — Fastest</option>
-                          </optgroup>
-                        </>
-                      )}
-                    </select>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
+                        <p className="text-amber-700 dark:text-amber-400">Enter your Anthropic API key above to fetch available models.</p>
+                      </div>
+                    )
                   ) : settings.privacy.llmProvider === "gemini" ? (
-                    <select
-                      value={settings.privacy.llmModelId ?? "gemini-2.0-flash"}
-                      onChange={(e) =>
-                        void updateSettings({
-                          ...settings,
-                          privacy: { ...settings.privacy, llmModelId: e.target.value || null },
-                        })
-                      }
-                      className="w-full p-2 border rounded-md bg-background"
-                    >
-                      {geminiModels.length > 0 ? (
-                        geminiModels
+                    geminiModels.length > 0 ? (
+                      <select
+                        value={settings.privacy.llmModelId ?? geminiModels[0].replace("models/", "")}
+                        onChange={(e) =>
+                          void updateSettings({
+                            ...settings,
+                            privacy: { ...settings.privacy, llmModelId: e.target.value || null },
+                          })
+                        }
+                        className="w-full p-2 border rounded-md bg-background"
+                      >
+                        {geminiModels
                           .map(m => m.replace("models/", ""))
                           .filter(m => m.includes("gemini"))
                           .map((model) => (
                             <option key={model} value={model}>{model}</option>
-                          ))
-                      ) : (
-                        <>
-                          <option value="gemini-2.5-pro-preview">Gemini 2.5 Pro — Most capable</option>
-                          <option value="gemini-2.0-flash">Gemini 2.0 Flash — Fast (Default)</option>
-                          <option value="gemini-2.0-pro">Gemini 2.0 Pro — Balanced</option>
-                          <option value="gemini-1.5-pro">Gemini 1.5 Pro — Long context</option>
-                          <option value="gemini-1.5-flash">Gemini 1.5 Flash — Fast</option>
-                        </>
-                      )}
-                    </select>
+                          ))}
+                      </select>
+                    ) : (
+                      <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
+                        <p className="text-amber-700 dark:text-amber-400">Enter your Google AI API key above to fetch available models.</p>
+                      </div>
+                    )
                   ) : settings.privacy.llmProvider === "deepseek" ? (
-                    <select
-                      value={settings.privacy.llmModelId ?? "deepseek-chat"}
-                      onChange={(e) =>
-                        void updateSettings({
-                          ...settings,
-                          privacy: { ...settings.privacy, llmModelId: e.target.value || null },
-                        })
-                      }
-                      className="w-full p-2 border rounded-md bg-background"
-                    >
-                      {deepseekModels.length > 0 ? (
-                        deepseekModels.map((model) => (
+                    deepseekModels.length > 0 ? (
+                      <select
+                        value={settings.privacy.llmModelId ?? deepseekModels[0]}
+                        onChange={(e) =>
+                          void updateSettings({
+                            ...settings,
+                            privacy: { ...settings.privacy, llmModelId: e.target.value || null },
+                          })
+                        }
+                        className="w-full p-2 border rounded-md bg-background"
+                      >
+                        {deepseekModels.map((model) => (
                           <option key={model} value={model}>{model}</option>
-                        ))
-                      ) : (
-                        <>
-                          <option value="deepseek-chat">DeepSeek V3 — General chat (Default)</option>
-                          <option value="deepseek-reasoner">DeepSeek R1 — Advanced reasoning</option>
-                          <option value="deepseek-coder">DeepSeek Coder — Code specialist</option>
-                        </>
-                      )}
-                    </select>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
+                        <p className="text-amber-700 dark:text-amber-400">Enter your DeepSeek API key above to fetch available models.</p>
+                      </div>
+                    )
                   ) : settings.privacy.llmProvider === "ollama-cloud" ? (
-                    <select
-                      value={settings.privacy.llmModelId ?? "llama3.2"}
-                      onChange={(e) =>
-                        void updateSettings({
-                          ...settings,
-                          privacy: { ...settings.privacy, llmModelId: e.target.value || null },
-                        })
-                      }
-                      className="w-full p-2 border rounded-md bg-background"
-                    >
-                      {ollamaCloudModels.length > 0 ? (
-                        ollamaCloudModels.map((model) => (
+                    ollamaCloudModels.length > 0 ? (
+                      <select
+                        value={settings.privacy.llmModelId ?? ollamaCloudModels[0]}
+                        onChange={(e) =>
+                          void updateSettings({
+                            ...settings,
+                            privacy: { ...settings.privacy, llmModelId: e.target.value || null },
+                          })
+                        }
+                        className="w-full p-2 border rounded-md bg-background"
+                      >
+                        {ollamaCloudModels.map((model) => (
                           <option key={model} value={model}>{model}</option>
-                        ))
-                      ) : (
-                        <>
-                          <option value="llama3.2">Llama 3.2 — Fast & capable (Default)</option>
-                          <option value="llama3.3">Llama 3.3 70B — Most capable</option>
-                          <option value="mistral">Mistral — Fast & efficient</option>
-                          <option value="codellama">Code Llama — Code specialist</option>
-                        </>
-                      )}
-                    </select>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
+                        <p className="text-amber-700 dark:text-amber-400">Enter your Ollama Cloud API key above to fetch available models.</p>
+                      </div>
+                    )
                   ) : (
-                    <select
-                      value={settings.privacy.llmModelId ?? "llama3.2"}
-                      onChange={(e) =>
-                        void updateSettings({
-                          ...settings,
-                          privacy: { ...settings.privacy, llmModelId: e.target.value || null },
-                        })
-                      }
-                      className="w-full p-2 border rounded-md bg-background"
-                    >
-                      <option value="llama3.2">Llama 3.2</option>
-                      <option value="llama3.3">Llama 3.3 70B</option>
-                    </select>
+                    <div className="p-3 rounded border bg-muted/30 text-sm">
+                      <p className="text-muted-foreground">Select a provider to see available models.</p>
+                    </div>
                   )}
                   <p className="text-xs text-muted-foreground">
                     {settings.privacy.llmProvider === "ollama" && ollamaModels.length === 0
                       ? "Download models via Ollama CLI or pull button below."
-                      : settings.privacy.llmProvider === "deepseek" 
-                        ? "DeepSeek offers 90%+ quality at 1/10th the cost of competitors."
-                        : "Models fetched from provider API. Select the best for your needs."}
+                      : settings.privacy.llmProvider !== "ollama" &&
+                        ["openai", "anthropic", "gemini", "deepseek", "ollama-cloud"].includes(settings.privacy.llmProvider) &&
+                        !hasApiKey && settings.privacy.llmProvider === provider
+                        ? "Add your API key above to fetch available models."
+                        : "Models fetched from provider API."}
                   </p>
                 </div>
 
@@ -1863,17 +1885,56 @@ export function SettingsView() {
 
                 <div className="space-y-2">
                   <Label>Credential provider</Label>
-                  <select
-                    value={provider}
-                    onChange={(e) => setProvider(e.target.value)}
-                    className="w-full p-2 border rounded-md bg-background"
-                  >
-                    <option value="openai">OpenAI</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="gemini">Google Gemini</option>
-                    <option value="deepseek">DeepSeek</option>
-                    <option value="ollama-cloud">Ollama Cloud</option>
-                  </select>
+                  <div className="flex gap-2 items-center">
+                    <select
+                      value={provider}
+                      onChange={(e) => {
+                        const next = e.target.value;
+                        setProvider(next);
+                        // Persist provider selection to settings so it survives restarts
+                        if (settings) {
+                          updateSettings({
+                            ...settings,
+                            privacy: { ...settings.privacy, llmProvider: next },
+                          });
+                        }
+                        // Immediately refresh model list for the newly selected provider
+                        void refreshModelsForProvider(next);
+                      }}
+                      className="flex-1 p-2 border rounded-md bg-background"
+                    >
+                      <option value="openai">OpenAI</option>
+                      <option value="anthropic">Anthropic</option>
+                      <option value="gemini">Google Gemini</option>
+                      <option value="deepseek">DeepSeek</option>
+                      <option value="ollama-cloud">Ollama Cloud</option>
+                    </select>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      title="Refresh model list"
+                      onClick={async () => {
+                        console.log(`[DEBUG] Refresh clicked. Key len: ${apiKey.length}. Provider: ${provider}`);
+                        if (apiKey.trim()) {
+                          // If user typed a key but didn't save, save it now!
+                          setSavingApiKey(true);
+                          try {
+                            await setProviderSecret(provider, apiKey.trim());
+                            setApiKey("");
+                            setHasApiKey(true);
+                          } catch (e) {
+                            console.error("Failed to save key on refresh", e);
+                          } finally {
+                            setSavingApiKey(false);
+                          }
+                        }
+                        void refreshModelsForProvider(provider);
+                      }}
+                      disabled={modelsLoading || savingApiKey}
+                    >
+                      {modelsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                    </Button>
+                  </div>
                   {!settings.privacy.remoteProcessingEnabled ? (
                     <p className="text-xs text-amber-600">
                       Remote processing is disabled. Stored cloud keys will not be used until policy is enabled.
@@ -1893,6 +1954,26 @@ export function SettingsView() {
                     placeholder={hasApiKey ? "Key already stored (enter to replace)" : "Enter API key"}
                     value={apiKey}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setApiKey(e.target.value)}
+                    onKeyDown={async (e) => {
+                      if (e.key === "Enter" && apiKey.trim()) {
+                        console.log(`[DEBUG] Enter pressed. Saving key.`);
+                        e.preventDefault();
+                        if (savingApiKey) return;
+
+                        setSavingApiKey(true);
+                        setError(null);
+                        try {
+                          await setProviderSecret(provider, apiKey.trim());
+                          setApiKey("");
+                          setHasApiKey(true);
+                          await refreshModelsForProvider(provider);
+                        } catch (e) {
+                          setError(e instanceof Error ? e.message : "Failed to save API key");
+                        } finally {
+                          setSavingApiKey(false);
+                        }
+                      }
+                    }}
                   />
                 </div>
 
@@ -1900,6 +1981,7 @@ export function SettingsView() {
                   <Button
                     onClick={async () => {
                       if (!apiKey.trim()) return;
+                      console.log(`[DEBUG] Save Key clicked. Saving key.`);
                       setSavingApiKey(true);
                       setError(null);
                       try {
@@ -2000,6 +2082,22 @@ export function SettingsView() {
             </Card>
           )}
 
+          {activeTab === "updates" && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <RefreshCw className="h-5 w-5 text-blue-600" />
+                  Updates
+                </CardTitle>
+                <CardDescription>Check for and install app updates</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <UpdateStatusWidget />
+                <BetaChannelToggle />
+              </CardContent>
+            </Card>
+          )}
+
           {activeTab === "license" && (
             <Card>
               <CardHeader>
@@ -2007,7 +2105,7 @@ export function SettingsView() {
                   <Shield className="h-5 w-5 text-emerald-600" />
                   License
                 </CardTitle>
-                <CardDescription>Lemon Squeezy license · 1 user · up to 5 computers</CardDescription>
+                <CardDescription>Lemon Squeezy license · 1 user · up to {licenseInfo?.tier === "friends_club" ? 10 : 5} computers</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 {licenseInfo === null ? (

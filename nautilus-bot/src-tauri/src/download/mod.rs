@@ -39,6 +39,7 @@ impl DownloadManager {
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::limited(10))
             .build()?;
 
         Ok(Self { client, models_dir })
@@ -197,9 +198,76 @@ impl DownloadManager {
     }
 
     /// Download diarization/speaker embedding model
+    /// Download a file without checksum verification (useful for LFS files where ETag != content hash)
+    pub async fn download_file_unverified(
+        &self,
+        url: &str,
+        destination: &PathBuf,
+        progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
+    ) -> Result<()> {
+        // Create parent directory if needed
+        if let Some(parent) = destination.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let temp_path = destination.with_extension("tmp");
+        
+        let client = &self.client;
+        let mut request = client.get(url);
+        
+        let start_byte = if temp_path.exists() {
+            let metadata = tokio::fs::metadata(&temp_path).await?;
+            metadata.len()
+        } else {
+            0
+        };
+
+        if start_byte > 0 {
+            request = request.header("Range", format!("bytes={}-", start_byte));
+        }
+
+        let response = request.send().await?;
+        let total_size = response
+            .content_length()
+            .map(|l| l + start_byte)
+            .unwrap_or(0);
+
+        let mut file = File::options()
+            .create(true)
+            .append(true)
+            .open(&temp_path)
+            .await?;
+
+        let mut stream = response.bytes_stream();
+        let bytes_downloaded = Arc::new(AtomicU64::new(start_byte));
+        let start_time = std::time::Instant::now();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            file.write_all(&chunk).await?;
+
+            let current = bytes_downloaded.fetch_add(chunk.len() as u64, Ordering::SeqCst) + chunk.len() as u64;
+            
+            // Throttle progress updates
+            if total_size > 0 {
+                let progress = DownloadProgress {
+                    bytes_downloaded: current,
+                    total_bytes: total_size,
+                    percentage: (current as f64 / total_size as f64) * 100.0,
+                    speed_mbps: 0.0, // simplified
+                };
+                progress_callback(progress);
+            }
+        }
+
+        file.flush().await?;
+        tokio::fs::rename(temp_path, destination).await?;
+        Ok(())
+    }
+
     pub async fn download_diarization_model(
         &self,
-        progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
+        _progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
     ) -> Result<PathBuf> {
         let diarization_dir = self.models_dir.join("diarization");
         tokio::fs::create_dir_all(&diarization_dir).await?;
@@ -211,30 +279,33 @@ impl DownloadManager {
             return Ok(destination);
         }
         
-        // Use a working ECAPA-TDNN model from a reliable source
-        // SpeechBrain provides pre-trained models we can convert, but for now
-        // we'll download from a mirror that hosts the ONNX version
-        let url = "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/resolve/main/embedding_model.ckpt";
+        // Use the Wespeaker ECAPA-TDNN model which is native ONNX and compatible with our runtime
+        let url = "https://huggingface.co/Wespeaker/wespeaker-ecapa-tdnn512-LM/resolve/main/voxceleb_ECAPA512_LM.onnx";
         
         tracing::info!("Downloading diarization model from {}", url);
-        tracing::warn!("Note: The SpeechBrain model is in PyTorch format. For full diarization support, use Ollama or a cloud LLM provider for analysis.");
+        println!("Starting UNVERIFIED download of diarization model...");
         
-        // For now, create a placeholder to indicate the feature needs setup
-        // Real diarization requires either:
-        // 1. A properly converted ONNX model
-        // 2. Integration with pyannote.audio
-        // 3. Using an LLM to identify speakers by voice characteristics
+        // Use unverified download because HF S3 ETag often matches LFS pointer, not content
+        self.download_file_unverified(url, &destination, _progress_callback)
+            .await?;
+
+        // Verify file size (should be > 10MB)
+        let metadata = tokio::fs::metadata(&destination).await?;
+        if metadata.len() < 1024 * 1024 {
+            tokio::fs::remove_file(&destination).await.ok();
+            return Err(anyhow::anyhow!(
+                "Downloaded diarization model is too small ({} bytes). Download failed.",
+                metadata.len()
+            ));
+        }
+
+        tracing::info!("Diarization model downloaded successfully to {:?}", destination);
         
-        tracing::warn!("Diarization model download not yet fully implemented. Speaker identification requires additional setup.");
-        
-        return Err(anyhow::anyhow!(
-            "Speaker diarization requires a model that is not yet publicly available as ONNX. \
-             For meeting analysis, use the AI analysis features (Meeting Summary, Action Items) \
-             which work with Ollama or cloud LLM providers."
-        ));
+        Ok(destination)
     }
 
     /// Check if diarization model is downloaded
+    #[allow(dead_code)]
     pub fn is_diarization_model_downloaded(&self) -> bool {
         self.models_dir
             .join("diarization")

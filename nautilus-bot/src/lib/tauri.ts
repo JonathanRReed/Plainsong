@@ -501,7 +501,7 @@ export async function exportBackupArchive(backupId: string, targetPath: string):
 
 // ── License ───────────────────────────────────────────────────────────────────
 
-export type LicenseTier = "none" | "basic" | "friends_club";
+export type LicenseTier = "none" | "pro" | "friends_club";
 export type LicenseLsStatus = "active" | "inactive" | "expired" | "disabled" | "";
 
 export interface LicenseInfo {
@@ -515,6 +515,7 @@ export interface LicenseInfo {
   lastValidatedAt: string;
   trialDaysRemaining: number;
   nagRequired: boolean;
+  trialActive: boolean;
 }
 
 /** Called on startup to check cached license status against Lemon Squeezy. */
@@ -530,6 +531,68 @@ export async function activateLicense(key: string): Promise<LicenseInfo> {
 /** Deactivate this device (calls LS deactivate endpoint, clears local state). */
 export async function deactivateLicense(): Promise<void> {
   await invoke("deactivate_license");
+}
+
+// ── Update System ─────────────────────────────────────────────────────────────
+
+export type UpdateChannel = "stable" | "beta";
+export type UpdateStatus =
+  | "unknown"
+  | "checking"
+  | "upToDate"
+  | "updateAvailable"
+  | "downloading"
+  | "installing"
+  | "error"
+  | "locked";
+
+export interface UpdateInfo {
+  version: string;
+  notes: string;
+  pubDate: string;
+  isBeta: boolean;
+}
+
+export interface UpdateStatusInfo {
+  status: UpdateStatus;
+  info?: UpdateInfo;
+  progress?: number;
+  error?: string;
+}
+
+/** Check for available updates. Returns update info if available, null if up to date. */
+export async function checkForUpdates(): Promise<UpdateInfo | null> {
+  return await invoke("check_for_updates");
+}
+
+/** Install the available update. App will restart automatically. */
+export async function installUpdate(): Promise<void> {
+  await invoke("install_update");
+}
+
+/** Get current update status. */
+export async function getUpdateStatus(): Promise<UpdateStatusInfo> {
+  return await invoke("get_update_status");
+}
+
+/** Get current update channel. */
+export async function getUpdateChannel(): Promise<UpdateChannel> {
+  return await invoke("get_update_channel");
+}
+
+/** Set update channel (requires appropriate license tier). */
+export async function setUpdateChannel(channel: UpdateChannel): Promise<void> {
+  await invoke("set_update_channel", { channel });
+}
+
+/** Check if user can use beta channel (Friends Club tier). */
+export async function canUseBetaChannel(): Promise<boolean> {
+  return await invoke("can_use_beta_channel");
+}
+
+/** Get reason why updates are locked, or null if not locked. */
+export async function getUpdateLockReason(): Promise<string | null> {
+  return await invoke("get_update_lock_reason");
 }
 
 // Dynamic Model Listing APIs
