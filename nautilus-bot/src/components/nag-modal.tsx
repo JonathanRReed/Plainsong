@@ -8,8 +8,8 @@ import { useState } from "react";
 import { X, Clock, ExternalLink, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-const BUY_PRO_URL = "https://nautilusbot.lemonsqueezy.com/buy/pro"; // TODO: replace with your real LS Pro checkout URL
-const BUY_FRIENDS_URL = "https://nautilusbot.lemonsqueezy.com/buy/friends-club"; // TODO: replace with your real LS Friends Club checkout URL
+const BUY_PRO_URL = "https://nautilusbot.lemonsqueezy.com/buy/pro";
+const BUY_FRIENDS_URL = "https://nautilusbot.lemonsqueezy.com/buy/friends-club";
 const DISMISS_KEY = "nautilus_nag_dismissed_at";
 const TRIAL_EXPIRED_KEY = "nautilus_trial_expired_at";
 

@@ -27,6 +27,8 @@ This doc covers everything needed to produce signed, verified distributable buil
 | `APPLE_ID` | Your Apple ID email |
 | `APPLE_PASSWORD` | App-specific password (not your Apple ID password) |
 | `APPLE_TEAM_ID` | 10-character team ID, e.g. `ABCD123456` |
+| `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater private key used to sign update artifacts |
+| `TAURI_SIGNING_PUBLIC_KEY` | Tauri updater public key injected into `tauri.conf.json` at release build time |
 
 ### tauri.conf.json — macOS signing fields
 
@@ -39,6 +41,8 @@ This doc covers everything needed to produce signed, verified distributable buil
 ```
 
 `signingIdentity` stays `null` — Tauri picks it up automatically from the `APPLE_SIGNING_IDENTITY` environment variable during CI.
+
+Updater note: keep the updater `pubkey` placeholder in source control and inject the real value in CI (`scripts/inject-updater-pubkey.js`) using `TAURI_SIGNING_PUBLIC_KEY`.
 
 ### Entitlements.plist — capabilities needed
 
@@ -134,6 +138,8 @@ For OV/PFX:
 |---|---|
 | `WINDOWS_CERTIFICATE` | `base64 -i cert.pfx` (base64-encoded PFX) |
 | `WINDOWS_CERTIFICATE_PASSWORD` | PFX password |
+| `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater private key for signed update artifacts |
+| `TAURI_SIGNING_PUBLIC_KEY` | Tauri updater public key injected into `tauri.conf.json` during release builds |
 
 For EV via DigiCert KeyLocker:
 
@@ -373,6 +379,7 @@ jobs:
 - [ ] Developer ID Application certificate generated and in Keychain
 - [ ] Notarization app-specific password created
 - [ ] All 6 `APPLE_*` GitHub Secrets populated
+- [ ] `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PUBLIC_KEY` secrets populated
 - [ ] `codesign --verify` passes locally
 - [ ] `spctl --assess` returns "accepted"
 
@@ -380,6 +387,7 @@ jobs:
 - [ ] OV or EV code signing certificate purchased
 - [ ] PFX exported (OV) or cloud HSM configured (EV)
 - [ ] `WINDOWS_CERTIFICATE` + `WINDOWS_CERTIFICATE_PASSWORD` Secrets set
+- [ ] `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PUBLIC_KEY` secrets set
 - [ ] `Get-AuthenticodeSignature` returns `Valid`
 - [ ] SmartScreen shows your publisher name (not "Unknown Publisher")
 

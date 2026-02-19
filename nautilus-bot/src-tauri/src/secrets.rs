@@ -1,95 +1,202 @@
-//! File-based credential storage for provider secrets (Dev Mode Fallback).
+//! Secure credential storage for provider and internal secrets.
 //!
-//! Replaces system keychain with a local JSON file to avoid ACL issues in development.
+//! Production storage uses the OS keychain/credential manager through `keyring`.
+//! A one-time migration reads legacy plaintext JSON secrets and moves them into
+//! secure storage, then deletes the plaintext file.
 
 use anyhow::{Context, Result};
+use keyring::{Entry, Error as KeyringError};
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::OnceLock;
 
-lazy_static::lazy_static! {
-    static ref MEMORY_CACHE: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
+const SERVICE_NAME: &str = "com.nautilus.app";
+const PROVIDER_PREFIX: &str = "provider:";
+const INTERNAL_PREFIX: &str = "internal:";
+
+const LEGACY_INTERNAL_KEYS: [&str; 2] = ["vault_db_key", "vault_unlock_check"];
+
+static LEGACY_MIGRATION_ONCE: OnceLock<()> = OnceLock::new();
+
+fn normalize_identifier(value: &str, label: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!("{} cannot be empty", label));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(anyhow::anyhow!(
+            "{} contains unsupported characters: '{}'",
+            label,
+            value
+        ));
+    }
+    Ok(trimmed.to_ascii_lowercase())
 }
 
-fn get_secrets_file_path() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("Failed to get HOME directory")?;
-    Ok(PathBuf::from(home).join(".nautilus-bot-secrets.json"))
+fn provider_account_name(provider: &str) -> Result<String> {
+    Ok(format!(
+        "{}{}",
+        PROVIDER_PREFIX,
+        normalize_identifier(provider, "provider")?
+    ))
 }
 
-fn load_secrets() -> Result<HashMap<String, String>> {
-    let path = get_secrets_file_path()?;
+fn internal_account_name(key: &str) -> Result<String> {
+    Ok(format!(
+        "{}{}",
+        INTERNAL_PREFIX,
+        normalize_identifier(key, "key")?
+    ))
+}
+
+fn entry_for_account(account: &str) -> Result<Entry> {
+    Entry::new(SERVICE_NAME, account)
+        .map_err(|e| anyhow::anyhow!("Failed to create secure credential entry: {}", e))
+}
+
+fn set_secret_for_account(account: &str, secret: &str) -> Result<()> {
+    let entry = entry_for_account(account)?;
+    entry
+        .set_password(secret)
+        .map_err(|e| anyhow::anyhow!("Failed to save secret in OS credential store: {}", e))
+}
+
+fn get_secret_for_account(account: &str) -> Result<Option<String>> {
+    let entry = entry_for_account(account)?;
+    match entry.get_password() {
+        Ok(secret) if secret.is_empty() => Ok(None),
+        Ok(secret) => Ok(Some(secret)),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(err) => Err(anyhow::anyhow!(
+            "Failed to read secret from OS credential store: {}",
+            err
+        )),
+    }
+}
+
+fn clear_secret_for_account(account: &str) -> Result<()> {
+    let entry = entry_for_account(account)?;
+    match entry.delete_credential() {
+        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+        Err(err) => Err(anyhow::anyhow!(
+            "Failed to remove secret from OS credential store: {}",
+            err
+        )),
+    }
+}
+
+fn legacy_secrets_file_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Failed to determine home directory")?;
+    Ok(home.join(".nautilus-bot-secrets.json"))
+}
+
+fn legacy_account_name_for_key(raw_key: &str) -> Result<String> {
+    let trimmed = raw_key.trim();
+    if let Some(provider) = trimmed.strip_prefix(PROVIDER_PREFIX) {
+        return provider_account_name(provider);
+    }
+    if let Some(internal) = trimmed.strip_prefix(INTERNAL_PREFIX) {
+        return internal_account_name(internal);
+    }
+    if LEGACY_INTERNAL_KEYS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(trimmed))
+    {
+        return internal_account_name(trimmed);
+    }
+    provider_account_name(trimmed)
+}
+
+fn migrate_legacy_file_if_needed() {
+    LEGACY_MIGRATION_ONCE.get_or_init(|| {
+        if let Err(err) = migrate_legacy_file_inner() {
+            tracing::warn!("Legacy secrets migration skipped: {}", err);
+        }
+    });
+}
+
+fn migrate_legacy_file_inner() -> Result<()> {
+    let path = legacy_secrets_file_path()?;
     if !path.exists() {
-        return Ok(HashMap::new());
+        return Ok(());
     }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read secrets file at {:?}", path))?;
-    if content.trim().is_empty() {
-        return Ok(HashMap::new());
-    }
-    serde_json::from_str(&content).with_context(|| "failed to parse secrets JSON")
-}
 
-fn save_secrets(secrets: &HashMap<String, String>) -> Result<()> {
-    let path = get_secrets_file_path()?;
-    let content = serde_json::to_string_pretty(secrets)?;
-    fs::write(&path, content).with_context(|| format!("failed to write secrets file at {:?}", path))
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read legacy secrets file {}", path.display()))?;
+    if raw.trim().is_empty() {
+        std::fs::remove_file(&path).with_context(|| {
+            format!(
+                "Failed to delete empty legacy secrets file {}",
+                path.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    let legacy_map: HashMap<String, String> =
+        serde_json::from_str(&raw).context("Failed to parse legacy secrets JSON")?;
+
+    for (legacy_key, secret) in legacy_map {
+        if secret.is_empty() {
+            continue;
+        }
+        let account = legacy_account_name_for_key(&legacy_key)?;
+        set_secret_for_account(&account, &secret).with_context(|| {
+            format!(
+                "Failed migrating legacy secret '{}' into secure credential store",
+                legacy_key
+            )
+        })?;
+    }
+
+    std::fs::remove_file(&path)
+        .with_context(|| format!("Failed to remove legacy secrets file {}", path.display()))?;
+    tracing::info!("Migrated legacy plaintext secrets into OS credential store");
+    Ok(())
 }
 
 pub fn set_provider_secret(provider: &str, secret: &str) -> Result<()> {
-    eprintln!(
-        "!!! SECRETS (FILE): set_provider_secret '{}' (len: {}) !!!",
-        provider,
-        secret.len()
-    );
-    let mut secrets = load_secrets().unwrap_or_default();
-    secrets.insert(provider.to_string(), secret.to_string());
-    save_secrets(&secrets)
+    migrate_legacy_file_if_needed();
+    let account = provider_account_name(provider)?;
+    set_secret_for_account(&account, secret)
 }
 
 pub fn clear_provider_secret(provider: &str) -> Result<()> {
-    let mut secrets = load_secrets().unwrap_or_default();
-    secrets.remove(provider);
-    save_secrets(&secrets)
+    migrate_legacy_file_if_needed();
+    let account = provider_account_name(provider)?;
+    clear_secret_for_account(&account)
 }
 
 pub fn has_provider_secret(provider: &str) -> Result<bool> {
-    let secrets = load_secrets().unwrap_or_default();
-    Ok(secrets.contains_key(provider) && !secrets.get(provider).unwrap().is_empty())
+    migrate_legacy_file_if_needed();
+    let account = provider_account_name(provider)?;
+    Ok(get_secret_for_account(&account)?.is_some())
 }
 
 pub fn get_provider_secret(provider: &str) -> Result<Option<String>> {
-    eprintln!("!!! SECRETS (FILE): get_provider_secret '{}' !!!", provider);
-    let secrets = load_secrets().unwrap_or_default();
-    match secrets.get(provider) {
-        Some(val) if !val.is_empty() => {
-            eprintln!("!!! SECRETS (FILE): Found secret for '{}' !!!", provider);
-            Ok(Some(val.clone()))
-        }
-        _ => {
-            eprintln!(
-                "!!! SECRETS (FILE): Secret for '{}' is empty/missing !!!",
-                provider
-            );
-            Ok(None)
-        }
-    }
+    migrate_legacy_file_if_needed();
+    let account = provider_account_name(provider)?;
+    get_secret_for_account(&account)
 }
 
 pub fn set_internal_secret(key: &str, secret: &str) -> Result<()> {
-    let mut secrets = load_secrets().unwrap_or_default();
-    secrets.insert(key.to_string(), secret.to_string());
-    save_secrets(&secrets)
+    migrate_legacy_file_if_needed();
+    let account = internal_account_name(key)?;
+    set_secret_for_account(&account, secret)
 }
 
 pub fn get_internal_secret(key: &str) -> Result<Option<String>> {
-    let secrets = load_secrets().unwrap_or_default();
-    Ok(secrets.get(key).cloned().filter(|s| !s.is_empty()))
+    migrate_legacy_file_if_needed();
+    let account = internal_account_name(key)?;
+    get_secret_for_account(&account)
 }
 
 #[allow(dead_code)]
 pub fn clear_internal_secret(key: &str) -> Result<()> {
-    let mut secrets = load_secrets().unwrap_or_default();
-    secrets.remove(key);
-    save_secrets(&secrets)
+    migrate_legacy_file_if_needed();
+    let account = internal_account_name(key)?;
+    clear_secret_for_account(&account)
 }

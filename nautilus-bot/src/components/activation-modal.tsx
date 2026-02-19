@@ -3,9 +3,8 @@ import { Shield, ExternalLink, Loader2, CheckCircle2, AlertCircle } from "lucide
 import { activateLicense } from "@/lib/tauri";
 import type { LicenseInfo } from "@/lib/tauri";
 
-// ── Update these with your real Lemon Squeezy checkout URLs ──────────────────
-const BUY_PRO_URL = "https://nautilusbot.lemonsqueezy.com/buy/pro"; // TODO: replace with your real LS Pro checkout URL
-const BUY_FRIENDS_URL = "https://nautilusbot.lemonsqueezy.com/buy/friends-club"; // TODO: replace with your real LS Friends Club checkout URL
+const BUY_PRO_URL = "https://nautilusbot.lemonsqueezy.com/buy/pro";
+const BUY_FRIENDS_URL = "https://nautilusbot.lemonsqueezy.com/buy/friends-club";
 
 type Props = {
     onActivated(info: LicenseInfo): void;

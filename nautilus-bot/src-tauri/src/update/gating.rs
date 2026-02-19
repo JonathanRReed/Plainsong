@@ -4,7 +4,7 @@
 //! license status and tier.
 
 use super::types::UpdateChannel;
-use crate::license::{get_tier_activation_limit, LicenseState, Tier};
+use crate::license::{is_license_state_valid, LicenseState, Tier};
 
 /// Check if the user is entitled to check for updates.
 ///
@@ -42,14 +42,7 @@ fn is_valid_or_trial(license: &LicenseState) -> bool {
 
 /// Check if the license is valid (active status and within tier limits)
 fn is_license_valid(license: &LicenseState) -> bool {
-    match license.ls_status.as_str() {
-        "active" | "inactive" => {
-            // Check if within tier activation limits
-            let tier_limit = get_tier_activation_limit(&license.tier);
-            license.activations_usage <= tier_limit
-        }
-        _ => false,
-    }
+    is_license_state_valid(license)
 }
 
 /// Check if the trial period is still active
@@ -147,6 +140,13 @@ mod tests {
     #[test]
     fn test_inactive_license_cannot_check() {
         let state = create_test_state(Tier::Pro, "key-123", "expired", 40);
+        assert!(!can_check_for_updates(&state, UpdateChannel::Stable));
+    }
+
+    #[test]
+    fn test_stale_validation_grace_period_locks_updates() {
+        let mut state = create_test_state(Tier::Pro, "key-123", "active", 40);
+        state.last_validated_at = (chrono::Utc::now() - chrono::Duration::days(8)).to_rfc3339();
         assert!(!can_check_for_updates(&state, UpdateChannel::Stable));
     }
 }

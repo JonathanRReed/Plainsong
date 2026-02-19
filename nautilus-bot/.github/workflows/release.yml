@@ -80,6 +80,12 @@ jobs:
         working-directory: nautilus-bot
         run: npm ci
 
+      - name: Inject updater public key
+        working-directory: nautilus-bot
+        env:
+          TAURI_SIGNING_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+        run: node scripts/inject-updater-pubkey.js
+
       - name: Install Apple certificate into temp keychain
         if: env.APPLE_CERTIFICATE != ''
         env:
@@ -160,6 +166,13 @@ jobs:
         working-directory: nautilus-bot
         run: npm ci
 
+      - name: Inject updater public key
+        working-directory: nautilus-bot
+        shell: bash
+        env:
+          TAURI_SIGNING_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+        run: node scripts/inject-updater-pubkey.js
+
       - name: Build & sign (Tauri)
         uses: tauri-apps/tauri-action@v0
         env:
@@ -228,6 +241,12 @@ jobs:
       - name: Install dependencies
         working-directory: nautilus-bot
         run: npm ci
+
+      - name: Inject updater public key
+        working-directory: nautilus-bot
+        env:
+          TAURI_SIGNING_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
+        run: node scripts/inject-updater-pubkey.js
 
       - name: Build (Tauri)
         uses: tauri-apps/tauri-action@v0

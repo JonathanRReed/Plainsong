@@ -96,6 +96,10 @@ Add these secrets to your GitHub repository (Settings → Secrets and variables 
 | `APPLE_ID` | Your Apple ID email | e.g., `you@example.com` |
 | `APPLE_PASSWORD` | App-specific password | From step 3 |
 | `APPLE_TEAM_ID` | Team ID | From step 4 |
+| `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater private key | Generate with `node scripts/sign-update.js --generate-keypair` (keep private key secret) |
+| `TAURI_SIGNING_PUBLIC_KEY` | Tauri updater public key | Base64 public key paired with `TAURI_SIGNING_PRIVATE_KEY` |
+
+The release workflow injects `TAURI_SIGNING_PUBLIC_KEY` into `src-tauri/tauri.conf.json` via `scripts/inject-updater-pubkey.js` before Tauri build/sign steps.
 
 ### Add Secrets via GitHub CLI (optional):
 

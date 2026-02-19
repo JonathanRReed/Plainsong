@@ -219,10 +219,7 @@ impl BackupManager {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
 
-        let backup_path = backup_dir.join(backup_id);
-        if !backup_path.exists() {
-            return Err(anyhow::anyhow!("Backup not found: {}", backup_id));
-        }
+        let backup_path = resolve_existing_backup_path(backup_dir, backup_id)?;
 
         // Restore database
         let db_backup = backup_path.join("nautilus.db");
@@ -324,12 +321,10 @@ impl BackupManager {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
 
-        let source = backup_dir.join(backup_id);
-        if !source.exists() {
-            return Err(anyhow::anyhow!("Backup not found: {}", backup_id));
-        }
+        let safe_backup_id = validate_backup_id(backup_id)?;
+        let source = resolve_existing_backup_path(backup_dir, &safe_backup_id)?;
 
-        let zip_path = target_path.join(format!("{}.zip", backup_id));
+        let zip_path = target_path.join(format!("{}.zip", safe_backup_id));
         create_zip_archive(&source, &zip_path).await?;
         tracing::info!("Backup exported to: {:?}", zip_path);
         Ok(())
@@ -398,19 +393,17 @@ impl BackupManager {
             &format!("Using provider {:?}", provider_value),
         ));
 
-        let cloud_folder = self.config.cloud_folder.trim();
-        if cloud_folder.is_empty() {
-            checks.push(fail_check(
-                "cloud_folder",
-                "Cloud folder configured",
-                "Cloud folder cannot be empty.",
-            ));
-        } else {
-            checks.push(pass_check(
+        match validate_cloud_folder(&self.config.cloud_folder) {
+            Ok(cloud_folder) => checks.push(pass_check(
                 "cloud_folder",
                 "Cloud folder configured",
                 &format!("Cloud folder: {}", cloud_folder),
-            ));
+            )),
+            Err(err) => checks.push(fail_check(
+                "cloud_folder",
+                "Cloud folder configured",
+                &err.to_string(),
+            )),
         }
 
         match provider_value {
@@ -568,10 +561,7 @@ impl BackupManager {
             .backup_dir
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
-        let source = backup_dir.join(backup_id);
-        if !source.exists() {
-            return Err(anyhow::anyhow!("Backup not found: {}", backup_id));
-        }
+        let source = resolve_existing_backup_path(backup_dir, backup_id)?;
 
         match provider {
             CloudProvider::ICloud => sync_to_icloud(&self.config, &source).await,
@@ -620,6 +610,97 @@ fn load_persisted_backup_config() -> Option<BackupConfig> {
     let path = backup_config_path().ok()?;
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str::<BackupConfig>(&raw).ok()
+}
+
+fn validate_backup_id(raw_backup_id: &str) -> Result<String> {
+    let backup_id = raw_backup_id.trim();
+    if backup_id.is_empty() {
+        return Err(anyhow::anyhow!("Backup ID cannot be empty"));
+    }
+    if backup_id.len() > 128 {
+        return Err(anyhow::anyhow!("Backup ID is too long"));
+    }
+    if backup_id.contains('/') || backup_id.contains('\\') || backup_id.contains("..") {
+        return Err(anyhow::anyhow!(
+            "Backup ID contains invalid path characters"
+        ));
+    }
+    if !backup_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(anyhow::anyhow!("Backup ID contains unsupported characters"));
+    }
+
+    Ok(backup_id.to_string())
+}
+
+fn resolve_existing_backup_path(backup_dir: &Path, backup_id: &str) -> Result<PathBuf> {
+    let safe_backup_id = validate_backup_id(backup_id)?;
+    let canonical_root = backup_dir.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve backup directory {}",
+            backup_dir.display()
+        )
+    })?;
+
+    let candidate = canonical_root.join(&safe_backup_id);
+    if !candidate.exists() {
+        return Err(anyhow::anyhow!("Backup not found: {}", safe_backup_id));
+    }
+
+    let canonical_candidate = candidate
+        .canonicalize()
+        .with_context(|| format!("Failed to resolve backup path {}", candidate.display()))?;
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(anyhow::anyhow!(
+            "Backup path is outside the configured backup directory"
+        ));
+    }
+
+    Ok(canonical_candidate)
+}
+
+fn validate_cloud_folder(raw_folder: &str) -> Result<String> {
+    let folder = raw_folder.trim().trim_matches('/');
+    if folder.is_empty() {
+        return Err(anyhow::anyhow!("Cloud folder cannot be empty"));
+    }
+
+    if folder
+        .split('/')
+        .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return Err(anyhow::anyhow!(
+            "Cloud folder cannot contain relative path segments"
+        ));
+    }
+
+    if folder.chars().any(|c| {
+        matches!(
+            c,
+            ':' | ';'
+                | '&'
+                | '|'
+                | '`'
+                | '$'
+                | '('
+                | ')'
+                | '{'
+                | '}'
+                | '\''
+                | '"'
+                | '\\'
+                | '\n'
+                | '\r'
+        )
+    }) {
+        return Err(anyhow::anyhow!(
+            "Cloud folder contains unsupported characters"
+        ));
+    }
+
+    Ok(folder.to_string())
 }
 
 /// Copy directory recursively
@@ -748,20 +829,7 @@ async fn sync_to_rclone(
         ));
     }
 
-    let folder = config.cloud_folder.trim_matches('/');
-    // Validate folder path contains no shell-unsafe characters
-    if folder.contains("..")
-        || folder.chars().any(|c| {
-            matches!(
-                c,
-                ';' | '&' | '|' | '`' | '$' | '(' | ')' | '{' | '}' | '\'' | '"' | '\\' | '\n'
-            )
-        })
-    {
-        return Err(anyhow::anyhow!(
-            "Invalid cloud folder path: contains unsafe characters"
-        ));
-    }
+    let folder = validate_cloud_folder(&config.cloud_folder)?;
     let backup_id = source
         .file_name()
         .and_then(|n| n.to_str())
@@ -826,7 +894,7 @@ async fn sync_to_icloud(config: &BackupConfig, source: &Path) -> Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow::anyhow!("Invalid backup path"))?;
-    let folder = config.cloud_folder.trim_matches('/');
+    let folder = validate_cloud_folder(&config.cloud_folder)?;
     let destination = root.join(folder).join(backup_id);
 
     if destination.exists() {
@@ -915,4 +983,40 @@ async fn list_rclone_remotes() -> std::result::Result<Vec<String>, String> {
     }
     let stdout = String::from_utf8_lossy(&remotes.stdout);
     Ok(stdout.lines().map(|line| line.to_string()).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backup_id_rejects_traversal() {
+        assert!(validate_backup_id("../outside").is_err());
+        assert!(validate_backup_id("backup/2026").is_err());
+        assert!(validate_backup_id("backup\\2026").is_err());
+    }
+
+    #[test]
+    fn backup_id_accepts_expected_characters() {
+        let value = validate_backup_id("backup_20260219_154500").expect("valid backup id");
+        assert_eq!(value, "backup_20260219_154500");
+    }
+
+    #[test]
+    fn cloud_folder_rejects_relative_segments() {
+        assert!(validate_cloud_folder("../backups").is_err());
+        assert!(validate_cloud_folder("Nautilus/../Backups").is_err());
+    }
+
+    #[test]
+    fn cloud_folder_rejects_unsafe_characters() {
+        assert!(validate_cloud_folder("Nautilus:Backups").is_err());
+        assert!(validate_cloud_folder("Nautilus\nBackups").is_err());
+    }
+
+    #[test]
+    fn cloud_folder_accepts_nested_safe_paths() {
+        let value = validate_cloud_folder("Nautilus/Backups/2026").expect("valid folder");
+        assert_eq!(value, "Nautilus/Backups/2026");
+    }
 }

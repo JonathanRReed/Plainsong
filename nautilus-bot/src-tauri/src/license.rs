@@ -184,7 +184,7 @@ fn persist_state(state: &LicenseState) -> Result<()> {
 // ── Helper: build LicenseInfo from state ─────────────────────────────────────
 
 fn info_from_state(state: &LicenseState) -> LicenseInfo {
-    let valid = is_valid(state);
+    let valid = is_license_state_valid(state);
     let (trial_days_remaining, nag_required) = trial_status(state, valid);
     let trial_active = trial_days_remaining > 0;
     LicenseInfo {
@@ -202,14 +202,37 @@ fn info_from_state(state: &LicenseState) -> LicenseInfo {
     }
 }
 
-fn is_valid(state: &LicenseState) -> bool {
+fn is_status_active(state: &LicenseState) -> bool {
+    matches!(state.ls_status.as_str(), "active")
+}
+
+fn activation_limit_for_state(state: &LicenseState) -> u32 {
+    if state.activations_limit > 0 {
+        state.activations_limit
+    } else {
+        get_tier_activation_limit(&state.tier)
+    }
+}
+
+fn is_within_activation_limit(state: &LicenseState) -> bool {
+    let limit = activation_limit_for_state(state);
+    if limit == 0 {
+        return false;
+    }
+    state.activations_usage <= limit
+}
+
+pub(crate) fn is_license_state_valid(state: &LicenseState) -> bool {
     if state.key.is_empty() {
         return false;
     }
-    if !matches!(state.ls_status.as_str(), "active" | "inactive") {
+    if !is_status_active(state) {
         return false;
     }
-    true
+    if !is_within_activation_limit(state) {
+        return false;
+    }
+    within_grace_period(state)
 }
 
 fn trial_status(state: &LicenseState, valid: bool) -> (i64, bool) {
@@ -219,9 +242,12 @@ fn trial_status(state: &LicenseState, valid: bool) -> (i64, bool) {
     if state.first_run_at.is_empty() {
         return (TRIAL_DAYS, false);
     }
-    let first_run = chrono::DateTime::parse_from_rfc3339(&state.first_run_at)
+    let Ok(first_run) = chrono::DateTime::parse_from_rfc3339(&state.first_run_at)
         .map(|dt| dt.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|_| chrono::Utc::now());
+    else {
+        // Fail closed on malformed trial metadata.
+        return (0, true);
+    };
     let days_elapsed = (chrono::Utc::now() - first_run).num_days();
     let remaining = (TRIAL_DAYS - days_elapsed).max(0);
     let nag = remaining == 0;
@@ -351,15 +377,7 @@ pub async fn validate_license() -> LicenseInfo {
     let mut state = load_state();
     match validate_license_inner(&mut state).await {
         Ok(info) => info,
-        Err(_) => {
-            // Network / server error — apply grace period.
-            if !state.key.is_empty() && within_grace_period(&state) {
-                // Keep state.ls_status as-is, return as valid.
-                info_from_state(&state)
-            } else {
-                info_from_state(&state)
-            }
-        }
+        Err(_) => info_from_state(&state),
     }
 }
 
@@ -390,7 +408,7 @@ async fn validate_license_inner(state: &mut LicenseState) -> Result<LicenseInfo,
     // Update stats from the validate response.
     state.ls_status = parsed.license_key.status.clone();
     state.activations_limit = if parsed.license_key.activation_limit == 0 {
-        5
+        get_tier_activation_limit(&state.tier)
     } else {
         parsed.license_key.activation_limit
     };
@@ -401,16 +419,22 @@ async fn validate_license_inner(state: &mut LicenseState) -> Result<LicenseInfo,
     if !parsed.meta.variant_name.is_empty() {
         state.tier = tier_from_variant(&parsed.meta.variant_name);
     }
-    state.last_validated_at = chrono::Utc::now().to_rfc3339();
-
-    let _ = persist_state(state);
-
     if !parsed.valid {
+        // Explicit server-side invalidation should immediately fail closed.
+        state.last_validated_at.clear();
+        if state.ls_status == "active" {
+            state.ls_status = "inactive".to_string();
+        }
+        let _ = persist_state(state);
+
         let msg = parsed
             .error
             .unwrap_or_else(|| format!("License {}", state.ls_status));
         return Err(msg);
     }
+
+    state.last_validated_at = chrono::Utc::now().to_rfc3339();
+    let _ = persist_state(state);
 
     Ok(info_from_state(state))
 }
@@ -463,4 +487,61 @@ pub async fn deactivate_license() -> Result<(), String> {
     state.device_id = device_id;
     persist_state(&state).map_err(|e| format!("Failed to clear license: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_state(status: &str, validated_days_ago: i64) -> LicenseState {
+        let last_validated = chrono::Utc::now() - chrono::Duration::days(validated_days_ago);
+        LicenseState {
+            key: "license-key".to_string(),
+            instance_id: "instance-id".to_string(),
+            tier: Tier::Pro,
+            ls_status: status.to_string(),
+            activations_limit: 5,
+            activations_usage: 1,
+            last_validated_at: last_validated.to_rfc3339(),
+            first_run_at: (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339(),
+            device_id: "test-device".to_string(),
+        }
+    }
+
+    #[test]
+    fn active_license_is_valid_within_grace_period() {
+        let state = sample_state("active", 1);
+        assert!(is_license_state_valid(&state));
+    }
+
+    #[test]
+    fn active_license_is_invalid_after_grace_period() {
+        let state = sample_state("active", GRACE_PERIOD_DAYS + 1);
+        assert!(!is_license_state_valid(&state));
+    }
+
+    #[test]
+    fn inactive_license_is_invalid() {
+        let state = sample_state("inactive", 1);
+        assert!(!is_license_state_valid(&state));
+    }
+
+    #[test]
+    fn malformed_first_run_timestamp_expires_trial() {
+        let state = LicenseState {
+            key: String::new(),
+            instance_id: String::new(),
+            tier: Tier::None,
+            ls_status: String::new(),
+            activations_limit: 0,
+            activations_usage: 0,
+            last_validated_at: String::new(),
+            first_run_at: "not-a-date".to_string(),
+            device_id: "test-device".to_string(),
+        };
+
+        let (remaining, nag) = trial_status(&state, false);
+        assert_eq!(remaining, 0);
+        assert!(nag);
+    }
 }

@@ -75,10 +75,10 @@ cargo test --lib
 
 ## Launch Audit Artifacts
 
-- `AUDIT_BASELINE.md`
-- `CLAIMS_PARITY_MATRIX.md`
-- `LAUNCH_AUDIT_REPORT.md`
-- `LAUNCH_CHECKLIST.md`
+- `docs/prelaunch-readiness.md`
+- `docs/prelaunch-action-checklist.md`
+- `docs/release-gate-evidence.md`
+- `docs/packaged-app-qa-matrix.md`
 
 ## Project Layout
 
