@@ -488,21 +488,21 @@ fn is_diarization_model_available() -> bool {
 #[tauri::command]
 async fn download_diarization_model(_app: tauri::AppHandle) -> Result<(), String> {
     use crate::download::DownloadManager;
-    
+
     let manager = DownloadManager::new().map_err(|e| e.to_string())?;
-    
+
     let progress_callback = |progress: crate::download::DownloadProgress| {
         tracing::info!(
             "Diarization model download progress: {:.1}%",
             progress.percentage
         );
     };
-    
+
     manager
         .download_diarization_model(progress_callback)
         .await
         .map_err(|e| e.to_string())?;
-    
+
     tracing::info!("Diarization model downloaded successfully");
     Ok(())
 }
@@ -1353,7 +1353,7 @@ async fn list_ollama_cloud_models() -> Result<Vec<String>, String> {
     let secret = secrets::get_provider_secret("ollama-cloud")
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
-    
+
     // Log secret status (don't log the key itself!)
     if secret.is_empty() {
         tracing::warn!("list_ollama_cloud_models called but secret is empty");
@@ -1362,12 +1362,12 @@ async fn list_ollama_cloud_models() -> Result<Vec<String>, String> {
     } else {
         println!("Ollama Cloud: Secret found (len: {})", secret.len());
     }
-    
+
     let client = llm::OllamaCloudClient::with_api_key(Some(secret));
-    
+
     // Log intent
     tracing::info!("Fetching Ollama Cloud models...");
-    
+
     match client.list_models().await {
         Ok(models) => {
             tracing::info!("Ollama Cloud returned {} models", models.len());
@@ -1385,11 +1385,11 @@ async fn list_openai_models() -> Result<Vec<String>, String> {
     let secret = secrets::get_provider_secret("openai")
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
-    
+
     if secret.is_empty() {
         return Ok(vec![]);
     }
-    
+
     let client = llm::OpenAIClient::with_api_key(Some(secret));
     client.list_models().await.map_err(|e| e.to_string())
 }
@@ -1399,11 +1399,11 @@ async fn list_anthropic_models() -> Result<Vec<String>, String> {
     let secret = secrets::get_provider_secret("anthropic")
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
-    
+
     if secret.is_empty() {
         return Ok(vec![]);
     }
-    
+
     let client = llm::AnthropicClient::with_api_key(Some(secret));
     client.list_models().await.map_err(|e| e.to_string())
 }
@@ -1413,11 +1413,11 @@ async fn list_gemini_models() -> Result<Vec<String>, String> {
     let secret = secrets::get_provider_secret("gemini")
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
-    
+
     if secret.is_empty() {
         return Ok(vec![]);
     }
-    
+
     let client = llm::GeminiClient::with_api_key(Some(secret));
     client.list_models().await.map_err(|e| e.to_string())
 }
@@ -1427,11 +1427,11 @@ async fn list_deepseek_models() -> Result<Vec<String>, String> {
     let secret = secrets::get_provider_secret("deepseek")
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
-    
+
     if secret.is_empty() {
         return Ok(vec![]);
     }
-    
+
     let client = llm::DeepSeekClient::with_api_key(Some(secret));
     client.list_models().await.map_err(|e| e.to_string())
 }
@@ -1707,12 +1707,19 @@ async fn set_default_asr_provider(
 #[tauri::command]
 #[allow(non_snake_case)]
 async fn download_asr_models(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     providerType: asr::AsrProviderType,
 ) -> Result<(), String> {
+    let app_handle = app.clone();
+    let provider_type_clone = providerType;
+    let cb = Box::new(move |progress: f32| {
+        let _ = app_handle.emit("asr-download-progress", (provider_type_clone, progress));
+    });
+
     state
         .asr_manager
-        .download_models(providerType)
+        .download_models(providerType, cb)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1890,7 +1897,8 @@ async fn save_settings(
 
         if settings.privacy.export_root != previous_export_root {
             if let Some(export_root) = settings.privacy.export_root.as_ref() {
-                let canonical_root = canonicalize_or_create_absolute_path(export_root, "exportRoot")?;
+                let canonical_root =
+                    canonicalize_or_create_absolute_path(export_root, "exportRoot")?;
                 settings.privacy.export_root = Some(canonical_root);
             }
         }
@@ -1924,7 +1932,11 @@ async fn has_provider_secret(provider: String) -> Result<bool, String> {
 
 #[tauri::command]
 async fn set_provider_secret(provider: String, secret: String) -> Result<(), String> {
-    eprintln!("!!! BACKEND: set_provider_secret for '{}' (len: {}) !!!", provider, secret.len());
+    eprintln!(
+        "!!! BACKEND: set_provider_secret for '{}' (len: {}) !!!",
+        provider,
+        secret.len()
+    );
     let normalized = normalize_provider_secret_name(&provider)?;
     secrets::set_provider_secret(normalized, &secret).map_err(|e| e.to_string())
 }
@@ -1960,13 +1972,19 @@ async fn deactivate_license() -> Result<(), String> {
 #[tauri::command]
 async fn check_for_updates(app: AppHandle) -> Result<Option<update::UpdateInfo>, String> {
     let update_service = update::UpdateService::new(app);
-    update_service.check_for_updates().await.map_err(|e| e.to_string())
+    update_service
+        .check_for_updates()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<(), String> {
     let update_service = update::UpdateService::new(app);
-    update_service.install_update().await.map_err(|e| e.to_string())
+    update_service
+        .install_update()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1984,7 +2002,10 @@ async fn get_update_channel(app: AppHandle) -> Result<update::UpdateChannel, Str
 #[tauri::command]
 async fn set_update_channel(app: AppHandle, channel: update::UpdateChannel) -> Result<(), String> {
     let update_service = update::UpdateService::new(app);
-    update_service.set_channel(channel).await.map_err(|e| e.to_string())
+    update_service
+        .set_channel(channel)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2359,26 +2380,33 @@ async fn start_dictation_session(
     options: models::DictationStartOptions,
 ) -> Result<u64, String> {
     {
-        let recording_state = state.recording_overlay_state.lock().map(|s| s.phase.clone()).unwrap_or_default();
+        let recording_state = state
+            .recording_overlay_state
+            .lock()
+            .map(|s| s.phase.clone())
+            .unwrap_or_default();
         if recording_state != "idle" {
             return Err("Cannot start dictation while meeting recording is active".to_string());
         }
     }
-    
+
     {
         let mut runtime_state = state.dictation_runtime_state.lock().await;
         if *runtime_state != DictationSessionState::Idle {
             return Err("Dictation is already active".to_string());
         }
-        
+
         let has_mic = {
             let audio = state.audio_capture.lock().await;
             audio.has_microphone_input()
         };
         if !has_mic {
-            return Err("No microphone available. Please connect a microphone and grant permission.".to_string());
+            return Err(
+                "No microphone available. Please connect a microphone and grant permission."
+                    .to_string(),
+            );
         }
-        
+
         *runtime_state = DictationSessionState::Recording;
     }
 
@@ -3921,7 +3949,10 @@ pub fn run() {
         })
         .expect("Failed to initialize database");
     #[cfg(debug_assertions)]
-    tracing::debug!("Database initialization completed in {:?}", db_init_started.elapsed());
+    tracing::debug!(
+        "Database initialization completed in {:?}",
+        db_init_started.elapsed()
+    );
 
     let settings_manager = settings::SettingsManager::new().expect("Failed to initialize settings");
     let initial_dictation_options = dictation_options_from_settings(settings_manager.settings());
@@ -4479,7 +4510,10 @@ fn dictation_profile_to_model_id(profile: &models::DictationProfile) -> &'static
     }
 }
 
-fn resolve_dictation_model_id(profile: &models::DictationProfile, fallback_model_id: &str) -> String {
+fn resolve_dictation_model_id(
+    profile: &models::DictationProfile,
+    fallback_model_id: &str,
+) -> String {
     let preferred = dictation_profile_to_model_id(profile);
     if whisper_model_exists(preferred) {
         return preferred.to_string();
@@ -4806,6 +4840,9 @@ fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static st
         asr::AsrProviderType::Parakeet => "parakeet",
         asr::AsrProviderType::Canary => "canary",
         asr::AsrProviderType::DistilWhisper => "distil_whisper",
+        asr::AsrProviderType::Moonshine => "moonshine",
+        asr::AsrProviderType::VibeVoice => "vibevoice",
+        asr::AsrProviderType::Voxtral => "voxtral",
     }
 }
 
@@ -4815,6 +4852,9 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
         "parakeet" => Some(asr::AsrProviderType::Parakeet),
         "canary" => Some(asr::AsrProviderType::Canary),
         "distil_whisper" => Some(asr::AsrProviderType::DistilWhisper),
+        "moonshine" => Some(asr::AsrProviderType::Moonshine),
+        "vibevoice" => Some(asr::AsrProviderType::VibeVoice),
+        "voxtral" => Some(asr::AsrProviderType::Voxtral),
         _ => None,
     }
 }
@@ -4997,7 +5037,7 @@ fn check_accessibility_permission() -> bool {
 
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     tracing::info!("Copying {} chars to clipboard", text.len());
-    
+
     #[cfg(target_os = "macos")]
     {
         use std::process::{Command, Stdio};
@@ -5090,7 +5130,7 @@ fn send_native_paste_key() -> Result<(), String> {
 
 fn paste_text_systemwide(text: &str) -> PasteOutcome {
     tracing::info!("paste_text_systemwide called with {} chars", text.len());
-    
+
     let original_clipboard = {
         #[cfg(target_os = "macos")]
         {
@@ -5122,7 +5162,7 @@ fn paste_text_systemwide(text: &str) -> PasteOutcome {
                 error: Some("Copied to clipboard. To insert at cursor, grant Accessibility permission in System Settings > Privacy & Security > Accessibility.".to_string()),
             };
         }
-        
+
         let paste_result = send_native_paste_key();
         let restore_result = if let Some(previous) = original_clipboard {
             copy_to_clipboard(&previous)

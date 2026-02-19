@@ -55,7 +55,7 @@ export interface BenchmarkResult {
   confidence: number;
 }
 
-export type AsrProviderType = "whisper" | "parakeet" | "canary" | "distil_whisper";
+export type AsrProviderType = "whisper" | "parakeet" | "canary" | "distil_whisper" | "moonshine" | "vibevoice" | "voxtral";
 
 // LLM Types
 export interface LlmAnalysisResult {

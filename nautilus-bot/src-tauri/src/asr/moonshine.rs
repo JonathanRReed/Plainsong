@@ -4,25 +4,22 @@ use super::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub struct DistilWhisperProvider {
+pub struct MoonshineProvider {
     model_dir: PathBuf,
 }
 
-const DISTIL_MODEL_ID: &str = "distil-large-v3.5";
-const DISTIL_MODEL_REPO: &str = "distil-whisper/distil-large-v3.5";
-const DISTIL_REQUIRED_FILES: [&str; 8] = [
+const MOONSHINE_MODEL_ID: &str = "moonshine-base";
+const MOONSHINE_MODEL_REPO: &str = "UsefulSensors/moonshine-base";
+// Required files for transformers to load the model locally
+const MOONSHINE_REQUIRED_FILES: [&str; 5] = [
     "config.json",
+    "generation_config.json",
     "model.safetensors",
     "preprocessor_config.json",
     "tokenizer.json",
-    "tokenizer_config.json",
-    "special_tokens_map.json",
-    "merges.txt",
-    "vocab.json",
 ];
 
 #[derive(Deserialize)]
@@ -31,23 +28,26 @@ struct PythonTranscription {
     error: Option<String>,
 }
 
-impl DistilWhisperProvider {
-    pub fn new(_selected_model_id: Option<&str>) -> Self {
+impl MoonshineProvider {
+    pub fn new() -> Self {
         let model_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Nautilus")
             .join("models")
-            .join("distil_whisper");
+            .join("moonshine");
+
         Self { model_dir }
     }
 
     fn has_required_files(&self) -> bool {
-        DISTIL_REQUIRED_FILES
+        MOONSHINE_REQUIRED_FILES
             .iter()
             .all(|file_name| self.model_dir.join(file_name).exists())
     }
 
     fn python_runtime(&self) -> Option<String> {
+        // Moonshine requires transformers >= 4.40 or similar for support?
+        // We check for torch and transformers.
         super::python_runtime::find_python_with_imports("import torch; import transformers")
     }
 
@@ -65,12 +65,14 @@ model_dir = sys.argv[1]
 audio_path = sys.argv[2]
 
 try:
+    # Use automatic-speech-recognition pipeline
     pipe = pipeline(
         task="automatic-speech-recognition",
         model=model_dir,
         tokenizer=model_dir,
         feature_extractor=model_dir,
-        device=-1
+        device=-1, # CPU
+        generate_kwargs={}
     )
     result = pipe(audio_path)
     text = result.get("text", "") if isinstance(result, dict) else str(result)
@@ -86,18 +88,18 @@ except Exception as exc:
             .arg(self.model_dir.as_os_str())
             .arg(audio_path.as_os_str())
             .output()
-            .context("failed to run local Distil worker")?;
+            .context("failed to run local Moonshine worker")?;
 
         if !output.status.success() && output.stdout.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow::anyhow!(
-                "Distil local worker failed: {}",
+                "Moonshine local worker failed: {}",
                 stderr.trim()
             ));
         }
 
         let payload: PythonTranscription =
-            serde_json::from_slice(&output.stdout).context("invalid Distil worker output")?;
+            serde_json::from_slice(&output.stdout).context("invalid Moonshine worker output")?;
         if let Some(error) = payload.error {
             return Err(anyhow::anyhow!(error));
         }
@@ -120,14 +122,20 @@ except Exception as exc:
     }
 }
 
+impl Default for MoonshineProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
-impl AsrProvider for DistilWhisperProvider {
+impl AsrProvider for MoonshineProvider {
     fn name(&self) -> &str {
-        "Distil Whisper (Local)"
+        "UsefulSensors Moonshine"
     }
 
     fn description(&self) -> &str {
-        "Distilled Whisper local runtime with native model artifacts for low-latency transcription."
+        "UsefulSensors Moonshine Base. Fast, on-device ASR optimized for edge devices."
     }
 
     fn is_available(&self) -> bool {
@@ -136,66 +144,62 @@ impl AsrProvider for DistilWhisperProvider {
 
     fn model_info(&self) -> ModelInfo {
         ModelInfo {
-            name: "Distil Whisper".to_string(),
-            version: DISTIL_MODEL_ID.to_string(),
-            size_mb: 1530.0,
-            parameters: "756M".to_string(),
-            languages: vec![
-                "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar",
-                "sv", "it", "id", "hi", "fi", "vi",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-            word_error_rate: Some(6.6),
-            real_time_factor: Some(0.6),
-            license: "Apache 2.0".to_string(),
-            source_url: format!("https://huggingface.co/{}", DISTIL_MODEL_REPO),
+            name: "Moonshine Base".to_string(),
+            version: "base".to_string(),
+            size_mb: 246.0, // Avg size
+            parameters: "Base".to_string(),
+            languages: vec!["en".to_string()], // Primary focus is English? Or check
+            word_error_rate: Some(4.0),        // Approximate
+            real_time_factor: Some(0.5),       // Very fast
+            license: "MIT".to_string(),
+            source_url: format!("https://huggingface.co/{}", MOONSHINE_MODEL_REPO),
         }
     }
 
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
         if !self.has_required_files() {
             return Err(anyhow::anyhow!(
-                "Distil model is not downloaded. Download it before selecting this provider."
+                "Moonshine model is not downloaded. Download it before selecting this provider."
             ));
         }
         let python_bin = match self.python_runtime() {
             Some(value) => value,
             None => {
                 return Err(anyhow::anyhow!(
-                    "Distil runtime is not ready. Install local Python dependencies (torch + transformers) and/or set NAUTILUS_PYTHON."
+                    "Moonshine runtime is not ready. Install local Python dependencies (torch + transformers) and/or set NAUTILUS_PYTHON."
                 ));
             }
         };
         let start = std::time::Instant::now();
         let text = self.run_python_transcription(&python_bin, audio_path)?;
         let duration = Self::wav_duration_seconds(audio_path);
+
+        // Simple segment since we get full text
         let segment = TranscriptSegment {
             start_time: 0.0,
             end_time: duration,
             text: text.clone(),
-            confidence: 0.87,
+            confidence: 0.9,
         };
 
         Ok(TranscriptionResult {
             text,
             segments: vec![segment],
             language: "en".to_string(),
-            confidence: 0.87,
+            confidence: 0.9,
             processing_time_ms: start.elapsed().as_millis() as u64,
-            model_name: "distil-whisper-local".to_string(),
-            model_id: DISTIL_MODEL_ID.to_string(),
-            requested_provider: AsrProviderType::DistilWhisper,
-            actual_provider: AsrProviderType::DistilWhisper,
+            model_name: "moonshine-base".to_string(),
+            model_id: MOONSHINE_MODEL_ID.to_string(),
+            requested_provider: AsrProviderType::Moonshine,
+            actual_provider: AsrProviderType::Moonshine,
             fallback_used: false,
             fallback_reason: None,
         })
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        let temp_path = std::env::temp_dir().join("distil_whisper_temp.wav");
-        std::fs::write(&temp_path, audio_data).context("failed to write temp wav for Distil")?;
+        let temp_path = std::env::temp_dir().join("moonshine_temp.wav");
+        std::fs::write(&temp_path, audio_data).context("failed to write temp wav for Moonshine")?;
         self.transcribe(&temp_path).await
     }
 
@@ -211,25 +215,31 @@ impl AsrProvider for DistilWhisperProvider {
         use crate::download::DownloadManager;
 
         let manager = DownloadManager::new()?;
+        std::fs::create_dir_all(&self.model_dir).context("failed to create moonshine model dir")?;
         let progress_cb = std::sync::Arc::new(progress_cb);
 
-        for file_name in DISTIL_REQUIRED_FILES {
+        for file_name in MOONSHINE_REQUIRED_FILES {
             let destination = self.model_dir.join(file_name);
             if destination.exists() {
                 continue;
             }
             let url = format!(
                 "https://huggingface.co/{}/resolve/main/{}",
-                DISTIL_MODEL_REPO, file_name
+                MOONSHINE_MODEL_REPO, file_name
             );
             let cb = progress_cb.clone();
             manager
                 .download_file_unverified(&url, &destination, move |progress| {
                     cb(progress.percentage as f32);
-                    tracing::info!("Distil {} download: {:.1}%", file_name, progress.percentage);
+                    tracing::info!(
+                        "Moonshine {} download: {:.1}%",
+                        file_name,
+                        progress.percentage
+                    );
                 })
                 .await?;
         }
+
         Ok(())
     }
 }

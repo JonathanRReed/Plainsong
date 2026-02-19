@@ -198,18 +198,19 @@ impl AsrProvider for ParakeetProvider {
         }
     }
 
-    async fn download_models(&self) -> Result<()> {
+    async fn download_models(&self, progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()> {
         use crate::download::DownloadManager;
         let manager = DownloadManager::new()?;
         let url =
             "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3/resolve/main/parakeet-tdt-0.6b-v3.nemo";
 
-        let progress_callback = |progress: crate::download::DownloadProgress| {
+        let progress_callback = move |progress: crate::download::DownloadProgress| {
+            progress_cb(progress.percentage as f32);
             tracing::info!("Parakeet download progress: {:.1}%", progress.percentage);
         };
 
         manager
-            .download_file(url, &self.model_path, progress_callback)
+            .download_file_unverified(url, &self.model_path, progress_callback)
             .await?;
         Ok(())
     }

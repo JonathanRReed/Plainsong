@@ -74,7 +74,8 @@ impl OllamaCloudClient {
             .map(|arr| {
                 arr.iter()
                     .filter_map(|m| {
-                        m["id"].as_str()
+                        m["id"]
+                            .as_str()
                             .or_else(|| m["name"].as_str())
                             .map(|s| s.to_string())
                     })

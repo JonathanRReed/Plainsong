@@ -27,19 +27,21 @@ fn load_secrets() -> Result<HashMap<String, String>> {
     if content.trim().is_empty() {
         return Ok(HashMap::new());
     }
-    serde_json::from_str(&content)
-        .with_context(|| "failed to parse secrets JSON")
+    serde_json::from_str(&content).with_context(|| "failed to parse secrets JSON")
 }
 
 fn save_secrets(secrets: &HashMap<String, String>) -> Result<()> {
     let path = get_secrets_file_path()?;
     let content = serde_json::to_string_pretty(secrets)?;
-    fs::write(&path, content)
-        .with_context(|| format!("failed to write secrets file at {:?}", path))
+    fs::write(&path, content).with_context(|| format!("failed to write secrets file at {:?}", path))
 }
 
 pub fn set_provider_secret(provider: &str, secret: &str) -> Result<()> {
-    eprintln!("!!! SECRETS (FILE): set_provider_secret '{}' (len: {}) !!!", provider, secret.len());
+    eprintln!(
+        "!!! SECRETS (FILE): set_provider_secret '{}' (len: {}) !!!",
+        provider,
+        secret.len()
+    );
     let mut secrets = load_secrets().unwrap_or_default();
     secrets.insert(provider.to_string(), secret.to_string());
     save_secrets(&secrets)
@@ -65,7 +67,10 @@ pub fn get_provider_secret(provider: &str) -> Result<Option<String>> {
             Ok(Some(val.clone()))
         }
         _ => {
-            eprintln!("!!! SECRETS (FILE): Secret for '{}' is empty/missing !!!", provider);
+            eprintln!(
+                "!!! SECRETS (FILE): Secret for '{}' is empty/missing !!!",
+                provider
+            );
             Ok(None)
         }
     }

@@ -128,13 +128,13 @@ mod tests {
 
     #[test]
     fn test_basic_license_can_check_stable() {
-        let state = create_test_state(Tier::Basic, "key-123", "active", 40);
+        let state = create_test_state(Tier::Pro, "key-123", "active", 40);
         assert!(can_check_for_updates(&state, UpdateChannel::Stable));
     }
 
     #[test]
     fn test_basic_license_cannot_check_beta() {
-        let state = create_test_state(Tier::Basic, "key-123", "active", 40);
+        let state = create_test_state(Tier::Pro, "key-123", "active", 40);
         assert!(!can_check_for_updates(&state, UpdateChannel::Beta));
     }
 
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_inactive_license_cannot_check() {
-        let state = create_test_state(Tier::Basic, "key-123", "expired", 40);
+        let state = create_test_state(Tier::Pro, "key-123", "expired", 40);
         assert!(!can_check_for_updates(&state, UpdateChannel::Stable));
     }
 }

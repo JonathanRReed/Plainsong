@@ -59,11 +59,11 @@ impl OpenAIClient {
             .iter()
             .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
             .filter(|id| {
-                id.contains("gpt") || 
-                id.contains("o1") || 
-                id.contains("o3") || 
-                id.contains("o4") ||
-                id.contains("chatgpt")
+                id.contains("gpt")
+                    || id.contains("o1")
+                    || id.contains("o3")
+                    || id.contains("o4")
+                    || id.contains("chatgpt")
             })
             .collect();
 

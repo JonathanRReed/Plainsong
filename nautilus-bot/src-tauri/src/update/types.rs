@@ -75,7 +75,7 @@ impl std::fmt::Display for UpdateError {
 impl std::error::Error for UpdateError {}
 
 /// Information about an available update
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
     /// New version available
@@ -89,10 +89,11 @@ pub struct UpdateInfo {
 }
 
 /// Current update status for the UI
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum UpdateStatus {
     /// No update check performed yet
+    #[default]
     Unknown,
     /// Currently checking for updates
     Checking,
@@ -106,12 +107,6 @@ pub enum UpdateStatus {
     Installing,
     /// Update check/install failed
     Error(String),
-    /// Updates locked (unlicensed)
+    /// Requires higher tier license
     Locked,
-}
-
-impl Default for UpdateStatus {
-    fn default() -> Self {
-        UpdateStatus::Unknown
-    }
 }

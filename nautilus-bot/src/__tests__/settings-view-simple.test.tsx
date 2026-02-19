@@ -125,6 +125,7 @@ vi.mock("@/lib/tauri", () => ({
   listDeepSeekModels: vi.fn(async () => []),
   listDownloadedModels: vi.fn(async () => []),
   downloadWhisperModel: vi.fn(async () => { }),
+  isDiarizationModelAvailable: vi.fn(async () => true),
   migrateToEncryptedStorage: vi.fn(),
   openPermissionSettings: vi.fn(),
   saveSettings: vi.fn(async () => { }),

@@ -20,6 +20,22 @@ const DISTIL_REQUIRED_FILES: [&str; 8] = [
     "merges.txt",
     "vocab.json",
 ];
+const MOONSHINE_REQUIRED_FILES: [&str; 5] = [
+    "config.json",
+    "generation_config.json",
+    "model.safetensors",
+    "preprocessor_config.json",
+    "tokenizer.json",
+];
+const VIBE_REQUIRED_FILES: [&str; 3] = ["config.json", "model.safetensors.index.json", "README.md"];
+const VOXTRAL_REQUIRED_FILES: [&str; 6] = [
+    "config.json",
+    "generation_config.json",
+    "model.safetensors",
+    "params.json",
+    "processor_config.json",
+    "tekken.json",
+];
 
 /// Manages multiple ASR providers
 #[allow(dead_code)]
@@ -240,43 +256,67 @@ impl AsrManager {
             .await
     }
 
-    /// Get info for all providers
+    /// Get info for all providers (Parallelized)
     pub async fn get_all_providers_info(&self) -> Result<Vec<ProviderInfo>, String> {
-        let mut infos = Vec::new();
         let selected_model = self.selected_model_id().await;
         let last_errors = self.last_runtime_errors.read().await.clone();
 
-        for provider_type in AsrProviderType::all() {
-            let provider = Self::provider_with_model(provider_type, Some(selected_model.as_str()));
-            let is_available = provider.is_available();
-            let diagnostics = runtime_diagnostics_for_provider(
-                provider_type,
-                selected_model.as_str(),
-                is_available,
-                last_errors.get(&provider_type).map(String::as_str),
-            );
-            infos.push(ProviderInfo {
-                provider_type,
-                name: provider.name().to_string(),
-                description: provider.description().to_string(),
-                is_available,
-                inference_enabled: Self::is_provider_transcription_enabled(provider_type),
-                model_info: provider.model_info(),
-                download_status: provider.download_status(),
-                runtime_status: diagnostics.runtime_status,
-                runtime_message: diagnostics.runtime_message,
-                runtime_details: diagnostics.runtime_details,
-            });
+        let futures = AsrProviderType::all().into_iter().map(|provider_type| {
+            let selected_model = selected_model.clone();
+            let last_error = last_errors.get(&provider_type).cloned();
+
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let provider =
+                        Self::provider_with_model(provider_type, Some(selected_model.as_str()));
+                    let is_available = provider.is_available();
+                    let diagnostics = runtime_diagnostics_for_provider(
+                        provider_type,
+                        selected_model.as_str(),
+                        is_available,
+                        last_error.as_deref(),
+                    );
+                    ProviderInfo {
+                        provider_type,
+                        name: provider.name().to_string(),
+                        description: provider.description().to_string(),
+                        is_available,
+                        inference_enabled: Self::is_provider_transcription_enabled(provider_type),
+                        model_info: provider.model_info(),
+                        download_status: provider.download_status(),
+                        runtime_status: diagnostics.runtime_status,
+                        runtime_message: diagnostics.runtime_message,
+                        runtime_details: diagnostics.runtime_details,
+                    }
+                })
+                .await
+                .map_err(|e| format!("Task join error: {}", e))
+            }
+        });
+
+        // Current crate uses futures-util
+        let results = futures_util::future::join_all(futures).await;
+
+        let mut infos = Vec::new();
+        for res in results {
+            match res {
+                Ok(info) => infos.push(info),
+                Err(e) => return Err(e),
+            }
         }
 
         Ok(infos)
     }
 
     /// Download models for a provider
-    pub async fn download_models(&self, provider_type: AsrProviderType) -> Result<()> {
+    pub async fn download_models(
+        &self,
+        provider_type: AsrProviderType,
+        progress_cb: Box<dyn Fn(f32) + Send + Sync>,
+    ) -> Result<()> {
         let selected_model = self.selected_model_id().await;
         let provider = Self::provider_with_model(provider_type, Some(selected_model.as_str()));
-        provider.download_models().await
+        provider.download_models(progress_cb).await
     }
 
     /// Get models directory
@@ -485,6 +525,79 @@ fn runtime_diagnostics_for_provider(
                 "Distil runtime missing. Install torch + transformers and set NAUTILUS_PYTHON.",
                 "Distil runtime detected but provider health check failed.",
                 "Distil runtime ready.",
+                last_error,
+            )
+        }
+        AsrProviderType::Moonshine => {
+            let model_dir = models_root.join("moonshine");
+            let model_ready = MOONSHINE_REQUIRED_FILES
+                .iter()
+                .all(|file_name| model_dir.join(file_name).exists());
+            let python = super::python_runtime::find_python_with_imports(
+                "import torch; import transformers",
+            );
+            runtime_from_model_dir_and_python(
+                provider_available,
+                model_dir,
+                model_ready,
+                python,
+                "Moonshine model files are incomplete. Download required model artifacts first.",
+                "Moonshine runtime missing. Install torch + transformers and set NAUTILUS_PYTHON.",
+                "Moonshine runtime detected but provider health check failed.",
+                "Moonshine runtime ready.",
+                last_error,
+            )
+        }
+
+        AsrProviderType::VibeVoice => {
+            let model_dir = models_root.join("vibevoice");
+            let mut model_ready = VIBE_REQUIRED_FILES
+                .iter()
+                .all(|file_name| model_dir.join(file_name).exists());
+
+            if model_ready {
+                // Check shards
+                for i in 1..=8 {
+                    let name = format!("model-{:05}-of-00008.safetensors", i);
+                    if !model_dir.join(name).exists() {
+                        model_ready = false;
+                        break;
+                    }
+                }
+            }
+
+            let python = super::python_runtime::find_python_with_imports(
+                "import torch; import transformers",
+            );
+            runtime_from_model_dir_and_python(
+                provider_available,
+                model_dir,
+                model_ready,
+                python,
+                "VibeVoice model files incomplete. Download required model artifacts.",
+                "VibeVoice runtime missing. Install torch + transformers.",
+                "VibeVoice runtime detected but health check failed.",
+                "VibeVoice (Microsoft) runtime ready.",
+                last_error,
+            )
+        }
+        AsrProviderType::Voxtral => {
+            let model_dir = models_root.join("voxtral");
+            let model_ready = VOXTRAL_REQUIRED_FILES
+                .iter()
+                .all(|file_name| model_dir.join(file_name).exists());
+            let python = super::python_runtime::find_python_with_imports(
+                "import torch; import transformers",
+            );
+            runtime_from_model_dir_and_python(
+                provider_available,
+                model_dir,
+                model_ready,
+                python,
+                "Voxtral model files incomplete. Download required model artifacts.",
+                "Voxtral runtime missing. Install torch + transformers.",
+                "Voxtral runtime detected but health check failed.",
+                "Voxtral Mini (Mistral) runtime ready.",
                 last_error,
             )
         }

@@ -41,6 +41,20 @@ export function normalizeDownloadStatus(status: DownloadStatus | unknown): Norma
     return { kind: "error" };
   }
 
+  // Handle snake_case from Rust
+  if (status === "downloaded") {
+    return { kind: "downloaded" };
+  }
+  if (status === "not_downloaded") {
+    return { kind: "not_downloaded" };
+  }
+  if (status === "downloading") {
+    return { kind: "downloading", progress: 0 };
+  }
+  if (status === "error") {
+    return { kind: "error" };
+  }
+
   if (!isRecord(status)) {
     return { kind: "unknown" };
   }

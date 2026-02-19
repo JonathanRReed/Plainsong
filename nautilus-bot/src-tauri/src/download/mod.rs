@@ -211,10 +211,10 @@ impl DownloadManager {
         }
 
         let temp_path = destination.with_extension("tmp");
-        
+
         let client = &self.client;
         let mut request = client.get(url);
-        
+
         let start_byte = if temp_path.exists() {
             let metadata = tokio::fs::metadata(&temp_path).await?;
             metadata.len()
@@ -240,14 +240,15 @@ impl DownloadManager {
 
         let mut stream = response.bytes_stream();
         let bytes_downloaded = Arc::new(AtomicU64::new(start_byte));
-        let start_time = std::time::Instant::now();
+        let _start_time = std::time::Instant::now();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             file.write_all(&chunk).await?;
 
-            let current = bytes_downloaded.fetch_add(chunk.len() as u64, Ordering::SeqCst) + chunk.len() as u64;
-            
+            let current = bytes_downloaded.fetch_add(chunk.len() as u64, Ordering::SeqCst)
+                + chunk.len() as u64;
+
             // Throttle progress updates
             if total_size > 0 {
                 let progress = DownloadProgress {
@@ -271,20 +272,20 @@ impl DownloadManager {
     ) -> Result<PathBuf> {
         let diarization_dir = self.models_dir.join("diarization");
         tokio::fs::create_dir_all(&diarization_dir).await?;
-        
+
         let destination = diarization_dir.join("ecapa_tdnn_speaker.onnx");
-        
+
         if destination.exists() {
             tracing::info!("Diarization model already exists at {:?}", destination);
             return Ok(destination);
         }
-        
+
         // Use the Wespeaker ECAPA-TDNN model which is native ONNX and compatible with our runtime
         let url = "https://huggingface.co/Wespeaker/wespeaker-ecapa-tdnn512-LM/resolve/main/voxceleb_ECAPA512_LM.onnx";
-        
+
         tracing::info!("Downloading diarization model from {}", url);
         println!("Starting UNVERIFIED download of diarization model...");
-        
+
         // Use unverified download because HF S3 ETag often matches LFS pointer, not content
         self.download_file_unverified(url, &destination, _progress_callback)
             .await?;
@@ -299,8 +300,11 @@ impl DownloadManager {
             ));
         }
 
-        tracing::info!("Diarization model downloaded successfully to {:?}", destination);
-        
+        tracing::info!(
+            "Diarization model downloaded successfully to {:?}",
+            destination
+        );
+
         Ok(destination)
     }
 

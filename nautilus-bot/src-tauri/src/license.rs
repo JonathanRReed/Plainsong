@@ -27,18 +27,13 @@ const GRACE_PERIOD_DAYS: i64 = 7;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
+    #[default]
     None,
     Pro,
     FriendsClub,
-}
-
-impl Default for Tier {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -211,10 +206,10 @@ fn is_valid(state: &LicenseState) -> bool {
     if state.key.is_empty() {
         return false;
     }
-    match state.ls_status.as_str() {
-        "active" | "inactive" => true,
-        _ => false,
+    if !matches!(state.ls_status.as_str(), "active" | "inactive") {
+        return false;
     }
+    true
 }
 
 fn trial_status(state: &LicenseState, valid: bool) -> (i64, bool) {
@@ -277,13 +272,7 @@ fn ls_client() -> reqwest::Client {
 fn encode_form(pairs: &[(&str, &str)]) -> String {
     pairs
         .iter()
-        .map(|(k, v)| {
-            format!(
-                "{}={}",
-                urlencoding::encode(k),
-                urlencoding::encode(v)
-            )
-        })
+        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
         .collect::<Vec<_>>()
         .join("&")
 }
@@ -325,7 +314,9 @@ pub async fn activate_license(key: &str) -> Result<LicenseInfo, String> {
         .map_err(|e| format!("Unexpected response from licensing server: {e}\n{text}"))?;
 
     if !parsed.activated {
-        let msg = parsed.error.unwrap_or_else(|| "Activation failed.".to_string());
+        let msg = parsed
+            .error
+            .unwrap_or_else(|| "Activation failed.".to_string());
         return Err(if status == 422 && msg.contains("activation limit") {
             let tier = tier_from_variant(&parsed.meta.variant_name);
             let limit = get_tier_activation_limit(&tier);
@@ -335,20 +326,17 @@ pub async fn activate_license(key: &str) -> Result<LicenseInfo, String> {
         });
     }
 
-    let instance_id = parsed
-        .instance
-        .map(|i| i.id)
-        .unwrap_or_default();
+    let instance_id = parsed.instance.map(|i| i.id).unwrap_or_default();
 
     state.key = key;
     state.instance_id = instance_id;
     state.tier = tier_from_variant(&parsed.meta.variant_name);
     state.ls_status = parsed.license_key.status;
     // Use tier-specific activation limit if LS doesn't provide one
-    state.activations_limit = if parsed.license_key.activation_limit == 0 { 
+    state.activations_limit = if parsed.license_key.activation_limit == 0 {
         get_tier_activation_limit(&state.tier)
-    } else { 
-        parsed.license_key.activation_limit 
+    } else {
+        parsed.license_key.activation_limit
     };
     state.activations_usage = parsed.license_key.activation_usage;
     state.last_validated_at = chrono::Utc::now().to_rfc3339();
@@ -381,7 +369,10 @@ async fn validate_license_inner(state: &mut LicenseState) -> Result<LicenseInfo,
     }
 
     let client = ls_client();
-    let body = encode_form(&[("license_key", &state.key), ("instance_id", &state.instance_id)]);
+    let body = encode_form(&[
+        ("license_key", &state.key),
+        ("instance_id", &state.instance_id),
+    ]);
 
     let resp = client
         .post(format!("{LS_API_BASE}/validate"))
@@ -393,12 +384,16 @@ async fn validate_license_inner(state: &mut LicenseState) -> Result<LicenseInfo,
         .map_err(|e| format!("Network error: {e}"))?;
 
     let text = resp.text().await.map_err(|e| format!("Read error: {e}"))?;
-    let parsed: LsValidateResponse = serde_json::from_str(&text)
-        .map_err(|e| format!("Unexpected response: {e}"))?;
+    let parsed: LsValidateResponse =
+        serde_json::from_str(&text).map_err(|e| format!("Unexpected response: {e}"))?;
 
     // Update stats from the validate response.
     state.ls_status = parsed.license_key.status.clone();
-    state.activations_limit = if parsed.license_key.activation_limit == 0 { 5 } else { parsed.license_key.activation_limit };
+    state.activations_limit = if parsed.license_key.activation_limit == 0 {
+        5
+    } else {
+        parsed.license_key.activation_limit
+    };
     state.activations_usage = parsed.license_key.activation_usage;
     if let Some(inst) = parsed.instance {
         state.instance_id = inst.id;
@@ -411,7 +406,9 @@ async fn validate_license_inner(state: &mut LicenseState) -> Result<LicenseInfo,
     let _ = persist_state(state);
 
     if !parsed.valid {
-        let msg = parsed.error.unwrap_or_else(|| format!("License {}", state.ls_status));
+        let msg = parsed
+            .error
+            .unwrap_or_else(|| format!("License {}", state.ls_status));
         return Err(msg);
     }
 
@@ -427,7 +424,10 @@ pub async fn deactivate_license() -> Result<(), String> {
     }
 
     let client = ls_client();
-    let body = encode_form(&[("license_key", &state.key), ("instance_id", &state.instance_id)]);
+    let body = encode_form(&[
+        ("license_key", &state.key),
+        ("instance_id", &state.instance_id),
+    ]);
 
     let resp = client
         .post(format!("{LS_API_BASE}/deactivate"))
@@ -439,11 +439,13 @@ pub async fn deactivate_license() -> Result<(), String> {
         .map_err(|e| format!("Network error: {e}"))?;
 
     let text = resp.text().await.map_err(|e| format!("Read error: {e}"))?;
-    let parsed: LsDeactivateResponse = serde_json::from_str(&text)
-        .map_err(|e| format!("Unexpected response: {e}"))?;
+    let parsed: LsDeactivateResponse =
+        serde_json::from_str(&text).map_err(|e| format!("Unexpected response: {e}"))?;
 
     if !parsed.deactivated {
-        let msg = parsed.error.unwrap_or_else(|| "Deactivation failed.".to_string());
+        let msg = parsed
+            .error
+            .unwrap_or_else(|| "Deactivation failed.".to_string());
         return Err(msg);
     }
 

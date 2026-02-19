@@ -65,11 +65,13 @@ impl WhisperProvider {
 
         tracing::info!("Loading Whisper model from {:?}", self.model_path);
 
-        let ctx = Arc::new(whisper_rs::WhisperContext::new_with_params(
-            &self.model_path.to_string_lossy(),
-            whisper_rs::WhisperContextParameters::default(),
-        )
-        .context("Failed to load Whisper model")?);
+        let ctx = Arc::new(
+            whisper_rs::WhisperContext::new_with_params(
+                &self.model_path.to_string_lossy(),
+                whisper_rs::WhisperContextParameters::default(),
+            )
+            .context("Failed to load Whisper model")?,
+        );
 
         if let Ok(mut cache) = whisper_context_cache().lock() {
             cache.insert(self.model_id.clone(), Arc::clone(&ctx));
@@ -144,7 +146,8 @@ impl AsrProvider for WhisperProvider {
         // Log audio statistics
         if !audio_data.is_empty() {
             let peak = audio_data.iter().fold(0.0_f32, |p, s| p.max(s.abs()));
-            let rms = (audio_data.iter().map(|s| s * s).sum::<f32>() / audio_data.len() as f32).sqrt();
+            let rms =
+                (audio_data.iter().map(|s| s * s).sum::<f32>() / audio_data.len() as f32).sqrt();
             tracing::info!("Whisper audio stats: peak={:.4}, rms={:.4}", peak, rms);
         }
 
@@ -239,14 +242,15 @@ impl AsrProvider for WhisperProvider {
         }
     }
 
-    async fn download_models(&self) -> Result<()> {
+    async fn download_models(&self, progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()> {
         use crate::download::DownloadManager;
 
         let manager = DownloadManager::new()?;
 
         let model_name = self.model_id.as_str();
 
-        let progress_callback = |progress: crate::download::DownloadProgress| {
+        let progress_callback = move |progress: crate::download::DownloadProgress| {
+            progress_cb(progress.percentage as f32);
             tracing::info!(
                 "Download progress: {:.1}% ({}/s)",
                 progress.percentage,

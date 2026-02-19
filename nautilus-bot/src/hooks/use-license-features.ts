@@ -17,7 +17,7 @@ const TIER_FEATURES: Record<LicenseTier, FeatureFlags> = {
     cloudSync: false,
     prioritySupport: false,
   },
-  basic: {
+  pro: {
     whisperLargeModel: true,
     intelligentPunctuation: true,
     autoDiarization: true,

@@ -1,42 +1,18 @@
 pub mod canary;
 pub mod distil_whisper;
 pub mod manager;
+pub mod moonshine;
 pub mod parakeet;
 pub mod python_runtime;
+pub mod vibevoice;
+pub mod voxtral;
 pub mod whisper;
 
+use anyhow::Result;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// ASR Provider trait for modular transcription support
-#[async_trait::async_trait]
-pub trait AsrProvider: Send + Sync {
-    /// Provider name
-    fn name(&self) -> &str;
-
-    /// Provider description
-    fn description(&self) -> &str;
-
-    /// Check if the provider is available (models downloaded, etc.)
-    fn is_available(&self) -> bool;
-
-    /// Get model information
-    fn model_info(&self) -> ModelInfo;
-
-    /// Transcribe audio file
-    async fn transcribe(&self, audio_path: &Path) -> anyhow::Result<TranscriptionResult>;
-
-    /// Transcribe audio bytes
-    async fn transcribe_bytes(&self, audio_data: &[u8]) -> anyhow::Result<TranscriptionResult>;
-
-    /// Get download status/progress
-    fn download_status(&self) -> DownloadStatus;
-
-    /// Download required models
-    async fn download_models(&self) -> anyhow::Result<()>;
-}
-
-/// Model information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
@@ -51,7 +27,15 @@ pub struct ModelInfo {
     pub source_url: String,
 }
 
-/// Transcription result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptSegment {
+    pub start_time: f64,
+    pub end_time: f64,
+    pub text: String,
+    pub confidence: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionResult {
@@ -68,24 +52,28 @@ pub struct TranscriptionResult {
     pub fallback_reason: Option<String>,
 }
 
-/// Transcript segment with timing
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptSegment {
-    pub start_time: f64,
-    pub end_time: f64,
-    pub text: String,
-    pub confidence: f64,
-}
-
-/// Download status
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum DownloadStatus {
     NotDownloaded,
-    Downloading { progress: f64 },
+    Downloading(f32),
     Downloaded,
-    Error(String),
+    Error,
 }
+
+#[async_trait]
+pub trait AsrProvider: Send + Sync {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn is_available(&self) -> bool;
+    fn model_info(&self) -> ModelInfo;
+    async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult>;
+    async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult>;
+    fn download_status(&self) -> DownloadStatus;
+    async fn download_models(&self, progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()>;
+}
+
+pub struct AsrProviderFactory;
 
 /// ASR Provider type
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -95,6 +83,9 @@ pub enum AsrProviderType {
     Parakeet,
     Canary,
     DistilWhisper,
+    Moonshine,
+    VibeVoice,
+    Voxtral,
 }
 
 impl AsrProviderType {
@@ -104,6 +95,9 @@ impl AsrProviderType {
             AsrProviderType::Parakeet,
             AsrProviderType::Canary,
             AsrProviderType::DistilWhisper,
+            AsrProviderType::Moonshine,
+            AsrProviderType::VibeVoice,
+            AsrProviderType::Voxtral,
         ]
     }
 
@@ -114,12 +108,12 @@ impl AsrProviderType {
             AsrProviderType::Parakeet => "NVIDIA Parakeet TDT",
             AsrProviderType::Canary => "NVIDIA Canary Qwen",
             AsrProviderType::DistilWhisper => "Distil Whisper",
+            AsrProviderType::Moonshine => "UsefulSensors Moonshine",
+            AsrProviderType::VibeVoice => "Microsoft VibeVoice",
+            AsrProviderType::Voxtral => "Mistral Voxtral Mini",
         }
     }
 }
-
-/// Factory for creating ASR providers
-pub struct AsrProviderFactory;
 
 impl AsrProviderFactory {
     pub fn create(provider_type: AsrProviderType) -> Box<dyn AsrProvider> {
@@ -137,6 +131,9 @@ impl AsrProviderFactory {
             AsrProviderType::DistilWhisper => Box::new(distil_whisper::DistilWhisperProvider::new(
                 selected_model_id,
             )),
+            AsrProviderType::Moonshine => Box::new(moonshine::MoonshineProvider::new()),
+            AsrProviderType::VibeVoice => Box::new(vibevoice::VibeVoiceProvider::new()),
+            AsrProviderType::Voxtral => Box::new(voxtral::VoxtralProvider::new()),
         }
     }
 }

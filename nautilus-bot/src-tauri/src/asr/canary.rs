@@ -204,10 +204,12 @@ impl AsrProvider for CanaryProvider {
         }
     }
 
-    async fn download_models(&self) -> Result<()> {
+    async fn download_models(&self, progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()> {
         use crate::download::DownloadManager;
 
         let manager = DownloadManager::new()?;
+        let progress_cb = std::sync::Arc::new(progress_cb);
+
         for file_name in CANARY_REQUIRED_FILES {
             let destination = self.model_dir.join(file_name);
             if destination.exists() {
@@ -217,8 +219,10 @@ impl AsrProvider for CanaryProvider {
                 "https://huggingface.co/{}/resolve/main/{}",
                 CANARY_MODEL_REPO, file_name
             );
+            let cb = progress_cb.clone();
             manager
-                .download_file(&url, &destination, move |progress| {
+                .download_file_unverified(&url, &destination, move |progress| {
+                    cb(progress.percentage as f32);
                     tracing::info!("Canary {} download: {:.1}%", file_name, progress.percentage);
                 })
                 .await?;

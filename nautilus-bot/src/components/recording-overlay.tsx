@@ -11,22 +11,15 @@ interface RecordingOverlayProps {
   isDictation?: boolean;
 }
 
-export function RecordingOverlay({ isDictation = false }: RecordingOverlayProps) {
-  const { isRecording, recordingId, formattedDuration, isSystemAudioActive, stopMeeting } = useRecording();
+export function RecordingOverlay({ isDictation }: RecordingOverlayProps) {
+  const { isRecording, recordingId, formattedDuration, isSystemAudioActive, stopMeeting, recordingMode } = useRecording();
 
-  if (!isRecording) return null;
+  // If not recording, or if recording in dictation mode (which has its own dedicated window/popup),
+  // do not show the main window overlay.
+  if (!isRecording || recordingMode === "dictation") return null;
 
-  if (isDictation) {
-    return (
-      <div className="fixed top-4 right-4 z-50">
-        <div className="bg-active text-active-foreground px-4 py-2 rounded-full shadow-lg flex items-center gap-3 animate-pulse">
-          <Mic className="h-4 w-4" />
-          <span className="text-sm font-medium">Dictating...</span>
-          <span className="text-sm font-mono">{formattedDuration}</span>
-        </div>
-      </div>
-    );
-  }
+  // Legacy prop check can be ignored or removed since recordingMode is the source of truth.
+  if (isDictation) return null;
 
   return (
     <>
@@ -36,7 +29,7 @@ export function RecordingOverlay({ isDictation = false }: RecordingOverlayProps)
           isRecording ? "border-active" : "border-transparent"
         )} />
       </div>
-      
+
       <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 w-[500px]">
         <div className="bg-active text-active-foreground rounded-xl shadow-2xl overflow-hidden">
           {/* Header */}
@@ -45,7 +38,7 @@ export function RecordingOverlay({ isDictation = false }: RecordingOverlayProps)
               <Mic2 className="h-5 w-5" />
               <span className="font-medium">Recording</span>
             </div>
-            
+
             <div className="flex items-center gap-3">
               {isSystemAudioActive && (
                 <div className="flex items-center gap-1 px-2 py-1 bg-active-foreground/20 rounded text-xs">
@@ -53,9 +46,9 @@ export function RecordingOverlay({ isDictation = false }: RecordingOverlayProps)
                   <span>System Audio</span>
                 </div>
               )}
-              
+
               <span className="font-mono text-lg">{formattedDuration}</span>
-              
+
               <Button
                 variant="ghost"
                 size="icon"
@@ -66,10 +59,10 @@ export function RecordingOverlay({ isDictation = false }: RecordingOverlayProps)
               </Button>
             </div>
           </div>
-          
+
           {/* Waveform */}
           <div className="px-4 py-3 bg-active/50">
-            <RecordingWaveform 
+            <RecordingWaveform
               recordingId={recordingId || "temp"}
               isRecording={isRecording}
               height={50}
@@ -111,7 +104,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
             Choose what audio sources to capture. You'll see clear indicators while recording.
           </DialogDescription>
         </DialogHeader>
-        
+
         <div className="space-y-4 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -128,7 +121,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
               className="h-4 w-4"
             />
           </div>
-          
+
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Monitor className="h-5 w-5 text-muted-foreground" />
@@ -158,7 +151,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
             />
           </div>
         </div>
-        
+
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel

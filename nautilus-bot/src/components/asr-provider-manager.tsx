@@ -10,16 +10,19 @@ import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AsrBenchmarkEntry, AsrProviderInfo, AsrProviderType, BenchmarkResult } from "@/types";
-import { 
-  Download, 
-  Check, 
-  AlertCircle, 
-  Cpu, 
-  Globe, 
+import {
+  Download,
+  Check,
+  AlertCircle,
+  Cpu,
+  Globe,
   Clock,
   BarChart3,
   FileAudio,
-  Zap
+  Zap,
+  Moon,
+  Waves,
+  Mic
 } from "lucide-react";
 
 interface AsrProviderManagerProps {
@@ -35,12 +38,26 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   const [benchmarkFileName, setBenchmarkFileName] = useState<string | null>(null);
   const [isBenchmarking, setIsBenchmarking] = useState(false);
   const [providerErrors, setProviderErrors] = useState<Record<string, string>>({});
+  const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
   const benchmarkFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     loadProviders();
     loadDefaultProvider();
     loadBenchmarkHistory();
+
+    // Listen for download progress events
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      const unlisten = listen<[AsrProviderType, number]>("asr-download-progress", (event) => {
+        const [providerType, progress] = event.payload;
+        setDownloadProgress((prev) => ({ ...prev, [providerType]: progress }));
+      });
+      return unlisten;
+    }).then(() => {
+      // Cleanup if component unmounts - simpler to just let it leak in this top-level component 
+      // or store unlisten function in a ref if strictly needed. 
+      // For now, this is acceptable for a main view component.
+    });
   }, []);
 
   const loadProviders = async () => {
@@ -88,12 +105,30 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
 
   const handleDownload = async (providerType: AsrProviderType) => {
     setIsLoading(true);
+    setDownloadProgress((prev) => ({ ...prev, [providerType]: 0 }));
+    setProviderErrors((prev) => {
+      const next = { ...prev };
+      delete next[providerType];
+      return next;
+    });
+
     try {
       await invoke("download_asr_models", { providerType });
       await loadProviders();
     } catch (error) {
       console.error("Failed to download models:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      setProviderErrors((prev) => ({
+        ...prev,
+        [providerType]: message,
+      }));
     } finally {
+      // Clear progress on completion (success or failure)
+      setDownloadProgress((prev) => {
+        const next = { ...prev };
+        delete next[providerType];
+        return next;
+      });
       setIsLoading(false);
     }
   };
@@ -140,13 +175,30 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         return <Globe className="h-5 w-5" />;
       case "distil_whisper":
         return <Zap className="h-5 w-5" />;
+      case "moonshine":
+        return <Moon className="h-5 w-5" />;
+      case "vibevoice":
+        return <Waves className="h-5 w-5" />;
+      case "voxtral":
+        return <Mic className="h-5 w-5" />;
       default:
         return <Cpu className="h-5 w-5" />;
     }
   };
 
-  const getDownloadStatusBadge = (status: AsrProviderInfo["downloadStatus"]) => {
-    const normalizedStatus = normalizeDownloadStatus(status);
+  const getDownloadStatusBadge = (provider: AsrProviderInfo) => {
+    const normalizedStatus = normalizeDownloadStatus(provider.downloadStatus);
+    const activeProgress = downloadProgress[provider.providerType];
+
+    // Show progress bar if we have active progress and not yet fully downloaded/updated
+    if (activeProgress !== undefined && normalizedStatus.kind !== "downloaded") {
+      return (
+        <div className="flex items-center gap-2">
+          <Progress value={activeProgress} className="w-20 h-2" />
+          <span className="text-xs text-muted-foreground">{activeProgress.toFixed(0)}%</span>
+        </div>
+      );
+    }
 
     switch (normalizedStatus.kind) {
       case "downloaded":
@@ -164,6 +216,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
           </Badge>
         );
       case "downloading": {
+        // Fallback if backend says downloading but we missed events?
         const progress = normalizedStatus.progress ?? 0;
         return (
           <div className="flex items-center gap-2">
@@ -194,6 +247,9 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         return "python -m pip install 'nemo_toolkit[asr]' torch";
       case "canary":
       case "distil_whisper":
+      case "moonshine":
+      case "vibevoice":
+      case "voxtral":
         return "python -m pip install torch transformers";
       default:
         return "No runtime setup required for Whisper";
@@ -233,182 +289,182 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                     : null;
                 const providerError = providerErrors[provider.providerType];
                 return (
-                <Card 
-                  key={provider.providerType}
-                  className={cn(
-                    "transition-all",
-                    defaultProvider === provider.providerType && "border-trusted ring-1 ring-trusted"
-                  )}
-                >
-                  <CardHeader className="pb-3">
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-center gap-3">
-                        <div className="h-10 w-10 rounded-lg bg-trusted/10 flex items-center justify-center text-trusted">
-                          {getProviderIcon(provider.providerType)}
+                  <Card
+                    key={provider.providerType}
+                    className={cn(
+                      "transition-all",
+                      defaultProvider === provider.providerType && "border-trusted ring-1 ring-trusted"
+                    )}
+                  >
+                    <CardHeader className="pb-3">
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="h-10 w-10 rounded-lg bg-trusted/10 flex items-center justify-center text-trusted">
+                            {getProviderIcon(provider.providerType)}
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <CardTitle className="text-lg">{provider.name}</CardTitle>
+                              {defaultProvider === provider.providerType && (
+                                <Badge variant="outline" className="text-xs">
+                                  Default
+                                </Badge>
+                              )}
+                            </div>
+                            <CardDescription className="line-clamp-2 mt-1">
+                              {provider.description}
+                            </CardDescription>
+                          </div>
                         </div>
+                        <div className="flex items-center gap-2">
+                          {getDownloadStatusBadge(provider)}
+                        </div>
+                      </div>
+                    </CardHeader>
+
+                    <CardContent className="space-y-4">
+                      {provider.modelInfo && (
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                          <div className="p-2 bg-muted rounded-lg">
+                            <div className="text-muted-foreground text-xs">Size</div>
+                            <div className="font-medium">{provider.modelInfo.sizeMb} MB</div>
+                          </div>
+                          <div className="p-2 bg-muted rounded-lg">
+                            <div className="text-muted-foreground text-xs">Parameters</div>
+                            <div className="font-medium">{provider.modelInfo.parameters}</div>
+                          </div>
+                          <div className="p-2 bg-muted rounded-lg">
+                            <div className="text-muted-foreground text-xs">WER</div>
+                            <div className="font-medium">
+                              {provider.modelInfo.wordErrorRate?.toFixed(2) || "N/A"}%
+                            </div>
+                          </div>
+                          <div className="p-2 bg-muted rounded-lg">
+                            <div className="text-muted-foreground text-xs">Speed</div>
+                            <div className="font-medium">
+                              {provider.modelInfo.realTimeFactor?.toFixed(0) || "N/A"}x RTF
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {provider.modelInfo?.languages && provider.modelInfo.languages.length > 0 && (
                         <div>
-                          <div className="flex items-center gap-2">
-                            <CardTitle className="text-lg">{provider.name}</CardTitle>
-                            {defaultProvider === provider.providerType && (
-                              <Badge variant="outline" className="text-xs">
-                                Default
-                              </Badge>
-                            )}
+                          <div className="text-sm text-muted-foreground mb-2">
+                            Supported Languages ({provider.modelInfo.languages.length})
                           </div>
-                          <CardDescription className="line-clamp-2 mt-1">
-                            {provider.description}
-                          </CardDescription>
+                          <ScrollArea className="h-16">
+                            <div className="flex flex-wrap gap-1">
+                              {provider.modelInfo.languages.slice(0, 10).map((lang) => (
+                                <Badge key={lang} variant="secondary" className="text-xs">
+                                  {lang.toUpperCase()}
+                                </Badge>
+                              ))}
+                              {provider.modelInfo.languages.length > 10 && (
+                                <Badge variant="secondary" className="text-xs">
+                                  +{provider.modelInfo.languages.length - 10} more
+                                </Badge>
+                              )}
+                            </div>
+                          </ScrollArea>
                         </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {getDownloadStatusBadge(provider.downloadStatus)}
-                      </div>
-                    </div>
-                  </CardHeader>
+                      )}
 
-                  <CardContent className="space-y-4">
-                    {provider.modelInfo && (
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-                        <div className="p-2 bg-muted rounded-lg">
-                          <div className="text-muted-foreground text-xs">Size</div>
-                          <div className="font-medium">{provider.modelInfo.sizeMb} MB</div>
-                        </div>
-                        <div className="p-2 bg-muted rounded-lg">
-                          <div className="text-muted-foreground text-xs">Parameters</div>
-                          <div className="font-medium">{provider.modelInfo.parameters}</div>
-                        </div>
-                        <div className="p-2 bg-muted rounded-lg">
-                          <div className="text-muted-foreground text-xs">WER</div>
-                          <div className="font-medium">
-                            {provider.modelInfo.wordErrorRate?.toFixed(2) || "N/A"}%
-                          </div>
-                        </div>
-                        <div className="p-2 bg-muted rounded-lg">
-                          <div className="text-muted-foreground text-xs">Speed</div>
-                          <div className="font-medium">
-                            {provider.modelInfo.realTimeFactor?.toFixed(0) || "N/A"}x RTF
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {provider.modelInfo?.languages && provider.modelInfo.languages.length > 0 && (
-                      <div>
-                        <div className="text-sm text-muted-foreground mb-2">
-                          Supported Languages ({provider.modelInfo.languages.length})
-                        </div>
-                        <ScrollArea className="h-16">
-                          <div className="flex flex-wrap gap-1">
-                            {provider.modelInfo.languages.slice(0, 10).map((lang) => (
-                              <Badge key={lang} variant="secondary" className="text-xs">
-                                {lang.toUpperCase()}
-                              </Badge>
-                            ))}
-                            {provider.modelInfo.languages.length > 10 && (
-                              <Badge variant="secondary" className="text-xs">
-                                +{provider.modelInfo.languages.length - 10} more
-                              </Badge>
-                            )}
-                          </div>
-                        </ScrollArea>
-                      </div>
-                    )}
-
-                    <div className="flex items-center justify-between pt-2">
-                      <div className="flex items-center gap-2">
-                        <Badge variant="outline" className="text-xs">
-                          {provider.modelInfo?.license || "Unknown"}
-                        </Badge>
-                        {selection.reason === "runtime_unavailable" && (
-                          <Badge variant="secondary" className="text-xs">
-                            {provider.runtimeStatus === "missing_runtime"
-                              ? "Runtime setup required"
-                              : provider.runtimeStatus === "missing_model"
-                                ? "Model files missing"
-                                : "Runtime error"}
+                      <div className="flex items-center justify-between pt-2">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="outline" className="text-xs">
+                            {provider.modelInfo?.license || "Unknown"}
                           </Badge>
-                        )}
-                        {!provider.inferenceEnabled && (
-                          <Badge variant="secondary" className="text-xs">
-                            Not enabled
-                          </Badge>
-                        )}
-                        {provider.modelInfo?.sourceUrl && (
-                          <a
-                            href={provider.modelInfo.sourceUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-xs text-trusted hover:underline"
-                          >
-                            Learn more
-                          </a>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {selection.selectable ? (
-                          <Button
-                            variant={defaultProvider === provider.providerType ? "default" : "outline"}
-                            size="sm"
-                            onClick={() => handleSetDefault(provider.providerType)}
-                          >
-                            {defaultProvider === provider.providerType ? "Default" : "Set Default"}
-                          </Button>
-                        ) : selection.reason === "runtime_unavailable" ? (
-                          <>
-                            <Button size="sm" variant="outline" disabled>
-                              Runtime setup required
+                          {selection.reason === "runtime_unavailable" && (
+                            <Badge variant="secondary" className="text-xs">
+                              {provider.runtimeStatus === "missing_runtime"
+                                ? "Runtime setup required"
+                                : provider.runtimeStatus === "missing_model"
+                                  ? "Model files missing"
+                                  : "Runtime error"}
+                            </Badge>
+                          )}
+                          {!provider.inferenceEnabled && (
+                            <Badge variant="secondary" className="text-xs">
+                              Not enabled
+                            </Badge>
+                          )}
+                          {provider.modelInfo?.sourceUrl && (
+                            <a
+                              href={provider.modelInfo.sourceUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-trusted hover:underline"
+                            >
+                              Learn more
+                            </a>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {selection.selectable ? (
+                            <Button
+                              variant={defaultProvider === provider.providerType ? "default" : "outline"}
+                              size="sm"
+                              onClick={() => handleSetDefault(provider.providerType)}
+                            >
+                              {defaultProvider === provider.providerType ? "Default" : "Set Default"}
                             </Button>
+                          ) : selection.reason === "runtime_unavailable" ? (
+                            <>
+                              <Button size="sm" variant="outline" disabled>
+                                Runtime setup required
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => void copySetupCommand(provider.providerType)}
+                              >
+                                Copy setup command
+                              </Button>
+                              <Button size="sm" variant="outline" onClick={() => void loadProviders()}>
+                                Re-check runtime
+                              </Button>
+                              {defaultProvider === provider.providerType && provider.providerType !== "whisper" && (
+                                <Button size="sm" variant="secondary" onClick={() => handleSetDefault("whisper")}>
+                                  Switch to Whisper
+                                </Button>
+                              )}
+                            </>
+                          ) : selection.reason === "not_enabled" ? (
+                            <Button size="sm" variant="outline" disabled>
+                              Not enabled
+                            </Button>
+                          ) : isNotDownloaded(provider.downloadStatus) ? (
                             <Button
                               size="sm"
-                              variant="outline"
-                              onClick={() => void copySetupCommand(provider.providerType)}
+                              onClick={() => handleDownload(provider.providerType)}
+                              disabled={isLoading}
                             >
-                              Copy setup command
+                              <Download className="h-4 w-4 mr-2" />
+                              Download
                             </Button>
-                            <Button size="sm" variant="outline" onClick={() => void loadProviders()}>
-                              Re-check runtime
-                            </Button>
-                            {defaultProvider === provider.providerType && provider.providerType !== "whisper" && (
-                              <Button size="sm" variant="secondary" onClick={() => handleSetDefault("whisper")}>
-                                Switch to Whisper
-                              </Button>
-                            )}
-                          </>
-                        ) : selection.reason === "not_enabled" ? (
-                          <Button size="sm" variant="outline" disabled>
-                            Not enabled
-                          </Button>
-                        ) : isNotDownloaded(provider.downloadStatus) ? (
-                          <Button
-                            size="sm"
-                            onClick={() => handleDownload(provider.providerType)}
-                            disabled={isLoading}
-                          >
-                            <Download className="h-4 w-4 mr-2" />
-                            Download
-                          </Button>
-                        ) : null}
+                          ) : null}
+                        </div>
                       </div>
-                    </div>
-                    {(runtimeIssue || providerError) && (
-                      <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                        <p>{providerError ?? runtimeIssue}</p>
-                        {selection.reason === "runtime_unavailable" && (
-                          <>
-                            <p className="text-amber-100">
-                              Suggested setup: <span className="font-mono">{providerSetupCommand(provider.providerType)}</span>
-                            </p>
-                            {provider.runtimeDetails?.pythonPath ? (
+                      {(runtimeIssue || providerError) && (
+                        <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                          <p>{providerError ?? runtimeIssue}</p>
+                          {selection.reason === "runtime_unavailable" && (
+                            <>
                               <p className="text-amber-100">
-                                Detected Python: <span className="font-mono">{provider.runtimeDetails.pythonPath}</span>
+                                Suggested setup: <span className="font-mono">{providerSetupCommand(provider.providerType)}</span>
                               </p>
-                            ) : null}
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
+                              {provider.runtimeDetails?.pythonPath ? (
+                                <p className="text-amber-100">
+                                  Detected Python: <span className="font-mono">{provider.runtimeDetails.pythonPath}</span>
+                                </p>
+                              ) : null}
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
                 );
               })
             )}
