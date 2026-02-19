@@ -17,9 +17,19 @@ import { RecordingProvider } from "@/hooks/use-recording";
 import { DataCacheProvider } from "@/hooks/data-cache-context";
 import { DictationPopup } from "@/components/popups/dictation-popup";
 import { RecordingPopup } from "@/components/popups/recording-popup";
-import { DashboardView } from "@/components/views/dashboard-view";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/theme-provider";
+import { ActivationModal } from "@/components/activation-modal";
+import { NagModal, shouldShowNag } from "@/components/nag-modal";
+import { FirstRunWizard } from "@/components/first-run-wizard";
+import { ToastProvider } from "@/components/toast";
+import { validateLicense } from "@/lib/tauri";
+import type { LicenseInfo } from "@/lib/tauri";
+import { usePeriodicLicenseCheck } from "@/hooks/use-periodic-license-check";
+
+const DashboardView = lazy(() =>
+  import("@/components/views/dashboard-view").then((m) => ({ default: m.DashboardView }))
+);
 
 export type ViewId =
   | "dashboard"
@@ -32,7 +42,6 @@ export type ViewId =
 interface ErrorBoundaryProps {
   children: ReactNode;
 }
-
 interface ErrorBoundaryState {
   hasError: boolean;
   error: Error | null;
@@ -59,23 +68,18 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
     super(props);
     this.state = { hasError: false, error: null };
   }
-
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return { hasError: true, error };
   }
-
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error("Uncaught error:", error, info);
   }
-
   render() {
     if (this.state.hasError) {
       return (
         <div className="flex-1 flex items-center justify-center p-8">
           <div className="max-w-md text-center space-y-4">
-            <h2 className="text-xl font-semibold text-destructive">
-              Something went wrong
-            </h2>
+            <h2 className="text-xl font-semibold text-destructive">Something went wrong</h2>
             <p className="text-sm text-muted-foreground">
               {this.state.error?.message ?? "An unexpected error occurred."}
             </p>
@@ -90,7 +94,6 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
         </div>
       );
     }
-
     return this.props.children;
   }
 }
@@ -109,20 +112,18 @@ type OverlayMode = "dictation" | "recording" | null;
 function getOverlayMode(): OverlayMode {
   if (typeof window === "undefined") return null;
   const overlay = new URLSearchParams(window.location.search).get("overlay");
-  if (overlay === "dictation" || overlay === "recording") {
-    return overlay;
-  }
-
+  if (overlay === "dictation" || overlay === "recording") return overlay;
   try {
     const label = getCurrentWindow().label;
     if (label === "dictation-overlay") return "dictation";
     if (label === "recording-overlay") return "recording";
   } catch {
-    // Not in a Tauri runtime window.
+    // Not in a Tauri window.
   }
-
   return null;
 }
+
+export const ONBOARDING_STORAGE_KEY = "nautilus_onboarding_complete";
 
 function App() {
   const overlayMode = useMemo(getOverlayMode, []);
@@ -130,30 +131,81 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const firstViewMarked = useRef(false);
 
+  // License state
+  const [licenseChecked, setLicenseChecked] = useState(false);
+  const [license, setLicense] = useState<LicenseInfo | null>(null);
+
+  // UI overlays
+  const [showActivationModal, setShowActivationModal] = useState(false);
+  const [showWizard, setShowWizard] = useState(false);
+  const [showNag, setShowNag] = useState(false);
+
+  // Check license on startup (skip for overlay windows)
   useEffect(() => {
-    if (!import.meta.env.DEV || typeof performance === "undefined") {
+    if (overlayMode) {
+      setLicenseChecked(true);
       return;
     }
+    void validateLicense()
+      .then((info) => {
+        setLicense(info);
+        setLicenseChecked(true);
+        if (info.nagRequired && shouldShowNag()) {
+          setShowNag(true);
+        }
+      })
+      .catch(() => {
+        // Tauri not available (web/dev mode) – proceed in trial mode
+        setLicense(null);
+        setLicenseChecked(true);
+      });
+  }, [overlayMode]);
 
+  // Periodic license validation (every 4 hours)
+  usePeriodicLicenseCheck({
+    license,
+    onLicenseChange: (info) => {
+      setLicense(info);
+      if (!info.valid && info.nagRequired && shouldShowNag()) {
+        setShowNag(true);
+      }
+    },
+    onLicenseRevoked: () => {
+      setShowNag(true);
+    },
+  });
+
+  useEffect(() => {
+    if (!import.meta.env.DEV || typeof performance === "undefined") return;
     performance.mark("app-mounted");
     console.debug("[perf] app-mounted");
   }, []);
 
   useEffect(() => {
-    if (!import.meta.env.DEV || typeof performance === "undefined") {
-      return;
-    }
-
+    if (!import.meta.env.DEV || typeof performance === "undefined") return;
     if (!firstViewMarked.current) {
       firstViewMarked.current = true;
       performance.mark("first-view-render");
       console.debug("[perf] first-view-render");
     }
-
     performance.mark(`view-change:${activeView}`);
     console.debug(`[perf] view-change:${activeView}`);
   }, [activeView]);
 
+  const handleActivated = (info: LicenseInfo) => {
+    setLicense(info);
+    setShowActivationModal(false);
+    setShowNag(false);
+    const alreadyOnboarded = localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
+    if (!alreadyOnboarded) setShowWizard(true);
+  };
+
+  const handleWizardComplete = () => {
+    localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
+    setShowWizard(false);
+  };
+
+  // ── Overlay windows (dictation popup, recording popup) ───────────────────
   if (overlayMode) {
     return (
       <ThemeProvider>
@@ -164,39 +216,70 @@ function App() {
     );
   }
 
+  // ── Startup splash while license is being checked ────────────────────────
+  if (!licenseChecked) {
+    return (
+      <ThemeProvider>
+        <div className="flex h-screen items-center justify-center bg-background">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+        </div>
+      </ThemeProvider>
+    );
+  }
+
   const ActiveView = VIEW_COMPONENTS[activeView] ?? VIEW_COMPONENTS.dashboard;
 
   return (
     <ThemeProvider>
-      <TooltipProvider>
-        <ErrorBoundary>
-          <RecordingProvider>
-            <DataCacheProvider>
-              <div className="flex h-screen bg-background text-foreground">
-                <Sidebar
-                  activeView={activeView}
-                  onViewChange={(v) => setActiveView(v as ViewId)}
-                  isCollapsed={sidebarCollapsed}
-                  onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
-                />
+      <ToastProvider>
+        <TooltipProvider>
+          <ErrorBoundary>
+            <RecordingProvider>
+              <DataCacheProvider>
+                <div className="flex h-screen bg-background text-foreground">
+                  <Sidebar
+                    activeView={activeView}
+                    onViewChange={(v) => setActiveView(v as ViewId)}
+                    isCollapsed={sidebarCollapsed}
+                    onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
+                    license={license}
+                    onActivateClick={() => setShowActivationModal(true)}
+                  />
 
-                <main className="flex-1 overflow-hidden">
-                  <Suspense
-                    fallback={
-                      <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
-                        Loading view...
-                      </div>
-                    }
-                  >
-                    <ActiveView />
-                  </Suspense>
-                </main>
-                <RecordingOverlay isDictation={activeView === "dictation"} />
-              </div>
-            </DataCacheProvider>
-          </RecordingProvider>
-        </ErrorBoundary>
-      </TooltipProvider>
+                  <main className="flex-1 overflow-hidden">
+                    <Suspense
+                      fallback={
+                        <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
+                          Loading view...
+                        </div>
+                      }
+                    >
+                      <ActiveView />
+                    </Suspense>
+                  </main>
+                  <RecordingOverlay isDictation={activeView === "dictation"} />
+                </div>
+
+                {/* Dismissible nag (no license + trial expired) */}
+                {showNag && !license?.valid && (
+                  <NagModal onActivate={() => { setShowNag(false); setShowActivationModal(true); }} />
+                )}
+
+                {/* Activation modal (user-triggered or from nag) */}
+                {showActivationModal && (
+                  <ActivationModal
+                    onActivated={handleActivated}
+                    onCancel={() => setShowActivationModal(false)}
+                  />
+                )}
+
+                {/* First-run wizard (shown once after first activation) */}
+                {showWizard && <FirstRunWizard onComplete={handleWizardComplete} />}
+              </DataCacheProvider>
+            </RecordingProvider>
+          </ErrorBoundary>
+        </TooltipProvider>
+      </ToastProvider>
     </ThemeProvider>
   );
 }

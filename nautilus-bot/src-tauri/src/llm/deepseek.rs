@@ -1,27 +1,27 @@
-//! OpenAI GPT client for transcript analysis
+//! DeepSeek client for transcript analysis
 //!
-//! Supports GPT-3.5-turbo, GPT-4, and other OpenAI models
+//! DeepSeek uses an OpenAI-compatible API with competitive pricing
+//! Offers V3 for general chat and R1 for advanced reasoning
 
 #![allow(dead_code)]
 
 use crate::llm::{ActionItem, AnalysisResult, Citation};
 use anyhow::{Context, Result};
 
-const OPENAI_API_URL: &str = "https://api.openai.com/v1";
+const DEEPSEEK_API_URL: &str = "https://api.deepseek.com/v1";
 
-pub struct OpenAIClient {
+pub struct DeepSeekClient {
     api_key: Option<String>,
     client: reqwest::Client,
 }
 
-impl OpenAIClient {
-    /// Create a new OpenAI client
+impl DeepSeekClient {
     pub fn new() -> Self {
         Self::with_api_key(None)
     }
 
     pub fn with_api_key(api_key: Option<String>) -> Self {
-        let resolved_api_key = api_key.or_else(|| std::env::var("OPENAI_API_KEY").ok());
+        let resolved_api_key = api_key.or_else(|| std::env::var("DEEPSEEK_API_KEY").ok());
 
         Self {
             api_key: resolved_api_key,
@@ -29,12 +29,11 @@ impl OpenAIClient {
         }
     }
 
-    /// Check if OpenAI is available (has API key)
     pub fn is_available(&self) -> bool {
         self.api_key.is_some()
     }
 
-    /// List available models
+    /// List available models from DeepSeek API
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let Some(ref key) = self.api_key else {
             return Ok(vec![]);
@@ -42,36 +41,28 @@ impl OpenAIClient {
 
         let response = self
             .client
-            .get(format!("{}/models", OPENAI_API_URL))
+            .get(format!("{}/models", DEEPSEEK_API_URL))
             .header("Authorization", format!("Bearer {}", key))
             .send()
             .await
-            .context("Failed to connect to OpenAI")?;
+            .context("Failed to fetch DeepSeek models")?;
 
         let data: serde_json::Value = response
             .json()
             .await
-            .context("Failed to parse OpenAI response")?;
+            .context("Failed to parse DeepSeek response")?;
 
         let models: Vec<String> = data["data"]
             .as_array()
             .unwrap_or(&vec![])
             .iter()
             .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
-            .filter(|id| {
-                id.contains("gpt") || 
-                id.contains("o1") || 
-                id.contains("o3") || 
-                id.contains("o4") ||
-                id.contains("chatgpt")
-            })
             .collect();
 
-        tracing::info!("OpenAI returned {} models", models.len());
+        tracing::info!("DeepSeek returned {} models", models.len());
         Ok(models)
     }
 
-    /// Generate chat completion
     pub async fn generate(
         &self,
         model: &str,
@@ -79,7 +70,7 @@ impl OpenAIClient {
         system_prompt: Option<&str>,
     ) -> Result<String> {
         let Some(ref key) = self.api_key else {
-            return Err(anyhow::anyhow!("OpenAI API key not configured"));
+            return Err(anyhow::anyhow!("DeepSeek API key not configured"));
         };
 
         let mut messages = vec![];
@@ -105,18 +96,18 @@ impl OpenAIClient {
 
         let response = self
             .client
-            .post(format!("{}/chat/completions", OPENAI_API_URL))
+            .post(format!("{}/chat/completions", DEEPSEEK_API_URL))
             .header("Authorization", format!("Bearer {}", key))
             .header("Content-Type", "application/json")
             .json(&request_body)
             .send()
             .await
-            .context("Failed to send request to OpenAI")?;
+            .context("Failed to send request to DeepSeek")?;
 
         let data: serde_json::Value = response
             .json()
             .await
-            .context("Failed to parse OpenAI response")?;
+            .context("Failed to parse DeepSeek response")?;
 
         let content = data["choices"][0]["message"]["content"]
             .as_str()
@@ -126,7 +117,6 @@ impl OpenAIClient {
         Ok(content)
     }
 
-    /// Analyze transcript with specific query
     pub async fn analyze_transcript(
         &self,
         transcript: &str,
@@ -148,7 +138,6 @@ impl OpenAIClient {
 
         let response = self.generate(model, &prompt, Some(system_prompt)).await?;
 
-        // Extract citations from response
         let citations = extract_citations(&response, transcript);
 
         Ok(AnalysisResult {
@@ -160,7 +149,6 @@ impl OpenAIClient {
         })
     }
 
-    /// Summarize meeting
     pub async fn summarize(&self, transcript: &str, model: &str) -> Result<String> {
         let system_prompt = "Provide a concise summary of the following meeting transcript. \
             Focus on key points, decisions, and outcomes.";
@@ -168,7 +156,6 @@ impl OpenAIClient {
         self.generate(model, transcript, Some(system_prompt)).await
     }
 
-    /// Extract action items
     pub async fn extract_action_items(
         &self,
         transcript: &str,
@@ -187,7 +174,6 @@ impl OpenAIClient {
 
         let response = self.generate(model, &prompt, None).await?;
 
-        // Parse action items from response
         let items: Vec<ActionItem> = response
             .lines()
             .filter(|line| line.starts_with('-') || line.starts_with('*'))
@@ -205,13 +191,12 @@ impl OpenAIClient {
     }
 }
 
-impl Default for OpenAIClient {
+impl Default for DeepSeekClient {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Extract citations from response
 fn extract_citations(response: &str, transcript: &str) -> Vec<Citation> {
     let mut citations = Vec::new();
 

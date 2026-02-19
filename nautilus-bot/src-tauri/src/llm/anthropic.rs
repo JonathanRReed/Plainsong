@@ -33,14 +33,36 @@ impl AnthropicClient {
         self.api_key.is_some()
     }
 
-    /// List available models
+    /// List available models from Anthropic API
     pub async fn list_models(&self) -> Result<Vec<String>> {
-        // Anthropic has a fixed set of models
-        Ok(vec![
-            "claude-3-opus-20240229".to_string(),
-            "claude-3-sonnet-20240229".to_string(),
-            "claude-3-haiku-20240307".to_string(),
-        ])
+        let Some(ref key) = self.api_key else {
+            return Ok(vec![]);
+        };
+
+        let response = self
+            .client
+            .get(format!("{}/models", ANTHROPIC_API_URL))
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .context("Failed to fetch Anthropic models")?;
+
+        let data: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse Anthropic response")?;
+
+        let models: Vec<String> = data["data"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+            .filter(|id| id.contains("claude"))
+            .collect();
+
+        tracing::info!("Anthropic returned {} models", models.len());
+        Ok(models)
     }
 
     /// Generate completion using Messages API

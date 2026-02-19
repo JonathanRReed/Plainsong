@@ -129,9 +129,24 @@ impl AsrProvider for WhisperProvider {
 
         let start_time = std::time::Instant::now();
 
+        tracing::info!("Loading audio file for Whisper: {:?}", audio_path);
+
         // Load and preprocess audio
         let audio_data = crate::audio::utils::load_audio_file(audio_path)
             .context("Failed to load audio file")?;
+
+        tracing::info!(
+            "Whisper received {} samples (sample rate 16000, duration {:.2}s)",
+            audio_data.len(),
+            audio_data.len() as f64 / 16000.0
+        );
+
+        // Log audio statistics
+        if !audio_data.is_empty() {
+            let peak = audio_data.iter().fold(0.0_f32, |p, s| p.max(s.abs()));
+            let rms = (audio_data.iter().map(|s| s * s).sum::<f32>() / audio_data.len() as f32).sqrt();
+            tracing::info!("Whisper audio stats: peak={:.4}, rms={:.4}", peak, rms);
+        }
 
         // Create state and configure
         let mut state = ctx
@@ -155,6 +170,8 @@ impl AsrProvider for WhisperProvider {
         let num_segments = state
             .full_n_segments()
             .context("Failed to get segment count")?;
+
+        tracing::info!("Whisper produced {} segments", num_segments);
 
         let mut segments = Vec::new();
         let mut full_text = String::new();
@@ -186,7 +203,8 @@ impl AsrProvider for WhisperProvider {
         let processing_time = start_time.elapsed().as_millis() as u64;
 
         tracing::info!(
-            "Whisper transcription completed: {} segments in {}ms",
+            "Whisper transcription completed: '{}' ({} segments in {}ms)",
+            full_text,
             segments.len(),
             processing_time
         );

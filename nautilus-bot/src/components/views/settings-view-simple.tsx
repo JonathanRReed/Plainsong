@@ -27,6 +27,13 @@ import {
   lockVault,
   listBackups,
   listOllamaModels,
+  listOllamaCloudModels,
+  listOpenAiModels,
+  listAnthropicModels,
+  listGeminiModels,
+  listDeepSeekModels,
+  listDownloadedModels,
+  downloadWhisperModel,
   migrateToEncryptedStorage,
   openPermissionSettings,
   saveSettings,
@@ -36,8 +43,10 @@ import {
   unlockVault,
   verifyBackupCloudConnection,
 } from "@/lib/tauri";
-import type { BackupConfig, BackupInfo, CloudSetupReport, SecurityStatus } from "@/lib/tauri";
+import type { BackupConfig, BackupInfo, CloudSetupReport, SecurityStatus, LicenseInfo, DownloadedModel } from "@/lib/tauri";
 import type { PermissionDiagnostics } from "@/lib/tauri";
+import { validateLicense, deactivateLicense } from "@/lib/tauri";
+import { isFeatureAllowed } from "@/hooks/use-license-features";
 import type { Settings } from "@/types/settings";
 import {
   AlertCircle,
@@ -51,11 +60,14 @@ import {
   Shield,
   Sun,
   Moon,
-  XCircle,
+  Star,
+  ExternalLink,
   Loader2,
+  XCircle,
+  Download,
 } from "lucide-react";
 
-type TabId = "asr" | "general" | "security" | "storage" | "ai";
+type TabId = "asr" | "general" | "security" | "storage" | "ai" | "license";
 type QueuedSettingsSave = {
   version: number;
   settings: Settings;
@@ -101,8 +113,17 @@ export function SettingsView() {
   const [cloudReadinessMessage, setCloudReadinessMessage] = useState<string | null>(null);
   const [ollamaAvailable, setOllamaAvailable] = useState<boolean | null>(null);
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+  const [ollamaCloudModels, setOllamaCloudModels] = useState<string[]>([]);
+  const [openaiModels, setOpenaiModels] = useState<string[]>([]);
+  const [anthropicModels, setAnthropicModels] = useState<string[]>([]);
+  const [geminiModels, setGeminiModels] = useState<string[]>([]);
+  const [deepseekModels, setDeepseekModels] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [downloadedModels, setDownloadedModels] = useState<DownloadedModel[]>([]);
+  const [downloadingModel, setDownloadingModel] = useState<string | null>(null);
   const [hasLoadedSecurityTab, setHasLoadedSecurityTab] = useState(false);
   const [hasLoadedStorageTab, setHasLoadedStorageTab] = useState(false);
+  const [licenseInfo, setLicenseInfo] = useState<LicenseInfo | null>(null);
   const mountedRef = useRef(true);
   const saveSchedulerRef = useRef<SettingsSaveScheduler>({
     nextVersion: 0,
@@ -118,13 +139,13 @@ export function SettingsView() {
     setSecurityStatus((current) =>
       current
         ? {
-            ...current,
-            vaultInitialized: next.privacy.vaultInitialized,
-            recordingsEncrypted: next.privacy.encryptRecordings,
-            llmProvider: next.privacy.llmProvider,
-            remoteProcessingEnabled: next.privacy.remoteProcessingEnabled,
-            exportRoot: next.privacy.exportRoot ?? null,
-          }
+          ...current,
+          vaultInitialized: next.privacy.vaultInitialized,
+          recordingsEncrypted: next.privacy.encryptRecordings,
+          llmProvider: next.privacy.llmProvider,
+          remoteProcessingEnabled: next.privacy.remoteProcessingEnabled,
+          exportRoot: next.privacy.exportRoot ?? null,
+        }
         : current
     );
   }, []);
@@ -203,14 +224,16 @@ export function SettingsView() {
 
     const load = async () => {
       try {
-        const [loaded, loadedBackupConfig] = await Promise.all([
+        const [loaded, loadedBackupConfig, loadedModels] = await Promise.all([
           getSettings(),
           getBackupConfig(),
+          listDownloadedModels().catch(() => []),
         ]);
         if (mountedRef.current) {
           setDraftSettings(loaded);
           setPersistedSettings(loaded);
           setBackupConfig(loadedBackupConfig);
+          setDownloadedModels(loadedModels);
           markSettingsPerf("settings-initial-load-complete");
         }
       } catch (e) {
@@ -226,6 +249,19 @@ export function SettingsView() {
       void flushPendingSettingsSave(true);
     };
   }, [flushPendingSettingsSave]);
+  
+  const handleDownloadModel = useCallback(async (modelName: string) => {
+    setDownloadingModel(modelName);
+    try {
+      await downloadWhisperModel(modelName);
+      const models = await listDownloadedModels();
+      setDownloadedModels(models);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : `Failed to download ${modelName}`);
+    } finally {
+      setDownloadingModel(null);
+    }
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -308,6 +344,13 @@ export function SettingsView() {
   }, [activeTab, hasLoadedStorageTab]);
 
   useEffect(() => {
+    if (activeTab !== "license" || licenseInfo !== null) return;
+    void validateLicense().then(setLicenseInfo).catch(() => {
+      setLicenseInfo({ key: "", instanceId: "", tier: "none", valid: false, lsStatus: "", activationsLimit: 5, activationsUsage: 0, lastValidatedAt: "", trialDaysRemaining: 30, nagRequired: false });
+    });
+  }, [activeTab, licenseInfo]);
+
+  useEffect(() => {
     if (!settings) return;
     const llmProvider = settings.privacy.llmProvider;
     if (llmProvider === "openai" || llmProvider === "anthropic" || llmProvider === "gemini" || llmProvider === "ollama-cloud") {
@@ -315,29 +358,98 @@ export function SettingsView() {
     }
   }, [settings?.privacy.llmProvider]);
 
+  // Function to refresh models for a specific provider
+  const refreshModelsForProvider = useCallback(async (providerName: string) => {
+    setModelsLoading(true);
+    try {
+      switch (providerName) {
+        case "openai": {
+          const models = await listOpenAiModels();
+          setOpenaiModels(models);
+          break;
+        }
+        case "anthropic": {
+          const models = await listAnthropicModels();
+          setAnthropicModels(models);
+          break;
+        }
+        case "gemini": {
+          const models = await listGeminiModels();
+          setGeminiModels(models);
+          break;
+        }
+        case "deepseek": {
+          const models = await listDeepSeekModels();
+          setDeepseekModels(models);
+          break;
+        }
+        case "ollama-cloud": {
+          const models = await listOllamaCloudModels();
+          setOllamaCloudModels(models);
+          break;
+        }
+        case "ollama": {
+          const [available, models] = await Promise.all([
+            getOllamaStatus(),
+            listOllamaModels(),
+          ]);
+          setOllamaAvailable(available);
+          setOllamaModels(models);
+          break;
+        }
+      }
+    } catch (e) {
+      console.error(`Failed to refresh models for ${providerName}:`, e);
+    } finally {
+      setModelsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (activeTab !== "ai") {
       return;
     }
     let mounted = true;
-    const loadOllama = async () => {
+    setModelsLoading(true);
+    
+    const loadModels = async () => {
       try {
-        const [available, models] = await Promise.all([
+        const [ollamaAvail, ollamaList, ollamaCloudList, openaiList, anthropicList, geminiList, deepseekList] = await Promise.all([
           getOllamaStatus(),
-          listOllamaModels().catch(() => []),
+          listOllamaModels().catch((e) => { console.error("Ollama error:", e); return []; }),
+          listOllamaCloudModels().catch((e) => { console.error("Ollama Cloud error:", e); return []; }),
+          listOpenAiModels().catch((e) => { console.error("OpenAI error:", e); return []; }),
+          listAnthropicModels().catch((e) => { console.error("Anthropic error:", e); return []; }),
+          listGeminiModels().catch((e) => { console.error("Gemini error:", e); return []; }),
+          listDeepSeekModels().catch((e) => { console.error("DeepSeek error:", e); return []; }),
         ]);
+        
         if (mounted) {
-          setOllamaAvailable(available);
-          setOllamaModels(models);
+          setOllamaAvailable(ollamaAvail);
+          setOllamaModels(ollamaList);
+          setOllamaCloudModels(ollamaCloudList);
+          setOpenaiModels(openaiList);
+          setAnthropicModels(anthropicList);
+          setGeminiModels(geminiList);
+          setDeepseekModels(deepseekList);
+          setModelsLoading(false);
         }
-      } catch {
+      } catch (error) {
+        console.error("Failed to load models:", error);
         if (mounted) {
           setOllamaAvailable(false);
           setOllamaModels([]);
+          setOllamaCloudModels([]);
+          setOpenaiModels([]);
+          setAnthropicModels([]);
+          setGeminiModels([]);
+          setDeepseekModels([]);
+          setModelsLoading(false);
         }
       }
     };
-    void loadOllama();
+    
+    void loadModels();
     return () => {
       mounted = false;
     };
@@ -393,6 +505,7 @@ export function SettingsView() {
       { id: "security" as TabId, label: "Security", icon: Shield },
       { id: "storage" as TabId, label: "Storage", icon: Database },
       { id: "ai" as TabId, label: "AI & Keys", icon: Key },
+      { id: "license" as TabId, label: "License", icon: Shield },
     ],
     []
   );
@@ -422,16 +535,15 @@ export function SettingsView() {
             </div>
           )}
 
-          <div className="grid w-full grid-cols-5 bg-muted p-1 rounded-md">
+          <div className="grid w-full grid-cols-6 bg-muted p-1 rounded-md">
             {tabList.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-medium rounded-sm transition-all ${
-                  activeTab === tab.id
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
+                className={`flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-medium rounded-sm transition-all ${activeTab === tab.id
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+                  }`}
               >
                 <tab.icon className="h-4 w-4" />
                 {tab.label}
@@ -497,6 +609,96 @@ export function SettingsView() {
                   />
                 </div>
 
+                {settings.audio.voiceActivityDetection && (
+                  <div className="space-y-2">
+                    <Label>Silence timeout (seconds)</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={60}
+                      value={settings.audio.silenceTimeoutSeconds}
+                      onBlur={handleSettingsTextBlur}
+                      onKeyDown={handleSettingsTextKeyDown}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                        void updateSettings({
+                          ...settings,
+                          audio: {
+                            ...settings.audio,
+                            silenceTimeoutSeconds: Math.max(1, Math.min(60, Number(e.target.value) || 3)),
+                          },
+                        })
+                      }
+                    />
+                    <p className="text-sm text-muted-foreground">Stop recording after this many seconds of silence</p>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Noise suppression</Label>
+                    <p className="text-sm text-muted-foreground">Reduce background noise during recording</p>
+                  </div>
+                  <Switch
+                    checked={settings.audio.noiseSuppression}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        audio: { ...settings.audio, noiseSuppression: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Auto gain control</Label>
+                    <p className="text-sm text-muted-foreground">Automatically adjust microphone levels</p>
+                  </div>
+                  <Switch
+                    checked={settings.audio.autoGainControl}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        audio: { ...settings.audio, autoGainControl: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="h-px bg-border" />
+
+                <div className="space-y-2">
+                  <Label>Transcription language</Label>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={settings.transcription.language ?? ""}
+                    onChange={(e) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          language: e.target.value || null,
+                        },
+                      })
+                    }
+                  >
+                    <option value="">Auto-detect</option>
+                    <option value="en">English</option>
+                    <option value="es">Spanish</option>
+                    <option value="fr">French</option>
+                    <option value="de">German</option>
+                    <option value="it">Italian</option>
+                    <option value="pt">Portuguese</option>
+                    <option value="ja">Japanese</option>
+                    <option value="ko">Korean</option>
+                    <option value="zh">Chinese</option>
+                    <option value="ru">Russian</option>
+                    <option value="ar">Arabic</option>
+                    <option value="hi">Hindi</option>
+                  </select>
+                  <p className="text-sm text-muted-foreground">Force a specific language or leave on auto-detect</p>
+                </div>
+
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
                     <Label>Automatic speaker naming</Label>
@@ -516,7 +718,7 @@ export function SettingsView() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label>Default local model</Label>
+                  <Label>Default local ASR model</Label>
                   <select
                     className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                     value={settings.transcription.selectedModelId}
@@ -530,10 +732,76 @@ export function SettingsView() {
                       })
                     }
                   >
-                    <option value="base.en">Whisper base.en</option>
-                    <option value="large-v3">Whisper large-v3</option>
-                    <option value="large-v3-turbo">Whisper large-v3-turbo</option>
+                    <optgroup label="Fast (Edge-friendly)">
+                      <option value="tiny">Whisper tiny — 39M params, fastest</option>
+                      <option value="tiny.en">Whisper tiny.en — English only</option>
+                      <option value="base">Whisper base — 74M params</option>
+                      <option value="base.en">Whisper base.en — English only</option>
+                    </optgroup>
+                    <optgroup label="Balanced">
+                      <option value="small">Whisper small — 244M params</option>
+                      <option value="small.en">Whisper small.en — English only</option>
+                      <option value="medium">Whisper medium — 769M params</option>
+                      <option value="medium.en">Whisper medium.en — English only</option>
+                    </optgroup>
+                    <optgroup label="Best Accuracy">
+                      <option value="large-v3">Whisper large-v3 — 1.5B params, 99+ languages</option>
+                      <option value="large-v3-turbo">Whisper large-v3-turbo — Fast + accurate</option>
+                    </optgroup>
+                    <optgroup label="Alternative Models">
+                      <option value="parakeet-tdt-0.6b-v3">Parakeet TDT 0.6B v3 — Ultra low-latency</option>
+                      <option value="canary-qwen-2.5b">Canary Qwen 2.5B — Max English accuracy</option>
+                      <option value="distil-large-v3">Distil-Whisper Large V3 — 6x faster</option>
+                    </optgroup>
                   </select>
+                  <p className="text-xs text-muted-foreground">
+                    English-only models are faster. Use large-v3 for multilingual transcription.
+                  </p>
+                </div>
+
+                <div className="space-y-3">
+                  <Label className="text-sm text-muted-foreground">Quick download — Top 5 ASR models</Label>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {[
+                      { id: "large-v3-turbo", name: "Whisper Large V3 Turbo", desc: "Fast + accurate", size: "1.6 GB" },
+                      { id: "large-v3", name: "Whisper Large V3", desc: "99+ languages", size: "2.9 GB" },
+                      { id: "base.en", name: "Whisper Base EN", desc: "Fast English", size: "142 MB" },
+                      { id: "small.en", name: "Whisper Small EN", desc: "Balanced English", size: "466 MB" },
+                      { id: "medium.en", name: "Whisper Medium EN", desc: "Best English", size: "1.5 GB" },
+                    ].map((model) => {
+                      const isDownloaded = downloadedModels.some(
+                        (d) => d.name.toLowerCase().includes(model.id.toLowerCase()) || 
+                               d.name.toLowerCase().includes(model.id.replace(".en", "-en").toLowerCase())
+                      );
+                      const isDownloading = downloadingModel === model.id;
+                      
+                      return (
+                        <div key={model.id} className="flex items-center justify-between p-2 rounded border bg-muted/30">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium truncate">{model.name}</p>
+                            <p className="text-xs text-muted-foreground">{model.desc} · {model.size}</p>
+                          </div>
+                          {isDownloaded ? (
+                            <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0 ml-2" />
+                          ) : isDownloading ? (
+                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground shrink-0 ml-2" />
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="shrink-0 ml-2 h-7 px-2"
+                              onClick={() => void handleDownloadModel(model.id)}
+                            >
+                              <Download className="h-3 w-3" />
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Downloaded models: {downloadedModels.length} · Use ASR Models tab for all providers
+                  </p>
                 </div>
 
                 <div className="flex items-center justify-between">
@@ -593,6 +861,74 @@ export function SettingsView() {
                       })
                     }
                   />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Always on top</Label>
+                    <p className="text-sm text-muted-foreground">Keep window above other applications</p>
+                  </div>
+                  <Switch
+                    checked={settings.ui.alwaysOnTop}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        ui: { ...settings.ui, alwaysOnTop: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Show in Dock</Label>
+                    <p className="text-sm text-muted-foreground">Display app icon in macOS Dock</p>
+                  </div>
+                  <Switch
+                    checked={settings.ui.showInDock}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        ui: { ...settings.ui, showInDock: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="h-px bg-border" />
+
+                <div className="space-y-3">
+                  <Label>Keyboard shortcuts</Label>
+                  <p className="text-sm text-muted-foreground">Global hotkeys for quick access</p>
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="flex items-center justify-between p-2 rounded border">
+                      <span className="text-muted-foreground">Dictation</span>
+                      <kbd className="px-2 py-1 bg-muted rounded text-xs font-mono">
+                        {settings.shortcuts.toggleDictation}
+                      </kbd>
+                    </div>
+                    <div className="flex items-center justify-between p-2 rounded border">
+                      <span className="text-muted-foreground">Recording</span>
+                      <kbd className="px-2 py-1 bg-muted rounded text-xs font-mono">
+                        {settings.shortcuts.toggleRecording}
+                      </kbd>
+                    </div>
+                    <div className="flex items-center justify-between p-2 rounded border">
+                      <span className="text-muted-foreground">Quick export</span>
+                      <kbd className="px-2 py-1 bg-muted rounded text-xs font-mono">
+                        {settings.shortcuts.quickExport}
+                      </kbd>
+                    </div>
+                    <div className="flex items-center justify-between p-2 rounded border">
+                      <span className="text-muted-foreground">Search</span>
+                      <kbd className="px-2 py-1 bg-muted rounded text-xs font-mono">
+                        {settings.shortcuts.focusSearch}
+                      </kbd>
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Shortcuts can be customized in the app configuration file
+                  </p>
                 </div>
 
                 <div className="h-px bg-border" />
@@ -737,6 +1073,7 @@ export function SettingsView() {
                     <option value="openai">OpenAI</option>
                     <option value="anthropic">Anthropic</option>
                     <option value="gemini">Google Gemini</option>
+                    <option value="deepseek">DeepSeek</option>
                     <option value="ollama-cloud">Ollama Cloud</option>
                   </select>
                   {!settings.privacy.remoteProcessingEnabled && settings.privacy.llmProvider !== "ollama" ? (
@@ -840,11 +1177,17 @@ export function SettingsView() {
 
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
-                    <Label>Cloud sync</Label>
+                    <Label className="flex items-center gap-2">
+                      Cloud sync
+                      {!isFeatureAllowed(licenseInfo, "cloudSync") && (
+                        <span className="text-xs text-amber-600">⭐ Friends Club</span>
+                      )}
+                    </Label>
                     <p className="text-sm text-muted-foreground">Enable external backup sync integrations</p>
                   </div>
                   <Switch
                     checked={settings.privacy.cloudSync}
+                    disabled={!isFeatureAllowed(licenseInfo, "cloudSync")}
                     onCheckedChange={(checked) =>
                       void updateSettings({
                         ...settings,
@@ -881,6 +1224,98 @@ export function SettingsView() {
                     }}
                   />
                   <p className="text-sm text-muted-foreground">Set to 0 to keep all recordings indefinitely.</p>
+                </div>
+
+                <div className="h-px bg-border" />
+
+                <div className="space-y-3">
+                  <Label>Export defaults</Label>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label className="text-sm text-muted-foreground">Default format</Label>
+                      <select
+                        className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                        value={settings.export.defaultFormat}
+                        onChange={(e) =>
+                          void updateSettings({
+                            ...settings,
+                            export: { ...settings.export, defaultFormat: e.target.value },
+                          })
+                        }
+                      >
+                        <option value="markdown">Markdown</option>
+                        <option value="json">JSON</option>
+                        <option value="text">Plain Text</option>
+                        <option value="pdf">PDF</option>
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-sm text-muted-foreground">Export directory</Label>
+                      <Input
+                        placeholder="Same as recording location"
+                        value={settings.export.exportDirectory ?? ""}
+                        onBlur={handleSettingsTextBlur}
+                        onKeyDown={handleSettingsTextKeyDown}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                          void updateSettings({
+                            ...settings,
+                            export: {
+                              ...settings.export,
+                              exportDirectory: e.target.value.trim() || null,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Include timestamps in exports</Label>
+                    <p className="text-sm text-muted-foreground">Add time markers to exported transcripts</p>
+                  </div>
+                  <Switch
+                    checked={settings.export.includeTimestamps}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        export: { ...settings.export, includeTimestamps: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Include speaker names</Label>
+                    <p className="text-sm text-muted-foreground">Label speakers in exported transcripts</p>
+                  </div>
+                  <Switch
+                    checked={settings.export.includeSpeakers}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        export: { ...settings.export, includeSpeakers: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Open file after export</Label>
+                    <p className="text-sm text-muted-foreground">Automatically open exported files</p>
+                  </div>
+                  <Switch
+                    checked={settings.export.openAfterExport}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        export: { ...settings.export, openAfterExport: checked },
+                      })
+                    }
+                  />
                 </div>
 
                 {backupConfig && (
@@ -1126,9 +1561,8 @@ export function SettingsView() {
                         <div className="flex items-center justify-between">
                           <Label className="text-sm">Cloud setup readiness</Label>
                           <span
-                            className={`text-xs font-medium ${
-                              backupSetupReport.ready ? "text-emerald-600" : "text-amber-600"
-                            }`}
+                            className={`text-xs font-medium ${backupSetupReport.ready ? "text-emerald-600" : "text-amber-600"
+                              }`}
                           >
                             {backupSetupReport.ready ? "Ready" : "Needs action"}
                           </span>
@@ -1189,6 +1623,7 @@ export function SettingsView() {
                     <option value="openai">OpenAI</option>
                     <option value="anthropic">Anthropic</option>
                     <option value="gemini">Google Gemini</option>
+                    <option value="deepseek">DeepSeek</option>
                     <option value="ollama-cloud">Ollama Cloud</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
@@ -1199,6 +1634,194 @@ export function SettingsView() {
                       Remote provider selected but remote processing is disabled.
                     </p>
                   ) : null}
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-2">
+                    Analysis model
+                    {modelsLoading && <Loader2 className="h-3 w-3 animate-spin" />}
+                  </Label>
+                  
+                  {settings.privacy.llmProvider === "ollama" ? (
+                    ollamaModels.length > 0 ? (
+                      <select
+                        value={settings.privacy.llmModelId ?? ollamaModels[0] ?? "llama3.2"}
+                        onChange={(e) =>
+                          void updateSettings({
+                            ...settings,
+                            privacy: { ...settings.privacy, llmModelId: e.target.value || null },
+                          })
+                        }
+                        className="w-full p-2 border rounded-md bg-background"
+                      >
+                        {ollamaModels.map((model) => (
+                          <option key={model} value={model}>{model}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="p-3 rounded border bg-muted/30 text-sm">
+                        <p className="text-muted-foreground">No Ollama models found. Run <code className="bg-muted px-1 rounded">ollama pull llama3.2</code> to download a model.</p>
+                      </div>
+                    )
+                  ) : settings.privacy.llmProvider === "openai" ? (
+                    <select
+                      value={settings.privacy.llmModelId ?? "gpt-4o-mini"}
+                      onChange={(e) =>
+                        void updateSettings({
+                          ...settings,
+                          privacy: { ...settings.privacy, llmModelId: e.target.value || null },
+                        })
+                      }
+                      className="w-full p-2 border rounded-md bg-background"
+                    >
+                      {openaiModels.length > 0 ? (
+                        openaiModels
+                          .filter(m => m.includes("gpt") || m.includes("o1") || m.includes("o3") || m.includes("o4"))
+                          .sort()
+                          .map((model) => (
+                            <option key={model} value={model}>{model}</option>
+                          ))
+                      ) : (
+                        <>
+                          <optgroup label="Latest (Recommended)">
+                            <option value="gpt-4.1">GPT-4.1 — Latest flagship</option>
+                            <option value="gpt-4.1-mini">GPT-4.1 Mini — Fast & cheap</option>
+                            <option value="o3">o3 — Advanced reasoning</option>
+                            <option value="o4-mini">o4-mini — Reasoning, affordable</option>
+                          </optgroup>
+                          <optgroup label="GPT-4 Series">
+                            <option value="gpt-4o">GPT-4o — Multimodal</option>
+                            <option value="gpt-4o-mini">GPT-4o Mini — Fast (Default)</option>
+                            <option value="gpt-4-turbo">GPT-4 Turbo — Legacy</option>
+                          </optgroup>
+                        </>
+                      )}
+                    </select>
+                  ) : settings.privacy.llmProvider === "anthropic" ? (
+                    <select
+                      value={settings.privacy.llmModelId ?? "claude-sonnet-4-20250514"}
+                      onChange={(e) =>
+                        void updateSettings({
+                          ...settings,
+                          privacy: { ...settings.privacy, llmModelId: e.target.value || null },
+                        })
+                      }
+                      className="w-full p-2 border rounded-md bg-background"
+                    >
+                      {anthropicModels.length > 0 ? (
+                        anthropicModels.map((model) => (
+                          <option key={model} value={model}>{model}</option>
+                        ))
+                      ) : (
+                        <>
+                          <optgroup label="Claude 4 (Latest)">
+                            <option value="claude-opus-4-20250514">Claude Opus 4 — Most capable</option>
+                            <option value="claude-sonnet-4-20250514">Claude Sonnet 4 — Balanced (Default)</option>
+                          </optgroup>
+                          <optgroup label="Claude 3.5">
+                            <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet — Fast & smart</option>
+                            <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku — Fastest</option>
+                          </optgroup>
+                        </>
+                      )}
+                    </select>
+                  ) : settings.privacy.llmProvider === "gemini" ? (
+                    <select
+                      value={settings.privacy.llmModelId ?? "gemini-2.0-flash"}
+                      onChange={(e) =>
+                        void updateSettings({
+                          ...settings,
+                          privacy: { ...settings.privacy, llmModelId: e.target.value || null },
+                        })
+                      }
+                      className="w-full p-2 border rounded-md bg-background"
+                    >
+                      {geminiModels.length > 0 ? (
+                        geminiModels
+                          .map(m => m.replace("models/", ""))
+                          .filter(m => m.includes("gemini"))
+                          .map((model) => (
+                            <option key={model} value={model}>{model}</option>
+                          ))
+                      ) : (
+                        <>
+                          <option value="gemini-2.5-pro-preview">Gemini 2.5 Pro — Most capable</option>
+                          <option value="gemini-2.0-flash">Gemini 2.0 Flash — Fast (Default)</option>
+                          <option value="gemini-2.0-pro">Gemini 2.0 Pro — Balanced</option>
+                          <option value="gemini-1.5-pro">Gemini 1.5 Pro — Long context</option>
+                          <option value="gemini-1.5-flash">Gemini 1.5 Flash — Fast</option>
+                        </>
+                      )}
+                    </select>
+                  ) : settings.privacy.llmProvider === "deepseek" ? (
+                    <select
+                      value={settings.privacy.llmModelId ?? "deepseek-chat"}
+                      onChange={(e) =>
+                        void updateSettings({
+                          ...settings,
+                          privacy: { ...settings.privacy, llmModelId: e.target.value || null },
+                        })
+                      }
+                      className="w-full p-2 border rounded-md bg-background"
+                    >
+                      {deepseekModels.length > 0 ? (
+                        deepseekModels.map((model) => (
+                          <option key={model} value={model}>{model}</option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="deepseek-chat">DeepSeek V3 — General chat (Default)</option>
+                          <option value="deepseek-reasoner">DeepSeek R1 — Advanced reasoning</option>
+                          <option value="deepseek-coder">DeepSeek Coder — Code specialist</option>
+                        </>
+                      )}
+                    </select>
+                  ) : settings.privacy.llmProvider === "ollama-cloud" ? (
+                    <select
+                      value={settings.privacy.llmModelId ?? "llama3.2"}
+                      onChange={(e) =>
+                        void updateSettings({
+                          ...settings,
+                          privacy: { ...settings.privacy, llmModelId: e.target.value || null },
+                        })
+                      }
+                      className="w-full p-2 border rounded-md bg-background"
+                    >
+                      {ollamaCloudModels.length > 0 ? (
+                        ollamaCloudModels.map((model) => (
+                          <option key={model} value={model}>{model}</option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="llama3.2">Llama 3.2 — Fast & capable (Default)</option>
+                          <option value="llama3.3">Llama 3.3 70B — Most capable</option>
+                          <option value="mistral">Mistral — Fast & efficient</option>
+                          <option value="codellama">Code Llama — Code specialist</option>
+                        </>
+                      )}
+                    </select>
+                  ) : (
+                    <select
+                      value={settings.privacy.llmModelId ?? "llama3.2"}
+                      onChange={(e) =>
+                        void updateSettings({
+                          ...settings,
+                          privacy: { ...settings.privacy, llmModelId: e.target.value || null },
+                        })
+                      }
+                      className="w-full p-2 border rounded-md bg-background"
+                    >
+                      <option value="llama3.2">Llama 3.2</option>
+                      <option value="llama3.3">Llama 3.3 70B</option>
+                    </select>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    {settings.privacy.llmProvider === "ollama" && ollamaModels.length === 0
+                      ? "Download models via Ollama CLI or pull button below."
+                      : settings.privacy.llmProvider === "deepseek" 
+                        ? "DeepSeek offers 90%+ quality at 1/10th the cost of competitors."
+                        : "Models fetched from provider API. Select the best for your needs."}
+                  </p>
                 </div>
 
                 <div className="flex items-center justify-between">
@@ -1248,6 +1871,7 @@ export function SettingsView() {
                     <option value="openai">OpenAI</option>
                     <option value="anthropic">Anthropic</option>
                     <option value="gemini">Google Gemini</option>
+                    <option value="deepseek">DeepSeek</option>
                     <option value="ollama-cloud">Ollama Cloud</option>
                   </select>
                   {!settings.privacy.remoteProcessingEnabled ? (
@@ -1282,6 +1906,8 @@ export function SettingsView() {
                         await setProviderSecret(provider, apiKey.trim());
                         setApiKey("");
                         setHasApiKey(true);
+                        // Refresh models for this provider after saving key
+                        await refreshModelsForProvider(provider);
                       } catch (e) {
                         setError(e instanceof Error ? e.message : "Failed to save API key");
                       } finally {
@@ -1370,6 +1996,121 @@ export function SettingsView() {
                     <p className="text-xs text-muted-foreground">{cloudReadinessMessage}</p>
                   ) : null}
                 </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {activeTab === "license" && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Shield className="h-5 w-5 text-emerald-600" />
+                  License
+                </CardTitle>
+                <CardDescription>Lemon Squeezy license · 1 user · up to 5 computers</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {licenseInfo === null ? (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Checking license…
+                  </div>
+                ) : licenseInfo.valid ? (
+                  <>
+                    <div className={`rounded-lg border p-4 space-y-3 ${licenseInfo.tier === "friends_club"
+                      ? "border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800"
+                      : "border-emerald-200 bg-emerald-50 dark:bg-emerald-950/20 dark:border-emerald-800"
+                      }`}>
+                      <div className="flex items-center gap-2">
+                        {licenseInfo.tier === "friends_club" ? (
+                          <Star className="h-5 w-5 text-amber-500" />
+                        ) : (
+                          <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                        )}
+                        <span className={`font-semibold ${licenseInfo.tier === "friends_club"
+                          ? "text-amber-700 dark:text-amber-400"
+                          : "text-emerald-700 dark:text-emerald-400"
+                          }`}>
+                          {licenseInfo.tier === "friends_club" ? "Friends Club ⭐" : "Basic"}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-sm">
+                        <span className="text-muted-foreground">Key</span>
+                        <span className="font-mono text-xs truncate">{licenseInfo.key.slice(0, 8)}···</span>
+                        <span className="text-muted-foreground">Devices</span>
+                        <span>{licenseInfo.activationsUsage} of {licenseInfo.activationsLimit} used</span>
+                        {licenseInfo.lastValidatedAt && (
+                          <>
+                            <span className="text-muted-foreground">Last validated</span>
+                            <span>{new Date(licenseInfo.lastValidatedAt).toLocaleDateString()}</span>
+                          </>
+                        )}
+                        <span className="text-muted-foreground">Plan</span>
+                        <span>Lifetime</span>
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => { setLicenseInfo(null); }}
+                      >
+                        Re-check
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-destructive hover:bg-destructive/10"
+                        onClick={() => {
+                          if (!window.confirm("Deactivate Nautilus on this computer? You can reactivate later.")) return;
+                          void deactivateLicense().then(() => { setLicenseInfo(null); void validateLicense().then(setLicenseInfo); });
+                        }}
+                      >
+                        Deactivate this device
+                      </Button>
+                    </div>
+                  </>
+                ) : licenseInfo.trialDaysRemaining > 0 ? (
+                  <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-2">
+                    <div className="flex items-center gap-2 text-sm font-medium">
+                      <XCircle className="h-4 w-4 text-muted-foreground" />
+                      <span>Free trial · {licenseInfo.trialDaysRemaining} days remaining</span>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1.5"
+                      onClick={() => window.open("https://nautilusbot.lemonsqueezy.com/buy/basic", "_blank", "noopener,noreferrer")}
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      Buy a license — $8 lifetime
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800 p-4 space-y-3">
+                    <p className="text-sm text-amber-700 dark:text-amber-400 font-medium">Trial expired</p>
+                    <p className="text-xs text-muted-foreground">Enter a license key in Settings → License, or buy one below.</p>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => window.open("https://nautilusbot.lemonsqueezy.com/buy/basic", "_blank", "noopener,noreferrer")}
+                      >
+                        <ExternalLink className="mr-1 h-3.5 w-3.5" />
+                        Buy Basic
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-amber-300/60 text-amber-700 dark:text-amber-400"
+                        onClick={() => window.open("https://nautilusbot.lemonsqueezy.com/buy/friends-club", "_blank", "noopener,noreferrer")}
+                      >
+                        <ExternalLink className="mr-1 h-3.5 w-3.5" />
+                        Friends Club ⭐
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </CardContent>
             </Card>
           )}

@@ -60,10 +60,12 @@ export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps
   const [lastResult, setLastResult] = useState<LlmAnalysisResult | null>(null);
   const [actionItems, setActionItems] = useState<ActionItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showSetupGuide, setShowSetupGuide] = useState(false);
 
   const handleTemplateClick = async (template: AnalysisTemplate) => {
     setIsAnalyzing(true);
     setError(null);
+    setShowSetupGuide(false);
     
     try {
       if (template.id === "actions") {
@@ -76,7 +78,20 @@ export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps
         setActionItems(null);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Analysis failed");
+      const message = err instanceof Error ? err.message : "Analysis failed";
+      let helpfulError = message;
+      
+      if (message.includes("ollama") || message.includes("Ollama") || message.includes("connection refused") || message.includes("connect")) {
+        helpfulError = "Ollama is not running. Start Ollama locally, or configure a cloud provider in Settings.";
+        setShowSetupGuide(true);
+      } else if (message.includes("API key") || message.includes("secret") || message.includes("key not configured")) {
+        helpfulError = "API key not configured. Add your API key in Settings.";
+        setShowSetupGuide(true);
+      } else if (message.includes("not found") || message.includes("Transcript")) {
+        helpfulError = "Transcript not available. Wait for transcription to complete.";
+      }
+      
+      setError(helpfulError);
     } finally {
       setIsAnalyzing(false);
     }
@@ -87,6 +102,7 @@ export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps
     
     setIsAnalyzing(true);
     setError(null);
+    setShowSetupGuide(false);
     
     try {
       const result = await analyzeRecording(recordingId, customQuery);
@@ -94,7 +110,20 @@ export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps
       setActionItems(null);
       setCustomQuery("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Analysis failed");
+      const message = err instanceof Error ? err.message : "Analysis failed";
+      let helpfulError = message;
+      
+      if (message.includes("ollama") || message.includes("Ollama") || message.includes("connection refused") || message.includes("connect")) {
+        helpfulError = "Ollama is not running. Start Ollama locally, or configure a cloud provider in Settings.";
+        setShowSetupGuide(true);
+      } else if (message.includes("API key") || message.includes("secret") || message.includes("key not configured")) {
+        helpfulError = "API key not configured. Add your API key in Settings.";
+        setShowSetupGuide(true);
+      } else if (message.includes("not found") || message.includes("Transcript")) {
+        helpfulError = "Transcript not available. Wait for transcription to complete.";
+      }
+      
+      setError(helpfulError);
     } finally {
       setIsAnalyzing(false);
     }
@@ -191,9 +220,22 @@ export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps
 
       {/* Error Display */}
       {error && (
-        <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-center gap-2 text-sm text-destructive">
-          <AlertCircle className="h-4 w-4" />
-          {error}
+        <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-start gap-2 text-sm text-destructive">
+          <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+          <div className="flex-1">
+            <p>{error}</p>
+            {showSetupGuide && (
+              <div className="mt-3 p-3 bg-muted rounded-lg text-muted-foreground text-xs space-y-2">
+                <p className="font-medium text-foreground">Setup Options:</p>
+                <ul className="list-disc list-inside space-y-1">
+                  <li><strong>Ollama (Free, Local):</strong> Install from ollama.com, then run <code className="bg-muted-foreground/10 px-1 rounded">ollama serve</code></li>
+                  <li><strong>OpenAI:</strong> Get an API key from platform.openai.com</li>
+                  <li><strong>Anthropic:</strong> Get an API key from console.anthropic.com</li>
+                </ul>
+                <p className="pt-1">Go to <strong>Settings → AI & Keys</strong> to configure your preferred provider.</p>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

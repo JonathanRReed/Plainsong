@@ -223,6 +223,8 @@ pub struct PrivacySettings {
     pub remote_processing_enabled: bool,
     /// Default analysis LLM provider
     pub llm_provider: String,
+    /// Default LLM model ID (provider-specific)
+    pub llm_model_id: Option<String>,
     /// Optional absolute export root constraint
     pub export_root: Option<PathBuf>,
     /// Whether vault migration has completed
@@ -241,6 +243,7 @@ impl Default for PrivacySettings {
             cloud_sync: false,
             remote_processing_enabled: false,
             llm_provider: "ollama".to_string(),
+            llm_model_id: None,
             export_root: None,
             vault_initialized: false,
             vault_salt: None,

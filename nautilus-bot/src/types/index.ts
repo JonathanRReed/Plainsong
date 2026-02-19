@@ -57,39 +57,6 @@ export interface Project {
   keyHint?: string | null;
 }
 
-export interface ProjectSettings {
-  retentionDays?: number;
-  encryptionEnabled: boolean;
-  defaultTranscriptionModel: "speed" | "accuracy";
-  llmProvider: string;
-}
-
-export interface AnalysisResult {
-  id: string;
-  recordingId: string;
-  type: "summary" | "action_items" | "decisions" | "dates" | "custom";
-  content: string;
-  citations: Citation[];
-  createdAt: string;
-  model: string;
-}
-
-export interface Citation {
-  segmentId: string;
-  startTime: number;
-  endTime: number;
-  text: string;
-}
-
-export interface ExportBundle {
-  id: string;
-  recordingId: string;
-  format: "markdown" | "pdf" | "json" | "evidence_bundle";
-  content: string;
-  exportedAt: string;
-  target?: string;
-}
-
 export interface AuditLogEntry {
   id: string;
   timestamp: string;

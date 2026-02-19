@@ -64,6 +64,7 @@ export interface PrivacySettings {
   cloudSync: boolean;
   remoteProcessingEnabled: boolean;
   llmProvider: string;
+  llmModelId: string | null;
   exportRoot: string | null;
   vaultInitialized: boolean;
   vaultSalt: string | null;

@@ -21,6 +21,7 @@ import {
   renameSpeaker,
   deleteRecording,
   renameRecording,
+  isDiarizationModelAvailable,
 } from "@/lib/tauri";
 import type { Recording, Transcript } from "@/types";
 import {
@@ -130,6 +131,15 @@ export function RecordingsView() {
     setDiarizationError(null);
 
     try {
+      const available = await isDiarizationModelAvailable();
+      if (!available) {
+        setDiarizationError(
+          "Speaker identification requires a model that is not yet available. Use the Analysis tab above for AI-powered meeting summaries and action items."
+        );
+        setIsRunningDiarization(false);
+        return;
+      }
+
       const result = await runDiarization(selectedRecording.id);
       await loadRecordingDetail(selectedRecording);
       setDiarizationMessage(
@@ -139,7 +149,7 @@ export function RecordingsView() {
       setDiarizationError(
         error instanceof Error
           ? error.message
-          : "Speaker identification failed. Diarization model may not be available."
+          : "Speaker identification failed. Use the Analysis tab for AI-powered features."
       );
     } finally {
       setIsRunningDiarization(false);

@@ -60,7 +60,14 @@ impl OllamaClient {
             .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
             .collect();
 
+        tracing::info!("Ollama returned {} models", models.len());
         Ok(models)
+    }
+
+    /// Validate that a specific model is available
+    pub async fn validate_model(&self, model: &str) -> Result<bool> {
+        let models = self.list_models().await?;
+        Ok(models.iter().any(|m| m == model))
     }
 
     /// Generate completion

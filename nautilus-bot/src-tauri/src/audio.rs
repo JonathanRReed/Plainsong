@@ -25,6 +25,7 @@ pub struct AudioCapture {
     dictation_buffer: Arc<crossbeam::queue::SegQueue<f32>>,
     dictation_thread: Option<JoinHandle<()>>,
     dictation_sample_rate: u32,
+    dictation_channels: u16,
     recordings_dir: PathBuf,
     host: cpal::Host,
     active_recording: Option<ActiveRecordingSession>,
@@ -83,6 +84,7 @@ impl AudioCapture {
             dictation_buffer: Arc::new(crossbeam::queue::SegQueue::new()),
             dictation_thread: None,
             dictation_sample_rate: 16000,
+            dictation_channels: 1,
             recordings_dir,
             host,
             active_recording: None,
@@ -110,20 +112,27 @@ impl AudioCapture {
             return Err(anyhow::anyhow!("Dictation already in progress"));
         }
 
-        // Clear previous buffer
         while self.dictation_buffer.pop().is_some() {}
 
-        self.is_dictating.store(true, Ordering::SeqCst);
-
-        let sample_rate = self
+        let device = self
             .host
             .default_input_device()
-            .context("No input device available")?
-            .default_input_config()?
-            .sample_rate()
-            .0;
+            .context("No input device available")?;
+
+        let config = device.default_input_config()?;
+        let sample_rate = config.sample_rate().0;
+        let channels = config.channels();
         self.dictation_sample_rate = sample_rate;
-        tracing::info!("Starting dictation");
+        self.dictation_channels = channels;
+
+        tracing::info!(
+            "Starting dictation capture: {} channels, {} Hz, format: {:?}",
+            channels,
+            sample_rate,
+            config.sample_format()
+        );
+
+        self.is_dictating.store(true, Ordering::SeqCst);
 
         let is_dictating = Arc::clone(&self.is_dictating);
         let buffer = Arc::clone(&self.dictation_buffer);
@@ -134,7 +143,7 @@ impl AudioCapture {
             let device = match host.default_input_device() {
                 Some(device) => device,
                 None => {
-                    tracing::error!("No input device available for dictation");
+                    tracing::error!("No input device available for dictation capture thread");
                     return;
                 }
             };
@@ -145,17 +154,26 @@ impl AudioCapture {
                     return;
                 }
             };
+            let num_channels = config.channels() as usize;
             let err_fn = |err| tracing::error!("Dictation stream error: {}", err);
             let is_dictating_f32 = Arc::clone(&is_dictating);
             let is_dictating_i16 = Arc::clone(&is_dictating);
+            let is_dictating_u8 = Arc::clone(&is_dictating);
 
             let stream_result = match config.sample_format() {
                 cpal::SampleFormat::F32 => device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         if is_dictating_f32.load(Ordering::SeqCst) {
-                            for &sample in data {
-                                buffer.push(sample);
+                            if num_channels == 1 {
+                                for &sample in data {
+                                    buffer.push(sample);
+                                }
+                            } else {
+                                for chunk in data.chunks_exact(num_channels) {
+                                    let mono: f32 = chunk.iter().sum::<f32>() / num_channels as f32;
+                                    buffer.push(mono);
+                                }
                             }
                         }
                     },
@@ -166,15 +184,52 @@ impl AudioCapture {
                     &config.into(),
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
                         if is_dictating_i16.load(Ordering::SeqCst) {
-                            for &sample in data {
-                                buffer.push(sample as f32 / i16::MAX as f32);
+                            if num_channels == 1 {
+                                for &sample in data {
+                                    buffer.push(sample as f32 / i16::MAX as f32);
+                                }
+                            } else {
+                                for chunk in data.chunks_exact(num_channels) {
+                                    let mono: f32 = chunk
+                                        .iter()
+                                        .map(|&s| s as f32 / i16::MAX as f32)
+                                        .sum::<f32>()
+                                        / num_channels as f32;
+                                    buffer.push(mono);
+                                }
                             }
                         }
                     },
                     err_fn,
                     None,
                 ),
-                _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+                cpal::SampleFormat::U8 => device.build_input_stream(
+                    &config.into(),
+                    move |data: &[u8], _: &cpal::InputCallbackInfo| {
+                        if is_dictating_u8.load(Ordering::SeqCst) {
+                            if num_channels == 1 {
+                                for &sample in data {
+                                    buffer.push((sample as f32 - 128.0) / 128.0);
+                                }
+                            } else {
+                                for chunk in data.chunks_exact(num_channels) {
+                                    let mono: f32 = chunk
+                                        .iter()
+                                        .map(|&s| (s as f32 - 128.0) / 128.0)
+                                        .sum::<f32>()
+                                        / num_channels as f32;
+                                    buffer.push(mono);
+                                }
+                            }
+                        }
+                    },
+                    err_fn,
+                    None,
+                ),
+                format => {
+                    tracing::error!("Unsupported sample format for dictation: {:?}", format);
+                    return;
+                }
             };
 
             let Ok(stream) = stream_result else {
@@ -183,14 +238,17 @@ impl AudioCapture {
             };
 
             if let Err(e) = stream.play() {
-                tracing::error!("Failed to play dictation stream: {}", e);
+                tracing::error!("Failed to start dictation stream: {}", e);
                 return;
             }
+
+            tracing::info!("Dictation audio stream started successfully");
 
             while capture_flag.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
 
+            tracing::info!("Dictation audio stream stopping");
             drop(stream);
         });
         self.dictation_thread = Some(capture_handle);
@@ -204,9 +262,10 @@ impl AudioCapture {
             return Err(anyhow::anyhow!("No dictation in progress"));
         }
 
-        // Capture a brief trailing window so very short utterances are less likely to be cut off.
+        tracing::info!("Stopping dictation capture...");
         std::thread::sleep(Duration::from_millis(DICTATION_STOP_CAPTURE_TAIL_MS));
         self.is_dictating.store(false, Ordering::SeqCst);
+
         if let Some(handle) = self.dictation_thread.take() {
             let (done_tx, done_rx) = bounded::<()>(1);
             std::thread::spawn(move || {
@@ -222,19 +281,46 @@ impl AudioCapture {
             }
         }
 
-        // Collect samples from buffer
         let mut samples = Vec::new();
         while let Some(sample) = self.dictation_buffer.pop() {
             samples.push(sample);
         }
 
+        tracing::info!(
+            "Collected {} samples from dictation buffer (sample rate: {} Hz)",
+            samples.len(),
+            self.dictation_sample_rate
+        );
+
+        if samples.is_empty() {
+            tracing::warn!("No audio samples captured during dictation!");
+            return Err(anyhow::anyhow!(
+                "No audio was captured. Please check microphone permissions."
+            ));
+        }
+
+        // Log audio statistics for debugging
+        let peak = samples.iter().fold(0.0_f32, |p, s| p.max(s.abs()));
+        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+        tracing::info!(
+            "Audio stats: peak={}, rms={}, duration={}ms",
+            peak,
+            rms,
+            (samples.len() as f64 / self.dictation_sample_rate as f64 * 1000.0) as i64
+        );
+
         boost_quiet_audio(&mut samples);
         ensure_min_duration(&mut samples, self.dictation_sample_rate, 1.0);
 
-        tracing::info!("Dictation stopped, captured {} samples", samples.len());
+        tracing::info!(
+            "Dictation stopped: {} mono samples at {} Hz (after processing)",
+            samples.len(),
+            self.dictation_sample_rate
+        );
 
-        // Convert to WAV format
         let wav_data = encode_wav(&samples, self.dictation_sample_rate, 1)?;
+
+        tracing::info!("WAV data size: {} bytes", wav_data.len());
 
         Ok(wav_data)
     }

@@ -6,18 +6,21 @@
 //! - OpenAI
 //! - Anthropic (Claude)
 //! - Google (Gemini)
+//! - DeepSeek
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
 mod anthropic;
 mod cloud;
+mod deepseek;
 mod gemini;
 mod ollama;
 mod openai;
 
 pub use anthropic::AnthropicClient;
 pub use cloud::OllamaCloudClient;
+pub use deepseek::DeepSeekClient;
 pub use gemini::GeminiClient;
 pub use ollama::OllamaClient;
 pub use openai::OpenAIClient;
@@ -32,6 +35,7 @@ pub enum LlmProvider {
     OpenAI,
     Anthropic,
     Gemini,
+    DeepSeek,
 }
 
 impl LlmProvider {
@@ -42,6 +46,7 @@ impl LlmProvider {
             Self::OpenAI => "OpenAI GPT",
             Self::Anthropic => "Anthropic Claude",
             Self::Gemini => "Google Gemini",
+            Self::DeepSeek => "DeepSeek",
         }
     }
 }

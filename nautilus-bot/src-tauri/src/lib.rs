@@ -7,6 +7,7 @@ mod diarization;
 mod download;
 mod export;
 mod integrations;
+mod license;
 mod llm;
 mod models;
 mod performance;
@@ -148,6 +149,7 @@ enum AnalysisProvider {
     OpenAi,
     Anthropic,
     Gemini,
+    DeepSeek,
     OllamaCloud,
 }
 
@@ -157,6 +159,7 @@ impl AnalysisProvider {
             "openai" => Self::OpenAi,
             "anthropic" => Self::Anthropic,
             "gemini" => Self::Gemini,
+            "deepseek" => Self::DeepSeek,
             "ollama-cloud" => Self::OllamaCloud,
             _ => Self::Ollama,
         }
@@ -168,6 +171,7 @@ impl AnalysisProvider {
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
             Self::Gemini => "gemini",
+            Self::DeepSeek => "deepseek",
             Self::OllamaCloud => "ollama-cloud",
         }
     }
@@ -181,6 +185,7 @@ impl AnalysisProvider {
             Self::OpenAi => Some("openai"),
             Self::Anthropic => Some("anthropic"),
             Self::Gemini => Some("gemini"),
+            Self::DeepSeek => Some("deepseek"),
             Self::OllamaCloud => Some("ollama-cloud"),
             Self::Ollama => None,
         }
@@ -190,8 +195,9 @@ impl AnalysisProvider {
         match self {
             Self::Ollama => "llama3.2",
             Self::OpenAi => "gpt-4o-mini",
-            Self::Anthropic => "claude-3-5-sonnet-latest",
-            Self::Gemini => "gemini-1.5-flash",
+            Self::Anthropic => "claude-sonnet-4-20250514",
+            Self::Gemini => "gemini-2.0-flash",
+            Self::DeepSeek => "deepseek-chat",
             Self::OllamaCloud => "llama3.2",
         }
     }
@@ -474,6 +480,33 @@ async fn rename_speaker(
 }
 
 #[tauri::command]
+fn is_diarization_model_available() -> bool {
+    diarization::DiarizationEngine::is_real_available()
+}
+
+#[tauri::command]
+async fn download_diarization_model(app: tauri::AppHandle) -> Result<(), String> {
+    use crate::download::DownloadManager;
+    
+    let manager = DownloadManager::new().map_err(|e| e.to_string())?;
+    
+    let progress_callback = |progress: crate::download::DownloadProgress| {
+        tracing::info!(
+            "Diarization model download progress: {:.1}%",
+            progress.percentage
+        );
+    };
+    
+    manager
+        .download_diarization_model(progress_callback)
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    tracing::info!("Diarization model downloaded successfully");
+    Ok(())
+}
+
+#[tauri::command]
 async fn start_dictation(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -510,6 +543,13 @@ async fn start_recording(
     state: tauri::State<'_, AppState>,
     options: models::RecordingOptions,
 ) -> Result<String, String> {
+    {
+        let dictation_state = state.dictation_runtime_state.lock().await;
+        if *dictation_state != DictationSessionState::Idle {
+            return Err("Cannot start recording while dictation is active".to_string());
+        }
+    }
+
     let mut audio = state.audio_capture.lock().await;
     let recording_id = audio
         .start_recording(options.clone())
@@ -1308,6 +1348,81 @@ async fn list_ollama_models(state: tauri::State<'_, AppState>) -> Result<Vec<Str
 }
 
 #[tauri::command]
+async fn list_ollama_cloud_models() -> Result<Vec<String>, String> {
+    let secret = secrets::get_provider_secret("ollama-cloud")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    
+    if secret.is_empty() {
+        return Ok(vec![
+            "llama3.2".to_string(),
+            "llama3.3".to_string(),
+            "mistral".to_string(),
+            "codellama".to_string(),
+        ]);
+    }
+    
+    let client = llm::OllamaCloudClient::with_api_key(Some(secret));
+    client.list_models().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_openai_models() -> Result<Vec<String>, String> {
+    let secret = secrets::get_provider_secret("openai")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    
+    if secret.is_empty() {
+        return Ok(vec![]);
+    }
+    
+    let client = llm::OpenAIClient::with_api_key(Some(secret));
+    client.list_models().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_anthropic_models() -> Result<Vec<String>, String> {
+    let secret = secrets::get_provider_secret("anthropic")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    
+    if secret.is_empty() {
+        return Ok(vec![]);
+    }
+    
+    let client = llm::AnthropicClient::with_api_key(Some(secret));
+    client.list_models().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_gemini_models() -> Result<Vec<String>, String> {
+    let secret = secrets::get_provider_secret("gemini")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    
+    if secret.is_empty() {
+        return Ok(vec![]);
+    }
+    
+    let client = llm::GeminiClient::with_api_key(Some(secret));
+    client.list_models().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_deepseek_models() -> Result<Vec<String>, String> {
+    let secret = secrets::get_provider_secret("deepseek")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+    
+    if secret.is_empty() {
+        return Ok(vec![]);
+    }
+    
+    let client = llm::DeepSeekClient::with_api_key(Some(secret));
+    client.list_models().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 #[allow(non_snake_case)]
 async fn export_recording(
     state: tauri::State<'_, AppState>,
@@ -1811,6 +1926,21 @@ async fn get_security_status(state: tauri::State<'_, AppState>) -> Result<Securi
 }
 
 #[tauri::command]
+async fn validate_license() -> license::LicenseInfo {
+    license::validate_license().await
+}
+
+#[tauri::command]
+async fn activate_license(key: String) -> Result<license::LicenseInfo, String> {
+    license::activate_license(&key).await
+}
+
+#[tauri::command]
+async fn deactivate_license() -> Result<(), String> {
+    license::deactivate_license().await
+}
+
+#[tauri::command]
 async fn unlock_vault(state: tauri::State<'_, AppState>, password: String) -> Result<(), String> {
     unlock_vault_runtime(state.inner(), &password).await
 }
@@ -2170,10 +2300,26 @@ async fn start_dictation_session(
     options: models::DictationStartOptions,
 ) -> Result<u64, String> {
     {
+        let recording_state = state.recording_overlay_state.lock().map(|s| s.phase.clone()).unwrap_or_default();
+        if recording_state != "idle" {
+            return Err("Cannot start dictation while meeting recording is active".to_string());
+        }
+    }
+    
+    {
         let mut runtime_state = state.dictation_runtime_state.lock().await;
         if *runtime_state != DictationSessionState::Idle {
             return Err("Dictation is already active".to_string());
         }
+        
+        let has_mic = {
+            let audio = state.audio_capture.lock().await;
+            audio.has_microphone_input()
+        };
+        if !has_mic {
+            return Err("No microphone available. Please connect a microphone and grant permission.".to_string());
+        }
+        
         *runtime_state = DictationSessionState::Recording;
     }
 
@@ -3098,13 +3244,14 @@ async fn validate_export_target_path(state: &AppState, raw_target: &str) -> Resu
 
 async fn selected_analysis_provider_and_settings(
     state: &AppState,
-) -> (AnalysisProvider, bool, String) {
+) -> (AnalysisProvider, bool, String, Option<String>) {
     let settings_manager = state.settings_manager.lock().await;
     let settings = settings_manager.settings();
     (
         AnalysisProvider::from_settings_value(&settings.privacy.llm_provider),
         settings.privacy.remote_processing_enabled,
         settings.privacy.llm_provider.clone(),
+        settings.privacy.llm_model_id.clone(),
     )
 }
 
@@ -3148,15 +3295,23 @@ async fn run_analysis_with_selected_provider(
     query: &str,
     model: Option<&str>,
 ) -> Result<llm::AnalysisResult, String> {
-    let (provider, remote_processing_enabled, configured_provider) =
+    let (provider, remote_processing_enabled, configured_provider, settings_model) =
         selected_analysis_provider_and_settings(state).await;
 
     enforce_remote_provider_policy(provider, remote_processing_enabled)?;
 
+    // Use provided model, then settings model, then provider default
     let selected_model = model
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .or_else(|| settings_model.as_deref().filter(|v| !v.trim().is_empty()))
         .unwrap_or_else(|| provider.default_model());
+
+    tracing::info!(
+        "Running analysis with provider '{}' and model '{}'",
+        provider.as_settings_value(),
+        selected_model
+    );
 
     match provider {
         AnalysisProvider::Ollama => state
@@ -3185,6 +3340,13 @@ async fn run_analysis_with_selected_provider(
                 .await
                 .map_err(|e| e.to_string())
         }
+        AnalysisProvider::DeepSeek => {
+            let api_key = provider_secret_for(provider)?;
+            llm::DeepSeekClient::with_api_key(Some(api_key))
+                .analyze_transcript(transcript, query, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
         AnalysisProvider::OllamaCloud => {
             let api_key = provider_secret_for(provider)?;
             llm::OllamaCloudClient::with_api_key(Some(api_key))
@@ -3208,13 +3370,14 @@ async fn run_summary_with_selected_provider(
     transcript: &str,
     model: Option<&str>,
 ) -> Result<String, String> {
-    let (provider, remote_processing_enabled, _) =
+    let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state).await;
     enforce_remote_provider_policy(provider, remote_processing_enabled)?;
 
     let selected_model = model
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .or_else(|| settings_model.as_deref().filter(|v| !v.trim().is_empty()))
         .unwrap_or_else(|| provider.default_model());
 
     match provider {
@@ -3244,6 +3407,13 @@ async fn run_summary_with_selected_provider(
                 .await
                 .map_err(|e| e.to_string())
         }
+        AnalysisProvider::DeepSeek => {
+            let api_key = provider_secret_for(provider)?;
+            llm::DeepSeekClient::with_api_key(Some(api_key))
+                .summarize(transcript, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
         AnalysisProvider::OllamaCloud => {
             let api_key = provider_secret_for(provider)?;
             llm::OllamaCloudClient::with_api_key(Some(api_key))
@@ -3259,13 +3429,14 @@ async fn run_action_items_with_selected_provider(
     transcript: &str,
     model: Option<&str>,
 ) -> Result<Vec<llm::ActionItem>, String> {
-    let (provider, remote_processing_enabled, _) =
+    let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state).await;
     enforce_remote_provider_policy(provider, remote_processing_enabled)?;
 
     let selected_model = model
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .or_else(|| settings_model.as_deref().filter(|v| !v.trim().is_empty()))
         .unwrap_or_else(|| provider.default_model());
 
     match provider {
@@ -3291,6 +3462,13 @@ async fn run_action_items_with_selected_provider(
         AnalysisProvider::Gemini => {
             let api_key = provider_secret_for(provider)?;
             llm::GeminiClient::with_api_key(Some(api_key))
+                .extract_action_items(transcript, selected_model)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::DeepSeek => {
+            let api_key = provider_secret_for(provider)?;
+            llm::DeepSeekClient::with_api_key(Some(api_key))
                 .extract_action_items(transcript, selected_model)
                 .await
                 .map_err(|e| e.to_string())
@@ -3907,6 +4085,11 @@ pub fn run() {
             search_transcripts,
             get_ollama_status,
             list_ollama_models,
+            list_ollama_cloud_models,
+            list_openai_models,
+            list_anthropic_models,
+            list_gemini_models,
+            list_deepseek_models,
             export_recording,
             export_recording_v2,
             verify_evidence_bundle,
@@ -3938,6 +4121,8 @@ pub fn run() {
             run_diarization,
             get_speakers,
             rename_speaker,
+            is_diarization_model_available,
+            download_diarization_model,
             get_settings,
             save_settings,
             has_provider_secret,
@@ -3964,6 +4149,9 @@ pub fn run() {
             sync_backup_to_cloud,
             export_backup_archive,
             punctuate_text,
+            activate_license,
+            validate_license,
+            deactivate_license,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -4730,7 +4918,19 @@ struct PasteOutcome {
     error: Option<String>,
 }
 
+#[cfg(target_os = "macos")]
+fn check_accessibility_permission() -> bool {
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to get name of first process")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    tracing::info!("Copying {} chars to clipboard", text.len());
+    
     #[cfg(target_os = "macos")]
     {
         use std::process::{Command, Stdio};
@@ -4749,6 +4949,7 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
         if !copy_status.success() {
             return Err("pbcopy exited with failure status".to_string());
         }
+        tracing::info!("Successfully copied to clipboard via pbcopy");
         Ok(())
     }
 
@@ -4798,6 +4999,8 @@ fn send_native_paste_key() -> Result<(), String> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
     let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
         .map_err(|_| "Failed to create event source for paste".to_string())?;
 
@@ -4807,15 +5010,20 @@ fn send_native_paste_key() -> Result<(), String> {
     key_down.set_flags(CGEventFlags::CGEventFlagCommand);
     key_down.post(CGEventTapLocation::HID);
 
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
     let key_up = CGEvent::new_keyboard_event(source, keycode_v, false)
         .map_err(|_| "Failed to create key up event".to_string())?;
     key_up.set_flags(CGEventFlags::CGEventFlagCommand);
     key_up.post(CGEventTapLocation::HID);
 
+    tracing::info!("Cmd+V keystroke posted successfully");
     Ok(())
 }
 
 fn paste_text_systemwide(text: &str) -> PasteOutcome {
+    tracing::info!("paste_text_systemwide called with {} chars", text.len());
+    
     let original_clipboard = {
         #[cfg(target_os = "macos")]
         {
@@ -4828,15 +5036,26 @@ fn paste_text_systemwide(text: &str) -> PasteOutcome {
     };
 
     if let Err(error) = copy_to_clipboard(text) {
+        tracing::error!("Failed to copy to clipboard: {}", error);
         return PasteOutcome {
             pasted: false,
             copied: false,
             error: Some(error),
         };
     }
+    tracing::info!("Text copied to clipboard successfully");
 
     #[cfg(target_os = "macos")]
     {
+        if !check_accessibility_permission() {
+            tracing::warn!("Accessibility permission not granted - cannot simulate paste");
+            return PasteOutcome {
+                pasted: false,
+                copied: true,
+                error: Some("Copied to clipboard. To insert at cursor, grant Accessibility permission in System Settings > Privacy & Security > Accessibility.".to_string()),
+            };
+        }
+        
         let paste_result = send_native_paste_key();
         let restore_result = if let Some(previous) = original_clipboard {
             copy_to_clipboard(&previous)
@@ -4845,8 +5064,10 @@ fn paste_text_systemwide(text: &str) -> PasteOutcome {
         };
 
         if let Err(error) = paste_result {
+            tracing::error!("Paste key simulation failed: {}", error);
             let remediation = format!(
-                "Copied only. macOS blocked keystroke paste ({error}). Run the packaged Nautilus app and grant Accessibility to Nautilus."
+                "Copied to clipboard. macOS blocked keystroke paste ({}). Grant Accessibility in System Settings > Privacy & Security > Accessibility.",
+                error
             );
             if let Err(restore_error) = restore_result {
                 tracing::warn!(
@@ -4865,6 +5086,7 @@ fn paste_text_systemwide(text: &str) -> PasteOutcome {
             tracing::warn!("Failed to restore previous clipboard: {}", restore_error);
         }
 
+        tracing::info!("Paste successful - text inserted at cursor");
         PasteOutcome {
             pasted: true,
             copied: true,
@@ -4878,7 +5100,7 @@ fn paste_text_systemwide(text: &str) -> PasteOutcome {
             pasted: false,
             copied: true,
             error: Some(
-                "Copied only. System-wide paste is currently supported on macOS packaged builds."
+                "Copied to clipboard. System-wide paste is currently supported on macOS only."
                     .to_string(),
             ),
         }

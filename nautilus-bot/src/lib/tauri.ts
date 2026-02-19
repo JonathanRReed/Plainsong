@@ -1,12 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { 
+import type {
   Recording,
   Project,
   Transcript,
   AuditLogEntry,
-  AsrProviderInfo, 
+  AsrProviderInfo,
   AsrRuntimeDiagnostics,
-  AsrProviderType, 
+  AsrProviderType,
   BenchmarkResult,
   LlmAnalysisResult,
   ActionItem,
@@ -281,6 +281,10 @@ export async function listOllamaModels(): Promise<string[]> {
   return await invoke("list_ollama_models");
 }
 
+export async function listOllamaCloudModels(): Promise<string[]> {
+  return await invoke("list_ollama_cloud_models");
+}
+
 // System Audio APIs
 export async function checkSystemAudioAvailability(): Promise<boolean> {
   return await invoke("check_system_audio_availability");
@@ -357,6 +361,14 @@ export interface DiarizationResult {
 // Diarization APIs
 export async function runDiarization(recordingId: string): Promise<DiarizationResult> {
   return await invoke("run_diarization", { recordingId });
+}
+
+export async function isDiarizationModelAvailable(): Promise<boolean> {
+  return await invoke("is_diarization_model_available");
+}
+
+export async function downloadDiarizationModel(): Promise<void> {
+  return await invoke("download_diarization_model");
 }
 
 export async function getSpeakers(recordingId: string): Promise<Speaker[]> {
@@ -485,4 +497,54 @@ export async function syncBackupToCloud(backupId: string): Promise<void> {
 
 export async function exportBackupArchive(backupId: string, targetPath: string): Promise<void> {
   await invoke("export_backup_archive", { backupId, targetPath });
+}
+
+// ── License ───────────────────────────────────────────────────────────────────
+
+export type LicenseTier = "none" | "basic" | "friends_club";
+export type LicenseLsStatus = "active" | "inactive" | "expired" | "disabled" | "";
+
+export interface LicenseInfo {
+  key: string;
+  instanceId: string;
+  tier: LicenseTier;
+  valid: boolean;
+  lsStatus: LicenseLsStatus;
+  activationsLimit: number;
+  activationsUsage: number;
+  lastValidatedAt: string;
+  trialDaysRemaining: number;
+  nagRequired: boolean;
+}
+
+/** Called on startup to check cached license status against Lemon Squeezy. */
+export async function validateLicense(): Promise<LicenseInfo> {
+  return await invoke("validate_license");
+}
+
+/** Activate a new license key (calls LS activate endpoint). */
+export async function activateLicense(key: string): Promise<LicenseInfo> {
+  return await invoke("activate_license", { key });
+}
+
+/** Deactivate this device (calls LS deactivate endpoint, clears local state). */
+export async function deactivateLicense(): Promise<void> {
+  await invoke("deactivate_license");
+}
+
+// Dynamic Model Listing APIs
+export async function listOpenAiModels(): Promise<string[]> {
+  return await invoke("list_openai_models");
+}
+
+export async function listAnthropicModels(): Promise<string[]> {
+  return await invoke("list_anthropic_models");
+}
+
+export async function listGeminiModels(): Promise<string[]> {
+  return await invoke("list_gemini_models");
+}
+
+export async function listDeepSeekModels(): Promise<string[]> {
+  return await invoke("list_deepseek_models");
 }

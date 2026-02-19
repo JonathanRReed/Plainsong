@@ -196,6 +196,52 @@ impl DownloadManager {
         Ok(destination)
     }
 
+    /// Download diarization/speaker embedding model
+    pub async fn download_diarization_model(
+        &self,
+        progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
+    ) -> Result<PathBuf> {
+        let diarization_dir = self.models_dir.join("diarization");
+        tokio::fs::create_dir_all(&diarization_dir).await?;
+        
+        let destination = diarization_dir.join("ecapa_tdnn_speaker.onnx");
+        
+        if destination.exists() {
+            tracing::info!("Diarization model already exists at {:?}", destination);
+            return Ok(destination);
+        }
+        
+        // Use a working ECAPA-TDNN model from a reliable source
+        // SpeechBrain provides pre-trained models we can convert, but for now
+        // we'll download from a mirror that hosts the ONNX version
+        let url = "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/resolve/main/embedding_model.ckpt";
+        
+        tracing::info!("Downloading diarization model from {}", url);
+        tracing::warn!("Note: The SpeechBrain model is in PyTorch format. For full diarization support, use Ollama or a cloud LLM provider for analysis.");
+        
+        // For now, create a placeholder to indicate the feature needs setup
+        // Real diarization requires either:
+        // 1. A properly converted ONNX model
+        // 2. Integration with pyannote.audio
+        // 3. Using an LLM to identify speakers by voice characteristics
+        
+        tracing::warn!("Diarization model download not yet fully implemented. Speaker identification requires additional setup.");
+        
+        return Err(anyhow::anyhow!(
+            "Speaker diarization requires a model that is not yet publicly available as ONNX. \
+             For meeting analysis, use the AI analysis features (Meeting Summary, Action Items) \
+             which work with Ollama or cloud LLM providers."
+        ));
+    }
+
+    /// Check if diarization model is downloaded
+    pub fn is_diarization_model_downloaded(&self) -> bool {
+        self.models_dir
+            .join("diarization")
+            .join("ecapa_tdnn_speaker.onnx")
+            .exists()
+    }
+
     /// Get available space in models directory
     pub async fn get_available_space(&self) -> Result<u64> {
         // This is platform-specific

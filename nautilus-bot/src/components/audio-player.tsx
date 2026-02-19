@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { cn } from "@/lib/utils";
+import { formatDuration } from "@/lib/format-time";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
 import {
@@ -43,13 +44,6 @@ export function AudioPlayer({
   useEffect(() => {
     isPlayingRef.current = isPlaying;
   }, [isPlaying]);
-
-  // Format time as MM:SS
-  const formatTime = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
-  };
 
   // Handle play/pause
   const togglePlay = useCallback(() => {
@@ -267,8 +261,8 @@ export function AudioPlayer({
           className="cursor-pointer"
         />
         <div className="flex justify-between text-xs text-muted-foreground font-mono">
-          <span>{formatTime(currentTime)}</span>
-          <span>{formatTime(duration)}</span>
+          <span>{formatDuration(currentTime)}</span>
+          <span>{formatDuration(duration)}</span>
         </div>
       </div>
 

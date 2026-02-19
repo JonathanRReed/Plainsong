@@ -38,30 +38,66 @@ impl OllamaCloudClient {
 
     /// List available models
     pub async fn list_models(&self) -> Result<Vec<String>> {
+        // Ollama Cloud uses OpenAI-compatible API
         let mut request = self.client.get(format!("{}/v1/models", self.base_url));
 
         if let Some(ref key) = self.api_key {
             request = request.header("Authorization", format!("Bearer {}", key));
         }
 
-        let response = request
-            .send()
-            .await
-            .context("Failed to connect to Ollama Cloud")?;
+        match request.send().await {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<serde_json::Value>().await {
+                    Ok(data) => {
+                        let models: Vec<String> = data["data"]
+                            .as_array()
+                            .or_else(|| data["models"].as_array())
+                            .unwrap_or(&vec![])
+                            .iter()
+                            .filter_map(|m| {
+                                m["id"].as_str()
+                                    .or_else(|| m["name"].as_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .collect();
+                        
+                        if models.is_empty() {
+                            tracing::warn!("Ollama Cloud returned empty model list, using defaults");
+                            return Ok(Self::default_models());
+                        }
+                        
+                        tracing::info!("Ollama Cloud returned {} models", models.len());
+                        Ok(models)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse Ollama Cloud response: {}, using defaults", e);
+                        Ok(Self::default_models())
+                    }
+                }
+            }
+            Ok(response) => {
+                tracing::warn!("Ollama Cloud returned status {}, using default models", response.status());
+                Ok(Self::default_models())
+            }
+            Err(e) => {
+                tracing::warn!("Failed to connect to Ollama Cloud: {}, using default models", e);
+                Ok(Self::default_models())
+            }
+        }
+    }
 
-        let data: serde_json::Value = response
-            .json()
-            .await
-            .context("Failed to parse Ollama Cloud response")?;
-
-        let models: Vec<String> = data["models"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
-            .collect();
-
-        Ok(models)
+    fn default_models() -> Vec<String> {
+        vec![
+            "llama3.2".to_string(),
+            "llama3.3".to_string(),
+            "llama4".to_string(),
+            "mistral".to_string(),
+            "mixtral".to_string(),
+            "codellama".to_string(),
+            "deepseek-r1".to_string(),
+            "qwen2.5".to_string(),
+            "phi4".to_string(),
+        ]
     }
 
     /// Generate completion

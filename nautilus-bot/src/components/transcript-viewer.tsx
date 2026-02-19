@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo, memo } from "react";
 import { cn } from "@/lib/utils";
+import { formatTimeWithMs } from "@/lib/format-time";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,13 +16,6 @@ interface TranscriptViewerProps {
   onRenameSpeaker?: (speakerId: string, newName: string) => Promise<void> | void;
 }
 
-function formatTime(seconds: number): string {
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  const ms = Math.floor((seconds % 1) * 100);
-  return `${mins}:${secs.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
-}
-
 interface SpeakerBadgeProps {
   speakerId: string;
   speakerName?: string;
@@ -29,7 +23,7 @@ interface SpeakerBadgeProps {
   onRename?: (newName: string) => void;
 }
 
-function SpeakerBadge({ speakerId, speakerName, isEditing, onRename }: SpeakerBadgeProps) {
+const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEditing, onRename }: SpeakerBadgeProps) {
   const [isEditMode, setIsEditMode] = useState(false);
   const [editValue, setEditValue] = useState(speakerName || speakerId);
 
@@ -83,7 +77,7 @@ function SpeakerBadge({ speakerId, speakerName, isEditing, onRename }: SpeakerBa
       )}
     </div>
   );
-}
+});
 
 export function TranscriptViewer({
   segments,
@@ -110,20 +104,20 @@ export function TranscriptViewer({
   };
 
   // Group segments by speaker for better readability
-  const groupedSegments = segments.reduce((acc, segment, index) => {
-    const prevSegment = index > 0 ? segments[index - 1] : null;
-    
-    if (prevSegment && prevSegment.speakerId === segment.speakerId && 
-        segment.startTime - prevSegment.endTime < 2) {
-      // Merge with previous group
-      acc[acc.length - 1].push(segment);
-    } else {
-      // Start new group
-      acc.push([segment]);
-    }
-    
-    return acc;
-  }, [] as TranscriptSegment[][]);
+  const groupedSegments = useMemo(() => {
+    return segments.reduce((acc, segment, index) => {
+      const prevSegment = index > 0 ? segments[index - 1] : null;
+      
+      if (prevSegment && prevSegment.speakerId === segment.speakerId && 
+          segment.startTime - prevSegment.endTime < 2) {
+        acc[acc.length - 1].push(segment);
+      } else {
+        acc.push([segment]);
+      }
+      
+      return acc;
+    }, [] as TranscriptSegment[][]);
+  }, [segments]);
 
   return (
     <div className={cn("flex flex-col h-full", className)}>
@@ -135,7 +129,7 @@ export function TranscriptViewer({
           </span>
           {segments.length > 0 && (
             <span className="text-xs text-muted-foreground">
-              ({formatTime(segments[segments.length - 1]?.endTime || 0)} total)
+              ({formatTimeWithMs(segments[segments.length - 1]?.endTime || 0)} total)
             </span>
           )}
         </div>
@@ -180,7 +174,7 @@ export function TranscriptViewer({
                   {/* Timestamp & Speaker */}
                   <div className="flex flex-col gap-1 min-w-[100px]">
                     <span className="text-xs text-muted-foreground font-mono">
-                      {formatTime(firstSegment.startTime)}
+                      {formatTimeWithMs(firstSegment.startTime)}
                     </span>
                     <SpeakerBadge
                       speakerId={speakerId}
