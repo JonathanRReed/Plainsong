@@ -181,6 +181,12 @@ impl AsrProvider for WhisperProvider {
         params.set_print_timestamps(false);
         params.set_language(Some("en"));
         params.set_translate(false);
+        
+        // Anti-repetition and hallucination mitigation
+        params.set_no_context(true); // Don't use previous context to prevent loop hallucinations
+        params.set_single_segment(true); // Optimize for short dictations
+        params.set_entropy_thold(2.4); // Stricter entropy threshold
+        params.set_logprob_thold(-1.0); // Stricter logprob threshold
 
         // Run transcription
         state

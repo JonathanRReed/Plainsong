@@ -3046,7 +3046,14 @@ async fn stop_dictation_session_for_session(
     let dictation_options = state.dictation_start_options.lock().await.clone();
     let dictation_model_id = state.asr_manager.selected_model_id().await;
 
-    let mut result = match state.asr_manager.transcribe_bytes(&audio_data).await {
+    // Remove leading/trailing silence to prevent Whisper hallucinations ("Thank you", repetitive loops)
+    let processed_audio = crate::audio::utils::remove_silence_from_wav_bytes(&audio_data)
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to remove silence from dictation audio, using raw audio: {}", e);
+            audio_data.clone()
+        });
+
+    let mut result = match state.asr_manager.transcribe_bytes(&processed_audio).await {
         Ok(result) => result,
         Err(error) => {
             let message = error.to_string();
