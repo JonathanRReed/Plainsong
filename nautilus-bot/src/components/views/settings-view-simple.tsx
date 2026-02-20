@@ -691,18 +691,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               </CardHeader>
               <CardContent className="space-y-5">
                 <div className="space-y-3">
-                  <AsrProviderManager
-                    selectedModelId={settings.transcription.selectedModelId}
-                    onSelectedModelChange={(modelId) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          selectedModelId: modelId,
-                        },
-                      })
-                    }
-                  />
+                  <AsrProviderManager />
                 </div>
 
                 <div className="h-px bg-border" />
