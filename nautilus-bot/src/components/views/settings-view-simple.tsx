@@ -13,6 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { useTheme } from "@/components/theme-provider";
 import {
@@ -770,7 +771,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     <select
                       className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                       value={settings.transcription.speakerNamingMethod}
-                      onChange={(e) =>
+                      onChange={(e: any) =>
                         void updateSettings({
                           ...settings,
                           transcription: {
@@ -792,7 +793,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   <select
                     className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                     value={settings.transcription.language ?? ""}
-                    onChange={(e) =>
+                    onChange={(e: any) =>
                       void updateSettings({
                         ...settings,
                         transcription: {
@@ -864,6 +865,48 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       />
                     </div>
                     
+                    <div className="space-y-2">
+                      <Label>Custom Dictation Prompt</Label>
+                      <Textarea
+                        placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
+                        value={settings.transcription.dictationCustomPrompt ?? ""}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCustomPrompt: e.target.value,
+                            },
+                          })
+                        }
+                        className="min-h-[80px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Overrides the default AI formatting prompt. The active app name is still provided as context.
+                      </p>
+                    </div>
+                    
+                    <div className="space-y-2">
+                      <Label>Custom Meeting Summary Prompt</Label>
+                      <Textarea
+                        placeholder="e.g. Summarize the meeting and list action items..."
+                        value={settings.transcription.meetingCustomPrompt ?? ""}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              meetingCustomPrompt: e.target.value,
+                            },
+                          })
+                        }
+                        className="min-h-[80px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Overrides the default Granola-style meeting summary prompt.
+                      </p>
+                    </div>
+
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
                         <Label>Type text at cursor automatically</Label>
@@ -1013,7 +1056,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           step={0.5}
                           value={settings.audio.manualGainDb}
                           className="w-full"
-                          onChange={(e) =>
+                          onChange={(e: any) =>
                             void updateSettings({
                               ...settings,
                               audio: { ...settings.audio, manualGainDb: Number(e.target.value) },
@@ -1087,7 +1130,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                     value={document.documentElement.getAttribute("data-theme") ?? "default"}
                     disabled={!isFeatureAllowed(licenseInfo, "cloudSync")}
-                    onChange={(e) => {
+                    onChange={(e: any) => {
                       const scheme = e.target.value;
                       if (scheme === "default") {
                         document.documentElement.removeAttribute("data-theme");
@@ -1188,6 +1231,48 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       />
                     </div>
                     
+                    <div className="space-y-2">
+                      <Label>Custom Dictation Prompt</Label>
+                      <Textarea
+                        placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
+                        value={settings.transcription.dictationCustomPrompt ?? ""}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCustomPrompt: e.target.value,
+                            },
+                          })
+                        }
+                        className="min-h-[80px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Overrides the default AI formatting prompt. The active app name is still provided as context.
+                      </p>
+                    </div>
+                    
+                    <div className="space-y-2">
+                      <Label>Custom Meeting Summary Prompt</Label>
+                      <Textarea
+                        placeholder="e.g. Summarize the meeting and list action items..."
+                        value={settings.transcription.meetingCustomPrompt ?? ""}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              meetingCustomPrompt: e.target.value,
+                            },
+                          })
+                        }
+                        className="min-h-[80px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Overrides the default Granola-style meeting summary prompt.
+                      </p>
+                    </div>
+
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
                         <Label>Type text at cursor automatically</Label>
@@ -1396,6 +1481,48 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       />
                     </div>
                     
+                    <div className="space-y-2">
+                      <Label>Custom Dictation Prompt</Label>
+                      <Textarea
+                        placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
+                        value={settings.transcription.dictationCustomPrompt ?? ""}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCustomPrompt: e.target.value,
+                            },
+                          })
+                        }
+                        className="min-h-[80px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Overrides the default AI formatting prompt. The active app name is still provided as context.
+                      </p>
+                    </div>
+                    
+                    <div className="space-y-2">
+                      <Label>Custom Meeting Summary Prompt</Label>
+                      <Textarea
+                        placeholder="e.g. Summarize the meeting and list action items..."
+                        value={settings.transcription.meetingCustomPrompt ?? ""}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              meetingCustomPrompt: e.target.value,
+                            },
+                          })
+                        }
+                        className="min-h-[80px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Overrides the default Granola-style meeting summary prompt.
+                      </p>
+                    </div>
+
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
                         <Label>Type text at cursor automatically</Label>
@@ -1604,7 +1731,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       <select
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                         value={settings.export.defaultFormat}
-                        onChange={(e) =>
+                        onChange={(e: any) =>
                           void updateSettings({
                             ...settings,
                             export: { ...settings.export, defaultFormat: e.target.value },
@@ -1775,6 +1902,48 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       />
                     </div>
                     
+                    <div className="space-y-2">
+                      <Label>Custom Dictation Prompt</Label>
+                      <Textarea
+                        placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
+                        value={settings.transcription.dictationCustomPrompt ?? ""}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCustomPrompt: e.target.value,
+                            },
+                          })
+                        }
+                        className="min-h-[80px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Overrides the default AI formatting prompt. The active app name is still provided as context.
+                      </p>
+                    </div>
+                    
+                    <div className="space-y-2">
+                      <Label>Custom Meeting Summary Prompt</Label>
+                      <Textarea
+                        placeholder="e.g. Summarize the meeting and list action items..."
+                        value={settings.transcription.meetingCustomPrompt ?? ""}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              meetingCustomPrompt: e.target.value,
+                            },
+                          })
+                        }
+                        className="min-h-[80px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Overrides the default Granola-style meeting summary prompt.
+                      </p>
+                    </div>
+
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
                         <Label>Type text at cursor automatically</Label>
@@ -1860,7 +2029,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Label>Provider</Label>
                         <select
                           value={backupConfig.cloudProvider ?? ""}
-                          onChange={(e) =>
+                          onChange={(e: any) =>
                             setBackupConfig({
                               ...backupConfig,
                               cloudProvider: (e.target.value || null) as BackupConfig["cloudProvider"],
@@ -2121,7 +2290,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     ollamaModels.length > 0 ? (
                       <select
                         value={settings.privacy.llmModelId ?? ollamaModels[0] ?? ""}
-                        onChange={(e) =>
+                        onChange={(e: any) =>
                           void updateSettings({
                             ...settings,
                             privacy: { ...settings.privacy, llmModelId: e.target.value || null },
@@ -2142,7 +2311,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     openaiModels.length > 0 ? (
                       <select
                         value={settings.privacy.llmModelId ?? openaiModels[0]}
-                        onChange={(e) =>
+                        onChange={(e: any) =>
                           void updateSettings({
                             ...settings,
                             privacy: { ...settings.privacy, llmModelId: e.target.value || null },
@@ -2166,7 +2335,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     anthropicModels.length > 0 ? (
                       <select
                         value={settings.privacy.llmModelId ?? anthropicModels[0]}
-                        onChange={(e) =>
+                        onChange={(e: any) =>
                           void updateSettings({
                             ...settings,
                             privacy: { ...settings.privacy, llmModelId: e.target.value || null },
@@ -2187,7 +2356,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     geminiModels.length > 0 ? (
                       <select
                         value={settings.privacy.llmModelId ?? geminiModels[0].replace("models/", "")}
-                        onChange={(e) =>
+                        onChange={(e: any) =>
                           void updateSettings({
                             ...settings,
                             privacy: { ...settings.privacy, llmModelId: e.target.value || null },
@@ -2211,7 +2380,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     deepseekModels.length > 0 ? (
                       <select
                         value={settings.privacy.llmModelId ?? deepseekModels[0]}
-                        onChange={(e) =>
+                        onChange={(e: any) =>
                           void updateSettings({
                             ...settings,
                             privacy: { ...settings.privacy, llmModelId: e.target.value || null },
@@ -2232,7 +2401,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     ollamaCloudModels.length > 0 ? (
                       <select
                         value={settings.privacy.llmModelId ?? ollamaCloudModels[0]}
-                        onChange={(e) =>
+                        onChange={(e: any) =>
                           void updateSettings({
                             ...settings,
                             privacy: { ...settings.privacy, llmModelId: e.target.value || null },
@@ -2346,6 +2515,48 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       />
                     </div>
                     
+                    <div className="space-y-2">
+                      <Label>Custom Dictation Prompt</Label>
+                      <Textarea
+                        placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
+                        value={settings.transcription.dictationCustomPrompt ?? ""}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCustomPrompt: e.target.value,
+                            },
+                          })
+                        }
+                        className="min-h-[80px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Overrides the default AI formatting prompt. The active app name is still provided as context.
+                      </p>
+                    </div>
+                    
+                    <div className="space-y-2">
+                      <Label>Custom Meeting Summary Prompt</Label>
+                      <Textarea
+                        placeholder="e.g. Summarize the meeting and list action items..."
+                        value={settings.transcription.meetingCustomPrompt ?? ""}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              meetingCustomPrompt: e.target.value,
+                            },
+                          })
+                        }
+                        className="min-h-[80px]"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Overrides the default Granola-style meeting summary prompt.
+                      </p>
+                    </div>
+
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
                         <Label>Type text at cursor automatically</Label>
@@ -2372,7 +2583,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       <div className="flex gap-2 items-center">
                         <select
                           value={provider}
-                          onChange={(e) => {
+                          onChange={(e: any) => {
                             const next = e.target.value;
                             setProvider(next);
                             // Persist provider selection to settings so it survives restarts
@@ -2574,7 +2785,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Label>Search mode</Label>
                         <select
                           value={settings.transcription.memorySearchMode}
-                          onChange={(e) =>
+                          onChange={(e: any) =>
                             void updateSettings({
                               ...settings,
                               transcription: {
@@ -2752,7 +2963,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Input
                           placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                           value={licenseKeyInput}
-                          onChange={(e) => { setLicenseError(null); setLicenseKeyInput(e.target.value); }}
+                          onChange={(e: any) => { setLicenseError(null); setLicenseKeyInput(e.target.value); }}
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
                               void (async () => {
@@ -2832,7 +3043,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Input
                           placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                           value={licenseKeyInput}
-                          onChange={(e) => { setLicenseError(null); setLicenseKeyInput(e.target.value); }}
+                          onChange={(e: any) => { setLicenseError(null); setLicenseKeyInput(e.target.value); }}
                           onKeyDown={(e) => {
                             if (e.key === "Enter") {
                               void (async () => {

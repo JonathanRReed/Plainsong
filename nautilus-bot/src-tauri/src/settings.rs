@@ -121,6 +121,10 @@ pub struct TranscriptionSettings {
     pub dictation_push_to_talk: bool,
     /// Dictation: AI Formatting (Super Mode)
     pub dictation_ai_formatting: bool,
+    /// Custom system prompt for Dictation AI Formatting
+    pub dictation_custom_prompt: Option<String>,
+    /// Custom system prompt for Meeting Summaries
+    pub meeting_custom_prompt: Option<String>,
     /// Save raw transcript without formatting
     pub save_raw_transcript: bool,
     /// Persist dictation outputs into project storage.
@@ -151,6 +155,8 @@ impl Default for TranscriptionSettings {
             dictation_paste_to_cursor: true,
             dictation_push_to_talk: false,
             dictation_ai_formatting: false,
+            dictation_custom_prompt: None,
+            meeting_custom_prompt: None,
             save_raw_transcript: false,
             dictation_save_to_inbox: true,
             dictation_profile: "speed".to_string(),

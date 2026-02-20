@@ -3933,6 +3933,25 @@ fn get_frontmost_app_name() -> Option<String> {
     None
 }
 
+fn generate_default_dictation_prompt(active_app: Option<String>) -> String {
+    if let Some(app_name) = active_app {
+        format!(
+            "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
+            The user is currently dictating into the application: '{}'. 
+            Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). 
+            Fix any grammar, punctuation, and capitalization errors. Remove filler words (ums, ahs). 
+            Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
+            Just output the corrected text directly.",
+            app_name
+        )
+    } else {
+        "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
+        Fix any grammar, punctuation, and capitalization errors. Remove filler words (ums, ahs). 
+        Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
+        Just output the corrected text directly.".to_string()
+    }
+}
+
 async fn run_dictation_formatting_with_selected_provider(
     state: &AppState,
     transcript: &str,
@@ -3948,21 +3967,20 @@ async fn run_dictation_formatting_with_selected_provider(
 
     let active_app = get_frontmost_app_name();
     
-    let system_prompt = if let Some(app_name) = active_app {
-        format!(
-            "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
-            The user is currently dictating into the application: '{}'. 
-            Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). 
-            Fix any grammar, punctuation, and capitalization errors. Remove filler words (ums, ahs). 
-            Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
-            Just output the corrected text directly.",
-            app_name
-        )
+    let settings = state.settings_manager.lock().await.settings().clone();
+    
+    let system_prompt = if let Some(custom_prompt) = &settings.transcription.dictation_custom_prompt {
+        if !custom_prompt.trim().is_empty() {
+            if let Some(app_name) = &active_app {
+                format!("{}\n\n[Context: User is dictating into application '{}']", custom_prompt, app_name)
+            } else {
+                custom_prompt.clone()
+            }
+        } else {
+            generate_default_dictation_prompt(active_app)
+        }
     } else {
-        "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
-        Fix any grammar, punctuation, and capitalization errors. Remove filler words (ums, ahs). 
-        Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
-        Just output the corrected text directly.".to_string()
+        generate_default_dictation_prompt(active_app)
     };
 
     match provider {

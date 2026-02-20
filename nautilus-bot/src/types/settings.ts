@@ -35,6 +35,8 @@ export interface TranscriptionSettings {
   dictationPasteToCursor: boolean;
   dictationPushToTalk: boolean;
   dictationAiFormatting: boolean;
+  dictationCustomPrompt: string | null;
+  meetingCustomPrompt: string | null;
   saveRawTranscript: boolean;
   dictationSaveToInbox: boolean;
   dictationProfile: "speed" | "accuracy";
