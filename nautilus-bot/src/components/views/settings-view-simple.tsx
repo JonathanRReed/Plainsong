@@ -34,7 +34,6 @@ import {
   listGeminiModels,
   listDeepSeekModels,
   listDownloadedModels,
-  downloadWhisperModel,
   migrateToEncryptedStorage,
   openPermissionSettings,
   saveSettings,
@@ -44,7 +43,7 @@ import {
   unlockVault,
   verifyBackupCloudConnection,
 } from "@/lib/tauri";
-import type { BackupConfig, BackupInfo, CloudSetupReport, SecurityStatus, LicenseInfo, DownloadedModel } from "@/lib/tauri";
+import type { BackupConfig, BackupInfo, CloudSetupReport, SecurityStatus, LicenseInfo, } from "@/lib/tauri";
 import type { PermissionDiagnostics } from "@/lib/tauri";
 import { validateLicense, activateLicense, deactivateLicense, isDiarizationModelAvailable, downloadDiarizationModel } from "@/lib/tauri";
 import { isFeatureAllowed } from "@/hooks/use-license-features";
@@ -69,7 +68,6 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { UpdateStatusWidget, BetaChannelToggle } from "@/components/update";
-import { LOCAL_ASR_MODEL_GROUPS, QUICK_DOWNLOAD_ASR_MODELS } from "@/lib/asr-models";
 import { useToast } from "@/components/toast";
 
 type TabId = "asr" | "general" | "security" | "storage" | "ai" | "license" | "updates";
@@ -161,8 +159,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const [geminiModels, setGeminiModels] = useState<string[]>([]);
   const [deepseekModels, setDeepseekModels] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
-  const [downloadedModels, setDownloadedModels] = useState<DownloadedModel[]>([]);
-  const [downloadingModel, setDownloadingModel] = useState<string | null>(null);
   const [hasLoadedSecurityTab, setHasLoadedSecurityTab] = useState(false);
   const [hasLoadedStorageTab, setHasLoadedStorageTab] = useState(false);
   const [licenseInfo, setLicenseInfo] = useState<LicenseInfo | null>(null);
@@ -354,7 +350,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
     const load = async () => {
       try {
-        const [loaded, loadedBackupConfig, loadedModels] = await Promise.all([
+        const [loaded, loadedBackupConfig] = await Promise.all([
           getSettings(),
           getBackupConfig(),
           listDownloadedModels().catch(() => []),
@@ -363,8 +359,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
           setDraftSettings(loaded);
           setPersistedSettings(loaded);
           setBackupConfig(loadedBackupConfig);
-          setDownloadedModels(loadedModels);
-          markSettingsPerf("settings-initial-load-complete");
+                    markSettingsPerf("settings-initial-load-complete");
         }
       } catch (e) {
         if (mountedRef.current) {
@@ -380,22 +375,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     };
   }, [flushPendingSettingsSave]);
 
-  const handleDownloadModel = useCallback(async (modelName: string) => {
-    setDownloadingModel(modelName);
-    try {
-      await downloadWhisperModel(modelName);
-      const models = await listDownloadedModels();
-      setDownloadedModels(models);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : `Failed to download ${modelName}`);
-    } finally {
-      setDownloadingModel(null);
-    }
-  }, []);
 
   useEffect(() => {
     let mounted = true;
-    hasProviderSecret(provider)
+    if (!settings) return;
+    hasProviderSecret(settings.privacy.llmProvider)
       .then((value) => {
         if (mounted) {
           setHasApiKey(value);
@@ -409,7 +393,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     return () => {
       mounted = false;
     };
-  }, [provider]);
+  }, [settings?.privacy.llmProvider]);
 
   useEffect(() => {
     markSettingsPerf(`settings-tab-open:${activeTab}`);
@@ -703,77 +687,22 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   <CardTitle>Audio & Transcription</CardTitle>
                   <AdvancedToggle checked={advancedTabs.asr} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, asr: c }))} />
                 </div>
-                <CardDescription>Configure local ASR models, diarization, and audio capture</CardDescription>
+                <CardDescription>Configure ASR models, diarization, and audio capture</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
-                {/* Basic Settings */}
-                <div className="space-y-2">
-                  <Label>Default local ASR model</Label>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={settings.transcription.selectedModelId}
-                    onChange={(e) =>
+                <div className="space-y-3">
+                  <AsrProviderManager
+                    selectedModelId={settings.transcription.selectedModelId}
+                    onSelectedModelChange={(modelId) =>
                       void updateSettings({
                         ...settings,
                         transcription: {
                           ...settings.transcription,
-                          selectedModelId: e.target.value,
+                          selectedModelId: modelId,
                         },
                       })
                     }
-                  >
-                    {LOCAL_ASR_MODEL_GROUPS.map((group) => (
-                      <optgroup key={group.label} label={group.label}>
-                        {group.options.map((model) => (
-                          <option key={model.id} value={model.id}>
-                            {model.label}
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    English-only models are faster. Use large-v3 for multilingual transcription.
-                  </p>
-                </div>
-
-                <div className="space-y-3">
-                  <Label className="text-sm text-muted-foreground">Quick download — Top 5 ASR models</Label>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                    {QUICK_DOWNLOAD_ASR_MODELS.map((model) => {
-                      const isDownloaded = downloadedModels.some(
-                        (d) => d.name.toLowerCase().includes(model.id.toLowerCase()) ||
-                          d.name.toLowerCase().includes(model.id.replace(".en", "-en").toLowerCase())
-                      );
-                      const isDownloading = downloadingModel === model.id;
-
-                      return (
-                        <div key={model.id} className="flex items-center justify-between p-2 rounded border bg-muted/30">
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-medium truncate">{model.name}</p>
-                            <p className="text-xs text-muted-foreground">{model.description} · {model.size}</p>
-                          </div>
-                          {isDownloaded ? (
-                            <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0 ml-2" />
-                          ) : isDownloading ? (
-                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground shrink-0 ml-2" />
-                          ) : (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="shrink-0 ml-2 h-7 px-2"
-                              onClick={() => void handleDownloadModel(model.id)}
-                            >
-                              <Download className="h-3 w-3" />
-                            </Button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Downloaded models: {downloadedModels.length} · Toggle advanced settings to manage all providers
-                  </p>
+                  />
                 </div>
 
                 <div className="h-px bg-border" />
@@ -1046,24 +975,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         </div>
                       </div>
                     )}
-
-                    <div className="space-y-3 pt-2">
-                      <Label>ASR Provider Management</Label>
-                      <div className="p-4 border rounded-lg bg-muted/20">
-                        <AsrProviderManager
-                          selectedModelId={settings.transcription.selectedModelId}
-                          onSelectedModelChange={(modelId) =>
-                            void updateSettings({
-                              ...settings,
-                              transcription: {
-                                ...settings.transcription,
-                                selectedModelId: modelId,
-                              },
-                            })
-                          }
-                        />
-                      </div>
-                    </div>
                   </div>
                 )}
               </CardContent>
@@ -2107,7 +2018,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       ? "Download models via Ollama CLI or pull button below."
                       : settings.privacy.llmProvider !== "ollama" &&
                         ["openai", "anthropic", "gemini", "deepseek", "ollama-cloud"].includes(settings.privacy.llmProvider) &&
-                        !hasApiKey && settings.privacy.llmProvider === provider
+                        !hasApiKey && true
                         ? "Add your API key below to fetch available models."
                         : "Models fetched from provider API."}
                   </p>
@@ -2197,7 +2108,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                 setSavingApiKey(false);
                               }
                             }
-                            void refreshModelsForProvider(provider);
+                            void refreshModelsForProvider(settings.privacy.llmProvider);
                           }}
                           disabled={modelsLoading || savingApiKey}
                         >
@@ -2209,7 +2120,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           Remote processing is disabled. Stored cloud keys will not be used until policy is enabled.
                         </p>
                       ) : null}
-                      {settings.privacy.llmProvider === provider && settings.privacy.remoteProcessingEnabled && !hasApiKey ? (
+                      {true && settings.privacy.remoteProcessingEnabled && !hasApiKey ? (
                         <p className="text-xs text-amber-600">
                           Selected analysis provider has no stored key. Analysis requests will fail with a credential error.
                         </p>
@@ -2302,9 +2213,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             if (!settings.privacy.remoteProcessingEnabled) {
                               checks.push("Remote processing is disabled.");
                             }
-                            const keyPresent = await hasProviderSecret(provider);
+                            const keyPresent = await hasProviderSecret(settings.privacy.llmProvider);
                             if (!keyPresent) {
-                              checks.push(`No API key stored for ${provider}.`);
+                              checks.push(`No API key stored for ${settings.privacy.llmProvider}.`);
                             }
                             if (checks.length === 0) {
                               setCloudReadinessMessage("Cloud readiness checks passed.");
