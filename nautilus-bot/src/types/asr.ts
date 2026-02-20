@@ -5,10 +5,17 @@ export interface AsrProviderInfo {
   isAvailable: boolean;
   inferenceEnabled: boolean;
   modelInfo: AsrModelInfo;
+  selectedModelId: string;
+  modelOptions: AsrModelOption[];
   downloadStatus: DownloadStatus;
   runtimeStatus: AsrRuntimeStatus;
   runtimeMessage?: string;
   runtimeDetails: AsrRuntimeDetails;
+}
+
+export interface AsrModelOption {
+  id: string;
+  label: string;
 }
 
 export type AsrRuntimeStatus = "ready" | "missing_runtime" | "missing_model" | "error";
@@ -55,7 +62,16 @@ export interface BenchmarkResult {
   confidence: number;
 }
 
-export type AsrProviderType = "whisper" | "parakeet" | "canary" | "distil_whisper" | "moonshine" | "vibevoice" | "voxtral";
+export type AsrProviderType =
+  | "whisper"
+  | "parakeet"
+  | "canary"
+  | "distil_whisper"
+  | "moonshine"
+  | "vibevoice"
+  | "voxtral"
+  | "elevenlabs_scribe"
+  | "openai_cloud";
 
 // LLM Types
 export interface LlmAnalysisResult {

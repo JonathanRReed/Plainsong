@@ -2,7 +2,6 @@
 //!
 //! Provides real-time transcription as audio is recorded,
 //! processing audio chunks incrementally and emitting partial results.
-#![allow(dead_code)]
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -10,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
 /// Streaming transcription session
+#[allow(dead_code)]
 pub struct StreamingSession {
     /// Session ID
     pub id: String,
@@ -250,6 +250,7 @@ impl StreamingTranscriber {
     }
 
     /// Stop a streaming session without finalizing
+    #[allow(dead_code)]
     pub async fn stop_session(&self, session_id: &str) -> Result<()> {
         let mut sessions = self.sessions.lock().await;
 
@@ -263,6 +264,7 @@ impl StreamingTranscriber {
     }
 
     /// Check if a session is active
+    #[allow(dead_code)]
     pub async fn is_session_active(&self, session_id: &str) -> bool {
         let sessions = self.sessions.lock().await;
         sessions.contains_key(session_id)
@@ -270,14 +272,12 @@ impl StreamingTranscriber {
 }
 
 /// Handle for managing a streaming session
-#[allow(dead_code)]
 struct StreamingSessionHandle {
     session: Arc<StreamingSession>,
     is_active: Arc<Mutex<bool>>,
 }
 
 /// Process a chunk of audio for transcription
-#[allow(dead_code)]
 async fn process_chunk(
     session: &Arc<StreamingSession>,
     asr_manager: &crate::asr::AsrManager,
@@ -354,7 +354,6 @@ async fn process_chunk(
 }
 
 /// Convert f32 samples to WAV bytes
-#[allow(dead_code)]
 fn samples_to_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     use hound::{WavSpec, WavWriter};
     use std::io::Cursor;

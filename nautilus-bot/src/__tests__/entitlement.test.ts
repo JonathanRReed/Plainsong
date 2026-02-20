@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { deriveEntitlement } from "@/hooks/use-license-features";
+import {
+  canUseFormattingAssistant,
+  deriveEntitlement,
+  getThemeAccessLevel,
+} from "@/hooks/use-license-features";
 import type { LicenseInfo } from "@/lib/tauri";
 
 function makeLicense(
@@ -32,6 +36,8 @@ describe("deriveEntitlement", () => {
     expect(ent.canUpdate).toBe(true);
     expect(ent.features.whisperLargeModel).toBe(true);
     expect(ent.features.cloudSync).toBe(false);
+    expect(canUseFormattingAssistant(makeLicense({ trialActive: true, trialDaysRemaining: 20 }))).toBe(false);
+    expect(getThemeAccessLevel(makeLicense({ trialActive: true, trialDaysRemaining: 20 }))).toBe("basic");
   });
 
   it("valid pro license grants pro features", () => {
@@ -43,6 +49,8 @@ describe("deriveEntitlement", () => {
     expect(ent.canUpdate).toBe(true);
     expect(ent.features.autoDiarization).toBe(true);
     expect(ent.features.cloudSync).toBe(false);
+    expect(canUseFormattingAssistant(makeLicense({ valid: true, tier: "pro" }))).toBe(true);
+    expect(getThemeAccessLevel(makeLicense({ valid: true, tier: "pro" }))).toBe("pro");
   });
 
   it("valid friends_club license grants experimental features", () => {
@@ -53,6 +61,8 @@ describe("deriveEntitlement", () => {
     expect(ent.canUpdate).toBe(true);
     expect(ent.features.cloudSync).toBe(true);
     expect(ent.features.prioritySupport).toBe(true);
+    expect(canUseFormattingAssistant(makeLicense({ valid: true, tier: "friends_club" }))).toBe(true);
+    expect(getThemeAccessLevel(makeLicense({ valid: true, tier: "friends_club" }))).toBe("friends");
   });
 
   it("expired trial with no license locks everything", () => {
@@ -63,6 +73,8 @@ describe("deriveEntitlement", () => {
     expect(ent.canUpdate).toBe(false);
     expect(ent.features.whisperLargeModel).toBe(false);
     expect(ent.features.cloudSync).toBe(false);
+    expect(canUseFormattingAssistant(makeLicense({ trialActive: false, valid: false }))).toBe(false);
+    expect(getThemeAccessLevel(makeLicense({ trialActive: false, valid: false }))).toBe("basic");
   });
 
   it("null license defaults to free tier", () => {

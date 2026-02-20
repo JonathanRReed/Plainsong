@@ -31,6 +31,13 @@ pub struct ModelInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ModelOption {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TranscriptSegment {
     pub start_time: f64,
     pub end_time: f64,
@@ -121,6 +128,109 @@ impl AsrProviderType {
             AsrProviderType::OpenAiCloud => "OpenAI Whisper (Cloud)",
         }
     }
+
+    pub fn default_model_id(&self) -> &'static str {
+        match self {
+            AsrProviderType::Whisper => "base.en",
+            AsrProviderType::Parakeet => "parakeet-tdt-0.6b-v3",
+            AsrProviderType::Canary => "canary-qwen-2.5b",
+            AsrProviderType::DistilWhisper => "distil-large-v3.5",
+            AsrProviderType::Moonshine => "moonshine",
+            AsrProviderType::VibeVoice => "vibevoice",
+            AsrProviderType::Voxtral => "voxtral-mini-4b",
+            AsrProviderType::ElevenLabsScribe => "scribe_v1",
+            AsrProviderType::OpenAiCloud => "whisper-1",
+        }
+    }
+
+    pub fn model_options(&self) -> Vec<ModelOption> {
+        match self {
+            AsrProviderType::Whisper => vec![
+                ModelOption {
+                    id: "tiny".to_string(),
+                    label: "tiny (fastest)".to_string(),
+                },
+                ModelOption {
+                    id: "tiny.en".to_string(),
+                    label: "tiny.en (fastest, English)".to_string(),
+                },
+                ModelOption {
+                    id: "base".to_string(),
+                    label: "base (balanced)".to_string(),
+                },
+                ModelOption {
+                    id: "base.en".to_string(),
+                    label: "base.en (balanced, English)".to_string(),
+                },
+                ModelOption {
+                    id: "small".to_string(),
+                    label: "small (better accuracy)".to_string(),
+                },
+                ModelOption {
+                    id: "small.en".to_string(),
+                    label: "small.en (better accuracy, English)".to_string(),
+                },
+                ModelOption {
+                    id: "medium".to_string(),
+                    label: "medium (high accuracy)".to_string(),
+                },
+                ModelOption {
+                    id: "medium.en".to_string(),
+                    label: "medium.en (high accuracy, English)".to_string(),
+                },
+                ModelOption {
+                    id: "large-v3-turbo".to_string(),
+                    label: "large-v3-turbo (fast + accurate)".to_string(),
+                },
+                ModelOption {
+                    id: "large-v3".to_string(),
+                    label: "large-v3 (best accuracy)".to_string(),
+                },
+            ],
+            AsrProviderType::Parakeet => vec![ModelOption {
+                id: "parakeet-tdt-0.6b-v3".to_string(),
+                label: "Parakeet TDT 0.6B v3".to_string(),
+            }],
+            AsrProviderType::Canary => vec![ModelOption {
+                id: "canary-qwen-2.5b".to_string(),
+                label: "Canary Qwen 2.5B".to_string(),
+            }],
+            AsrProviderType::DistilWhisper => vec![ModelOption {
+                id: "distil-large-v3.5".to_string(),
+                label: "Distil Whisper Large v3.5".to_string(),
+            }],
+            AsrProviderType::Moonshine => vec![ModelOption {
+                id: "moonshine".to_string(),
+                label: "Moonshine".to_string(),
+            }],
+            AsrProviderType::VibeVoice => vec![ModelOption {
+                id: "vibevoice".to_string(),
+                label: "VibeVoice".to_string(),
+            }],
+            AsrProviderType::Voxtral => vec![ModelOption {
+                id: "voxtral-mini-4b".to_string(),
+                label: "Voxtral Mini 4B".to_string(),
+            }],
+            AsrProviderType::ElevenLabsScribe => vec![ModelOption {
+                id: "scribe_v1".to_string(),
+                label: "Scribe v1".to_string(),
+            }],
+            AsrProviderType::OpenAiCloud => vec![
+                ModelOption {
+                    id: "whisper-1".to_string(),
+                    label: "whisper-1".to_string(),
+                },
+                ModelOption {
+                    id: "gpt-4o-mini-transcribe".to_string(),
+                    label: "gpt-4o-mini-transcribe".to_string(),
+                },
+                ModelOption {
+                    id: "gpt-4o-transcribe".to_string(),
+                    label: "gpt-4o-transcribe".to_string(),
+                },
+            ],
+        }
+    }
 }
 
 impl AsrProviderFactory {
@@ -143,10 +253,10 @@ impl AsrProviderFactory {
             AsrProviderType::VibeVoice => Box::new(vibevoice::VibeVoiceProvider::new()),
             AsrProviderType::Voxtral => Box::new(voxtral::VoxtralProvider::new()),
             AsrProviderType::ElevenLabsScribe => {
-                Box::new(elevenlabs_scribe::ElevenLabsScribeProvider::new())
+                Box::new(elevenlabs_scribe::ElevenLabsScribeProvider::new(selected_model_id))
             }
             AsrProviderType::OpenAiCloud => {
-                Box::new(openai_cloud::OpenAiCloudWhisperProvider::new())
+                Box::new(openai_cloud::OpenAiCloudWhisperProvider::new(selected_model_id))
             }
         }
     }

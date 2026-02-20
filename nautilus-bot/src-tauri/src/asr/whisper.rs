@@ -184,7 +184,6 @@ impl AsrProvider for WhisperProvider {
         
         // Anti-repetition and hallucination mitigation
         params.set_no_context(true); // Don't use previous context to prevent loop hallucinations
-        params.set_single_segment(true); // Optimize for short dictations
         params.set_entropy_thold(2.4); // Stricter entropy threshold
         params.set_logprob_thold(-1.0); // Stricter logprob threshold
 
@@ -251,10 +250,12 @@ impl AsrProvider for WhisperProvider {
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        // Save to temp file and transcribe
-        let temp_path = std::env::temp_dir().join("whisper_temp.wav");
+        let temp_path =
+            std::env::temp_dir().join(format!("whisper_{}.wav", uuid::Uuid::new_v4()));
         std::fs::write(&temp_path, audio_data)?;
-        self.transcribe(&temp_path).await
+        let result = self.transcribe(&temp_path).await;
+        let _ = std::fs::remove_file(&temp_path);
+        result
     }
 
     fn download_status(&self) -> DownloadStatus {
@@ -307,19 +308,38 @@ struct WhisperModelSpec {
 
 fn sanitize_model_id(model_id: &str) -> String {
     match model_id {
-        "large-v3-turbo" => "large-v3-turbo".to_string(),
-        "large-v3" => "large-v3".to_string(),
-        "medium" => "medium".to_string(),
-        "medium.en" => "medium.en".to_string(),
+        "tiny" => "tiny".to_string(),
+        "tiny.en" => "tiny.en".to_string(),
+        "base" => "base".to_string(),
+        "base.en" => "base.en".to_string(),
         "small" => "small".to_string(),
         "small.en" => "small.en".to_string(),
-        "base" => "base".to_string(),
+        "medium" => "medium".to_string(),
+        "medium.en" => "medium.en".to_string(),
+        "large-v3-turbo" => "large-v3-turbo".to_string(),
+        "large-v3" => "large-v3".to_string(),
         _ => "base.en".to_string(),
     }
 }
 
 fn whisper_model_spec(model_id: &str) -> WhisperModelSpec {
     match model_id {
+        "tiny" => WhisperModelSpec {
+            id: "tiny",
+            size_mb: 75.0,
+            parameters: "39M",
+            wer: 18.0,
+            real_time_factor: 0.2,
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
+        },
+        "tiny.en" => WhisperModelSpec {
+            id: "tiny.en",
+            size_mb: 75.0,
+            parameters: "39M",
+            wer: 15.0,
+            real_time_factor: 0.2,
+            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
+        },
         "large-v3-turbo" => WhisperModelSpec {
             id: "large-v3-turbo",
             size_mb: 1620.0,

@@ -3,32 +3,25 @@ use super::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use serde::Deserialize;
-use std::path::Path;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+
+// ---------------------------------------------------------------------------
+// Distil-Whisper Large v3.5 — native Candle inference, no Python required.
+// Same Whisper encoder-decoder architecture; uses candle-transformers Whisper.
+// ---------------------------------------------------------------------------
+const DISTIL_MODEL_ID: &str = "distil-large-v3.5";
+const DISTIL_HF_REPO: &str = "distil-whisper/distil-large-v3.5";
+
+/// Only the files needed for Candle inference (safetensors + tokenizer).
+const DISTIL_REQUIRED_FILES: [&str; 4] = [
+    "model.safetensors",
+    "config.json",
+    "tokenizer.json",
+    "preprocessor_config.json",
+];
 
 pub struct DistilWhisperProvider {
     model_dir: PathBuf,
-}
-
-const DISTIL_MODEL_ID: &str = "distil-large-v3.5";
-const DISTIL_MODEL_REPO: &str = "distil-whisper/distil-large-v3.5";
-const DISTIL_REQUIRED_FILES: [&str; 8] = [
-    "config.json",
-    "model.safetensors",
-    "preprocessor_config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "special_tokens_map.json",
-    "merges.txt",
-    "vocab.json",
-];
-
-#[derive(Deserialize)]
-struct PythonTranscription {
-    text: Option<String>,
-    error: Option<String>,
 }
 
 impl DistilWhisperProvider {
@@ -44,65 +37,7 @@ impl DistilWhisperProvider {
     fn has_required_files(&self) -> bool {
         DISTIL_REQUIRED_FILES
             .iter()
-            .all(|file_name| self.model_dir.join(file_name).exists())
-    }
-
-    fn python_runtime(&self) -> Option<String> {
-        super::python_runtime::find_python_with_imports("import torch; import transformers")
-    }
-
-    fn runtime_ready(&self) -> bool {
-        self.python_runtime().is_some()
-    }
-
-    fn run_python_transcription(&self, python_bin: &str, audio_path: &Path) -> Result<String> {
-        let py = r#"
-import json
-import sys
-from transformers import pipeline
-
-model_dir = sys.argv[1]
-audio_path = sys.argv[2]
-
-try:
-    pipe = pipeline(
-        task="automatic-speech-recognition",
-        model=model_dir,
-        tokenizer=model_dir,
-        feature_extractor=model_dir,
-        device=-1
-    )
-    result = pipe(audio_path)
-    text = result.get("text", "") if isinstance(result, dict) else str(result)
-    print(json.dumps({"text": text}))
-except Exception as exc:
-    print(json.dumps({"error": str(exc)}))
-    sys.exit(2)
-"#;
-
-        let output = Command::new(python_bin)
-            .arg("-c")
-            .arg(py)
-            .arg(self.model_dir.as_os_str())
-            .arg(audio_path.as_os_str())
-            .output()
-            .context("failed to run local Distil worker")?;
-
-        if !output.status.success() && output.stdout.is_empty() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!(
-                "Distil local worker failed: {}",
-                stderr.trim()
-            ));
-        }
-
-        let payload: PythonTranscription =
-            serde_json::from_slice(&output.stdout).context("invalid Distil worker output")?;
-        if let Some(error) = payload.error {
-            return Err(anyhow::anyhow!(error));
-        }
-
-        Ok(payload.text.unwrap_or_default())
+            .all(|f| self.model_dir.join(f).exists())
     }
 
     fn wav_duration_seconds(path: &Path) -> f64 {
@@ -120,57 +55,80 @@ except Exception as exc:
     }
 }
 
+impl Default for DistilWhisperProvider {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Native Candle inference (feature-gated via asr-canary since it shares deps)
+// ---------------------------------------------------------------------------
+#[cfg(feature = "asr-canary")]
+fn run_distil_candle(model_dir: &Path, audio_path: &Path) -> Result<String> {
+    let samples = crate::audio::utils::load_audio_file(audio_path)
+        .context("Failed to load audio for Distil-Whisper")?;
+    // DistilWhisper shares the same Whisper encoder-decoder architecture as Canary.
+    super::canary::run_canary_inference_on_samples(samples, model_dir)
+}
+
+#[cfg(not(feature = "asr-canary"))]
+fn run_distil_candle(_model_dir: &Path, _audio_path: &Path) -> Result<String> {
+    Err(anyhow::anyhow!(
+        "Distil-Whisper requires the `asr-canary` feature. Rebuild with that feature enabled."
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// AsrProvider implementation
+// ---------------------------------------------------------------------------
 #[async_trait]
 impl AsrProvider for DistilWhisperProvider {
     fn name(&self) -> &str {
-        "Distil Whisper (Local)"
+        "Distil-Whisper Large v3.5"
     }
 
     fn description(&self) -> &str {
-        "Distilled Whisper local runtime with native model artifacts for low-latency transcription."
+        "Distil-Whisper Large v3.5 — native Candle inference, 6x faster than Whisper Large, no Python."
     }
 
     fn is_available(&self) -> bool {
-        self.has_required_files() && self.runtime_ready()
+        self.has_required_files()
     }
 
     fn model_info(&self) -> ModelInfo {
         ModelInfo {
-            name: "Distil Whisper".to_string(),
+            name: "Distil-Whisper Large v3.5".to_string(),
             version: DISTIL_MODEL_ID.to_string(),
             size_mb: 1530.0,
             parameters: "756M".to_string(),
-            languages: vec![
-                "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar",
-                "sv", "it", "id", "hi", "fi", "vi",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+            languages: vec!["en".to_string()],
             word_error_rate: Some(6.6),
             real_time_factor: Some(0.6),
             license: "Apache 2.0".to_string(),
-            source_url: format!("https://huggingface.co/{}", DISTIL_MODEL_REPO),
+            source_url: format!("https://huggingface.co/{}", DISTIL_HF_REPO),
         }
     }
 
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
         if !self.has_required_files() {
             return Err(anyhow::anyhow!(
-                "Distil model is not downloaded. Download it before selecting this provider."
+                "Distil-Whisper model not downloaded. Use the model manager to download it."
             ));
         }
-        let python_bin = match self.python_runtime() {
-            Some(value) => value,
-            None => {
-                return Err(anyhow::anyhow!(
-                    "Distil runtime is not ready. Install local Python dependencies (torch + transformers) and/or set NAUTILUS_PYTHON."
-                ));
-            }
-        };
+
         let start = std::time::Instant::now();
-        let text = self.run_python_transcription(&python_bin, audio_path)?;
-        let duration = Self::wav_duration_seconds(audio_path);
+        let model_dir = self.model_dir.clone();
+        let audio_path_owned = audio_path.to_path_buf();
+        let audio_for_dur = audio_path_owned.clone();
+
+        let text = tokio::task::spawn_blocking(move || {
+            run_distil_candle(&model_dir, &audio_path_owned)
+        })
+        .await
+        .context("Distil-Whisper inference task panicked")??;
+
+        let duration = Self::wav_duration_seconds(&audio_for_dur);
         let segment = TranscriptSegment {
             start_time: 0.0,
             end_time: duration,
@@ -184,7 +142,7 @@ impl AsrProvider for DistilWhisperProvider {
             language: "en".to_string(),
             confidence: 0.87,
             processing_time_ms: start.elapsed().as_millis() as u64,
-            model_name: "distil-whisper-local".to_string(),
+            model_name: "distil-whisper-large-v3.5".to_string(),
             model_id: DISTIL_MODEL_ID.to_string(),
             requested_provider: AsrProviderType::DistilWhisper,
             actual_provider: AsrProviderType::DistilWhisper,
@@ -194,9 +152,12 @@ impl AsrProvider for DistilWhisperProvider {
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        let temp_path = std::env::temp_dir().join("distil_whisper_temp.wav");
+        let temp_path =
+            std::env::temp_dir().join(format!("distil_{}.wav", uuid::Uuid::new_v4()));
         std::fs::write(&temp_path, audio_data).context("failed to write temp wav for Distil")?;
-        self.transcribe(&temp_path).await
+        let result = self.transcribe(&temp_path).await;
+        let _ = std::fs::remove_file(&temp_path);
+        result
     }
 
     fn download_status(&self) -> DownloadStatus {
@@ -210,26 +171,31 @@ impl AsrProvider for DistilWhisperProvider {
     async fn download_models(&self, progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()> {
         use crate::download::DownloadManager;
 
+        std::fs::create_dir_all(&self.model_dir)
+            .context("Failed to create Distil-Whisper model directory")?;
+
         let manager = DownloadManager::new()?;
         let progress_cb = std::sync::Arc::new(progress_cb);
+        let n_files = DISTIL_REQUIRED_FILES.len() as f32;
 
-        for file_name in DISTIL_REQUIRED_FILES {
+        for (i, file_name) in DISTIL_REQUIRED_FILES.iter().enumerate() {
             let destination = self.model_dir.join(file_name);
             if destination.exists() {
                 continue;
             }
             let url = format!(
                 "https://huggingface.co/{}/resolve/main/{}",
-                DISTIL_MODEL_REPO, file_name
+                DISTIL_HF_REPO, file_name
             );
             let cb = progress_cb.clone();
             manager
-                .download_file_unverified(&url, &destination, move |progress| {
-                    cb(progress.percentage as f32);
-                    tracing::info!("Distil {} download: {:.1}%", file_name, progress.percentage);
+                .download_file_unverified(&url, &destination, move |p| {
+                    cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);
+                    tracing::info!("Distil-Whisper {} download: {:.1}%", file_name, p.percentage);
                 })
                 .await?;
         }
+        tracing::info!("Distil-Whisper model downloaded successfully");
         Ok(())
     }
 }

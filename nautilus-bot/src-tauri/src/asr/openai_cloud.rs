@@ -1,6 +1,7 @@
 use super::{
     AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult,
 };
+use crate::secrets;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -8,12 +9,23 @@ use std::path::Path;
 
 const OPENAI_TRANSCRIPTION_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 
-pub struct OpenAiCloudWhisperProvider;
+pub struct OpenAiCloudWhisperProvider {
+    model_id: String,
+}
 
 #[derive(Deserialize)]
 struct OpenAiTranscriptionResponse {
     text: String,
     segments: Option<Vec<OpenAiSegment>>,
+}
+
+fn sanitize_openai_asr_model_id(model_id: &str) -> &'static str {
+    match model_id {
+        "whisper-1" => "whisper-1",
+        "gpt-4o-mini-transcribe" => "gpt-4o-mini-transcribe",
+        "gpt-4o-transcribe" => "gpt-4o-transcribe",
+        _ => "whisper-1",
+    }
 }
 
 #[derive(Deserialize)]
@@ -25,19 +37,27 @@ struct OpenAiSegment {
 
 impl Default for OpenAiCloudWhisperProvider {
     fn default() -> Self {
-        Self
+        Self {
+            model_id: "whisper-1".to_string(),
+        }
     }
 }
 
 impl OpenAiCloudWhisperProvider {
-    pub fn new() -> Self {
-        Self
+    pub fn new(selected_model_id: Option<&str>) -> Self {
+        Self {
+            model_id: sanitize_openai_asr_model_id(selected_model_id.unwrap_or("whisper-1"))
+                .to_string(),
+        }
     }
 
     fn api_key() -> Option<String> {
-        std::env::var("OPENAI_API_KEY")
-            .ok()
-            .filter(|k| !k.is_empty())
+        match secrets::get_provider_secret("openai") {
+            Ok(Some(secret)) if !secret.trim().is_empty() => Some(secret),
+            _ => std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty()),
+        }
     }
 
     async fn transcribe_impl(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
@@ -50,7 +70,7 @@ impl OpenAiCloudWhisperProvider {
             .mime_str("audio/wav")?;
         let form = reqwest::multipart::Form::new()
             .part("file", part)
-            .text("model", "whisper-1")
+            .text("model", self.model_id.clone())
             .text("response_format", "verbose_json")
             .text("timestamp_granularities[]", "segment");
 
@@ -96,8 +116,8 @@ impl OpenAiCloudWhisperProvider {
             language: "en".to_string(),
             confidence: 0.92,
             processing_time_ms: elapsed,
-            model_name: "OpenAI Whisper".to_string(),
-            model_id: "whisper-1".to_string(),
+            model_name: format!("OpenAI ASR ({})", self.model_id),
+            model_id: self.model_id.clone(),
             requested_provider: AsrProviderType::OpenAiCloud,
             actual_provider: AsrProviderType::OpenAiCloud,
             fallback_used: false,

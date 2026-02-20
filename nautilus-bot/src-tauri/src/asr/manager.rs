@@ -8,33 +8,29 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
-const PARAKEET_MODEL_FILE: &str = "parakeet-tdt-0.6b-v3.nemo";
-const CANARY_REQUIRED_FILES: [&str; 3] = ["config.json", "model.safetensors", "LICENSES"];
-const DISTIL_REQUIRED_FILES: [&str; 8] = [
-    "config.json",
+// Parakeet: native ONNX inference — sherpa-onnx format (encoder.onnx + tokens.txt)
+// Legacy names (model.onnx / vocab.txt) are also accepted by the provider itself.
+const PARAKEET_ONNX_NAMES: [&str; 2] = ["encoder.onnx", "model.onnx"];
+const PARAKEET_VOCAB_NAMES: [&str; 2] = ["tokens.txt", "vocab.txt"];
+// Canary: Whisper Large V3 Turbo via Candle (no Python)
+const CANARY_REQUIRED_FILES: [&str; 4] = [
     "model.safetensors",
-    "preprocessor_config.json",
+    "config.json",
     "tokenizer.json",
-    "tokenizer_config.json",
-    "special_tokens_map.json",
-    "merges.txt",
-    "vocab.json",
-];
-const MOONSHINE_REQUIRED_FILES: [&str; 5] = [
-    "config.json",
-    "generation_config.json",
-    "model.safetensors",
     "preprocessor_config.json",
-    "tokenizer.json",
 ];
-const VIBE_REQUIRED_FILES: [&str; 3] = ["config.json", "model.safetensors.index.json", "README.md"];
-const VOXTRAL_REQUIRED_FILES: [&str; 6] = [
-    "config.json",
-    "generation_config.json",
+// DistilWhisper: Candle native (no Python)
+const DISTIL_REQUIRED_FILES: [&str; 4] = [
     "model.safetensors",
-    "params.json",
-    "processor_config.json",
-    "tekken.json",
+    "config.json",
+    "tokenizer.json",
+    "preprocessor_config.json",
+];
+// Moonshine: native ONNX (no Python)
+const MOONSHINE_REQUIRED_FILES: [&str; 3] = [
+    "encode.onnx",
+    "uncached_decode.onnx",
+    "tokenizer.json",
 ];
 
 /// Manages multiple ASR providers
@@ -42,10 +38,21 @@ const VOXTRAL_REQUIRED_FILES: [&str; 6] = [
 pub struct AsrManager {
     default_provider: RwLock<AsrProviderType>,
     selected_model_id: RwLock<String>,
+    provider_model_ids: RwLock<HashMap<AsrProviderType, String>>,
     allow_whisper_fallback: RwLock<bool>,
     silence_skip_enabled: RwLock<bool>,
     last_runtime_errors: RwLock<HashMap<AsrProviderType, String>>,
     models_dir: PathBuf,
+}
+
+fn has_provider_secret_or_env(secret_name: &str, env_name: &str) -> bool {
+    match crate::secrets::get_provider_secret(secret_name) {
+        Ok(Some(secret)) if !secret.trim().is_empty() => true,
+        _ => std::env::var(env_name)
+            .ok()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+    }
 }
 
 impl AsrManager {
@@ -57,13 +64,28 @@ impl AsrManager {
 
         std::fs::create_dir_all(&models_dir).ok();
 
+        let provider_model_ids: HashMap<AsrProviderType, String> = AsrProviderType::all()
+            .into_iter()
+            .map(|provider| (provider, provider.default_model_id().to_string()))
+            .collect();
+
         Self {
             silence_skip_enabled: RwLock::new(false),
             default_provider: RwLock::new(AsrProviderType::Whisper),
-            selected_model_id: RwLock::new("base.en".to_string()),
+            selected_model_id: RwLock::new(AsrProviderType::Whisper.default_model_id().to_string()),
+            provider_model_ids: RwLock::new(provider_model_ids),
             allow_whisper_fallback: RwLock::new(false),
             last_runtime_errors: RwLock::new(HashMap::new()),
             models_dir,
+        }
+    }
+
+    fn normalize_model_id(provider_type: AsrProviderType, model_id: &str) -> String {
+        let trimmed = model_id.trim();
+        if trimmed.is_empty() {
+            provider_type.default_model_id().to_string()
+        } else {
+            trimmed.to_string()
         }
     }
 
@@ -80,11 +102,64 @@ impl AsrManager {
     }
 
     pub async fn set_selected_model_id(&self, model_id: String) {
-        *self.selected_model_id.write().await = model_id;
+        let default_provider = self.get_default_provider().await;
+        let normalized = Self::normalize_model_id(default_provider, &model_id);
+        self.provider_model_ids
+            .write()
+            .await
+            .insert(default_provider, normalized.clone());
+        *self.selected_model_id.write().await = normalized;
     }
 
     pub async fn selected_model_id(&self) -> String {
         self.selected_model_id.read().await.clone()
+    }
+
+    pub async fn set_provider_model_id(&self, provider_type: AsrProviderType, model_id: String) {
+        let normalized = Self::normalize_model_id(provider_type, &model_id);
+        self.provider_model_ids
+            .write()
+            .await
+            .insert(provider_type, normalized.clone());
+
+        if self.get_default_provider().await == provider_type {
+            *self.selected_model_id.write().await = normalized;
+        }
+    }
+
+    pub async fn provider_model_id(&self, provider_type: AsrProviderType) -> String {
+        self.provider_model_ids
+            .read()
+            .await
+            .get(&provider_type)
+            .cloned()
+            .unwrap_or_else(|| provider_type.default_model_id().to_string())
+    }
+
+    pub async fn provider_model_map(&self) -> HashMap<AsrProviderType, String> {
+        self.provider_model_ids.read().await.clone()
+    }
+
+    pub async fn set_provider_model_map(&self, provider_map: HashMap<AsrProviderType, String>) {
+        let mut merged: HashMap<AsrProviderType, String> = AsrProviderType::all()
+            .into_iter()
+            .map(|provider| {
+                let selected = provider_map
+                    .get(&provider)
+                    .cloned()
+                    .unwrap_or_else(|| provider.default_model_id().to_string());
+                (provider, Self::normalize_model_id(provider, &selected))
+            })
+            .collect();
+
+        let default_provider = self.get_default_provider().await;
+        let default_selected = merged
+            .get(&default_provider)
+            .cloned()
+            .unwrap_or_else(|| default_provider.default_model_id().to_string());
+
+        *self.provider_model_ids.write().await = std::mem::take(&mut merged);
+        *self.selected_model_id.write().await = default_selected;
     }
 
     pub async fn set_allow_whisper_fallback(&self, allow: bool) {
@@ -106,7 +181,7 @@ impl AsrManager {
     /// Get a provider by type - creates fresh instance each time
     #[allow(dead_code)]
     pub async fn get_provider(&self, provider_type: AsrProviderType) -> Box<dyn AsrProvider> {
-        let selected_model = self.selected_model_id().await;
+        let selected_model = self.provider_model_id(provider_type).await;
         Self::provider_with_model(provider_type, Some(selected_model.as_str()))
     }
 
@@ -124,13 +199,15 @@ impl AsrManager {
     /// Set the default provider
     pub async fn set_default_provider(&self, provider_type: AsrProviderType) {
         *self.default_provider.write().await = provider_type;
+        let selected = self.provider_model_id(provider_type).await;
+        *self.selected_model_id.write().await = selected;
     }
 
     pub async fn get_runtime_diagnostics(
         &self,
         provider_type: AsrProviderType,
     ) -> RuntimeDiagnostics {
-        let selected_model = self.selected_model_id().await;
+        let selected_model = self.provider_model_id(provider_type).await;
         let provider = Self::provider_with_model(provider_type, Some(selected_model.as_str()));
         let last_error = self
             .last_runtime_errors
@@ -162,8 +239,8 @@ impl AsrManager {
         selected_model: Option<&str>,
     ) -> Result<TranscriptionResult> {
         let resolved_model = match selected_model {
-            Some(value) => value.to_string(),
-            None => self.selected_model_id().await,
+            Some(value) => Self::normalize_model_id(provider_type, value),
+            None => self.provider_model_id(provider_type).await,
         };
         let provider = Self::provider_with_model(provider_type, Some(resolved_model.as_str()));
         let fallback_allowed = self.allow_whisper_fallback().await;
@@ -225,7 +302,7 @@ impl AsrManager {
 
                 let fallback_provider = Self::provider_with_model(
                     AsrProviderType::Whisper,
-                    Some(resolved_model.as_str()),
+                    Some(self.provider_model_id(AsrProviderType::Whisper).await.as_str()),
                 );
                 let fallback_result = match (file_path, audio_data) {
                     (Some(path), None) => fallback_provider.transcribe(path).await,
@@ -288,11 +365,14 @@ impl AsrManager {
 
     /// Get info for all providers (Parallelized)
     pub async fn get_all_providers_info(&self) -> Result<Vec<ProviderInfo>, String> {
-        let selected_model = self.selected_model_id().await;
+        let provider_models = self.provider_model_map().await;
         let last_errors = self.last_runtime_errors.read().await.clone();
 
         let futures = AsrProviderType::all().into_iter().map(|provider_type| {
-            let selected_model = selected_model.clone();
+            let selected_model = provider_models
+                .get(&provider_type)
+                .cloned()
+                .unwrap_or_else(|| provider_type.default_model_id().to_string());
             let last_error = last_errors.get(&provider_type).cloned();
 
             async move {
@@ -313,6 +393,8 @@ impl AsrManager {
                         is_available,
                         inference_enabled: Self::is_provider_transcription_enabled(provider_type),
                         model_info: provider.model_info(),
+                        selected_model_id: selected_model.clone(),
+                        model_options: provider_type.model_options(),
                         download_status: provider.download_status(),
                         runtime_status: diagnostics.runtime_status,
                         runtime_message: diagnostics.runtime_message,
@@ -344,7 +426,7 @@ impl AsrManager {
         provider_type: AsrProviderType,
         progress_cb: Box<dyn Fn(f32) + Send + Sync>,
     ) -> Result<()> {
-        let selected_model = self.selected_model_id().await;
+        let selected_model = self.provider_model_id(provider_type).await;
         let provider = Self::provider_with_model(provider_type, Some(selected_model.as_str()));
         provider.download_models(progress_cb).await
     }
@@ -358,9 +440,9 @@ impl AsrManager {
     /// Compare providers with benchmark
     pub async fn benchmark_providers(&self, test_audio: &Path) -> Vec<BenchmarkResult> {
         let mut results = Vec::new();
-        let selected_model = self.selected_model_id().await;
 
         for provider_type in AsrProviderType::all() {
+            let selected_model = self.provider_model_id(provider_type).await;
             let provider = Self::provider_with_model(provider_type, Some(selected_model.as_str()));
             if !provider.is_available() || !Self::is_provider_transcription_enabled(provider_type) {
                 continue;
@@ -397,6 +479,8 @@ pub struct ProviderInfo {
     pub is_available: bool,
     pub inference_enabled: bool,
     pub model_info: ModelInfo,
+    pub selected_model_id: String,
+    pub model_options: Vec<super::ModelOption>,
     pub download_status: DownloadStatus,
     pub runtime_status: RuntimeStatus,
     pub runtime_message: Option<String>,
@@ -504,37 +588,56 @@ fn runtime_diagnostics_for_provider(
             }
         }
         AsrProviderType::Parakeet => {
-            let model_path = models_root.join("parakeet").join(PARAKEET_MODEL_FILE);
-            let python =
-                super::python_runtime::find_python_with_imports("import nemo.collections.asr");
-            runtime_from_model_and_python(
-                provider_available,
-                model_path,
-                python,
-                "Parakeet model not downloaded. Download the provider model first.",
-                "Parakeet runtime missing. Install NeMo ASR and set NAUTILUS_PYTHON to the same interpreter.",
-                "Parakeet runtime detected but failed health check.",
-                "Parakeet runtime ready.",
-                last_error,
-            )
+            let model_dir = models_root.join("parakeet");
+            let has_onnx = PARAKEET_ONNX_NAMES.iter().any(|f| {
+                let p = model_dir.join(f);
+                p.exists() && p.metadata().map(|m| m.len() > 4096).unwrap_or(false)
+            });
+            let has_vocab = PARAKEET_VOCAB_NAMES.iter().any(|f| model_dir.join(f).exists());
+            let model_ready = has_onnx && has_vocab;
+            if !model_ready {
+                return RuntimeDiagnosticsInternal {
+                    runtime_status: RuntimeStatus::MissingModel,
+                    runtime_message: Some(
+                        "Parakeet model not downloaded. Download encoder.onnx + tokens.txt \
+                         (from k2-fsa/sherpa-onnx-nemo-parakeet-tdt-0.6b-en) or provide \
+                         your own NeMo ONNX export."
+                            .to_string(),
+                    ),
+                    runtime_details: RuntimeDetails {
+                        model_path: Some(model_dir.to_string_lossy().to_string()),
+                        python_path: None,
+                    },
+                };
+            }
+            RuntimeDiagnosticsInternal {
+                runtime_status: if provider_available {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::Error
+                },
+                runtime_message: Some(
+                    last_error
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "Parakeet ONNX runtime ready.".to_string()),
+                ),
+                runtime_details: RuntimeDetails {
+                    model_path: Some(model_dir.to_string_lossy().to_string()),
+                    python_path: None,
+                },
+            }
         }
         AsrProviderType::Canary => {
             let model_dir = models_root.join("canary");
             let model_ready = CANARY_REQUIRED_FILES
                 .iter()
-                .all(|file_name| model_dir.join(file_name).exists());
-            let python = super::python_runtime::find_python_with_imports(
-                "import torch; import transformers",
-            );
-            runtime_from_model_dir_and_python(
+                .all(|f| model_dir.join(f).exists());
+            runtime_native_model(
                 provider_available,
                 model_dir,
                 model_ready,
-                python,
-                "Canary model files are incomplete. Download required model artifacts first.",
-                "Canary runtime missing. Install torch + transformers and set NAUTILUS_PYTHON.",
-                "Canary runtime detected but provider health check failed.",
-                "Canary runtime ready.",
+                "Canary model not downloaded. Download Whisper Large V3 Turbo safetensors first.",
+                "Canary (Whisper Large V3 Turbo) native Candle inference ready.",
                 last_error,
             )
         }
@@ -542,19 +645,13 @@ fn runtime_diagnostics_for_provider(
             let model_dir = models_root.join("distil_whisper");
             let model_ready = DISTIL_REQUIRED_FILES
                 .iter()
-                .all(|file_name| model_dir.join(file_name).exists());
-            let python = super::python_runtime::find_python_with_imports(
-                "import torch; import transformers",
-            );
-            runtime_from_model_dir_and_python(
+                .all(|f| model_dir.join(f).exists());
+            runtime_native_model(
                 provider_available,
                 model_dir,
                 model_ready,
-                python,
-                "Distil model files are incomplete. Download required model artifacts first.",
-                "Distil runtime missing. Install torch + transformers and set NAUTILUS_PYTHON.",
-                "Distil runtime detected but provider health check failed.",
-                "Distil runtime ready.",
+                "Distil-Whisper model not downloaded. Download model.safetensors + config first.",
+                "Distil-Whisper native Candle inference ready.",
                 last_error,
             )
         }
@@ -562,80 +659,57 @@ fn runtime_diagnostics_for_provider(
             let model_dir = models_root.join("moonshine");
             let model_ready = MOONSHINE_REQUIRED_FILES
                 .iter()
-                .all(|file_name| model_dir.join(file_name).exists());
-            let python = super::python_runtime::find_python_with_imports(
-                "import torch; import transformers",
-            );
-            runtime_from_model_dir_and_python(
+                .all(|f| model_dir.join(f).exists());
+            runtime_native_model(
                 provider_available,
                 model_dir,
                 model_ready,
-                python,
-                "Moonshine model files are incomplete. Download required model artifacts first.",
-                "Moonshine runtime missing. Install torch + transformers and set NAUTILUS_PYTHON.",
-                "Moonshine runtime detected but provider health check failed.",
-                "Moonshine runtime ready.",
+                "Moonshine ONNX model not downloaded. Download encode.onnx + uncached_decode.onnx first.",
+                "Moonshine native ONNX inference ready.",
                 last_error,
             )
         }
 
-        AsrProviderType::VibeVoice => {
-            let model_dir = models_root.join("vibevoice");
-            let mut model_ready = VIBE_REQUIRED_FILES
-                .iter()
-                .all(|file_name| model_dir.join(file_name).exists());
-
-            if model_ready {
-                // Check shards
-                for i in 1..=8 {
-                    let name = format!("model-{:05}-of-00008.safetensors", i);
-                    if !model_dir.join(name).exists() {
-                        model_ready = false;
-                        break;
-                    }
-                }
-            }
-
-            let python = super::python_runtime::find_python_with_imports(
-                "import torch; import transformers",
-            );
-            runtime_from_model_dir_and_python(
-                provider_available,
-                model_dir,
-                model_ready,
-                python,
-                "VibeVoice model files incomplete. Download required model artifacts.",
-                "VibeVoice runtime missing. Install torch + transformers.",
-                "VibeVoice runtime detected but health check failed.",
-                "VibeVoice (Microsoft) runtime ready.",
-                last_error,
-            )
-        }
+        AsrProviderType::VibeVoice => RuntimeDiagnosticsInternal {
+            runtime_status: RuntimeStatus::MissingRuntime,
+            runtime_message: Some(
+                "VibeVoice native integration is not yet available. Select a different provider."
+                    .to_string(),
+            ),
+            runtime_details: RuntimeDetails {
+                model_path: None,
+                python_path: None,
+            },
+        },
         AsrProviderType::Voxtral => {
+            let has_key = has_provider_secret_or_env("mistral", "MISTRAL_API_KEY");
             let model_dir = models_root.join("voxtral");
-            let model_ready = VOXTRAL_REQUIRED_FILES
+            let has_local = ["config.json", "tokenizer.json", "model.safetensors"]
                 .iter()
-                .all(|file_name| model_dir.join(file_name).exists());
-            let python = super::python_runtime::find_python_with_imports(
-                "import torch; import transformers",
-            );
-            runtime_from_model_dir_and_python(
-                provider_available,
-                model_dir,
-                model_ready,
-                python,
-                "Voxtral model files incomplete. Download required model artifacts.",
-                "Voxtral runtime missing. Install torch + transformers.",
-                "Voxtral runtime detected but health check failed.",
-                "Voxtral Mini (Mistral) runtime ready.",
-                last_error,
-            )
+                .all(|f| model_dir.join(f).exists());
+            RuntimeDiagnosticsInternal {
+                runtime_status: if has_local || has_key {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingRuntime
+                },
+                runtime_message: Some(if has_local && has_key {
+                    "Voxtral ready \u2014 local model + cloud API available.".to_string()
+                } else if has_local {
+                    "Voxtral ready \u2014 local model (Canary encoder). Download Canary model for inference.".to_string()
+                } else if has_key {
+                    "Voxtral ready \u2014 Mistral cloud API active.".to_string()
+                } else {
+                    "Voxtral unavailable \u2014 download the model or set MISTRAL_API_KEY.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: if has_local { Some(model_dir.to_string_lossy().to_string()) } else { None },
+                    python_path: None,
+                },
+            }
         }
         AsrProviderType::ElevenLabsScribe => {
-            let has_key = std::env::var("ELEVENLABS_API_KEY")
-                .ok()
-                .filter(|k| !k.is_empty())
-                .is_some();
+            let has_key = has_provider_secret_or_env("elevenlabs", "ELEVENLABS_API_KEY");
             RuntimeDiagnosticsInternal {
                 runtime_status: if has_key {
                     RuntimeStatus::Ready
@@ -654,10 +728,7 @@ fn runtime_diagnostics_for_provider(
             }
         }
         AsrProviderType::OpenAiCloud => {
-            let has_key = std::env::var("OPENAI_API_KEY")
-                .ok()
-                .filter(|k| !k.is_empty())
-                .is_some();
+            let has_key = has_provider_secret_or_env("openai", "OPENAI_API_KEY");
             RuntimeDiagnosticsInternal {
                 runtime_status: if has_key {
                     RuntimeStatus::Ready
@@ -678,73 +749,12 @@ fn runtime_diagnostics_for_provider(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn runtime_from_model_and_python(
-    provider_available: bool,
-    model_path: PathBuf,
-    python_path: Option<String>,
-    missing_model_message: &str,
-    missing_runtime_message: &str,
-    health_error_message: &str,
-    ready_message: &str,
-    last_error: Option<&str>,
-) -> RuntimeDiagnosticsInternal {
-    if !model_path.exists() {
-        return RuntimeDiagnosticsInternal {
-            runtime_status: RuntimeStatus::MissingModel,
-            runtime_message: Some(missing_model_message.to_string()),
-            runtime_details: RuntimeDetails {
-                python_path,
-                model_path: Some(model_path.to_string_lossy().to_string()),
-            },
-        };
-    }
-
-    if python_path.is_none() {
-        return RuntimeDiagnosticsInternal {
-            runtime_status: RuntimeStatus::MissingRuntime,
-            runtime_message: Some(missing_runtime_message.to_string()),
-            runtime_details: RuntimeDetails {
-                python_path: None,
-                model_path: Some(model_path.to_string_lossy().to_string()),
-            },
-        };
-    }
-
-    if !provider_available {
-        return RuntimeDiagnosticsInternal {
-            runtime_status: RuntimeStatus::Error,
-            runtime_message: Some(
-                last_error
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| health_error_message.to_string()),
-            ),
-            runtime_details: RuntimeDetails {
-                python_path,
-                model_path: Some(model_path.to_string_lossy().to_string()),
-            },
-        };
-    }
-
-    RuntimeDiagnosticsInternal {
-        runtime_status: RuntimeStatus::Ready,
-        runtime_message: Some(ready_message.to_string()),
-        runtime_details: RuntimeDetails {
-            python_path,
-            model_path: Some(model_path.to_string_lossy().to_string()),
-        },
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn runtime_from_model_dir_and_python(
+/// Diagnostics for native-inference providers (no Python, no external runtime).
+fn runtime_native_model(
     provider_available: bool,
     model_dir: PathBuf,
     model_ready: bool,
-    python_path: Option<String>,
     missing_model_message: &str,
-    missing_runtime_message: &str,
-    health_error_message: &str,
     ready_message: &str,
     last_error: Option<&str>,
 ) -> RuntimeDiagnosticsInternal {
@@ -753,57 +763,41 @@ fn runtime_from_model_dir_and_python(
             runtime_status: RuntimeStatus::MissingModel,
             runtime_message: Some(missing_model_message.to_string()),
             runtime_details: RuntimeDetails {
-                python_path,
                 model_path: Some(model_dir.to_string_lossy().to_string()),
-            },
-        };
-    }
-
-    if python_path.is_none() {
-        return RuntimeDiagnosticsInternal {
-            runtime_status: RuntimeStatus::MissingRuntime,
-            runtime_message: Some(missing_runtime_message.to_string()),
-            runtime_details: RuntimeDetails {
                 python_path: None,
-                model_path: Some(model_dir.to_string_lossy().to_string()),
             },
         };
     }
-
-    if !provider_available {
-        return RuntimeDiagnosticsInternal {
-            runtime_status: RuntimeStatus::Error,
-            runtime_message: Some(
-                last_error
-                    .map(ToString::to_string)
-                    .unwrap_or_else(|| health_error_message.to_string()),
-            ),
-            runtime_details: RuntimeDetails {
-                python_path,
-                model_path: Some(model_dir.to_string_lossy().to_string()),
-            },
-        };
-    }
-
     RuntimeDiagnosticsInternal {
-        runtime_status: RuntimeStatus::Ready,
-        runtime_message: Some(ready_message.to_string()),
+        runtime_status: if provider_available {
+            RuntimeStatus::Ready
+        } else {
+            RuntimeStatus::Error
+        },
+        runtime_message: Some(
+            last_error
+                .map(ToString::to_string)
+                .unwrap_or_else(|| ready_message.to_string()),
+        ),
         runtime_details: RuntimeDetails {
-            python_path,
             model_path: Some(model_dir.to_string_lossy().to_string()),
+            python_path: None,
         },
     }
 }
 
 fn sanitize_whisper_model_id(model_id: &str) -> &'static str {
     match model_id {
-        "large-v3-turbo" => "large-v3-turbo",
-        "large-v3" => "large-v3",
-        "medium" => "medium",
-        "medium.en" => "medium.en",
+        "tiny" => "tiny",
+        "tiny.en" => "tiny.en",
+        "base" => "base",
+        "base.en" => "base.en",
         "small" => "small",
         "small.en" => "small.en",
-        "base" => "base",
+        "medium" => "medium",
+        "medium.en" => "medium.en",
+        "large-v3-turbo" => "large-v3-turbo",
+        "large-v3" => "large-v3",
         _ => "base.en",
     }
 }

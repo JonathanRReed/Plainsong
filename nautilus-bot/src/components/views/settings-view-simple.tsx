@@ -46,8 +46,9 @@ import {
 } from "@/lib/tauri";
 import type { BackupConfig, BackupInfo, CloudSetupReport, SecurityStatus, LicenseInfo, } from "@/lib/tauri";
 import type { PermissionDiagnostics } from "@/lib/tauri";
-import { validateLicense, activateLicense, deactivateLicense, isDiarizationModelAvailable, downloadDiarizationModel } from "@/lib/tauri";
-import { isFeatureAllowed } from "@/hooks/use-license-features";
+import { validateLicense, activateLicense, deactivateLicense, isDiarizationModelAvailable, downloadDiarizationModel, listDiarizationModels } from "@/lib/tauri";
+import type { DiarizationModelOption } from "@/lib/tauri";
+import { isFeatureAllowed, canUseFormattingAssistant, getThemeAccessLevel } from "@/hooks/use-license-features";
 import type { Settings } from "@/types/settings";
 import {
   AlertCircle,
@@ -155,6 +156,17 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const [ollamaCloudModels, setOllamaCloudModels] = useState<string[]>([]);
   const [diarizationAvailable, setDiarizationAvailable] = useState(false);
   const [diarizationDownloading, setDiarizationDownloading] = useState(false);
+  const [diarizationModels, setDiarizationModels] = useState<DiarizationModelOption[]>([]);
+  const [selectedDiarizationModel, setSelectedDiarizationModel] = useState("ecapa_tdnn_speaker");
+  const [micTestActive, setMicTestActive] = useState(false);
+  const [micTestLevel, setMicTestLevel] = useState(0);
+  const [micTestRecording, setMicTestRecording] = useState(false);
+  const [micTestPlaybackUrl, setMicTestPlaybackUrl] = useState<string | null>(null);
+  const micTestContextRef = useRef<AudioContext | null>(null);
+  const micTestAnimFrameRef = useRef<number | null>(null);
+  const micTestStreamRef = useRef<MediaStream | null>(null);
+  const micTestRecorderRef = useRef<MediaRecorder | null>(null);
+  const micTestChunksRef = useRef<BlobPart[]>([]);
   const [openaiModels, setOpenaiModels] = useState<string[]>([]);
   const [anthropicModels, setAnthropicModels] = useState<string[]>([]);
   const [geminiModels, setGeminiModels] = useState<string[]>([]);
@@ -528,9 +540,16 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
   useEffect(() => {
     let mounted = true;
-    isDiarizationModelAvailable().then((avail) => {
-      if (mounted) setDiarizationAvailable(avail);
-    });
+    const load = async () => {
+      const [avail, models] = await Promise.all([
+        isDiarizationModelAvailable(),
+        listDiarizationModels().catch(() => [] as DiarizationModelOption[]),
+      ]);
+      if (!mounted) return;
+      setDiarizationAvailable(avail);
+      setDiarizationModels(models);
+    };
+    load();
     return () => { mounted = false; };
   }, []);
 
@@ -626,6 +645,84 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     },
     [flushPendingSettingsSave]
   );
+
+  useEffect(() => {
+    return () => {
+      if (micTestAnimFrameRef.current !== null) cancelAnimationFrame(micTestAnimFrameRef.current);
+      micTestStreamRef.current?.getTracks().forEach((t) => t.stop());
+      micTestContextRef.current?.close().catch(() => {});
+      if (micTestPlaybackUrl) URL.revokeObjectURL(micTestPlaybackUrl);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const stopMicTest = useCallback(() => {
+    if (micTestAnimFrameRef.current !== null) {
+      cancelAnimationFrame(micTestAnimFrameRef.current);
+      micTestAnimFrameRef.current = null;
+    }
+    if (micTestStreamRef.current) {
+      micTestStreamRef.current.getTracks().forEach((t) => t.stop());
+      micTestStreamRef.current = null;
+    }
+    if (micTestContextRef.current) {
+      micTestContextRef.current.close().catch(() => {});
+      micTestContextRef.current = null;
+    }
+    setMicTestActive(false);
+    setMicTestLevel(0);
+    setMicTestRecording(false);
+  }, []);
+
+  const startMicTest = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      micTestStreamRef.current = stream;
+      const ctx = new AudioContext();
+      micTestContextRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+      const buf = new Float32Array(analyser.fftSize);
+      const tick = () => {
+        analyser.getFloatTimeDomainData(buf);
+        const rms = Math.sqrt(buf.reduce((sum, v) => sum + v * v, 0) / buf.length);
+        const db = 20 * Math.log10(Math.max(rms, 1e-6));
+        const pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
+        setMicTestLevel(Math.round(pct));
+        micTestAnimFrameRef.current = requestAnimationFrame(tick);
+      };
+      tick();
+      setMicTestActive(true);
+    } catch (err) {
+      console.error("Mic test failed:", err);
+    }
+  }, []);
+
+  const recordMicTest = useCallback(async () => {
+    if (!micTestStreamRef.current) return;
+    if (micTestPlaybackUrl) {
+      URL.revokeObjectURL(micTestPlaybackUrl);
+      setMicTestPlaybackUrl(null);
+    }
+    micTestChunksRef.current = [];
+    const recorder = new MediaRecorder(micTestStreamRef.current);
+    micTestRecorderRef.current = recorder;
+    recorder.ondataavailable = (e) => micTestChunksRef.current.push(e.data);
+    recorder.onstop = () => {
+      const blob = new Blob(micTestChunksRef.current, { type: "audio/webm" });
+      setMicTestPlaybackUrl(URL.createObjectURL(blob));
+      setMicTestRecording(false);
+    };
+    setMicTestRecording(true);
+    recorder.start();
+    setTimeout(() => {
+      if (micTestRecorderRef.current?.state === "recording") {
+        micTestRecorderRef.current.stop();
+      }
+    }, 3000);
+  }, [micTestPlaybackUrl]);
 
   const tabList = useMemo(
     () => [
@@ -751,17 +848,80 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   )}
                 </div>
 
-                {settings.transcription.enableDiarization && diarizationAvailable && (
-                  <div className="rounded-md border border-border bg-muted/30 p-3 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium">Diarization model</p>
-                        <p className="text-xs text-muted-foreground">Wespeaker ECAPA-TDNN 512 (speaker embedding)</p>
+                {settings.transcription.enableDiarization && (
+                  <div className="space-y-2">
+                    <Label>Diarization model</Label>
+                    {diarizationModels.length > 0 ? (
+                      <div className="space-y-2">
+                        {diarizationModels.map((model) => (
+                          <div
+                            key={model.id}
+                            className={`rounded-md border p-3 cursor-pointer transition-colors ${selectedDiarizationModel === model.id ? "border-trusted bg-trusted/5" : "border-border bg-muted/20 hover:bg-muted/40"}`}
+                            onClick={() => setSelectedDiarizationModel(model.id)}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="radio"
+                                  name="diarization-model"
+                                  value={model.id}
+                                  checked={selectedDiarizationModel === model.id}
+                                  onChange={() => setSelectedDiarizationModel(model.id)}
+                                  className="accent-trusted"
+                                />
+                                <div>
+                                  <p className="text-sm font-medium">{model.label}</p>
+                                  <p className="text-xs text-muted-foreground">{model.description}</p>
+                                </div>
+                              </div>
+                              {model.installed ? (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 shrink-0">
+                                  <CheckCircle2 className="h-3 w-3" /> Installed
+                                </span>
+                              ) : (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="shrink-0 text-xs h-7"
+                                  disabled={diarizationDownloading}
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    setDiarizationDownloading(true);
+                                    try {
+                                      await downloadDiarizationModel(model.id);
+                                      setDiarizationModels((prev) =>
+                                        prev.map((m) => m.id === model.id ? { ...m, installed: true } : m)
+                                      );
+                                      if (model.id === "ecapa_tdnn_speaker") setDiarizationAvailable(true);
+                                    } catch (e) {
+                                      const msg = e instanceof Error ? e.message : String(e);
+                                      setError(`Download failed: ${msg}`);
+                                    } finally {
+                                      setDiarizationDownloading(false);
+                                    }
+                                  }}
+                                >
+                                  <Download className="h-3 w-3 mr-1" />
+                                  Download
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
-                        <CheckCircle2 className="h-3 w-3" /> Installed
-                      </span>
-                    </div>
+                    ) : diarizationAvailable ? (
+                      <div className="rounded-md border border-border bg-muted/30 p-3">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-sm font-medium">ECAPA-TDNN 512</p>
+                            <p className="text-xs text-muted-foreground">Wespeaker ECAPA-TDNN (speaker embedding)</p>
+                          </div>
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                            <CheckCircle2 className="h-3 w-3" /> Installed
+                          </span>
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 )}
 
@@ -846,13 +1006,19 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label>AI Formatting (Super Mode)</Label>
+                        <Label className="flex items-center gap-1.5">
+                          Smart Format
+                          {!canUseFormattingAssistant(licenseInfo) && (
+                            <span className="text-xs text-amber-600">Pro</span>
+                          )}
+                        </Label>
                         <p className="text-sm text-muted-foreground">
                           Use the default LLM to format and correct dictation before pasting
                         </p>
                       </div>
                       <Switch
                         checked={settings.transcription.dictationAiFormatting}
+                        disabled={!canUseFormattingAssistant(licenseInfo)}
                         onCheckedChange={(checked) =>
                           void updateSettings({
                             ...settings,
@@ -882,7 +1048,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         className="min-h-[80px]"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Overrides the default AI formatting prompt. The active app name is still provided as context.
+                        Overrides the default Smart Format prompt. The active app name is still provided as context.
                       </p>
                     </div>
                     
@@ -903,7 +1069,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         className="min-h-[80px]"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Overrides the default Granola-style meeting summary prompt.
+                        Overrides the default Nautilus-style meeting summary prompt.
                       </p>
                     </div>
 
@@ -951,19 +1117,13 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label className="flex items-center gap-1.5">
-                          Automatic silence skip
-                          {!isFeatureAllowed(licenseInfo, "autoDiarization") && (
-                            <span className="text-xs text-amber-600">Pro</span>
-                          )}
-                        </Label>
+                        <Label>Automatic silence skip</Label>
                         <p className="text-sm text-muted-foreground">
                           Remove silent segments before transcription
                         </p>
                       </div>
                       <Switch
                         checked={settings.transcription.silenceSkipEnabled}
-                        disabled={!isFeatureAllowed(licenseInfo, "autoDiarization")}
                         onCheckedChange={(checked) =>
                           void updateSettings({
                             ...settings,
@@ -990,27 +1150,68 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     </div>
 
                     {settings.audio.voiceActivityDetection && (
-                      <div className="space-y-2">
-                        <Label>Silence timeout (minutes)</Label>
-                        <Input
-                          type="number"
-                          min={0.1}
-                          max={5}
-                          step={0.1}
-                          value={Math.round((settings.audio.silenceTimeoutSeconds / 60) * 10) / 10}
-                          onBlur={handleSettingsTextBlur}
-                          onKeyDown={handleSettingsTextKeyDown}
-                          onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                            const minutes = Math.max(0.1, Math.min(5, Number(e.target.value) || 0.05));
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <Label>Silence timeout</Label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              min={1}
+                              max={30}
+                              step={1}
+                              className="w-16 rounded-md border bg-background px-2 py-1 text-sm text-center"
+                              value={Math.round(settings.audio.silenceTimeoutSeconds / 60)}
+                              onBlur={handleSettingsTextBlur}
+                              onKeyDown={handleSettingsTextKeyDown}
+                              onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                                const minutes = Math.max(1, Math.min(30, parseInt(e.target.value, 10) || 5));
+                                void updateSettings({
+                                  ...settings,
+                                  audio: { ...settings.audio, silenceTimeoutSeconds: minutes * 60 },
+                                });
+                              }}
+                            />
+                            <span className="text-sm text-muted-foreground">min</span>
+                          </div>
+                        </div>
+                        <input
+                          type="range"
+                          min={1}
+                          max={30}
+                          step={1}
+                          className="w-full"
+                          value={Math.round(settings.audio.silenceTimeoutSeconds / 60)}
+                          onChange={(e: any) => {
+                            const minutes = parseInt(e.target.value, 10);
                             void updateSettings({
                               ...settings,
-                              audio: {
-                                ...settings.audio,
-                                silenceTimeoutSeconds: Math.round(minutes * 60),
-                              },
+                              audio: { ...settings.audio, silenceTimeoutSeconds: minutes * 60 },
                             });
                           }}
                         />
+                        <div className="flex justify-between text-xs text-muted-foreground">
+                          <span>1 min</span>
+                          <span>5 min</span>
+                          <span>15 min</span>
+                          <span>30 min</span>
+                        </div>
+                        <div className="flex gap-2">
+                          {[1, 2, 5, 10, 15, 30].map((preset) => (
+                            <button
+                              key={preset}
+                              type="button"
+                              className={`rounded px-2 py-0.5 text-xs border transition-colors ${Math.round(settings.audio.silenceTimeoutSeconds / 60) === preset ? "bg-trusted text-white border-trusted" : "bg-muted hover:bg-muted/80 border-border"}`}
+                              onClick={() =>
+                                void updateSettings({
+                                  ...settings,
+                                  audio: { ...settings.audio, silenceTimeoutSeconds: preset * 60 },
+                                })
+                              }
+                            >
+                              {preset}m
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     )}
 
@@ -1070,6 +1271,68 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         </div>
                       </div>
                     )}
+
+                    <div className="rounded-md border border-border bg-muted/20 p-3 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-sm font-medium">Microphone test</p>
+                          <p className="text-xs text-muted-foreground">Check your mic level and hear the gain effect</p>
+                        </div>
+                        <Button
+                          variant={micTestActive ? "destructive" : "outline"}
+                          size="sm"
+                          onClick={() => micTestActive ? stopMicTest() : void startMicTest()}
+                        >
+                          <Mic className="h-3.5 w-3.5 mr-1.5" />
+                          {micTestActive ? "Stop" : "Start"}
+                        </Button>
+                      </div>
+
+                      {micTestActive && (
+                        <>
+                          <div className="space-y-1">
+                            <div className="flex items-center justify-between text-xs text-muted-foreground">
+                              <span>Level</span>
+                              <span>{micTestLevel}%</span>
+                            </div>
+                            <div className="h-3 w-full rounded-full bg-muted overflow-hidden">
+                              <div
+                                className={`h-full rounded-full transition-none ${micTestLevel > 80 ? "bg-red-500" : micTestLevel > 50 ? "bg-yellow-500" : "bg-emerald-500"}`}
+                                style={{ width: `${micTestLevel}%` }}
+                              />
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={micTestRecording}
+                              onClick={() => void recordMicTest()}
+                              className="text-xs"
+                            >
+                              {micTestRecording ? (
+                                <>
+                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                  Recording 3s…
+                                </>
+                              ) : (
+                                "Record 3s"
+                              )}
+                            </Button>
+                            {micTestPlaybackUrl && !micTestRecording && (
+                              <audio
+                                key={micTestPlaybackUrl}
+                                src={micTestPlaybackUrl}
+                                controls
+                                autoPlay
+                                className="h-8 flex-1"
+                              />
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
                   </div>
                 )}
               </CardContent>
@@ -1119,39 +1382,57 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <Label className="flex items-center gap-1.5">
-                    Color scheme
-                    {!isFeatureAllowed(licenseInfo, "cloudSync") && (
-                      <span className="text-xs text-amber-600">Friends Club</span>
-                    )}
-                  </Label>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={document.documentElement.getAttribute("data-theme") ?? "default"}
-                    disabled={!isFeatureAllowed(licenseInfo, "cloudSync")}
-                    onChange={(e: any) => {
-                      const scheme = e.target.value;
-                      if (scheme === "default") {
-                        document.documentElement.removeAttribute("data-theme");
-                      } else {
-                        document.documentElement.setAttribute("data-theme", scheme);
-                      }
-                    }}
-                  >
-                    <option value="default">Default</option>
-                    <option value="dracula">Dracula</option>
-                    <option value="tokyo-night">Tokyo Night</option>
-                    <option value="solarized-dark">Solarized Dark</option>
-                    <option value="solarized-light">Solarized Light</option>
-                    <option value="gruvbox">Gruvbox Dark</option>
-                    <option value="nord">Nord</option>
-                    <option value="rose-pine">Rosé Pine</option>
-                    <option value="rose-pine-moon">Rosé Pine Moon</option>
-                    <option value="rose-pine-dawn">Rosé Pine Dawn</option>
-                    <option value="catppuccin">Catppuccin Mocha</option>
-                  </select>
-                </div>
+                {(() => {
+                  const themeAccess = getThemeAccessLevel(licenseInfo);
+                  const currentScheme = document.documentElement.getAttribute("data-theme") ?? "default";
+                  return (
+                    <div className="space-y-2">
+                      <Label className="flex items-center gap-1.5">
+                        Color scheme
+                        {themeAccess === "basic" && (
+                          <span className="text-xs text-amber-600">Pro unlocks more</span>
+                        )}
+                      </Label>
+                      <select
+                        className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                        value={currentScheme}
+                        onChange={(e: any) => {
+                          const scheme = e.target.value;
+                          if (scheme === "default") {
+                            document.documentElement.removeAttribute("data-theme");
+                          } else {
+                            document.documentElement.setAttribute("data-theme", scheme);
+                          }
+                        }}
+                      >
+                        <option value="default">Default</option>
+                        {themeAccess !== "basic" && (
+                          <>
+                            <option value="rose-pine">Rosé Pine Night (Pro)</option>
+                            <option value="rose-pine-dawn">Rosé Pine Dawn (Pro)</option>
+                            <option value="solarized-dark">Solarized Dark (Pro)</option>
+                            <option value="solarized-light">Solarized Light (Pro)</option>
+                          </>
+                        )}
+                        {themeAccess === "friends" && (
+                          <>
+                            <option value="dracula">Dracula</option>
+                            <option value="tokyo-night">Tokyo Night</option>
+                            <option value="gruvbox">Gruvbox Dark</option>
+                            <option value="nord">Nord</option>
+                            <option value="rose-pine-moon">Rosé Pine Moon</option>
+                            <option value="catppuccin">Catppuccin Mocha</option>
+                          </>
+                        )}
+                      </select>
+                      {themeAccess === "basic" && (
+                        <p className="text-xs text-muted-foreground">
+                          Upgrade to Pro for Rosé Pine and Solarized themes, Friends Club for all premium schemes.
+                        </p>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
@@ -1212,13 +1493,19 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label>AI Formatting (Super Mode)</Label>
+                        <Label className="flex items-center gap-1.5">
+                          Smart Format
+                          {!canUseFormattingAssistant(licenseInfo) && (
+                            <span className="text-xs text-amber-600">Pro</span>
+                          )}
+                        </Label>
                         <p className="text-sm text-muted-foreground">
                           Use the default LLM to format and correct dictation before pasting
                         </p>
                       </div>
                       <Switch
                         checked={settings.transcription.dictationAiFormatting}
+                        disabled={!canUseFormattingAssistant(licenseInfo)}
                         onCheckedChange={(checked) =>
                           void updateSettings({
                             ...settings,
@@ -1248,7 +1535,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         className="min-h-[80px]"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Overrides the default AI formatting prompt. The active app name is still provided as context.
+                        Overrides the default Smart Format prompt. The active app name is still provided as context.
                       </p>
                     </div>
                     
@@ -1269,7 +1556,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         className="min-h-[80px]"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Overrides the default Granola-style meeting summary prompt.
+                        Overrides the default Nautilus-style meeting summary prompt.
                       </p>
                     </div>
 
@@ -1462,13 +1749,19 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label>AI Formatting (Super Mode)</Label>
+                        <Label className="flex items-center gap-1.5">
+                          Smart Format
+                          {!canUseFormattingAssistant(licenseInfo) && (
+                            <span className="text-xs text-amber-600">Pro</span>
+                          )}
+                        </Label>
                         <p className="text-sm text-muted-foreground">
                           Use the default LLM to format and correct dictation before pasting
                         </p>
                       </div>
                       <Switch
                         checked={settings.transcription.dictationAiFormatting}
+                        disabled={!canUseFormattingAssistant(licenseInfo)}
                         onCheckedChange={(checked) =>
                           void updateSettings({
                             ...settings,
@@ -1498,7 +1791,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         className="min-h-[80px]"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Overrides the default AI formatting prompt. The active app name is still provided as context.
+                        Overrides the default Smart Format prompt. The active app name is still provided as context.
                       </p>
                     </div>
                     
@@ -1519,7 +1812,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         className="min-h-[80px]"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Overrides the default Granola-style meeting summary prompt.
+                        Overrides the default Nautilus-style meeting summary prompt.
                       </p>
                     </div>
 
@@ -1883,13 +2176,19 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label>AI Formatting (Super Mode)</Label>
+                        <Label className="flex items-center gap-1.5">
+                          Smart Format
+                          {!canUseFormattingAssistant(licenseInfo) && (
+                            <span className="text-xs text-amber-600">Pro</span>
+                          )}
+                        </Label>
                         <p className="text-sm text-muted-foreground">
                           Use the default LLM to format and correct dictation before pasting
                         </p>
                       </div>
                       <Switch
                         checked={settings.transcription.dictationAiFormatting}
+                        disabled={!canUseFormattingAssistant(licenseInfo)}
                         onCheckedChange={(checked) =>
                           void updateSettings({
                             ...settings,
@@ -1919,7 +2218,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         className="min-h-[80px]"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Overrides the default AI formatting prompt. The active app name is still provided as context.
+                        Overrides the default Smart Format prompt. The active app name is still provided as context.
                       </p>
                     </div>
                     
@@ -1940,7 +2239,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         className="min-h-[80px]"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Overrides the default Granola-style meeting summary prompt.
+                        Overrides the default Nautilus-style meeting summary prompt.
                       </p>
                     </div>
 
@@ -2496,13 +2795,19 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label>AI Formatting (Super Mode)</Label>
+                        <Label className="flex items-center gap-1.5">
+                          Smart Format
+                          {!canUseFormattingAssistant(licenseInfo) && (
+                            <span className="text-xs text-amber-600">Pro</span>
+                          )}
+                        </Label>
                         <p className="text-sm text-muted-foreground">
                           Use the default LLM to format and correct dictation before pasting
                         </p>
                       </div>
                       <Switch
                         checked={settings.transcription.dictationAiFormatting}
+                        disabled={!canUseFormattingAssistant(licenseInfo)}
                         onCheckedChange={(checked) =>
                           void updateSettings({
                             ...settings,
@@ -2532,7 +2837,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         className="min-h-[80px]"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Overrides the default AI formatting prompt. The active app name is still provided as context.
+                        Overrides the default Smart Format prompt. The active app name is still provided as context.
                       </p>
                     </div>
                     
@@ -2553,7 +2858,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         className="min-h-[80px]"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Overrides the default Granola-style meeting summary prompt.
+                        Overrides the default Nautilus-style meeting summary prompt.
                       </p>
                     </div>
 

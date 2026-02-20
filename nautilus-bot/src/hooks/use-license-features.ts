@@ -19,6 +19,8 @@ export interface Entitlement {
   features: FeatureFlags;
 }
 
+export type ThemeAccessLevel = "basic" | "pro" | "friends";
+
 const TIER_FEATURES: Record<LicenseTier, FeatureFlags> = {
   none: {
     whisperLargeModel: false,
@@ -92,4 +94,21 @@ export function isFeatureAllowed(
   feature: keyof FeatureFlags
 ): boolean {
   return deriveEntitlement(license).features[feature];
+}
+
+export function canUseFormattingAssistant(license: LicenseInfo | null): boolean {
+  // Product rule: trial users do not get Formatting Assistant Mode.
+  return Boolean(license?.valid);
+}
+
+export function getThemeAccessLevel(license: LicenseInfo | null): ThemeAccessLevel {
+  if (!license?.valid) {
+    return "basic";
+  }
+
+  if (license.tier === "friends_club") {
+    return "friends";
+  }
+
+  return "pro";
 }

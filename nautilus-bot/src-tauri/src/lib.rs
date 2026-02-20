@@ -1,6 +1,7 @@
 pub mod asr;
 mod audio;
 mod backup;
+mod commands;
 mod crypto;
 mod db;
 mod diarization;
@@ -18,9 +19,12 @@ mod text;
 mod transcription;
 pub mod update;
 
+use commands::backup::*;
+use commands::infra::*;
 use anyhow::Result;
 use rand::RngCore;
 use regex::Regex;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,7 +43,7 @@ pub struct AppState {
     #[allow(dead_code)]
     integration_manager: Arc<integrations::IntegrationManager>,
     settings_manager: Arc<Mutex<settings::SettingsManager>>,
-    backup_manager: Arc<Mutex<backup::BackupManager>>,
+    pub(crate) backup_manager: Arc<Mutex<backup::BackupManager>>,
     template_manager: Arc<export::templates::TemplateManager>,
     dictation_hotkey_active: Arc<Mutex<bool>>,
     dictation_release_pending: Arc<AtomicBool>,
@@ -51,13 +55,20 @@ pub struct AppState {
     recording_overlay_state: Arc<StdMutex<RecordingOverlayState>>,
     streaming_transcriber: Arc<streaming::StreamingTranscriber>,
     vault_state: Arc<Mutex<VaultRuntimeState>>,
+    /// Stop flag for the live recording streaming task; set to false to terminate it
+    recording_stream_stop: Arc<AtomicBool>,
 }
 
 const DICTATION_OVERLAY_LABEL: &str = "dictation-overlay";
 const RECORDING_OVERLAY_LABEL: &str = "recording-overlay";
 const RECORDING_TRAY_ID: &str = "recording-indicator";
 const DICTATION_MAX_DURATION_SECONDS: u64 = 120;
+const DICTATION_AI_FORMAT_TIMEOUT_MS: u64 = 1400;
+const DICTATION_AI_FORMAT_MIN_CHARS: usize = 80;
+const DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
 const STREAMING_PREVIEW_MAX_SECONDS: f64 = 90.0;
+const MIN_SILENCE_TIMEOUT_SECONDS: f32 = 60.0;
+const MAX_SILENCE_TIMEOUT_SECONDS: f32 = 1800.0;
 const VAULT_DB_KEY_SECRET: &str = "vault_db_key";
 const VAULT_UNLOCK_CHECK_SECRET: &str = "vault_unlock_check";
 const VAULT_RECORDING_KEY_SALT_LEN: usize = 16;
@@ -658,14 +669,78 @@ async fn rename_speaker(
     Ok(())
 }
 
-#[tauri::command]
-fn is_diarization_model_available() -> bool {
-    diarization::DiarizationEngine::is_real_available()
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiarizationModelOption {
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    installed: bool,
+}
+
+fn diarization_model_path(model_id: &str) -> Option<std::path::PathBuf> {
+    let models_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("Nautilus")
+        .join("models")
+        .join("diarization");
+    match model_id {
+        "ecapa_tdnn_speaker" => Some(models_dir.join("ecapa_tdnn_speaker.onnx")),
+        "wespeaker_resnet" => Some(models_dir.join("wespeaker_resnet.onnx")),
+        "titanet_small" => Some(models_dir.join("titanet_small.onnx")),
+        _ => None,
+    }
 }
 
 #[tauri::command]
-async fn download_diarization_model(_app: tauri::AppHandle) -> Result<(), String> {
+fn list_diarization_models() -> Vec<DiarizationModelOption> {
+    vec![
+        DiarizationModelOption {
+            id: "ecapa_tdnn_speaker",
+            label: "ECAPA-TDNN 512",
+            description: "Wespeaker ECAPA-TDNN — fast, accurate, recommended (~14 MB)",
+            installed: diarization_model_path("ecapa_tdnn_speaker")
+                .map(|p| p.exists())
+                .unwrap_or(false),
+        },
+        DiarizationModelOption {
+            id: "wespeaker_resnet",
+            label: "WeSpeaker ResNet",
+            description: "WeSpeaker ResNet-based speaker embedding — high accuracy (~25 MB)",
+            installed: diarization_model_path("wespeaker_resnet")
+                .map(|p| p.exists())
+                .unwrap_or(false),
+        },
+        DiarizationModelOption {
+            id: "titanet_small",
+            label: "TitaNet Small",
+            description: "NVIDIA TitaNet-Small — compact and robust (~12 MB)",
+            installed: diarization_model_path("titanet_small")
+                .map(|p| p.exists())
+                .unwrap_or(false),
+        },
+    ]
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn is_diarization_model_available(modelId: Option<String>) -> bool {
+    let id = modelId.as_deref().unwrap_or("ecapa_tdnn_speaker");
+    if id == "ecapa_tdnn_speaker" {
+        return diarization::DiarizationEngine::is_real_available();
+    }
+    diarization_model_path(id).map(|p| p.exists()).unwrap_or(false)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn download_diarization_model(
+    _app: tauri::AppHandle,
+    modelId: Option<String>,
+) -> Result<(), String> {
     use crate::download::DownloadManager;
+
+    let id = modelId.as_deref().unwrap_or("ecapa_tdnn_speaker");
 
     let manager = DownloadManager::new().map_err(|e| e.to_string())?;
 
@@ -676,12 +751,19 @@ async fn download_diarization_model(_app: tauri::AppHandle) -> Result<(), String
         );
     };
 
-    manager
-        .download_diarization_model(progress_callback)
-        .await
-        .map_err(|e| e.to_string())?;
+    if id == "ecapa_tdnn_speaker" {
+        manager
+            .download_diarization_model(progress_callback)
+            .await
+            .map_err(|e| e.to_string())?;
+    } else {
+        return Err(format!(
+            "Model '{}' is not yet available for download. Only 'ecapa_tdnn_speaker' is currently supported.",
+            id
+        ));
+    }
 
-    tracing::info!("Diarization model downloaded successfully");
+    tracing::info!("Diarization model '{}' downloaded successfully", id);
     Ok(())
 }
 
@@ -764,6 +846,90 @@ async fn start_recording(
         tracing::warn!("Failed to log audit event: {}", e);
     }
 
+    // Launch live streaming transcription task (mic-only path has a sample queue)
+    let maybe_stream_info = {
+        let audio = state.audio_capture.lock().await;
+        audio.get_streaming_queue(&recording_id)
+    };
+
+    if let Some((stream_queue, sample_rate)) = maybe_stream_info {
+        state.recording_stream_stop.store(true, Ordering::SeqCst);
+        let stop_flag = Arc::clone(&state.recording_stream_stop);
+        let streaming_transcriber = Arc::clone(&state.streaming_transcriber);
+        let asr_manager = Arc::clone(&state.asr_manager);
+        let app_handle = app.clone();
+        let rec_id = recording_id.clone();
+
+        tauri::async_runtime::spawn(async move {
+            let provider = asr_manager.get_default_provider().await;
+            let model_id = asr_manager.selected_model_id().await;
+            let session_result = streaming_transcriber
+                .start_session(provider, sample_rate, model_id)
+                .await;
+
+            let (session_id, mut result_rx) = match session_result {
+                Ok(pair) => pair,
+                Err(e) => {
+                    tracing::warn!("Failed to start live streaming session: {}", e);
+                    return;
+                }
+            };
+
+            // Forward streaming results to the frontend
+            let emit_app = app_handle.clone();
+            let emit_rec_id = rec_id.clone();
+            let recv_task = tokio::spawn(async move {
+                while let Some(result) = result_rx.recv().await {
+                    if result.text.trim().is_empty() {
+                        continue;
+                    }
+                    if let Err(e) = emit_app.emit(
+                        "recording-transcription-stream",
+                        serde_json::json!({
+                            "recordingId": &emit_rec_id,
+                            "isPartial": result.is_partial,
+                            "isFinal": result.is_final,
+                            "text": result.text,
+                            "startTime": result.start_time,
+                            "endTime": result.end_time,
+                            "confidence": result.confidence,
+                        }),
+                    ) {
+                        tracing::warn!("Failed to emit streaming event: {}", e);
+                    }
+                }
+            });
+
+            // Drain the sample queue and feed chunks while recording is active
+            let chunk_threshold = (sample_rate as usize) * 2; // 2-second chunks
+            let mut pending: Vec<f32> = Vec::with_capacity(chunk_threshold * 2);
+
+            while stop_flag.load(Ordering::SeqCst) {
+                while let Some(chunk) = stream_queue.pop() {
+                    pending.extend_from_slice(&chunk);
+                }
+                if pending.len() >= chunk_threshold {
+                    let feed_slice = std::mem::take(&mut pending);
+                    if let Err(e) = streaming_transcriber.feed_audio(&session_id, &feed_slice).await {
+                        tracing::warn!("Live streaming feed error: {}", e);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+
+            // Feed any remaining samples before finalizing
+            while let Some(chunk) = stream_queue.pop() {
+                pending.extend_from_slice(&chunk);
+            }
+            if !pending.is_empty() {
+                let _ = streaming_transcriber.feed_audio(&session_id, &pending).await;
+            }
+            let _ = streaming_transcriber.finalize_session(&session_id).await;
+            recv_task.abort();
+            tracing::info!("Live streaming task finished for recording {}", rec_id);
+        });
+    }
+
     if should_show_recording_overlay(state.inner()).await {
         show_recording_overlay(&app);
     } else {
@@ -788,6 +954,9 @@ async fn stop_recording(
     state: tauri::State<'_, AppState>,
     recordingId: String,
 ) -> Result<(), String> {
+    // Signal the live streaming background task to stop before halting audio capture
+    state.recording_stream_stop.store(false, Ordering::SeqCst);
+
     let (audio_path, content_hash) = {
         let mut audio = state.audio_capture.lock().await;
         audio
@@ -827,6 +996,7 @@ async fn stop_recording(
     let db_clone = Arc::clone(&state.db);
     let settings_manager_clone = Arc::clone(&state.settings_manager);
     let vault_state_clone = Arc::clone(&state.vault_state);
+    let ollama_client_clone = Arc::clone(&state.ollama_client);
     let recording_id_clone = recordingId.clone();
     let audio_path_clone = audio_path.clone();
 
@@ -931,6 +1101,61 @@ async fn stop_recording(
                 if let Err(e) = db.save_transcript(&transcript) {
                     tracing::error!("Failed to save transcript: {}", e);
                 }
+                drop(db);
+
+                // Auto-analysis: run summary + action items in background if transcript is non-empty
+                let auto_analyze = {
+                    let sm = settings_manager_clone.lock().await;
+                    sm.settings().transcription.enable_auto_analysis
+                };
+                if auto_analyze && !transcript.full_text.trim().is_empty() {
+                    let full_text = transcript.full_text.clone();
+                    let app_for_analysis = app_handle.clone();
+                    let rec_id_for_analysis = recording_id_clone.clone();
+                    let ollama = Arc::clone(&ollama_client_clone);
+
+                    tokio::spawn(async move {
+                        const ANALYSIS_TIMEOUT_MS: u64 = 45_000;
+                        let model = AnalysisProvider::Ollama.default_model();
+
+                        let summary_fut = tokio::time::timeout(
+                            Duration::from_millis(ANALYSIS_TIMEOUT_MS),
+                            ollama.summarize(&full_text, model),
+                        );
+                        let actions_fut = tokio::time::timeout(
+                            Duration::from_millis(ANALYSIS_TIMEOUT_MS),
+                            ollama.extract_action_items(&full_text, model),
+                        );
+
+                        let (summary_res, actions_res) = tokio::join!(summary_fut, actions_fut);
+
+                        let summary = match summary_res {
+                            Ok(Ok(s)) => Some(s),
+                            Ok(Err(e)) => { tracing::warn!("Auto-summary failed: {}", e); None }
+                            Err(_) => { tracing::warn!("Auto-summary timed out"); None }
+                        };
+                        let action_items: Vec<String> = match actions_res {
+                            Ok(Ok(items)) => items.into_iter().map(|i| i.task).collect(),
+                            Ok(Err(e)) => { tracing::warn!("Auto action items failed: {}", e); vec![] }
+                            Err(_) => { tracing::warn!("Auto action items timed out"); vec![] }
+                        };
+
+                        if summary.is_some() || !action_items.is_empty() {
+                            if let Err(e) = app_for_analysis.emit(
+                                "recording-analysis-ready",
+                                serde_json::json!({
+                                    "recordingId": rec_id_for_analysis,
+                                    "summary": summary,
+                                    "actionItems": action_items,
+                                }),
+                            ) {
+                                tracing::warn!("Failed to emit analysis-ready event: {}", e);
+                            }
+                        }
+                    });
+                }
+
+                let mut db = db_clone.lock().await;
 
                 if let Some(result) = diarization_result {
                     let existing_aliases = match db.get_speaker_aliases(&recording_id_clone) {
@@ -1789,13 +2014,11 @@ async fn list_ollama_cloud_models() -> Result<Vec<String>, String> {
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
 
-    // Log secret status (don't log the key itself!)
     if secret.is_empty() {
         tracing::warn!("list_ollama_cloud_models called but secret is empty");
-        println!("Ollama Cloud: Secret is empty");
         return Ok(vec![]);
     } else {
-        println!("Ollama Cloud: Secret found (len: {})", secret.len());
+        tracing::debug!("list_ollama_cloud_models: secret present (len: {})", secret.len());
     }
 
     let client = llm::OllamaCloudClient::with_api_key(Some(secret));
@@ -1827,6 +2050,90 @@ async fn list_openai_models() -> Result<Vec<String>, String> {
 
     let client = llm::OpenAIClient::with_api_key(Some(secret));
     client.list_models().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_openai_asr_models() -> Result<Vec<String>, String> {
+    let secret = secrets::get_provider_secret("openai")
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default();
+
+    if secret.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let client = llm::OpenAIClient::with_api_key(Some(secret));
+    let mut models: Vec<String> = client
+        .list_models()
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|id| {
+            id.contains("whisper")
+                || id.contains("transcribe")
+                || id.contains("gpt-4o-mini-transcribe")
+                || id.contains("gpt-4o-transcribe")
+        })
+        .collect();
+
+    if models.is_empty() {
+        models = vec![
+            "whisper-1".to_string(),
+            "gpt-4o-mini-transcribe".to_string(),
+            "gpt-4o-transcribe".to_string(),
+        ];
+    }
+
+    models.sort();
+    models.dedup();
+    Ok(models)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ElevenLabsAsrModel {
+    model_id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ElevenLabsAsrModelsResponse {
+    models: Vec<ElevenLabsAsrModel>,
+}
+
+#[tauri::command]
+async fn list_elevenlabs_asr_models() -> Result<Vec<String>, String> {
+    let secret = secrets::get_provider_secret("elevenlabs")
+        .map_err(|e| e.to_string())?
+        .or_else(|| std::env::var("ELEVENLABS_API_KEY").ok())
+        .unwrap_or_default();
+
+    if secret.trim().is_empty() {
+        return Ok(vec![]);
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get("https://api.elevenlabs.io/v1/speech-to-text/models")
+        .header("xi-api-key", secret)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        return Ok(vec!["scribe_v1".to_string()]);
+    }
+
+    let parsed = response
+        .json::<ElevenLabsAsrModelsResponse>()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut models: Vec<String> = parsed.models.into_iter().map(|entry| entry.model_id).collect();
+    if models.is_empty() {
+        models.push("scribe_v1".to_string());
+    }
+    models.sort();
+    models.dedup();
+    Ok(models)
 }
 
 #[tauri::command]
@@ -2130,13 +2437,103 @@ async fn set_default_asr_provider(
     state.asr_manager.set_default_provider(providerType).await;
 
     let mut settings_manager = state.settings_manager.lock().await;
+    let provider_key = asr_provider_to_settings_value(providerType).to_string();
+    let selected_model = state.asr_manager.provider_model_id(providerType).await;
     settings_manager
         .settings_mut()
         .transcription
-        .default_provider = asr_provider_to_settings_value(providerType).to_string();
+        .default_provider = provider_key.clone();
+    settings_manager
+        .settings_mut()
+        .transcription
+        .selected_model_id = selected_model.clone();
+    settings_manager
+        .settings_mut()
+        .transcription
+        .provider_model_ids
+        .insert(provider_key, selected_model);
     settings_manager.save().map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn get_asr_provider_model(
+    state: tauri::State<'_, AppState>,
+    providerType: asr::AsrProviderType,
+) -> Result<String, String> {
+    Ok(state.asr_manager.provider_model_id(providerType).await)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn set_asr_provider_model(
+    state: tauri::State<'_, AppState>,
+    providerType: asr::AsrProviderType,
+    modelId: String,
+) -> Result<(), String> {
+    state
+        .asr_manager
+        .set_provider_model_id(providerType, modelId.clone())
+        .await;
+
+    let provider_key = asr_provider_to_settings_value(providerType).to_string();
+    let mut settings_manager = state.settings_manager.lock().await;
+    settings_manager
+        .settings_mut()
+        .transcription
+        .provider_model_ids
+        .insert(provider_key, modelId.clone());
+
+    if let Some(default_provider) = asr_provider_from_settings_value(
+        &settings_manager.settings().transcription.default_provider,
+    ) {
+        if default_provider == providerType {
+            settings_manager.settings_mut().transcription.selected_model_id = modelId;
+        }
+    }
+
+    settings_manager.save().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn get_asr_provider_model_options(
+    providerType: asr::AsrProviderType,
+) -> Result<Vec<asr::ModelOption>, String> {
+    let options = match providerType {
+        asr::AsrProviderType::OpenAiCloud => {
+            let models = list_openai_asr_models().await.unwrap_or_else(|_| {
+                vec![
+                    "whisper-1".to_string(),
+                    "gpt-4o-mini-transcribe".to_string(),
+                    "gpt-4o-transcribe".to_string(),
+                ]
+            });
+            models
+                .into_iter()
+                .map(|id| asr::ModelOption {
+                    label: id.clone(),
+                    id,
+                })
+                .collect()
+        }
+        asr::AsrProviderType::ElevenLabsScribe => {
+            let models = list_elevenlabs_asr_models()
+                .await
+                .unwrap_or_else(|_| vec!["scribe_v1".to_string()]);
+            models
+                .into_iter()
+                .map(|id| asr::ModelOption {
+                    label: id.clone(),
+                    id,
+                })
+                .collect()
+        }
+        _ => providerType.model_options(),
+    };
+    Ok(options)
 }
 
 #[tauri::command]
@@ -2204,69 +2601,6 @@ async fn get_audit_log(
     db.get_audit_log().map_err(|e| e.to_string())
 }
 
-// Download manager commands
-#[tauri::command]
-#[allow(non_snake_case)]
-async fn download_whisper_model(modelName: String) -> Result<String, String> {
-    let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
-
-    let progress_callback = |progress: download::DownloadProgress| {
-        tracing::info!(
-            "Download progress: {:.1}% ({}/{})",
-            progress.percentage,
-            download::format_bytes(progress.bytes_downloaded),
-            download::format_bytes(progress.total_bytes)
-        );
-    };
-
-    let path = manager
-        .download_whisper_model(&modelName, progress_callback)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    Ok(path.to_string_lossy().to_string())
-}
-
-#[tauri::command]
-async fn list_downloaded_models() -> Result<Vec<download::DownloadedModel>, String> {
-    let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
-
-    manager
-        .list_downloaded_models()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn delete_model(path: String) -> Result<(), String> {
-    let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
-
-    let canonical = canonicalize_existing_absolute_path(&path, "path")?;
-    let models_root = nautilus_data_root()?.join("models");
-    let models_root = models_root.canonicalize().unwrap_or(models_root);
-    if !canonical.starts_with(&models_root) {
-        return Err(format!(
-            "Refusing to delete model outside managed directory '{}': {}",
-            models_root.display(),
-            canonical.display()
-        ));
-    }
-    manager
-        .delete_model(&canonical)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_available_space() -> Result<u64, String> {
-    let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
-
-    manager
-        .get_available_space()
-        .await
-        .map_err(|e| e.to_string())
-}
-
 // Settings commands
 #[tauri::command]
 async fn get_settings(state: tauri::State<'_, AppState>) -> Result<settings::Settings, String> {
@@ -2291,11 +2625,30 @@ async fn save_settings(
     let previous_export_root = previous_settings.privacy.export_root.clone();
 
     let result: Result<(), String> = async {
+        settings.audio.silence_timeout_seconds = normalize_silence_timeout_seconds(
+            settings.audio.silence_timeout_seconds,
+        );
+
+        let default_provider = asr_provider_from_settings_value(&settings.transcription.default_provider)
+            .unwrap_or(asr::AsrProviderType::Whisper);
+        settings.transcription.default_provider =
+            asr_provider_to_settings_value(default_provider).to_string();
+
+        let mut provider_model_map = provider_model_map_from_settings(&settings.transcription);
+        let selected_for_default = normalize_asr_model_id(
+            default_provider,
+            &settings.transcription.selected_model_id,
+        );
+        provider_model_map.insert(default_provider, selected_for_default.clone());
+        settings.transcription.selected_model_id = selected_for_default;
+        settings.transcription.provider_model_ids = provider_model_map_to_settings(&provider_model_map);
+
         let dictation_options = dictation_options_from_settings(&settings);
         state
             .asr_manager
-            .set_selected_model_id(settings.transcription.selected_model_id.clone())
+            .set_provider_model_map(provider_model_map)
             .await;
+        state.asr_manager.set_default_provider(default_provider).await;
         state
             .asr_manager
             .set_allow_whisper_fallback(settings.transcription.allow_whisper_fallback)
@@ -2306,21 +2659,15 @@ async fn save_settings(
             .await;
 
         if settings.transcription.default_provider != previous_default_provider {
-            if let Some(provider_type) =
-                asr_provider_from_settings_value(&settings.transcription.default_provider)
-            {
-                state.asr_manager.set_default_provider(provider_type).await;
-
-                let provider = state.asr_manager.get_provider(provider_type).await;
-                if !provider.is_available() {
-                    let warning = format!(
-                        "{} is not ready — Whisper fallback will be used for transcription",
-                        provider_type.display_name()
-                    );
-                    tracing::warn!("{}", warning);
-                    if let Err(e) = app.emit("asr-provider-warning", &warning) {
-                        tracing::warn!("Failed to emit asr-provider-warning: {}", e);
-                    }
+            let provider = state.asr_manager.get_provider(default_provider).await;
+            if !provider.is_available() {
+                let warning = format!(
+                    "{} is not ready — Whisper fallback will be used for transcription",
+                    default_provider.display_name()
+                );
+                tracing::warn!("{}", warning);
+                if let Err(e) = app.emit("asr-provider-warning", &warning) {
+                    tracing::warn!("Failed to emit asr-provider-warning: {}", e);
                 }
             }
         }
@@ -2374,104 +2721,8 @@ async fn save_settings(
 }
 
 #[tauri::command]
-async fn has_provider_secret(provider: String) -> Result<bool, String> {
-    let normalized = normalize_provider_secret_name(&provider)?;
-    secrets::has_provider_secret(normalized).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn set_provider_secret(provider: String, secret: String) -> Result<(), String> {
-    eprintln!(
-        "!!! BACKEND: set_provider_secret for '{}' (len: {}) !!!",
-        provider,
-        secret.len()
-    );
-    let normalized = normalize_provider_secret_name(&provider)?;
-    secrets::set_provider_secret(normalized, &secret).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn clear_provider_secret(provider: String) -> Result<(), String> {
-    let normalized = normalize_provider_secret_name(&provider)?;
-    secrets::clear_provider_secret(normalized).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 async fn get_security_status(state: tauri::State<'_, AppState>) -> Result<SecurityStatus, String> {
     build_security_status(state.inner()).await
-}
-
-#[tauri::command]
-async fn validate_license() -> license::LicenseInfo {
-    license::validate_license().await
-}
-
-#[tauri::command]
-async fn activate_license(key: String) -> Result<license::LicenseInfo, String> {
-    license::activate_license(&key).await
-}
-
-#[tauri::command]
-async fn deactivate_license() -> Result<(), String> {
-    license::deactivate_license().await
-}
-
-#[tauri::command]
-fn get_entitlement() -> license::Entitlement {
-    license::get_current_entitlement()
-}
-
-// ── Update Commands ───────────────────────────────────────────────────────────
-
-#[tauri::command]
-async fn check_for_updates(app: AppHandle) -> Result<Option<update::UpdateInfo>, String> {
-    let update_service = update::UpdateService::new(app);
-    update_service
-        .check_for_updates()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn install_update(app: AppHandle) -> Result<(), String> {
-    let update_service = update::UpdateService::new(app);
-    update_service
-        .install_update()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_update_status(app: AppHandle) -> Result<update::UpdateStatus, String> {
-    let update_service = update::UpdateService::new(app);
-    Ok(update_service.get_status().await)
-}
-
-#[tauri::command]
-async fn get_update_channel(app: AppHandle) -> Result<update::UpdateChannel, String> {
-    let update_service = update::UpdateService::new(app);
-    Ok(update_service.get_channel().await)
-}
-
-#[tauri::command]
-async fn set_update_channel(app: AppHandle, channel: update::UpdateChannel) -> Result<(), String> {
-    let update_service = update::UpdateService::new(app);
-    update_service
-        .set_channel(channel)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn can_use_beta_channel(app: AppHandle) -> Result<bool, String> {
-    let update_service = update::UpdateService::new(app);
-    Ok(update_service.can_use_beta().await)
-}
-
-#[tauri::command]
-async fn get_update_lock_reason(app: AppHandle) -> Result<Option<String>, String> {
-    let update_service = update::UpdateService::new(app);
-    Ok(update_service.get_lock_reason().await)
 }
 
 #[tauri::command]
@@ -2547,7 +2798,7 @@ async fn export_with_template(
 ) -> Result<models::TemplateExportResponse, String> {
     use export::templates::RenderData;
 
-    let (recording, transcript) = {
+    let (recording, transcript, speaker_aliases) = {
         let db = state.db.lock().await;
         let recording = db
             .get_recording(&recordingId)
@@ -2555,20 +2806,96 @@ async fn export_with_template(
             .ok_or("Recording not found")?;
 
         let transcript = db.get_transcript(&recordingId).map_err(|e| e.to_string())?;
-        (recording, transcript)
+        let speaker_aliases = db
+            .get_speaker_aliases(&recordingId)
+            .unwrap_or_default();
+        (recording, transcript, speaker_aliases)
+    };
+
+    let full_text = transcript
+        .as_ref()
+        .map(|t| t.full_text.clone())
+        .unwrap_or_default();
+
+    // Build SpeakerInfo from transcript segments + DB aliases
+    let speakers: Vec<export::templates::SpeakerInfo> = {
+        use std::collections::BTreeMap;
+        let mut by_speaker: BTreeMap<String, Vec<(f64, f64, String)>> = BTreeMap::new();
+        if let Some(t) = &transcript {
+            for seg in &t.segments {
+                let sid = seg.speaker_id.clone().unwrap_or_else(|| "unknown".to_string());
+                by_speaker
+                    .entry(sid)
+                    .or_default()
+                    .push((seg.start_time, seg.end_time, seg.text.clone()));
+            }
+        }
+        by_speaker
+            .into_iter()
+            .enumerate()
+            .map(|(idx, (speaker_id, segments))| {
+                let name = speaker_aliases
+                    .get(&speaker_id)
+                    .and_then(|(n, _, _)| n.clone())
+                    .unwrap_or_else(|| format!("Speaker {}", idx + 1));
+                export::templates::SpeakerInfo { id: speaker_id, name, segments }
+            })
+            .collect()
+    };
+
+    // Run summary + action items with timeouts; fall back gracefully on error/timeout
+    const TEMPLATE_LLM_TIMEOUT_MS: u64 = 12_000;
+
+    let summary = if !full_text.trim().is_empty() {
+        match tokio::time::timeout(
+            Duration::from_millis(TEMPLATE_LLM_TIMEOUT_MS),
+            run_summary_with_selected_provider(state.inner(), &full_text, None),
+        )
+        .await
+        {
+            Ok(Ok(s)) => Some(s),
+            Ok(Err(e)) => {
+                tracing::warn!("Template summary failed: {}", e);
+                None
+            }
+            Err(_) => {
+                tracing::warn!("Template summary timed out after {}ms", TEMPLATE_LLM_TIMEOUT_MS);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let action_items: Vec<String> = if !full_text.trim().is_empty() {
+        match tokio::time::timeout(
+            Duration::from_millis(TEMPLATE_LLM_TIMEOUT_MS),
+            run_action_items_with_selected_provider(state.inner(), &full_text, None),
+        )
+        .await
+        {
+            Ok(Ok(items)) => items.into_iter().map(|i| i.task).collect(),
+            Ok(Err(e)) => {
+                tracing::warn!("Template action items failed: {}", e);
+                vec![]
+            }
+            Err(_) => {
+                tracing::warn!("Template action items timed out after {}ms", TEMPLATE_LLM_TIMEOUT_MS);
+                vec![]
+            }
+        }
+    } else {
+        vec![]
     };
 
     let render_data = RenderData {
         title: recording.title.clone(),
         date: recording.created_at.format("%Y-%m-%d %H:%M").to_string(),
         duration_seconds: recording.duration as u64,
-        transcript: transcript
-            .as_ref()
-            .map(|t| t.full_text.clone())
-            .unwrap_or_default(),
-        speakers: vec![], // Would populate from diarization
-        action_items: vec![],
-        summary: None,
+        transcript: full_text,
+        speakers,
+        action_items,
+        summary,
     };
 
     let rendered = state
@@ -2672,145 +2999,6 @@ async fn generate_waveform_svg(
 
     let svg = waveform::export_waveform_svg(&data, width, height, "#3b82f6");
     Ok(svg)
-}
-
-// Backup commands
-#[tauri::command]
-async fn list_backups(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<backup::BackupInfo>, String> {
-    let backup_manager = state.backup_manager.lock().await;
-    backup_manager
-        .list_backups()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn create_backup(
-    state: tauri::State<'_, AppState>,
-    data_dir: String,
-) -> Result<backup::BackupInfo, String> {
-    let path = canonicalize_existing_absolute_path(&data_dir, "data_dir")?;
-    let expected_data_root = nautilus_data_root()?;
-    if path != expected_data_root {
-        return Err(format!(
-            "data_dir must be Nautilus data directory '{}', got '{}'",
-            expected_data_root.display(),
-            path.display()
-        ));
-    }
-    let backup_manager = state.backup_manager.lock().await;
-    backup_manager
-        .create_backup(&path)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn create_backup_default(
-    state: tauri::State<'_, AppState>,
-) -> Result<backup::BackupInfo, String> {
-    let data_dir = dirs::data_dir()
-        .ok_or("Could not find data directory")?
-        .join("Nautilus");
-    let backup_manager = state.backup_manager.lock().await;
-    backup_manager
-        .create_backup(&data_dir)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn restore_backup(
-    state: tauri::State<'_, AppState>,
-    backup_id: String,
-    data_dir: String,
-) -> Result<(), String> {
-    let path = canonicalize_existing_absolute_path(&data_dir, "data_dir")?;
-    let expected_data_root = nautilus_data_root()?;
-    if path != expected_data_root {
-        return Err(format!(
-            "data_dir must be Nautilus data directory '{}', got '{}'",
-            expected_data_root.display(),
-            path.display()
-        ));
-    }
-    let backup_manager = state.backup_manager.lock().await;
-    backup_manager
-        .restore_backup(&backup_id, &path)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_backup_config(
-    state: tauri::State<'_, AppState>,
-) -> Result<backup::BackupConfig, String> {
-    let backup_manager = state.backup_manager.lock().await;
-    Ok(backup_manager.config().clone())
-}
-
-#[tauri::command]
-async fn save_backup_config(
-    state: tauri::State<'_, AppState>,
-    config: backup::BackupConfig,
-) -> Result<(), String> {
-    let mut backup_manager = state.backup_manager.lock().await;
-    backup_manager.set_config(config).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn verify_backup_cloud_connection(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let backup_manager = state.backup_manager.lock().await;
-    backup_manager
-        .verify_cloud_connection()
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn get_backup_setup_report(
-    state: tauri::State<'_, AppState>,
-) -> Result<backup::CloudSetupReport, String> {
-    let backup_manager = state.backup_manager.lock().await;
-    Ok(backup_manager.cloud_setup_report().await)
-}
-
-#[tauri::command]
-#[allow(non_snake_case)]
-async fn sync_backup_to_cloud(
-    state: tauri::State<'_, AppState>,
-    backupId: String,
-) -> Result<(), String> {
-    let backup_manager = state.backup_manager.lock().await;
-    backup_manager
-        .sync_backup_to_cloud(&backupId)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-#[allow(non_snake_case)]
-async fn export_backup_archive(
-    state: tauri::State<'_, AppState>,
-    backupId: String,
-    targetPath: String,
-) -> Result<(), String> {
-    let canonical_target = canonicalize_existing_absolute_path(&targetPath, "targetPath")?;
-    if !canonical_target.is_dir() {
-        return Err(format!(
-            "targetPath must be an existing directory, got '{}'",
-            canonical_target.display()
-        ));
-    }
-    ensure_path_in_approved_roots(&canonical_target, "targetPath")?;
-
-    let backup_manager = state.backup_manager.lock().await;
-    backup_manager
-        .export_backup(&backupId, &canonical_target)
-        .await
-        .map_err(|e| e.to_string())
 }
 
 // Intelligent punctuation command
@@ -3053,6 +3241,7 @@ async fn stop_dictation_session_for_session(
             audio_data.clone()
         });
 
+    let transcription_start = std::time::Instant::now();
     let mut result = match state.asr_manager.transcribe_bytes(&processed_audio).await {
         Ok(result) => result,
         Err(error) => {
@@ -3082,29 +3271,51 @@ async fn stop_dictation_session_for_session(
         }
     };
 
-    // Apply AI Formatting (Super Mode) if enabled
+    let transcription_latency_ms = transcription_start.elapsed().as_millis() as u64;
+    tracing::info!("Dictation transcription latency: {}ms", transcription_latency_ms);
+
+    let raw_text = result.text.clone();
+
+    // Apply Smart Format if enabled (runs on all profiles when text meets minimum length)
     let ai_formatting_enabled = state.settings_manager.lock().await.settings().transcription.dictation_ai_formatting;
-    if ai_formatting_enabled && !result.text.trim().is_empty() {
+    let should_run_ai_formatting =
+        ai_formatting_enabled
+            && result.text.chars().count() >= DICTATION_AI_FORMAT_MIN_CHARS;
+
+    if should_run_ai_formatting && !result.text.trim().is_empty() {
         emit_dictation_state(
             app,
             "transcribing", // Or maybe a new state like "formatting", but "transcribing" keeps the UI spinner going
             None,
-            Some("Applying AI formatting..."),
+            Some("Applying Smart Format..."),
             None,
             Some(session_id),
             Some(stop_reason),
             None,
         );
-        match run_dictation_formatting_with_selected_provider(state, &result.text).await {
-            Ok(formatted_text) => {
-                tracing::info!("AI Formatting applied successfully");
+        match tokio::time::timeout(
+            Duration::from_millis(DICTATION_AI_FORMAT_TIMEOUT_MS),
+            run_dictation_formatting_with_selected_provider(state, &result.text),
+        )
+        .await
+        {
+            Ok(Ok(formatted_text)) => {
+                tracing::info!("Smart Format applied successfully");
                 result.text = formatted_text.trim().to_string();
             }
-            Err(e) => {
-                tracing::warn!("AI Formatting failed, falling back to raw transcript: {}", e);
+            Ok(Err(e)) => {
+                tracing::warn!("Smart Format failed, falling back to raw transcript: {}", e);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Smart Format timed out after {}ms, using raw transcript",
+                    DICTATION_AI_FORMAT_TIMEOUT_MS
+                );
             }
         }
     }
+
+    result.text = sanitize_dictation_output(&result.text, &raw_text);
 
     let mut pasted = false;
     let mut copied = false;
@@ -3132,7 +3343,8 @@ async fn stop_dictation_session_for_session(
             "actualProvider": result.actual_provider,
             "fallbackUsed": result.fallback_used,
             "fallbackReason": result.fallback_reason,
-            "modelId": result.model_id
+            "modelId": result.model_id,
+            "latencyMs": transcription_latency_ms
         }),
     ) {
         tracing::warn!("Failed to emit dictation text event: {}", error);
@@ -3682,17 +3894,19 @@ fn show_main_window(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn normalize_provider_secret_name(provider: &str) -> Result<&'static str, String> {
+pub(crate) fn normalize_provider_secret_name(provider: &str) -> Result<&'static str, String> {
     let normalized = provider.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "openai" => Ok("openai"),
+        "elevenlabs" | "eleven_labs" => Ok("elevenlabs"),
         "anthropic" => Ok("anthropic"),
         "gemini" => Ok("gemini"),
         "deepseek" => Ok("deepseek"),
         "ollama-cloud" | "ollama_cloud" | "ollamacloud" => Ok("ollama-cloud"),
+        "mistral" => Ok("mistral"),
         "ollama" => Err("Local Ollama does not require a stored API key".to_string()),
         _ => Err(format!(
-            "Unsupported provider '{}'. Expected one of: openai, anthropic, gemini, deepseek, ollama-cloud",
+            "Unsupported provider '{}'. Expected one of: openai, elevenlabs, anthropic, gemini, deepseek, ollama-cloud, mistral",
             provider
         )),
     }
@@ -3940,14 +4154,110 @@ fn get_frontmost_app_name() -> Option<String> {
     None
 }
 
-fn generate_default_dictation_prompt(active_app: Option<String>, clipboard_text: Option<String>) -> String {
-    let mut base = "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
-        Fix any grammar, punctuation, and capitalization errors. Remove filler words (ums, ahs). 
-        Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
-        Just output the corrected text directly.".to_string();
+fn normalize_sentence_for_compare(sentence: &str) -> String {
+    sentence
+        .trim()
+        .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
+        .to_lowercase()
+}
 
+fn looks_repetitive_hallucination(text: &str) -> bool {
+    let mut sentence_counts = std::collections::HashMap::<String, usize>::new();
+    let mut sentence_total = 0usize;
+
+    for sentence in text.split_inclusive(|c| c == '.' || c == '!' || c == '?') {
+        let normalized = normalize_sentence_for_compare(sentence);
+        if normalized.is_empty() {
+            continue;
+        }
+        *sentence_counts.entry(normalized).or_insert(0) += 1;
+        sentence_total += 1;
+    }
+
+    if sentence_total < 4 {
+        return false;
+    }
+
+    let max_repeat = sentence_counts.values().copied().max().unwrap_or(0);
+    max_repeat >= 3 && (max_repeat as f32 / sentence_total as f32) >= 0.6
+}
+
+fn collapse_repeated_sentence_runs(text: &str) -> String {
+    let mut collapsed: Vec<&str> = Vec::new();
+    let mut last_normalized = String::new();
+
+    for sentence in text.split_inclusive(|c| c == '.' || c == '!' || c == '?') {
+        let trimmed = sentence.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized = normalize_sentence_for_compare(trimmed);
+        if normalized.is_empty() {
+            continue;
+        }
+        if normalized == last_normalized {
+            continue;
+        }
+        collapsed.push(trimmed);
+        last_normalized = normalized;
+    }
+
+    if collapsed.is_empty() {
+        text.trim().to_string()
+    } else {
+        collapsed.join(" ")
+    }
+}
+
+fn dedupe_sentence_inventory(text: &str) -> String {
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut kept: Vec<&str> = Vec::new();
+
+    for sentence in text.split_inclusive(|c| c == '.' || c == '!' || c == '?') {
+        let trimmed = sentence.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let normalized = normalize_sentence_for_compare(trimmed);
+        if normalized.is_empty() {
+            continue;
+        }
+
+        if seen.insert(normalized) {
+            kept.push(trimmed);
+        }
+    }
+
+    if kept.is_empty() {
+        text.trim().to_string()
+    } else {
+        kept.join(" ")
+    }
+}
+
+fn sanitize_dictation_output(candidate: &str, fallback: &str) -> String {
+    let candidate_was_repetitive = looks_repetitive_hallucination(candidate);
+
+    let cleaned = collapse_repeated_sentence_runs(candidate);
+    if cleaned.trim().is_empty() {
+        return fallback.trim().to_string();
+    }
+
+    if candidate_was_repetitive || looks_repetitive_hallucination(&cleaned) {
+        if !fallback.trim().is_empty() && !looks_repetitive_hallucination(fallback) {
+            return collapse_repeated_sentence_runs(fallback);
+        }
+
+        return dedupe_sentence_inventory(&cleaned);
+    }
+
+    cleaned
+}
+
+fn generate_default_dictation_prompt(active_app: Option<String>) -> String {
     if let Some(app_name) = active_app {
-        base = format!(
+        format!(
             "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
             The user is currently dictating into the application: '{}'. 
             Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). 
@@ -3955,20 +4265,14 @@ fn generate_default_dictation_prompt(active_app: Option<String>, clipboard_text:
             Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
             Just output the corrected text directly.",
             app_name
-        );
+        )
+    } else {
+        "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
+        Fix any grammar, punctuation, and capitalization errors. Remove filler words (ums, ahs). 
+        Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
+        Just output the corrected text directly."
+            .to_string()
     }
-
-    if let Some(clip) = clipboard_text {
-        base = format!(
-            "{}
-
-For additional context, the user's clipboard currently contains the following text (they may be referencing it or replying to it):
-\"{}\"",
-            base, clip
-        );
-    }
-
-    base
 }
 
 async fn run_dictation_formatting_with_selected_provider(
@@ -3984,34 +4288,24 @@ async fn run_dictation_formatting_with_selected_provider(
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| provider.default_model());
 
-    let active_app = tauri::async_runtime::spawn_blocking(|| {
-        get_frontmost_app_name()
-    })
+    let active_app = tauri::async_runtime::spawn_blocking(|| get_frontmost_app_name())
     .await
     .unwrap_or(None);
     
     let settings = state.settings_manager.lock().await.settings().clone();
-    
-        #[cfg(target_os = "macos")]
-    let clipboard_text = read_clipboard_text().ok().filter(|s| !s.trim().is_empty() && s.len() < 5000);
-    #[cfg(not(target_os = "macos"))]
-    let clipboard_text: Option<String> = None;
 
     let system_prompt = if let Some(custom_prompt) = &settings.transcription.dictation_custom_prompt {
         if !custom_prompt.trim().is_empty() {
-            let mut base = custom_prompt.clone();
+            let mut base = custom_prompt.trim().to_string();
             if let Some(app_name) = &active_app {
                 base = format!("{}\n\n[Context: User is dictating into application '{}']", base, app_name);
             }
-            if let Some(clip) = &clipboard_text {
-                base = format!("{}\n\n[Context: User's clipboard currently contains: '{}']", base, clip);
-            }
             base
         } else {
-            generate_default_dictation_prompt(active_app, clipboard_text)
+            generate_default_dictation_prompt(active_app)
         }
     } else {
-        generate_default_dictation_prompt(active_app, clipboard_text)
+        generate_default_dictation_prompt(active_app)
     };
 
     match provider {
@@ -4587,33 +4881,26 @@ pub fn run() {
             recording_overlay_state: Arc::new(StdMutex::new(RecordingOverlayState::default())),
             streaming_transcriber,
             vault_state: Arc::new(Mutex::new(VaultRuntimeState::default())),
+            recording_stream_stop: Arc::new(AtomicBool::new(false)),
         })
         .setup(|app| {
             let state = app.state::<AppState>();
             tauri::async_runtime::block_on(async {
-                let (configured_provider, selected_model_id, allow_whisper_fallback, silence_skip) = {
+                let (configured_provider, allow_whisper_fallback, silence_skip, provider_model_map) =
+                {
                     let settings_manager = state.settings_manager.lock().await;
+                    let transcription = &settings_manager.settings().transcription;
                     (
-                        settings_manager.settings().transcription.default_provider.clone(),
-                        settings_manager
-                            .settings()
-                            .transcription
-                            .selected_model_id
-                            .clone(),
-                        settings_manager
-                            .settings()
-                            .transcription
-                            .allow_whisper_fallback,
-                        settings_manager
-                            .settings()
-                            .transcription
-                            .silence_skip_enabled,
+                        transcription.default_provider.clone(),
+                        transcription.allow_whisper_fallback,
+                        transcription.silence_skip_enabled,
+                        provider_model_map_from_settings(transcription),
                     )
                 };
 
                 state
                     .asr_manager
-                    .set_selected_model_id(selected_model_id)
+                    .set_provider_model_map(provider_model_map)
                     .await;
                 state
                     .asr_manager
@@ -4849,6 +5136,11 @@ pub fn run() {
             get_asr_runtime_diagnostics,
             get_default_asr_provider,
             set_default_asr_provider,
+            get_asr_provider_model,
+            set_asr_provider_model,
+            get_asr_provider_model_options,
+            list_openai_asr_models,
+            list_elevenlabs_asr_models,
             download_asr_models,
             benchmark_asr_providers,
             benchmark_asr_providers_bytes,
@@ -4868,6 +5160,7 @@ pub fn run() {
             run_diarization,
             get_speakers,
             rename_speaker,
+            list_diarization_models,
             is_diarization_model_available,
             download_diarization_model,
             get_settings,
@@ -5138,6 +5431,21 @@ mod tests {
         assert_eq!(validated.len(), 1);
         assert_eq!(validated[0].recording_id.as_deref(), Some("r1"));
         assert_eq!(validated[0].certainty, Some(1.0));
+    }
+
+    #[test]
+    fn sanitize_dictation_output_collapses_repeated_runs() {
+        let repeated = "Testing: 1, 2, 3. Testing: 1, 2, 3. Testing: 1, 2, 3.";
+        let sanitized = sanitize_dictation_output(repeated, repeated);
+        assert_eq!(sanitized, "Testing: 1, 2, 3.");
+    }
+
+    #[test]
+    fn sanitize_dictation_output_prefers_non_repetitive_fallback() {
+        let candidate = "Testing: 1, 2, 3. Testing: 1, 2, 3. Testing: 1, 2, 3. Testing: 1, 2, 3.";
+        let fallback = "testing 1,2,3 this is a test.";
+        let sanitized = sanitize_dictation_output(candidate, fallback);
+        assert_eq!(sanitized, "testing 1,2,3 this is a test.");
     }
 }
 
@@ -5459,6 +5767,53 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
     }
 }
 
+fn normalize_silence_timeout_seconds(value: f32) -> f32 {
+    value.clamp(MIN_SILENCE_TIMEOUT_SECONDS, MAX_SILENCE_TIMEOUT_SECONDS)
+}
+
+fn normalize_asr_model_id(provider_type: asr::AsrProviderType, model_id: &str) -> String {
+    let trimmed = model_id.trim();
+    if trimmed.is_empty() {
+        provider_type.default_model_id().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn provider_model_map_from_settings(
+    transcription: &settings::TranscriptionSettings,
+) -> HashMap<asr::AsrProviderType, String> {
+    let mut map: HashMap<asr::AsrProviderType, String> = asr::AsrProviderType::all()
+        .into_iter()
+        .map(|pt| (pt, pt.default_model_id().to_string()))
+        .collect();
+
+    for (key, model_id) in &transcription.provider_model_ids {
+        if let Some(pt) = asr_provider_from_settings_value(key) {
+            let normalized = normalize_asr_model_id(pt, model_id);
+            map.insert(pt, normalized);
+        }
+    }
+
+    if let Some(default_provider) =
+        asr_provider_from_settings_value(&transcription.default_provider)
+    {
+        let normalized =
+            normalize_asr_model_id(default_provider, &transcription.selected_model_id);
+        map.insert(default_provider, normalized);
+    }
+
+    map
+}
+
+fn provider_model_map_to_settings(
+    map: &HashMap<asr::AsrProviderType, String>,
+) -> HashMap<String, String> {
+    map.iter()
+        .map(|(pt, model_id)| (asr_provider_to_settings_value(*pt).to_string(), model_id.clone()))
+        .collect()
+}
+
 fn template_format_extension(format: &export::templates::ExportFormat) -> &'static str {
     match format {
         export::templates::ExportFormat::Markdown => "md",
@@ -5490,7 +5845,7 @@ fn compute_wav_duration_seconds(audio_path: &str) -> i64 {
     }
 }
 
-fn canonicalize_existing_absolute_path(raw_path: &str, label: &str) -> Result<PathBuf, String> {
+pub(crate) fn canonicalize_existing_absolute_path(raw_path: &str, label: &str) -> Result<PathBuf, String> {
     let trimmed = raw_path.trim();
     if trimmed.is_empty() {
         return Err(format!("{} cannot be empty", label));
@@ -5512,7 +5867,7 @@ fn canonicalize_existing_absolute_path(raw_path: &str, label: &str) -> Result<Pa
         .map_err(|e| format!("Failed to resolve {} '{}': {}", label, trimmed, e))
 }
 
-fn nautilus_data_root() -> Result<PathBuf, String> {
+pub(crate) fn nautilus_data_root() -> Result<PathBuf, String> {
     let root = dirs::data_dir()
         .ok_or("Could not find data directory")?
         .join("Nautilus");
@@ -5564,7 +5919,7 @@ fn approved_path_roots() -> Result<Vec<PathBuf>, String> {
     Ok(roots)
 }
 
-fn ensure_path_in_approved_roots(path: &Path, label: &str) -> Result<(), String> {
+pub(crate) fn ensure_path_in_approved_roots(path: &Path, label: &str) -> Result<(), String> {
     let roots = approved_path_roots()?;
     if roots.iter().any(|root| path.starts_with(root)) {
         return Ok(());
@@ -5728,6 +6083,30 @@ fn send_native_paste_key() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn schedule_clipboard_restore(previous: String, inserted_text: String) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(
+            DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS,
+        ));
+
+        match read_clipboard_text() {
+            Ok(current) => {
+                // Only restore if clipboard still contains the injected dictation text.
+                // This avoids clobbering user clipboard changes made right after dictation.
+                if current != inserted_text {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+
+        if let Err(error) = copy_to_clipboard(&previous) {
+            tracing::warn!("Failed to restore previous clipboard after paste success: {}", error);
+        }
+    });
+}
+
 fn paste_text_systemwide(text: &str) -> PasteOutcome {
     tracing::info!("paste_text_systemwide called with {} chars", text.len());
 
@@ -5763,12 +6142,12 @@ fn paste_text_systemwide(text: &str) -> PasteOutcome {
             };
         }
 
-        let paste_result = send_native_paste_key();
-        let restore_result = if let Some(previous) = original_clipboard {
-            copy_to_clipboard(&previous)
-        } else {
-            Ok(())
-        };
+        let paste_result = send_native_paste_key().or_else(|first_error| {
+            std::thread::sleep(std::time::Duration::from_millis(45));
+            send_native_paste_key().map_err(|retry_error| {
+                format!("{} (retry failed: {})", first_error, retry_error)
+            })
+        });
 
         if let Err(error) = paste_result {
             tracing::error!("Paste key simulation failed: {}", error);
@@ -5776,11 +6155,13 @@ fn paste_text_systemwide(text: &str) -> PasteOutcome {
                 "Copied to clipboard. macOS blocked keystroke paste ({}). Grant Accessibility in System Settings > Privacy & Security > Accessibility.",
                 error
             );
-            if let Err(restore_error) = restore_result {
-                tracing::warn!(
-                    "Failed to restore previous clipboard after paste failure: {}",
-                    restore_error
-                );
+            if let Some(previous) = original_clipboard {
+                if let Err(restore_error) = copy_to_clipboard(&previous) {
+                    tracing::warn!(
+                        "Failed to restore previous clipboard after paste failure: {}",
+                        restore_error
+                    );
+                }
             }
             return PasteOutcome {
                 pasted: false,
@@ -5789,8 +6170,8 @@ fn paste_text_systemwide(text: &str) -> PasteOutcome {
             };
         }
 
-        if let Err(restore_error) = restore_result {
-            tracing::warn!("Failed to restore previous clipboard: {}", restore_error);
+        if let Some(previous) = original_clipboard {
+            schedule_clipboard_restore(previous, text.to_string());
         }
 
         tracing::info!("Paste successful - text inserted at cursor");

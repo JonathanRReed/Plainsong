@@ -19,6 +19,7 @@ interface DictationTextReadyEvent {
   fallbackUsed?: boolean;
   fallbackReason?: string | null;
   modelId?: string;
+  latencyMs?: number;
 }
 
 export function DictationView() {
@@ -36,6 +37,7 @@ export function DictationView() {
   const [lastModelId, setLastModelId] = useState<string | null>(null);
   const [pasteStatus, setPasteStatus] = useState<string | null>(null);
   const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [saveToInbox, setSaveToInbox] = useState(true);
   const [dictationProfile, setDictationProfile] = useState<"speed" | "accuracy">("speed");
   const [defaultProjectId, setDefaultProjectId] = useState("inbox");
@@ -143,6 +145,9 @@ export function DictationView() {
         }
         if (payload?.modelId) {
           setLastModelId(payload.modelId);
+        }
+        if (payload?.latencyMs !== undefined) {
+          setLatencyMs(payload.latencyMs);
         }
         if (payload?.fallbackUsed) {
           setFallbackNotice(
@@ -363,11 +368,19 @@ export function DictationView() {
                 <div className="p-4 bg-muted rounded-lg">
                   <p className="whitespace-pre-wrap">{transcribedText}</p>
                 </div>
-                {(lastProvider || lastModelId || fallbackNotice) && (
-                  <div className="mt-3 space-y-1 text-xs text-muted-foreground">
-                    {lastProvider && <p>Provider: {lastProvider}</p>}
-                    {lastModelId && <p>Model: {lastModelId}</p>}
-                    {fallbackNotice && <p className="text-amber-500">{fallbackNotice}</p>}
+                {(lastProvider || lastModelId || fallbackNotice || latencyMs !== null) && (
+                  <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                    {latencyMs !== null && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-active/10 text-active font-medium">
+                        <Zap className="h-3 w-3" />
+                        {latencyMs < 1000
+                          ? `${latencyMs}ms`
+                          : `${(latencyMs / 1000).toFixed(1)}s`}
+                      </span>
+                    )}
+                    {lastProvider && <span>Provider: {lastProvider}</span>}
+                    {lastModelId && <span>Model: {lastModelId}</span>}
+                    {fallbackNotice && <span className="text-amber-500">{fallbackNotice}</span>}
                   </div>
                 )}
               </CardContent>

@@ -1,6 +1,7 @@
 use super::{
     AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult,
 };
+use crate::secrets;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -8,12 +9,22 @@ use std::path::Path;
 
 const SCRIBE_API_URL: &str = "https://api.elevenlabs.io/v1/speech-to-text";
 
-pub struct ElevenLabsScribeProvider;
+pub struct ElevenLabsScribeProvider {
+    model_id: String,
+}
 
 #[derive(Deserialize)]
 struct ScribeResponse {
     text: Option<String>,
     words: Option<Vec<ScribeWord>>,
+}
+
+fn sanitize_elevenlabs_asr_model_id(model_id: &str) -> &'static str {
+    match model_id {
+        "scribe_v1" => "scribe_v1",
+        "scribe_v1_experimental" => "scribe_v1_experimental",
+        _ => "scribe_v1",
+    }
 }
 
 #[derive(Deserialize)]
@@ -25,19 +36,27 @@ struct ScribeWord {
 
 impl Default for ElevenLabsScribeProvider {
     fn default() -> Self {
-        Self
+        Self {
+            model_id: "scribe_v1".to_string(),
+        }
     }
 }
 
 impl ElevenLabsScribeProvider {
-    pub fn new() -> Self {
-        Self
+    pub fn new(selected_model_id: Option<&str>) -> Self {
+        Self {
+            model_id: sanitize_elevenlabs_asr_model_id(selected_model_id.unwrap_or("scribe_v1"))
+                .to_string(),
+        }
     }
 
     fn api_key() -> Option<String> {
-        std::env::var("ELEVENLABS_API_KEY")
-            .ok()
-            .filter(|k| !k.is_empty())
+        match secrets::get_provider_secret("elevenlabs") {
+            Ok(Some(secret)) if !secret.trim().is_empty() => Some(secret),
+            _ => std::env::var("ELEVENLABS_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty()),
+        }
     }
 
     async fn transcribe_impl(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
@@ -50,7 +69,7 @@ impl ElevenLabsScribeProvider {
             .mime_str("audio/wav")?;
         let form = reqwest::multipart::Form::new()
             .part("audio", part)
-            .text("model_id", "scribe_v1");
+            .text("model_id", self.model_id.clone());
 
         let client = reqwest::Client::new();
         let response = client
@@ -96,8 +115,8 @@ impl ElevenLabsScribeProvider {
             language: "en".to_string(),
             confidence: 0.95,
             processing_time_ms: elapsed,
-            model_name: "ElevenLabs Scribe v1".to_string(),
-            model_id: "scribe_v1".to_string(),
+            model_name: format!("ElevenLabs Scribe ({})", self.model_id),
+            model_id: self.model_id.clone(),
             requested_provider: AsrProviderType::ElevenLabsScribe,
             actual_provider: AsrProviderType::ElevenLabsScribe,
             fallback_used: false,

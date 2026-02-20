@@ -55,9 +55,9 @@ const PROVIDER_BUNDLES: Array<{
   },
   {
     providerType: "parakeet",
-    label: "NVIDIA Parakeet v3",
-    description: "Downloads the local NeMo model bundle for Parakeet TDT 0.6B v3.",
-    indicator: "parakeet-tdt-0.6b-v3.nemo",
+    label: "NVIDIA Parakeet TDT 0.6B",
+    description: "Downloads encoder.onnx + tokens.txt from the sherpa-onnx community export (native ONNX, no Python).",
+    indicator: "parakeet/encoder.onnx",
   },
   {
     providerType: "canary",

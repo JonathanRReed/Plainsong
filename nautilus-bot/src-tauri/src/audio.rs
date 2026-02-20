@@ -1,4 +1,5 @@
 pub mod enhance;
+pub mod mel;
 pub mod system_capture;
 pub mod utils;
 pub mod vad;
@@ -60,6 +61,10 @@ struct ActiveRecordingSession {
     capture_handle: Option<JoinHandle<()>>,
     mixed_capture: Option<MixedAudioCapture>,
     waveform_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
+    /// Shared queue for streaming preview: capture threads push chunks here
+    pub streaming_queue: Arc<crossbeam::queue::SegQueue<Vec<f32>>>,
+    /// Sample rate used by this recording
+    pub sample_rate: u32,
 }
 
 #[allow(dead_code)]
@@ -79,6 +84,10 @@ impl AudioCapture {
 
         let host = cpal::default_host();
 
+        let default_vad_config = VadConfig::default();
+        let preprocessor = AudioPreprocessor::new(16000);
+        let vad = VoiceActivityDetector::new(default_vad_config);
+
         Self {
             is_dictating: Arc::new(AtomicBool::new(false)),
             dictation_buffer: Arc::new(crossbeam::queue::SegQueue::new()),
@@ -88,8 +97,8 @@ impl AudioCapture {
             recordings_dir,
             host,
             active_recording: None,
-            vad: None,
-            preprocessor: None,
+            vad: Some(vad),
+            preprocessor: Some(preprocessor),
             vad_enabled: true,
             noise_suppression_enabled: true,
         }
@@ -323,6 +332,16 @@ impl AudioCapture {
             (samples.len() as f64 / self.dictation_sample_rate as f64 * 1000.0) as i64
         );
 
+        // Apply noise suppression before encoding if enabled
+        if self.noise_suppression_enabled {
+            if let Some(preprocessor) = &mut self.preprocessor {
+                preprocessor.auto_calibrate(&samples, self.dictation_sample_rate);
+                if let Err(e) = preprocessor.process(&mut samples) {
+                    tracing::warn!("Noise suppression failed, using raw audio: {}", e);
+                }
+            }
+        }
+
         boost_quiet_audio(&mut samples);
         ensure_min_duration(&mut samples, self.dictation_sample_rate, 1.1);
 
@@ -378,6 +397,9 @@ impl AudioCapture {
             options.system_audio
         );
 
+        let streaming_queue: Arc<crossbeam::queue::SegQueue<Vec<f32>>> =
+            Arc::new(crossbeam::queue::SegQueue::new());
+
         // Use MixedAudioCapture if system audio is requested
         if options.system_audio {
             let mut mixed_capture = MixedAudioCapture::new();
@@ -406,6 +428,8 @@ impl AudioCapture {
                 capture_handle: None,
                 mixed_capture: Some(mixed_capture),
                 waveform_buffer,
+                streaming_queue,
+                sample_rate: 44100,
             });
         } else {
             // Standard microphone-only recording
@@ -415,6 +439,7 @@ impl AudioCapture {
             let capture_stop_flag = Arc::new(AtomicBool::new(true));
             let capture_flag = Arc::clone(&capture_stop_flag);
 
+            let stream_queue_clone = Arc::clone(&streaming_queue);
             let capture_handle = std::thread::spawn(move || {
                 let host = cpal::default_host();
                 let Some(device) = host.default_input_device() else {
@@ -426,6 +451,8 @@ impl AudioCapture {
                     return;
                 };
 
+                let sq_f32 = Arc::clone(&stream_queue_clone);
+                let sq_i16 = Arc::clone(&stream_queue_clone);
                 let err_fn = |err| tracing::error!("Stream error: {}", err);
                 let stream_result = match config.sample_format() {
                     cpal::SampleFormat::F32 => device.build_input_stream(
@@ -443,6 +470,7 @@ impl AudioCapture {
                                 }
                             }
 
+                            sq_f32.push(chunk.clone());
                             let _ = samples_sender.send(chunk);
                         },
                         err_fn,
@@ -465,6 +493,7 @@ impl AudioCapture {
                                 }
                             }
 
+                            sq_i16.push(chunk.clone());
                             let _ = samples_sender.send(chunk);
                         },
                         err_fn,
@@ -519,6 +548,8 @@ impl AudioCapture {
                 capture_handle: Some(capture_handle),
                 mixed_capture: None,
                 waveform_buffer,
+                streaming_queue,
+                sample_rate,
             });
         }
 
@@ -570,6 +601,19 @@ impl AudioCapture {
         tracing::info!("Recording SHA256: {}", hash);
 
         Ok((path.to_string_lossy().to_string(), hash))
+    }
+
+    /// Returns the streaming sample queue and sample rate for the active recording.
+    /// The caller should drain this queue periodically and feed samples to StreamingTranscriber.
+    pub fn get_streaming_queue(
+        &self,
+        recording_id: &str,
+    ) -> Option<(Arc<crossbeam::queue::SegQueue<Vec<f32>>>, u32)> {
+        let session = self.active_recording.as_ref()?;
+        if session.id != recording_id {
+            return None;
+        }
+        Some((Arc::clone(&session.streaming_queue), session.sample_rate))
     }
 
     pub fn get_waveform_data(&self, recording_id: &str) -> Option<Vec<f32>> {

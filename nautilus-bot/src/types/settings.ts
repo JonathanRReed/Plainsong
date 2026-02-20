@@ -5,6 +5,7 @@ export interface Settings {
   export: ExportSettings;
   privacy: PrivacySettings;
   shortcuts: KeyboardShortcuts;
+  updates: UpdateSettings;
   defaultTemplate: string;
   theme: "light" | "dark" | "system";
 }
@@ -24,6 +25,7 @@ export interface AudioSettings {
 export interface TranscriptionSettings {
   defaultProvider: string;
   selectedModelId: string;
+  providerModelIds?: Record<string, string>;
   allowWhisperFallback: boolean;
   autoTranscribe: boolean;
   enableDiarization: boolean;
@@ -31,6 +33,7 @@ export interface TranscriptionSettings {
   language: string | null;
   numSpeakers: number;
   speakerNamingMethod: "auto" | "numbered" | "manual";
+  diarizationModelId?: string;
   silenceSkipEnabled: boolean;
   dictationPasteToCursor: boolean;
   dictationPushToTalk: boolean;
@@ -43,6 +46,7 @@ export interface TranscriptionSettings {
   dictationProjectId: string;
   memorySearchMode: "fts" | "ollama_embeddings";
   embeddingModel: string;
+  enableAutoAnalysis: boolean;
 }
 
 export interface UiSettings {
@@ -78,6 +82,13 @@ export interface PrivacySettings {
   exportRoot: string | null;
   vaultInitialized: boolean;
   vaultSalt: string | null;
+}
+
+export interface UpdateSettings {
+  channel: "stable" | "beta";
+  autoCheck: boolean;
+  lastCheckAt: string | null;
+  lastSeenVersion: string | null;
 }
 
 export interface KeyboardShortcuts {

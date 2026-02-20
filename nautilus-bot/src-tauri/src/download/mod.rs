@@ -284,7 +284,7 @@ impl DownloadManager {
         let url = "https://huggingface.co/Wespeaker/wespeaker-ecapa-tdnn512-LM/resolve/main/voxceleb_ECAPA512_LM.onnx";
 
         tracing::info!("Downloading diarization model from {}", url);
-        println!("Starting UNVERIFIED download of diarization model...");
+        tracing::info!("Starting unverified download of diarization model (HF ETag bypassed)");
 
         // Use unverified download because HF S3 ETag often matches LFS pointer, not content
         self.download_file_unverified(url, &destination, _progress_callback)

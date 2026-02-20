@@ -132,6 +132,10 @@ vi.mock("@/lib/tauri", () => ({
   listDownloadedModels: vi.fn(async () => []),
   downloadWhisperModel: vi.fn(async () => { }),
   isDiarizationModelAvailable: vi.fn(async () => true),
+  downloadDiarizationModel: vi.fn(async () => {}),
+  listDiarizationModels: vi.fn(async () => [
+    { id: "ecapa_tdnn_speaker", label: "ECAPA-TDNN 512", description: "Recommended", installed: true },
+  ]),
   migrateToEncryptedStorage: vi.fn(),
   openPermissionSettings: vi.fn(),
   saveSettings: vi.fn(async () => { }),

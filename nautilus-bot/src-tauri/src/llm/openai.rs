@@ -162,16 +162,16 @@ impl OpenAIClient {
 
     /// Summarize meeting
     pub async fn summarize(&self, transcript: &str, model: &str) -> Result<String> {
-        let system_prompt = "You are a highly capable AI meeting assistant (similar to Granola or SuperWhisper). \
-Your task is to provide a comprehensive, well-structured, and highly readable summary of the following meeting transcript. \
+        let system_prompt = "You are Nautilus, a precise and forensic meeting intelligence assistant. \
+Your task is to produce a comprehensive, well-structured, and highly readable summary of the following meeting transcript. \
 \
-Please organize the summary into the following sections:\
+Organize the summary into the following sections:\
 1. **Executive Summary**: A brief 2-3 sentence overview of the meeting's main purpose and conclusion.\
 2. **Key Discussion Points**: Bullet points detailing the most important topics discussed, preserving context and nuance.\
 3. **Decisions Made**: A clear list of any final decisions or agreements reached during the meeting.\
 4. **Action Items**: A list of tasks assigned, including who is responsible and any mentioned deadlines.\
 \
-Ensure the tone is professional, objective, and easy to skim.";
+Ensure the tone is professional, objective, and easy to skim. Cite transcript time references where relevant.";
 
         self.generate(model, transcript, Some(system_prompt)).await
     }

@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Application settings
@@ -84,7 +85,7 @@ impl Default for AudioSettings {
             capture_microphone: true,
             noise_suppression: true,
             voice_activity_detection: true,
-            silence_timeout_seconds: 3.0,
+            silence_timeout_seconds: 300.0,
             auto_gain_control: true,
             manual_gain_db: 0.0,
         }
@@ -99,6 +100,8 @@ pub struct TranscriptionSettings {
     pub default_provider: String,
     /// Selected model identifier for local model backends
     pub selected_model_id: String,
+    /// Provider-specific model identifiers (keyed by provider value, e.g. "whisper")
+    pub provider_model_ids: HashMap<String, String>,
     /// If true, fallback to Whisper when selected provider fails
     pub allow_whisper_fallback: bool,
     /// Auto-transcribe after recording
@@ -113,15 +116,17 @@ pub struct TranscriptionSettings {
     pub num_speakers: usize,
     /// Speaker naming method: auto (infer from speech), numbered, manual
     pub speaker_naming_method: String,
+    /// Selected diarization model id
+    pub diarization_model_id: String,
     /// Skip silence segments during transcription (Pro/Friends Club feature)
     pub silence_skip_enabled: bool,
     /// Dictation: Paste text to cursor automatically
     pub dictation_paste_to_cursor: bool,
     /// Dictation: Use Push-to-Talk (start on press, stop on release)
     pub dictation_push_to_talk: bool,
-    /// Dictation: AI Formatting (Super Mode)
+    /// Dictation: Smart Format — LLM polishes text before insert
     pub dictation_ai_formatting: bool,
-    /// Custom system prompt for Dictation AI Formatting
+    /// Custom system prompt for Smart Format
     pub dictation_custom_prompt: Option<String>,
     /// Custom system prompt for Meeting Summaries
     pub meeting_custom_prompt: Option<String>,
@@ -137,6 +142,8 @@ pub struct TranscriptionSettings {
     pub memory_search_mode: String,
     /// Ollama embedding model name (e.g. "nomic-embed-text")
     pub embedding_model: String,
+    /// Auto-run Nautilus-style summary + action items after recording transcription
+    pub enable_auto_analysis: bool,
 }
 
 impl Default for TranscriptionSettings {
@@ -144,6 +151,7 @@ impl Default for TranscriptionSettings {
         Self {
             default_provider: "whisper".to_string(),
             selected_model_id: "base.en".to_string(),
+            provider_model_ids: HashMap::new(),
             allow_whisper_fallback: false,
             auto_transcribe: true,
             enable_diarization: true,
@@ -151,6 +159,7 @@ impl Default for TranscriptionSettings {
             language: None,
             num_speakers: 0,
             speaker_naming_method: "auto".to_string(),
+            diarization_model_id: "ecapa_tdnn_speaker".to_string(),
             silence_skip_enabled: false,
             dictation_paste_to_cursor: true,
             dictation_push_to_talk: false,
@@ -163,6 +172,7 @@ impl Default for TranscriptionSettings {
             dictation_project_id: "inbox".to_string(),
             memory_search_mode: "fts".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
+            enable_auto_analysis: true,
         }
     }
 }

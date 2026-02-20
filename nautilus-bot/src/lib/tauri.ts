@@ -5,6 +5,7 @@ import type {
   Transcript,
   AuditLogEntry,
   AsrProviderInfo,
+  AsrModelOption,
   AsrRuntimeDiagnostics,
   AsrProviderType,
   BenchmarkResult,
@@ -218,6 +219,31 @@ export async function setDefaultAsrProvider(providerType: AsrProviderType): Prom
   await invoke("set_default_asr_provider", { providerType });
 }
 
+export async function getAsrProviderModel(providerType: AsrProviderType): Promise<string> {
+  return await invoke("get_asr_provider_model", { providerType });
+}
+
+export async function setAsrProviderModel(
+  providerType: AsrProviderType,
+  modelId: string
+): Promise<void> {
+  await invoke("set_asr_provider_model", { providerType, modelId });
+}
+
+export async function getAsrProviderModelOptions(
+  providerType: AsrProviderType
+): Promise<AsrModelOption[]> {
+  return await invoke("get_asr_provider_model_options", { providerType });
+}
+
+export async function listOpenAiAsrModels(): Promise<string[]> {
+  return await invoke("list_openai_asr_models");
+}
+
+export async function listElevenlabsAsrModels(): Promise<string[]> {
+  return await invoke("list_elevenlabs_asr_models");
+}
+
 export async function downloadAsrModels(providerType: AsrProviderType): Promise<void> {
   await invoke("download_asr_models", { providerType });
 }
@@ -387,12 +413,23 @@ export async function runDiarization(recordingId: string): Promise<DiarizationRe
   return await invoke("run_diarization", { recordingId });
 }
 
-export async function isDiarizationModelAvailable(): Promise<boolean> {
-  return await invoke("is_diarization_model_available");
+export interface DiarizationModelOption {
+  id: string;
+  label: string;
+  description: string;
+  installed: boolean;
 }
 
-export async function downloadDiarizationModel(): Promise<void> {
-  return await invoke("download_diarization_model");
+export async function listDiarizationModels(): Promise<DiarizationModelOption[]> {
+  return await invoke("list_diarization_models");
+}
+
+export async function isDiarizationModelAvailable(modelId?: string): Promise<boolean> {
+  return await invoke("is_diarization_model_available", { modelId });
+}
+
+export async function downloadDiarizationModel(modelId?: string): Promise<void> {
+  return await invoke("download_diarization_model", { modelId });
 }
 
 export async function getSpeakers(recordingId: string): Promise<Speaker[]> {

@@ -9,7 +9,13 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { AsrBenchmarkEntry, AsrProviderInfo, AsrProviderType, BenchmarkResult } from "@/types";
+import type {
+  AsrBenchmarkEntry,
+  AsrModelOption,
+  AsrProviderInfo,
+  AsrProviderType,
+  BenchmarkResult,
+} from "@/types";
 import {
   Download,
   Check,
@@ -20,6 +26,7 @@ import {
   BarChart3,
   FileAudio,
   Zap,
+  CloudLightning,
   Moon,
   Waves,
   Mic
@@ -65,7 +72,25 @@ export function AsrProviderManager({
   const loadProviders = async () => {
     try {
       const data = await invoke<AsrProviderInfo[]>("get_asr_providers");
-      setProviders(data);
+      const hydrated = await Promise.all(
+        data.map(async (provider) => {
+          try {
+            const modelOptions = await invoke<AsrModelOption[]>(
+              "get_asr_provider_model_options",
+              {
+                providerType: provider.providerType,
+              }
+            );
+            return {
+              ...provider,
+              modelOptions: modelOptions.length > 0 ? modelOptions : provider.modelOptions,
+            };
+          } catch {
+            return provider;
+          }
+        })
+      );
+      setProviders(hydrated);
     } catch (error) {
       console.error("Failed to load ASR providers:", error);
     }
@@ -135,6 +160,29 @@ export function AsrProviderManager({
     }
   };
 
+  const handleModelChange = async (providerType: AsrProviderType, modelId: string) => {
+    try {
+      await invoke("set_asr_provider_model", { providerType, modelId });
+      setProviders((prev) =>
+        prev.map((provider) =>
+          provider.providerType === providerType
+            ? {
+              ...provider,
+              selectedModelId: modelId,
+            }
+            : provider
+        )
+      );
+      await loadProviders();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setProviderErrors((previous) => ({
+        ...previous,
+        [providerType]: message,
+      }));
+    }
+  };
+
   const runBenchmark = async () => {
     const selectedFile = benchmarkFileInputRef.current?.files?.[0];
     if (!selectedFile) {
@@ -183,6 +231,9 @@ export function AsrProviderManager({
         return <Waves className="h-5 w-5" />;
       case "voxtral":
         return <Mic className="h-5 w-5" />;
+      case "openai_cloud":
+      case "elevenlabs_scribe":
+        return <CloudLightning className="h-5 w-5" />;
       default:
         return <Cpu className="h-5 w-5" />;
     }
@@ -246,15 +297,23 @@ export function AsrProviderManager({
   const providerSetupCommand = (providerType: AsrProviderType): string => {
     switch (providerType) {
       case "parakeet":
-        return "python -m pip install 'nemo_toolkit[asr]' torch";
+        return "Use the Download button to fetch encoder.onnx + tokens.txt (no Python needed)";
       case "canary":
+        return "Use the Download button to fetch the Whisper Large V3 Turbo model (no Python needed)";
       case "distil_whisper":
+        return "Use the Download button to fetch the Distil-Whisper Large v3.5 model (no Python needed)";
       case "moonshine":
-      case "vibevoice":
+        return "Use the Download button to fetch the Moonshine ONNX model (no Python needed)";
       case "voxtral":
-        return "python -m pip install torch transformers";
+        return "Add a Mistral API key in Settings → API Keys, or use the Download button to pre-cache the local model";
+      case "vibevoice":
+        return "VibeVoice native integration coming soon — select a different provider for now";
+      case "elevenlabs_scribe":
+        return "Add an ElevenLabs API key in Settings → API Keys";
+      case "openai_cloud":
+        return "Add an OpenAI API key in Settings → API Keys";
       default:
-        return "No runtime setup required for Whisper";
+        return "Use the Download button to fetch the model (no Python needed)";
     }
   };
 
@@ -290,6 +349,8 @@ export function AsrProviderManager({
                     ? provider.runtimeMessage ?? "Runtime setup required."
                     : null;
                 const providerError = providerErrors[provider.providerType];
+                const modelOptions = provider.modelOptions ?? [];
+                const selectedModelId = provider.selectedModelId || modelOptions[0]?.id || "";
                 return (
                   <Card
                     key={provider.providerType}
@@ -372,6 +433,29 @@ export function AsrProviderManager({
                         </div>
                       )}
 
+                      <div className="space-y-2">
+                        <p className="text-xs text-muted-foreground">Model</p>
+                        {modelOptions.length > 1 ? (
+                          <select
+                            className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                            value={selectedModelId}
+                            onChange={(event) => {
+                              void handleModelChange(provider.providerType, event.target.value);
+                            }}
+                          >
+                            {modelOptions.map((option) => (
+                              <option key={option.id} value={option.id}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
+                            {(modelOptions[0]?.label ?? selectedModelId) || "Default model"}
+                          </div>
+                        )}
+                      </div>
+
                       <div className="flex items-center justify-between pt-2">
                         <div className="flex items-center gap-2">
                           <Badge variant="outline" className="text-xs">
@@ -421,7 +505,7 @@ export function AsrProviderManager({
                                 variant="outline"
                                 onClick={() => void copySetupCommand(provider.providerType)}
                               >
-                                Copy setup command
+                                Copy setup info
                               </Button>
                               <Button size="sm" variant="outline" onClick={() => void loadProviders()}>
                                 Re-check runtime
@@ -454,7 +538,7 @@ export function AsrProviderManager({
                           {selection.reason === "runtime_unavailable" && (
                             <>
                               <p className="text-amber-100">
-                                Suggested setup: <span className="font-mono">{providerSetupCommand(provider.providerType)}</span>
+                                How to enable: <span className="font-mono">{providerSetupCommand(provider.providerType)}</span>
                               </p>
                               {provider.runtimeDetails?.pythonPath ? (
                                 <p className="text-amber-100">

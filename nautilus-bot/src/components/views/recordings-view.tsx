@@ -24,6 +24,7 @@ import {
   isDiarizationModelAvailable,
 } from "@/lib/tauri";
 import type { Recording, Transcript } from "@/types";
+import { listen } from "@tauri-apps/api/event";
 import {
   AlertCircle,
   BarChart3,
@@ -59,12 +60,68 @@ export function RecordingsView() {
   const [renameValue, setRenameValue] = useState("");
   const lastRecordingState = useRef(false);
 
+  // Live streaming transcript state
+  type StreamChunk = { text: string; startTime: number; isPartial: boolean };
+  const [streamChunks, setStreamChunks] = useState<StreamChunk[]>([]);
+  const streamScrollRef = useRef<HTMLDivElement>(null);
+
+  // Nautilus auto-analysis results keyed by recording ID
+  type AutoAnalysis = { summary: string | null; actionItems: string[] };
+  const [analysisCache, setAnalysisCache] = useState<Record<string, AutoAnalysis>>({});
+
   useEffect(() => {
     if (lastRecordingState.current && !isRecording) {
       refetch();
+      setStreamChunks([]);
     }
     lastRecordingState.current = isRecording;
   }, [isRecording, refetch]);
+
+  // Listen for recording-analysis-ready events (auto Nautilus-style summary)
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ recordingId: string; summary?: string | null; actionItems?: string[] }>(
+      "recording-analysis-ready",
+      (event) => {
+        const { recordingId, summary = null, actionItems = [] } = event.payload;
+        setAnalysisCache((prev) => ({ ...prev, [recordingId]: { summary, actionItems } }));
+      }
+    ).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
+
+  // Subscribe to live streaming transcript events while recording
+  useEffect(() => {
+    if (!isRecording || !recordingId) {
+      return;
+    }
+    let unlisten: (() => void) | undefined;
+    listen<{ recordingId: string; text: string; startTime: number; isPartial: boolean }>(
+      "recording-transcription-stream",
+      (event) => {
+        if (event.payload.recordingId !== recordingId) return;
+        setStreamChunks((prev) => {
+          const chunk: StreamChunk = {
+            text: event.payload.text,
+            startTime: event.payload.startTime,
+            isPartial: event.payload.isPartial,
+          };
+          return [...prev.filter((c) => !c.isPartial), chunk];
+        });
+        setTimeout(() => {
+          streamScrollRef.current?.scrollTo({
+            top: streamScrollRef.current.scrollHeight,
+            behavior: "smooth",
+          });
+        }, 50);
+      }
+    ).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [isRecording, recordingId]);
 
   const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean }) => {
     const startedId = await startMeeting({ ...options, projectId: "default" });
@@ -256,6 +313,30 @@ export function RecordingsView() {
                   isRecording={isRecording}
                   height={56}
                 />
+                {streamChunks.length > 0 && (
+                  <div className="mt-3 border-t border-active/20 pt-3">
+                    <p className="text-xs font-medium text-active mb-1.5">Live Transcript</p>
+                    <div
+                      ref={streamScrollRef}
+                      className="max-h-32 overflow-y-auto text-sm text-muted-foreground space-y-1 pr-1"
+                    >
+                      {streamChunks.map((chunk, i) => {
+                        const minutes = Math.floor(chunk.startTime / 60);
+                        const seconds = Math.floor(chunk.startTime % 60);
+                        const ts = `${minutes}:${seconds.toString().padStart(2, "0")}`;
+                        return (
+                          <p
+                            key={i}
+                            className={chunk.isPartial ? "opacity-50 italic" : "opacity-100"}
+                          >
+                            <span className="text-xs text-active/60 mr-1.5 font-mono">{ts}</span>
+                            {chunk.text}
+                          </p>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </CardContent>
             </Card>
           )}
@@ -504,6 +585,35 @@ export function RecordingsView() {
             <TabsContent value="analysis" className="flex-1 overflow-hidden">
               {selectedRecording ? (
                 <ScrollArea className="h-full pr-2">
+                  {analysisCache[selectedRecording.id] && (
+                    <div className="space-y-4 mb-6">
+                      {analysisCache[selectedRecording.id].summary && (
+                        <div className="rounded-lg border border-active/30 bg-active/5 p-4 space-y-2">
+                          <p className="text-xs font-semibold text-active uppercase tracking-wide">
+                            Nautilus Summary
+                          </p>
+                          <p className="text-sm leading-relaxed whitespace-pre-wrap">
+                            {analysisCache[selectedRecording.id].summary}
+                          </p>
+                        </div>
+                      )}
+                      {analysisCache[selectedRecording.id].actionItems.length > 0 && (
+                        <div className="rounded-lg border p-4 space-y-2">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                            Action Items
+                          </p>
+                          <ul className="space-y-1.5">
+                            {analysisCache[selectedRecording.id].actionItems.map((item, i) => (
+                              <li key={i} className="flex items-start gap-2 text-sm">
+                                <span className="mt-1 h-2 w-2 rounded-full bg-active shrink-0" />
+                                {item}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <AiAnalysisPanel recordingId={selectedRecording.id} />
                 </ScrollArea>
               ) : (

@@ -62,8 +62,7 @@ impl OllamaCloudClient {
             .await
             .context("Failed to read Ollama Cloud response body")?;
 
-        // Debug log for user visibility
-        println!("Ollama Cloud Response: {}", text);
+        tracing::debug!("Ollama Cloud models response received ({} bytes)", text.len());
 
         let data: serde_json::Value = serde_json::from_str(&text)
             .with_context(|| format!("Failed to parse Ollama Cloud response: {}", text))?;
