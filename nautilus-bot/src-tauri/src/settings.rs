@@ -119,6 +119,8 @@ pub struct TranscriptionSettings {
     pub dictation_paste_to_cursor: bool,
     /// Dictation: Use Push-to-Talk (start on press, stop on release)
     pub dictation_push_to_talk: bool,
+    /// Dictation: AI Formatting (Super Mode)
+    pub dictation_ai_formatting: bool,
     /// Save raw transcript without formatting
     pub save_raw_transcript: bool,
     /// Persist dictation outputs into project storage.
@@ -148,6 +150,7 @@ impl Default for TranscriptionSettings {
             silence_skip_enabled: false,
             dictation_paste_to_cursor: true,
             dictation_push_to_talk: false,
+            dictation_ai_formatting: false,
             save_raw_transcript: false,
             dictation_save_to_inbox: true,
             dictation_profile: "speed".to_string(),

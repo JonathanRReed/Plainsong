@@ -34,6 +34,7 @@ export interface TranscriptionSettings {
   silenceSkipEnabled: boolean;
   dictationPasteToCursor: boolean;
   dictationPushToTalk: boolean;
+  dictationAiFormatting: boolean;
   saveRawTranscript: boolean;
   dictationSaveToInbox: boolean;
   dictationProfile: "speed" | "accuracy";

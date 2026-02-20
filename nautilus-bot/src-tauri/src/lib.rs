@@ -3046,7 +3046,7 @@ async fn stop_dictation_session_for_session(
     let dictation_options = state.dictation_start_options.lock().await.clone();
     let dictation_model_id = state.asr_manager.selected_model_id().await;
 
-    let result = match state.asr_manager.transcribe_bytes(&audio_data).await {
+    let mut result = match state.asr_manager.transcribe_bytes(&audio_data).await {
         Ok(result) => result,
         Err(error) => {
             let message = error.to_string();
@@ -3074,6 +3074,30 @@ async fn stop_dictation_session_for_session(
             return Err(message);
         }
     };
+
+    // Apply AI Formatting (Super Mode) if enabled
+    let ai_formatting_enabled = state.settings_manager.lock().await.settings().transcription.dictation_ai_formatting;
+    if ai_formatting_enabled && !result.text.trim().is_empty() {
+        emit_dictation_state(
+            app,
+            "transcribing", // Or maybe a new state like "formatting", but "transcribing" keeps the UI spinner going
+            None,
+            Some("Applying AI formatting..."),
+            None,
+            Some(session_id),
+            Some(stop_reason),
+            None,
+        );
+        match run_dictation_formatting_with_selected_provider(state, &result.text).await {
+            Ok(formatted_text) => {
+                tracing::info!("AI Formatting applied successfully");
+                result.text = formatted_text.trim().to_string();
+            }
+            Err(e) => {
+                tracing::warn!("AI Formatting failed, falling back to raw transcript: {}", e);
+            }
+        }
+    }
 
     let mut pasted = false;
     let mut copied = false;
@@ -3885,6 +3909,104 @@ async fn run_analysis_with_selected_provider(
             error
         )
     })
+}
+
+#[cfg(target_os = "macos")]
+fn get_frontmost_app_name() -> Option<String> {
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to get name of first application process whose frontmost is true")
+        .output()
+        .ok()?;
+        
+    if output.status.success() {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_frontmost_app_name() -> Option<String> {
+    None
+}
+
+async fn run_dictation_formatting_with_selected_provider(
+    state: &AppState,
+    transcript: &str,
+) -> Result<String, String> {
+    let (provider, remote_processing_enabled, _, settings_model) =
+        selected_analysis_provider_and_settings(state).await;
+    enforce_remote_provider_policy(provider.clone(), remote_processing_enabled)?;
+
+    let selected_model = settings_model
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| provider.default_model());
+
+    let active_app = get_frontmost_app_name();
+    
+    let system_prompt = if let Some(app_name) = active_app {
+        format!(
+            "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
+            The user is currently dictating into the application: '{}'. 
+            Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). 
+            Fix any grammar, punctuation, and capitalization errors. Remove filler words (ums, ahs). 
+            Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
+            Just output the corrected text directly.",
+            app_name
+        )
+    } else {
+        "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
+        Fix any grammar, punctuation, and capitalization errors. Remove filler words (ums, ahs). 
+        Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
+        Just output the corrected text directly.".to_string()
+    };
+
+    match provider {
+        AnalysisProvider::Ollama => state
+            .ollama_client
+            .generate(selected_model, &format!("{}\n\n{}", system_prompt, transcript))
+            .await
+            .map_err(|e| e.to_string()),
+        AnalysisProvider::OllamaCloud => {
+            let api_key = provider_secret_for(provider.clone())?;
+            llm::OllamaCloudClient::with_api_key(Some(api_key))
+                .generate(selected_model, &format!("{}\n\n{}", system_prompt, transcript))
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::OpenAi => {
+            let api_key = provider_secret_for(provider.clone())?;
+            llm::OpenAIClient::with_api_key(Some(api_key))
+                .generate(selected_model, transcript, Some(&system_prompt))
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::Anthropic => {
+            let api_key = provider_secret_for(provider.clone())?;
+            llm::AnthropicClient::with_api_key(Some(api_key))
+                .generate(selected_model, transcript, Some(&system_prompt))
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::Gemini => {
+            let api_key = provider_secret_for(provider.clone())?;
+            llm::GeminiClient::with_api_key(Some(api_key))
+                .generate(selected_model, transcript, Some(&system_prompt))
+                .await
+                .map_err(|e| e.to_string())
+        }
+        AnalysisProvider::DeepSeek => {
+            let api_key = provider_secret_for(provider.clone())?;
+            llm::DeepSeekClient::with_api_key(Some(api_key))
+                .generate(selected_model, transcript, Some(&system_prompt))
+                .await
+                .map_err(|e| e.to_string())
+        }
+    }
 }
 
 async fn run_summary_with_selected_provider(

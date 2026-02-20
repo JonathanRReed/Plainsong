@@ -845,6 +845,27 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
+                        <Label>AI Formatting (Super Mode)</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Use the default LLM to format and correct dictation before pasting
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationAiFormatting}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationAiFormatting: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
                         <Label>Type text at cursor automatically</Label>
                         <p className="text-sm text-muted-foreground">
                           Automatically paste dictation text into active window
@@ -1148,6 +1169,27 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
+                        <Label>AI Formatting (Super Mode)</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Use the default LLM to format and correct dictation before pasting
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationAiFormatting}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationAiFormatting: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
                         <Label>Type text at cursor automatically</Label>
                         <p className="text-sm text-muted-foreground">
                           Automatically paste dictation text into active window
@@ -1327,6 +1369,27 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             transcription: {
                               ...settings.transcription,
                               dictationPushToTalk: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>AI Formatting (Super Mode)</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Use the default LLM to format and correct dictation before pasting
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationAiFormatting}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationAiFormatting: checked,
                             },
                           })
                         }
@@ -1685,6 +1748,27 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             transcription: {
                               ...settings.transcription,
                               dictationPushToTalk: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>AI Formatting (Super Mode)</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Use the default LLM to format and correct dictation before pasting
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationAiFormatting}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationAiFormatting: checked,
                             },
                           })
                         }
@@ -2235,6 +2319,27 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             transcription: {
                               ...settings.transcription,
                               dictationPushToTalk: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>AI Formatting (Super Mode)</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Use the default LLM to format and correct dictation before pasting
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationAiFormatting}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationAiFormatting: checked,
                             },
                           })
                         }
