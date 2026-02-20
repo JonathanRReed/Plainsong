@@ -3977,7 +3977,11 @@ async fn run_dictation_formatting_with_selected_provider(
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| provider.default_model());
 
-    let active_app = get_frontmost_app_name();
+    let active_app = tauri::async_runtime::spawn_blocking(|| {
+        get_frontmost_app_name()
+    })
+    .await
+    .unwrap_or(None);
     
     let settings = state.settings_manager.lock().await.settings().clone();
     
