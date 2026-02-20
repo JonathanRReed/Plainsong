@@ -176,13 +176,13 @@ describe("SettingsView performance behavior", () => {
     expect(tauri.getPermissionDiagnostics).not.toHaveBeenCalled();
     expect(tauri.getSecurityStatus).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Security" }));
+    fireEvent.click(screen.getByText("Security & Privacy"));
     await waitFor(() => {
       expect(tauri.getPermissionDiagnostics).toHaveBeenCalledTimes(1);
       expect(tauri.getSecurityStatus).toHaveBeenCalledTimes(1);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Storage" }));
+    fireEvent.click(screen.getByText("Data & Retention"));
     await waitFor(() => {
       expect(tauri.listBackups).toHaveBeenCalledTimes(1);
     });
@@ -194,9 +194,12 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("Configure Nautilus preferences");
     vi.useFakeTimers();
+    // Get a switch that actually triggers updateSettings (not the advanced toggle)
+    // The "Show in menu bar" switch (minimizeToTray) is in the General tab.
+    // It's the 2nd switch in the general tab (1st is Advanced Toggle).
     const switches = screen.getAllByRole("switch");
-    fireEvent.click(switches[0]);
-    fireEvent.click(switches[0]);
+    fireEvent.click(switches[1]);
+    fireEvent.click(switches[1]);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(400);
@@ -212,8 +215,8 @@ describe("SettingsView performance behavior", () => {
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
     await screen.findByText("Configure Nautilus preferences");
-    fireEvent.click(screen.getByRole("button", { name: "Security" }));
-    await screen.findByText("Security and Privacy");
+    fireEvent.click(screen.getByText("Data & Retention"));
+    await screen.findByText("Data lifecycle, backups, and cloud sync controls");
 
     const exportRootInput = screen.getByPlaceholderText("/Users/you/Documents/Nautilus");
     fireEvent.change(exportRootInput, {

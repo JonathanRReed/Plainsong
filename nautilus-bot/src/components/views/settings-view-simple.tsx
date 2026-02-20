@@ -111,6 +111,22 @@ function markSettingsPerf(markName: string) {
   console.debug(`[perf] ${markName}`);
 }
 
+
+function AdvancedToggle({ 
+  checked, 
+  onCheckedChange 
+}: { 
+  checked: boolean; 
+  onCheckedChange: (checked: boolean) => void 
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <Label className="text-xs text-muted-foreground font-normal cursor-pointer">Advanced settings</Label>
+      <Switch checked={checked} onCheckedChange={onCheckedChange} className="scale-75 data-[state=checked]:bg-amber-600" />
+    </div>
+  );
+}
+
 type SettingsViewProps = {
   onLicenseChange?: (info: LicenseInfo) => void;
 };
@@ -154,6 +170,15 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const [licenseActivating, setLicenseActivating] = useState(false);
   const [licenseError, setLicenseError] = useState<string | null>(null);
   const [capturingShortcut, setCapturingShortcut] = useState<ShortcutFieldKey | null>(null);
+  const [advancedTabs, setAdvancedTabs] = useState<Record<TabId, boolean>>({
+    asr: false,
+    general: false,
+    security: false,
+    storage: false,
+    ai: false,
+    updates: false,
+    license: false,
+  });
   const mountedRef = useRef(true);
   const saveSchedulerRef = useRef<SettingsSaveScheduler>({
     nextVersion: 0,
@@ -621,9 +646,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     () => [
       { id: "asr" as TabId, label: "ASR Models", icon: Mic },
       { id: "general" as TabId, label: "General", icon: Monitor },
-      { id: "security" as TabId, label: "Security", icon: Shield },
-      { id: "storage" as TabId, label: "Storage", icon: Database },
-      { id: "ai" as TabId, label: "AI & Keys", icon: Key },
+      { id: "security" as TabId, label: "Security & Privacy", icon: Shield },
+      { id: "storage" as TabId, label: "Data & Retention", icon: Database },
+      { id: "ai" as TabId, label: "AI & Models", icon: Key },
       { id: "updates" as TabId, label: "Updates", icon: RefreshCw },
       { id: "license" as TabId, label: "License", icon: Shield },
     ],
@@ -672,24 +697,386 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
           </div>
 
           {activeTab === "asr" && (
-            <AsrProviderManager
-              selectedModelId={settings.transcription.selectedModelId}
-              onSelectedModelChange={(modelId) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    selectedModelId: modelId,
-                  },
-                })
-              }
-            />
-          )}
-
-          {activeTab === "general" && (
             <Card>
               <CardHeader>
-                <CardTitle>Application Preferences</CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle>Audio & Transcription</CardTitle>
+                  <AdvancedToggle checked={advancedTabs.asr} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, asr: c }))} />
+                </div>
+                <CardDescription>Configure local ASR models, diarization, and audio capture</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                {/* Basic Settings */}
+                <div className="space-y-2">
+                  <Label>Default local ASR model</Label>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={settings.transcription.selectedModelId}
+                    onChange={(e) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          selectedModelId: e.target.value,
+                        },
+                      })
+                    }
+                  >
+                    {LOCAL_ASR_MODEL_GROUPS.map((group) => (
+                      <optgroup key={group.label} label={group.label}>
+                        {group.options.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    English-only models are faster. Use large-v3 for multilingual transcription.
+                  </p>
+                </div>
+
+                <div className="space-y-3">
+                  <Label className="text-sm text-muted-foreground">Quick download — Top 5 ASR models</Label>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {QUICK_DOWNLOAD_ASR_MODELS.map((model) => {
+                      const isDownloaded = downloadedModels.some(
+                        (d) => d.name.toLowerCase().includes(model.id.toLowerCase()) ||
+                          d.name.toLowerCase().includes(model.id.replace(".en", "-en").toLowerCase())
+                      );
+                      const isDownloading = downloadingModel === model.id;
+
+                      return (
+                        <div key={model.id} className="flex items-center justify-between p-2 rounded border bg-muted/30">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium truncate">{model.name}</p>
+                            <p className="text-xs text-muted-foreground">{model.description} · {model.size}</p>
+                          </div>
+                          {isDownloaded ? (
+                            <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0 ml-2" />
+                          ) : isDownloading ? (
+                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground shrink-0 ml-2" />
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="shrink-0 ml-2 h-7 px-2"
+                              onClick={() => void handleDownloadModel(model.id)}
+                            >
+                              <Download className="h-3 w-3" />
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Downloaded models: {downloadedModels.length} · Toggle advanced settings to manage all providers
+                  </p>
+                </div>
+
+                <div className="h-px bg-border" />
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label>Automatic speaker naming</Label>
+                    <p className="text-sm text-muted-foreground">
+                      Run diarization and label speakers after transcription
+                    </p>
+                  </div>
+                  {diarizationAvailable ? (
+                    <Switch
+                      checked={settings.transcription.enableDiarization}
+                      onCheckedChange={(checked) =>
+                        void updateSettings({
+                          ...settings,
+                          transcription: { ...settings.transcription, enableDiarization: checked },
+                        })
+                      }
+                    />
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={diarizationDownloading}
+                      onClick={async () => {
+                        setDiarizationDownloading(true);
+                        try {
+                          await downloadDiarizationModel();
+                          setDiarizationAvailable(true);
+                          updateSettings({
+                            ...settings,
+                            transcription: { ...settings.transcription, enableDiarization: true },
+                          });
+                        } catch (e) {
+                          const msg = e instanceof Error ? e.message : String(e);
+                          setError(`Download failed: ${msg}`);
+                        } finally {
+                          setDiarizationDownloading(false);
+                        }
+                      }}
+                    >
+                      {diarizationDownloading ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Downloading Model...
+                        </>
+                      ) : (
+                        <>
+                          <Download className="mr-2 h-4 w-4" />
+                          Download Model (~25MB)
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </div>
+
+                {settings.transcription.enableDiarization && diarizationAvailable && (
+                  <div className="rounded-md border border-border bg-muted/30 p-3 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium">Diarization model</p>
+                        <p className="text-xs text-muted-foreground">Wespeaker ECAPA-TDNN 512 (speaker embedding)</p>
+                      </div>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                        <CheckCircle2 className="h-3 w-3" /> Installed
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {settings.transcription.enableDiarization && (
+                  <div className="space-y-2">
+                    <Label>Speaker naming method</Label>
+                    <select
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                      value={settings.transcription.speakerNamingMethod}
+                      onChange={(e) =>
+                        void updateSettings({
+                          ...settings,
+                          transcription: {
+                            ...settings.transcription,
+                            speakerNamingMethod: e.target.value as "auto" | "numbered" | "manual",
+                          },
+                        })
+                      }
+                    >
+                      <option value="auto">Auto-detect from speech (recommended)</option>
+                      <option value="numbered">Numbered (Speaker 1, Speaker 2, ...)</option>
+                      <option value="manual">Manual only (set names yourself)</option>
+                    </select>
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <Label>Transcription language</Label>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={settings.transcription.language ?? ""}
+                    onChange={(e) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          language: e.target.value || null,
+                        },
+                      })
+                    }
+                  >
+                    <option value="">Auto-detect</option>
+                    <option value="en">English</option>
+                    <option value="es">Spanish</option>
+                    <option value="fr">French</option>
+                    <option value="de">German</option>
+                    <option value="it">Italian</option>
+                    <option value="pt">Portuguese</option>
+                    <option value="ja">Japanese</option>
+                    <option value="ko">Korean</option>
+                    <option value="zh">Chinese</option>
+                    <option value="ru">Russian</option>
+                    <option value="ar">Arabic</option>
+                    <option value="hi">Hindi</option>
+                  </select>
+                </div>
+
+                {advancedTabs.asr && (
+                  <div className="pt-4 border-t space-y-5">
+                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Allow Whisper fallback</Label>
+                        <p className="text-sm text-muted-foreground">
+                          If selected provider fails, fallback to Whisper
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.allowWhisperFallback}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              allowWhisperFallback: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label className="flex items-center gap-1.5">
+                          Automatic silence skip
+                          {!isFeatureAllowed(licenseInfo, "autoDiarization") && (
+                            <span className="text-xs text-amber-600">Pro</span>
+                          )}
+                        </Label>
+                        <p className="text-sm text-muted-foreground">
+                          Remove silent segments before transcription
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.silenceSkipEnabled}
+                        disabled={!isFeatureAllowed(licenseInfo, "autoDiarization")}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: { ...settings.transcription, silenceSkipEnabled: checked },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Voice activity detection</Label>
+                        <p className="text-sm text-muted-foreground">Auto-stop after silence timeout</p>
+                      </div>
+                      <Switch
+                        checked={settings.audio.voiceActivityDetection}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            audio: { ...settings.audio, voiceActivityDetection: checked },
+                          })
+                        }
+                      />
+                    </div>
+
+                    {settings.audio.voiceActivityDetection && (
+                      <div className="space-y-2">
+                        <Label>Silence timeout (minutes)</Label>
+                        <Input
+                          type="number"
+                          min={0.1}
+                          max={5}
+                          step={0.1}
+                          value={Math.round((settings.audio.silenceTimeoutSeconds / 60) * 10) / 10}
+                          onBlur={handleSettingsTextBlur}
+                          onKeyDown={handleSettingsTextKeyDown}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                            const minutes = Math.max(0.1, Math.min(5, Number(e.target.value) || 0.05));
+                            void updateSettings({
+                              ...settings,
+                              audio: {
+                                ...settings.audio,
+                                silenceTimeoutSeconds: Math.round(minutes * 60),
+                              },
+                            });
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Noise suppression</Label>
+                        <p className="text-sm text-muted-foreground">Reduce background noise</p>
+                      </div>
+                      <Switch
+                        checked={settings.audio.noiseSuppression}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            audio: { ...settings.audio, noiseSuppression: checked },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Auto gain control</Label>
+                        <p className="text-sm text-muted-foreground">Automatically adjust microphone levels</p>
+                      </div>
+                      <Switch
+                        checked={settings.audio.autoGainControl}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            audio: { ...settings.audio, autoGainControl: checked },
+                          })
+                        }
+                      />
+                    </div>
+
+                    {!settings.audio.autoGainControl && (
+                      <div className="space-y-2">
+                        <Label>Manual gain ({settings.audio.manualGainDb > 0 ? "+" : ""}{settings.audio.manualGainDb.toFixed(1)} dB)</Label>
+                        <input
+                          type="range"
+                          min={-20}
+                          max={20}
+                          step={0.5}
+                          value={settings.audio.manualGainDb}
+                          className="w-full"
+                          onChange={(e) =>
+                            void updateSettings({
+                              ...settings,
+                              audio: { ...settings.audio, manualGainDb: Number(e.target.value) },
+                            })
+                          }
+                        />
+                        <div className="flex justify-between text-xs text-muted-foreground">
+                          <span>-20 dB</span>
+                          <span>0 dB</span>
+                          <span>+20 dB</span>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="space-y-3 pt-2">
+                      <Label>ASR Provider Management</Label>
+                      <div className="p-4 border rounded-lg bg-muted/20">
+                        <AsrProviderManager
+                          selectedModelId={settings.transcription.selectedModelId}
+                          onSelectedModelChange={(modelId) =>
+                            void updateSettings({
+                              ...settings,
+                              transcription: {
+                                ...settings.transcription,
+                                selectedModelId: modelId,
+                              },
+                            })
+                          }
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+                    {activeTab === "general" && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <CardTitle>Application Preferences</CardTitle>
+                  <AdvancedToggle checked={advancedTabs.general} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, general: c }))} />
+                </div>
                 <CardDescription>Core interface and control defaults</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
@@ -762,379 +1149,15 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
-                    <Label>Voice activity detection</Label>
-                    <p className="text-sm text-muted-foreground">Auto-stop after silence timeout</p>
+                    <Label>Show in menu bar</Label>
+                    <p className="text-sm text-muted-foreground">Keep app accessible in the system tray</p>
                   </div>
                   <Switch
-                    checked={settings.audio.voiceActivityDetection}
+                    checked={settings.ui.minimizeToTray}
                     onCheckedChange={(checked) =>
                       void updateSettings({
                         ...settings,
-                        audio: { ...settings.audio, voiceActivityDetection: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                {settings.audio.voiceActivityDetection && (
-                  <div className="space-y-2">
-                    <Label>Silence timeout (minutes)</Label>
-                    <Input
-                      type="number"
-                      min={0.1}
-                      max={5}
-                      step={0.1}
-                      value={Math.round((settings.audio.silenceTimeoutSeconds / 60) * 10) / 10}
-                      onBlur={handleSettingsTextBlur}
-                      onKeyDown={handleSettingsTextKeyDown}
-                      onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                        const minutes = Math.max(0.1, Math.min(5, Number(e.target.value) || 0.05));
-                        void updateSettings({
-                          ...settings,
-                          audio: {
-                            ...settings.audio,
-                            silenceTimeoutSeconds: Math.round(minutes * 60),
-                          },
-                        });
-                      }}
-                    />
-                    <p className="text-sm text-muted-foreground">Stop recording after this many minutes of silence</p>
-                  </div>
-                )}
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Noise suppression</Label>
-                    <p className="text-sm text-muted-foreground">Reduce background noise during recording</p>
-                  </div>
-                  <Switch
-                    checked={settings.audio.noiseSuppression}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        audio: { ...settings.audio, noiseSuppression: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Auto gain control</Label>
-                    <p className="text-sm text-muted-foreground">Automatically adjust microphone levels</p>
-                  </div>
-                  <Switch
-                    checked={settings.audio.autoGainControl}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        audio: { ...settings.audio, autoGainControl: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                {!settings.audio.autoGainControl && (
-                  <div className="space-y-2">
-                    <Label>Manual gain ({settings.audio.manualGainDb > 0 ? "+" : ""}{settings.audio.manualGainDb.toFixed(1)} dB)</Label>
-                    <input
-                      type="range"
-                      min={-20}
-                      max={20}
-                      step={0.5}
-                      value={settings.audio.manualGainDb}
-                      className="w-full"
-                      onChange={(e) =>
-                        void updateSettings({
-                          ...settings,
-                          audio: { ...settings.audio, manualGainDb: Number(e.target.value) },
-                        })
-                      }
-                    />
-                    <div className="flex justify-between text-xs text-muted-foreground">
-                      <span>-20 dB</span>
-                      <span>0 dB</span>
-                      <span>+20 dB</span>
-                    </div>
-                  </div>
-                )}
-
-                <div className="h-px bg-border" />
-
-                <div className="space-y-2">
-                  <Label>Transcription language</Label>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={settings.transcription.language ?? ""}
-                    onChange={(e) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          language: e.target.value || null,
-                        },
-                      })
-                    }
-                  >
-                    <option value="">Auto-detect</option>
-                    <option value="en">English</option>
-                    <option value="es">Spanish</option>
-                    <option value="fr">French</option>
-                    <option value="de">German</option>
-                    <option value="it">Italian</option>
-                    <option value="pt">Portuguese</option>
-                    <option value="ja">Japanese</option>
-                    <option value="ko">Korean</option>
-                    <option value="zh">Chinese</option>
-                    <option value="ru">Russian</option>
-                    <option value="ar">Arabic</option>
-                    <option value="hi">Hindi</option>
-                  </select>
-                  <p className="text-sm text-muted-foreground">Force a specific language or leave on auto-detect</p>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Automatic speaker naming</Label>
-                    <p className="text-sm text-muted-foreground">
-                      Run diarization and label speakers after transcription
-                    </p>
-                  </div>
-                  {diarizationAvailable ? (
-                    <Switch
-                      checked={settings.transcription.enableDiarization}
-                      onCheckedChange={(checked) =>
-                        void updateSettings({
-                          ...settings,
-                          transcription: { ...settings.transcription, enableDiarization: checked },
-                        })
-                      }
-                    />
-                  ) : (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={diarizationDownloading}
-                      onClick={async () => {
-                        setDiarizationDownloading(true);
-                        try {
-                          await downloadDiarizationModel();
-                          setDiarizationAvailable(true);
-                          // Auto-enable once downloaded
-                          updateSettings({
-                            ...settings,
-                            transcription: { ...settings.transcription, enableDiarization: true },
-                          });
-                        } catch (e) {
-                          const msg = e instanceof Error ? e.message : String(e); // Capture full error
-                          setError(`Download failed: ${msg}`);
-                        } finally {
-                          setDiarizationDownloading(false);
-                        }
-                      }}
-                    >
-                      {diarizationDownloading ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Downloading Model...
-                        </>
-                      ) : (
-                        <>
-                          <Download className="mr-2 h-4 w-4" />
-                          Download Model (~25MB)
-                        </>
-                      )}
-                    </Button>
-                  )}
-                </div>
-
-                {settings.transcription.enableDiarization && diarizationAvailable && (
-                  <div className="rounded-md border border-border bg-muted/30 p-3 space-y-1">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium">Diarization model</p>
-                        <p className="text-xs text-muted-foreground">Wespeaker ECAPA-TDNN 512 (speaker embedding)</p>
-                      </div>
-                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
-                        <CheckCircle2 className="h-3 w-3" /> Installed
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label className="flex items-center gap-1.5">
-                      Automatic silence skip
-                      {!isFeatureAllowed(licenseInfo, "autoDiarization") && (
-                        <span className="text-xs text-amber-600">Pro</span>
-                      )}
-                    </Label>
-                    <p className="text-sm text-muted-foreground">
-                      Remove silent segments before transcription for faster processing
-                    </p>
-                  </div>
-                  <Switch
-                    checked={settings.transcription.silenceSkipEnabled}
-                    disabled={!isFeatureAllowed(licenseInfo, "autoDiarization")}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: { ...settings.transcription, silenceSkipEnabled: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                {settings.transcription.enableDiarization && (
-                  <div className="space-y-2">
-                    <Label>Speaker naming method</Label>
-                    <select
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                      value={settings.transcription.speakerNamingMethod}
-                      onChange={(e) =>
-                        void updateSettings({
-                          ...settings,
-                          transcription: {
-                            ...settings.transcription,
-                            speakerNamingMethod: e.target.value as "auto" | "numbered" | "manual",
-                          },
-                        })
-                      }
-                    >
-                      <option value="auto">Auto-detect from speech (recommended)</option>
-                      <option value="numbered">Numbered (Speaker 1, Speaker 2, ...)</option>
-                      <option value="manual">Manual only (set names yourself)</option>
-                    </select>
-                    <p className="text-sm text-muted-foreground">
-                      How speakers are named after diarization
-                    </p>
-                  </div>
-                )}
-
-                <div className="space-y-2">
-                  <Label>Default local ASR model</Label>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={settings.transcription.selectedModelId}
-                    onChange={(e) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          selectedModelId: e.target.value,
-                        },
-                      })
-                    }
-                  >
-                    {LOCAL_ASR_MODEL_GROUPS.map((group) => (
-                      <optgroup key={group.label} label={group.label}>
-                        {group.options.map((model) => (
-                          <option key={model.id} value={model.id}>
-                            {model.label}
-                          </option>
-                        ))}
-                      </optgroup>
-                    ))}
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    English-only models are faster. Use large-v3 for multilingual transcription.
-                  </p>
-                </div>
-
-                <div className="space-y-3">
-                  <Label className="text-sm text-muted-foreground">Quick download — Top 5 ASR models</Label>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                    {QUICK_DOWNLOAD_ASR_MODELS.map((model) => {
-                      const isDownloaded = downloadedModels.some(
-                        (d) => d.name.toLowerCase().includes(model.id.toLowerCase()) ||
-                          d.name.toLowerCase().includes(model.id.replace(".en", "-en").toLowerCase())
-                      );
-                      const isDownloading = downloadingModel === model.id;
-
-                      return (
-                        <div key={model.id} className="flex items-center justify-between p-2 rounded border bg-muted/30">
-                          <div className="flex-1 min-w-0">
-                            <p className="text-sm font-medium truncate">{model.name}</p>
-                            <p className="text-xs text-muted-foreground">{model.description} · {model.size}</p>
-                          </div>
-                          {isDownloaded ? (
-                            <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0 ml-2" />
-                          ) : isDownloading ? (
-                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground shrink-0 ml-2" />
-                          ) : (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="shrink-0 ml-2 h-7 px-2"
-                              onClick={() => void handleDownloadModel(model.id)}
-                            >
-                              <Download className="h-3 w-3" />
-                            </Button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Downloaded models: {downloadedModels.length} · Use ASR Models tab for all providers
-                  </p>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Allow Whisper fallback</Label>
-                    <p className="text-sm text-muted-foreground">
-                      If selected provider fails, fallback to Whisper instead of hard failing
-                    </p>
-                  </div>
-                  <Switch
-                    checked={settings.transcription.allowWhisperFallback}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          allowWhisperFallback: checked,
-                        },
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="h-px bg-border" />
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Show dictation popup</Label>
-                    <p className="text-sm text-muted-foreground">
-                      Floating status while hotkey dictation runs
-                    </p>
-                  </div>
-                  <Switch
-                    checked={settings.ui.showDictationPopup}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        ui: { ...settings.ui, showDictationPopup: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Show recording popup</Label>
-                    <p className="text-sm text-muted-foreground">
-                      Floating status while meeting recording is active
-                    </p>
-                  </div>
-                  <Switch
-                    checked={settings.ui.showRecordingPopup}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        ui: { ...settings.ui, showRecordingPopup: checked },
+                        ui: { ...settings.ui, minimizeToTray: checked },
                       })
                     }
                   />
@@ -1143,7 +1166,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
                     <Label>Always on top</Label>
-                    <p className="text-sm text-muted-foreground">Keep window above other applications</p>
+                    <p className="text-sm text-muted-foreground">Keep the window above other applications</p>
                   </div>
                   <Switch
                     checked={settings.ui.alwaysOnTop}
@@ -1156,135 +1179,108 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   />
                 </div>
 
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Show in Dock</Label>
-                    <p className="text-sm text-muted-foreground">Display app icon in macOS Dock</p>
-                  </div>
-                  <Switch
-                    checked={settings.ui.showInDock}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        ui: { ...settings.ui, showInDock: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="h-px bg-border" />
-
-                <div className="space-y-3">
-                  <Label>Keyboard shortcuts</Label>
-                  <p className="text-sm text-muted-foreground">
-                    Click a field, then press your preferred key combo (one shortcut per action).
-                  </p>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-                    {SHORTCUT_FIELD_CONFIG.map((entry) => (
-                      <div key={entry.key} className="space-y-1">
-                        <Label className="text-xs text-muted-foreground">{entry.label}</Label>
-                        <Input
-                          value={settings.shortcuts[entry.key]}
-                          readOnly
-                          onFocus={() => setCapturingShortcut(entry.key)}
-                          onBlur={() => setCapturingShortcut(null)}
-                          onKeyDown={handleShortcutKeyDown(entry.key)}
-                          className="font-mono text-xs"
-                        />
-                        {capturingShortcut === entry.key ? (
-                          <p className="text-xs text-trusted">Listening… press combo, Esc to cancel</p>
-                        ) : null}
+                {advancedTabs.general && (
+                  <div className="pt-4 border-t space-y-5">
+                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Show dictation popup</Label>
+                        <p className="text-sm text-muted-foreground">Show an overlay when dictating text globally</p>
                       </div>
-                    ))}
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Changes save immediately, duplicate conflicts are blocked, and new bindings apply after relaunch.
-                  </p>
-                </div>
+                      <Switch
+                        checked={settings.ui.showDictationPopup}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            ui: { ...settings.ui, showDictationPopup: checked },
+                          })
+                        }
+                      />
+                    </div>
 
-                <div className="h-px bg-border" />
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Show recording popup</Label>
+                        <p className="text-sm text-muted-foreground">Show an overlay when recording audio</p>
+                      </div>
+                      <Switch
+                        checked={settings.ui.showRecordingPopup}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            ui: { ...settings.ui, showRecordingPopup: checked },
+                          })
+                        }
+                      />
+                    </div>
 
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <Label>Permission diagnostics</Label>
-                      <p className="text-sm text-muted-foreground">
-                        Validate microphone, accessibility, and automation permissions
+                    <div className="space-y-3 pt-2 border-t">
+                      <div className="space-y-1">
+                        <Label>Global keyboard shortcuts</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Click a field and press your desired shortcut combination
+                        </p>
+                      </div>
+                      <div className="grid gap-2">
+                        {SHORTCUT_FIELD_CONFIG.map(({ key, label }) => {
+                          const currentVal = settings.shortcuts[key] || "None";
+                          const isCapturing = capturingShortcut === key;
+                          return (
+                            <div key={key} className="flex items-center justify-between">
+                              <span className="text-sm text-muted-foreground">{label}</span>
+                              <div className="flex items-center gap-2">
+                                <Input
+                                  value={isCapturing ? "Listening..." : currentVal}
+                                  readOnly
+                                  className={`w-32 text-center text-xs font-mono h-8 ${isCapturing ? "border-primary ring-1 ring-primary" : ""}`}
+                                  onFocus={() => {
+                                    setCapturingShortcut(key);
+                                  }}
+                                  onBlur={() => {
+                                    if (capturingShortcut === key) {
+                                      setCapturingShortcut(null);
+                                    }
+                                  }}
+                                  onKeyDown={handleShortcutKeyDown(key)}
+                                />
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-8 px-2"
+                                  onClick={() => {
+                                    const next: Settings = {
+                                      ...settings,
+                                      shortcuts: { ...settings.shortcuts, [key]: "" },
+                                    };
+                                    setDraftSettings(next);
+                                    queueSettingsSave(next, 0);
+                                  }}
+                                >
+                                  Clear
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Changes save immediately, duplicate conflicts are blocked, and new bindings apply after relaunch.
                       </p>
                     </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={async () => {
-                        const diagnostics = await getPermissionDiagnostics();
-                        setPermissionDiagnostics(diagnostics);
-                      }}
-                    >
-                      Refresh
-                    </Button>
                   </div>
-                  {permissionDiagnostics && (
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-sm">
-                      <div className="p-2 rounded border">
-                        <p className="font-medium">Microphone</p>
-                        <p className={permissionDiagnostics.microphoneReady ? "text-green-500" : "text-amber-500"}>
-                          {permissionDiagnostics.microphoneReady ? "Ready" : "Not ready"}
-                        </p>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="mt-1 px-0"
-                          onClick={() => void openPermissionSettings("microphone")}
-                        >
-                          Open settings
-                        </Button>
-                      </div>
-                      <div className="p-2 rounded border">
-                        <p className="font-medium">Accessibility</p>
-                        <p className={permissionDiagnostics.accessibilityReady ? "text-green-500" : "text-amber-500"}>
-                          {permissionDiagnostics.accessibilityReady ? "Ready" : "Needs grant"}
-                        </p>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="mt-1 px-0"
-                          onClick={() => void openPermissionSettings("accessibility")}
-                        >
-                          Open settings
-                        </Button>
-                      </div>
-                      <div className="p-2 rounded border">
-                        <p className="font-medium">Automation</p>
-                        <p className={permissionDiagnostics.automationReady ? "text-green-500" : "text-amber-500"}>
-                          {permissionDiagnostics.automationReady ? "Ready" : "Needs grant"}
-                        </p>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="mt-1 px-0"
-                          onClick={() => void openPermissionSettings("automation")}
-                        >
-                          Open settings
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                  {permissionDiagnostics?.notes?.length ? (
-                    <div className="text-xs text-muted-foreground space-y-1">
-                      {permissionDiagnostics.notes.map((note) => (
-                        <p key={note}>{note}</p>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
+                )}
               </CardContent>
             </Card>
           )}
 
-          {activeTab === "security" && (
+                    {activeTab === "security" && (
             <Card>
               <CardHeader>
-                <CardTitle>Security and Privacy</CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle>Security & Privacy</CardTitle>
+                  <AdvancedToggle checked={advancedTabs.security} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, security: c }))} />
+                </div>
                 <CardDescription>Local-first defaults with explicit remote opt-in</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
@@ -1328,158 +1324,189 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   />
                 </div>
 
-                <div className="space-y-2">
-                  <Label>Default analysis provider</Label>
-                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
-                    Managed in <span className="font-medium">AI &amp; Keys</span>. Current: {settings.privacy.llmProvider}
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <Label>Export root (absolute path)</Label>
-                  <Input
-                    placeholder="/Users/you/Documents/Nautilus"
-                    value={settings.privacy.exportRoot ?? ""}
-                    onBlur={handleSettingsTextBlur}
-                    onKeyDown={handleSettingsTextKeyDown}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                      void updateSettings({
-                        ...settings,
-                        privacy: {
-                          ...settings.privacy,
-                          exportRoot: e.target.value.trim() ? e.target.value.trim() : null,
-                        },
-                      })
-                    }
-                  />
-                  <p className="text-sm text-muted-foreground">
-                    When set, exports are restricted to this root.
-                  </p>
-                </div>
-
-                <div className="h-px bg-border" />
-
-                <div className="space-y-2">
-                  <Label>Vault password</Label>
-                  <Input
-                    type="password"
-                    placeholder="Enter vault password"
-                    value={vaultPassword}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setVaultPassword(e.target.value)}
-                  />
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      variant="outline"
-                      disabled={!vaultPassword.trim()}
-                      onClick={async () => {
-                        setError(null);
-                        try {
-                          await unlockVault(vaultPassword.trim());
-                          setVaultPassword("");
-                          setSecurityStatus(await getSecurityStatus());
-                        } catch (e) {
-                          setError(e instanceof Error ? e.message : "Failed to unlock vault");
-                        }
-                      }}
-                    >
-                      Unlock Vault
-                    </Button>
-                    <Button
-                      variant="outline"
-                      onClick={async () => {
-                        setError(null);
-                        try {
-                          await lockVault();
-                          setSecurityStatus(await getSecurityStatus());
-                        } catch (e) {
-                          setError(e instanceof Error ? e.message : "Failed to lock vault");
-                        }
-                      }}
-                    >
-                      Lock Vault
-                    </Button>
-                    <Button
-                      disabled={!vaultPassword.trim()}
-                      onClick={async () => {
-                        setError(null);
-                        try {
-                          await migrateToEncryptedStorage(vaultPassword.trim());
-                          setVaultPassword("");
-                          setSecurityStatus(await getSecurityStatus());
-                        } catch (e) {
-                          setError(
-                            e instanceof Error
-                              ? e.message
-                              : "Failed to migrate to encrypted storage"
-                          );
-                        }
-                      }}
-                    >
-                      Migrate to Encrypted Storage
-                    </Button>
-                  </div>
-                  {securityStatus ? (
-                    <div className="text-sm text-muted-foreground space-y-1">
-                      <p>Vault initialized: {securityStatus.vaultInitialized ? "yes" : "no"}</p>
-                      <p>Vault unlocked: {securityStatus.vaultUnlocked ? "yes" : "no"}</p>
-                      <p>Database encrypted: {securityStatus.databaseEncrypted ? "yes" : "no"}</p>
-                    </div>
-                  ) : null}
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label className="flex items-center gap-2">
-                      Cloud sync
-                      {!isFeatureAllowed(licenseInfo, "cloudSync") && (
-                        <span className="text-xs text-amber-600">⭐ Friends Club</span>
+                {advancedTabs.security && (
+                  <div className="pt-4 border-t space-y-5">
+                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
+                    
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <Label>Permission diagnostics</Label>
+                          <p className="text-sm text-muted-foreground">
+                            Validate microphone, accessibility, and automation permissions
+                          </p>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={async () => {
+                            const diagnostics = await getPermissionDiagnostics();
+                            setPermissionDiagnostics(diagnostics);
+                          }}
+                        >
+                          Refresh
+                        </Button>
+                      </div>
+                      {permissionDiagnostics && (
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-sm">
+                          <div className="p-2 rounded border bg-muted/20">
+                            <p className="font-medium">Microphone</p>
+                            <p className={permissionDiagnostics.microphoneReady ? "text-green-500" : "text-amber-500"}>
+                              {permissionDiagnostics.microphoneReady ? "Ready" : "Not ready"}
+                            </p>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="mt-1 px-0 h-auto font-normal text-xs text-muted-foreground hover:text-foreground"
+                              onClick={() => void openPermissionSettings("microphone")}
+                            >
+                              Open settings
+                            </Button>
+                          </div>
+                          <div className="p-2 rounded border bg-muted/20">
+                            <p className="font-medium">Accessibility</p>
+                            <p className={permissionDiagnostics.accessibilityReady ? "text-green-500" : "text-amber-500"}>
+                              {permissionDiagnostics.accessibilityReady ? "Ready" : "Needs grant"}
+                            </p>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="mt-1 px-0 h-auto font-normal text-xs text-muted-foreground hover:text-foreground"
+                              onClick={() => void openPermissionSettings("accessibility")}
+                            >
+                              Open settings
+                            </Button>
+                          </div>
+                          <div className="p-2 rounded border bg-muted/20">
+                            <p className="font-medium">Automation</p>
+                            <p className={permissionDiagnostics.automationReady ? "text-green-500" : "text-amber-500"}>
+                              {permissionDiagnostics.automationReady ? "Ready" : "Needs grant"}
+                            </p>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="mt-1 px-0 h-auto font-normal text-xs text-muted-foreground hover:text-foreground"
+                              onClick={() => void openPermissionSettings("automation")}
+                            >
+                              Open settings
+                            </Button>
+                          </div>
+                        </div>
                       )}
-                    </Label>
-                    <p className="text-sm text-muted-foreground">Enable external backup sync integrations</p>
+                      {permissionDiagnostics?.notes?.length ? (
+                        <div className="text-xs text-muted-foreground space-y-1">
+                          {permissionDiagnostics.notes.map((note) => (
+                            <p key={note}>{note}</p>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Vault password</Label>
+                      <Input
+                        type="password"
+                        placeholder="Enter vault password"
+                        value={vaultPassword}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => setVaultPassword(e.target.value)}
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="outline"
+                          disabled={!vaultPassword.trim()}
+                          onClick={async () => {
+                            setError(null);
+                            try {
+                              await unlockVault(vaultPassword.trim());
+                              setVaultPassword("");
+                              setSecurityStatus(await getSecurityStatus());
+                            } catch (e) {
+                              setError(e instanceof Error ? e.message : "Failed to unlock vault");
+                            }
+                          }}
+                        >
+                          Unlock Vault
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={async () => {
+                            setError(null);
+                            try {
+                              await lockVault();
+                              setSecurityStatus(await getSecurityStatus());
+                            } catch (e) {
+                              setError(e instanceof Error ? e.message : "Failed to lock vault");
+                            }
+                          }}
+                        >
+                          Lock Vault
+                        </Button>
+                        <Button
+                          disabled={!vaultPassword.trim()}
+                          onClick={async () => {
+                            setError(null);
+                            try {
+                              await migrateToEncryptedStorage(vaultPassword.trim());
+                              setVaultPassword("");
+                              setSecurityStatus(await getSecurityStatus());
+                            } catch (e) {
+                              setError(
+                                e instanceof Error
+                                  ? e.message
+                                  : "Failed to migrate to encrypted storage"
+                              );
+                            }
+                          }}
+                        >
+                          Migrate to Encrypted Storage
+                        </Button>
+                      </div>
+                      {securityStatus ? (
+                        <div className="text-sm text-muted-foreground space-y-1 mt-2 p-3 bg-muted/20 border rounded-md">
+                          <p>Vault initialized: <span className="font-medium">{securityStatus.vaultInitialized ? "yes" : "no"}</span></p>
+                          <p>Vault unlocked: <span className="font-medium">{securityStatus.vaultUnlocked ? "yes" : "no"}</span></p>
+                          <p>Database encrypted: <span className="font-medium">{securityStatus.databaseEncrypted ? "yes" : "no"}</span></p>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label className="flex items-center gap-2">
+                          Cloud sync
+                          {!isFeatureAllowed(licenseInfo, "cloudSync") && (
+                            <span className="text-xs text-amber-600">⭐ Friends Club</span>
+                          )}
+                        </Label>
+                        <p className="text-sm text-muted-foreground">Enable external backup sync integrations</p>
+                      </div>
+                      <Switch
+                        checked={settings.privacy.cloudSync}
+                        disabled={!isFeatureAllowed(licenseInfo, "cloudSync")}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            privacy: { ...settings.privacy, cloudSync: checked },
+                          })
+                        }
+                      />
+                    </div>
                   </div>
-                  <Switch
-                    checked={settings.privacy.cloudSync}
-                    disabled={!isFeatureAllowed(licenseInfo, "cloudSync")}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        privacy: { ...settings.privacy, cloudSync: checked },
-                      })
-                    }
-                  />
-                </div>
+                )}
               </CardContent>
             </Card>
           )}
 
-          {activeTab === "storage" && (
+                    {activeTab === "storage" && (
             <Card>
               <CardHeader>
-                <CardTitle>Storage and Retention</CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle>Data & Retention</CardTitle>
+                  <AdvancedToggle checked={advancedTabs.storage} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, storage: c }))} />
+                </div>
                 <CardDescription>Data lifecycle, backups, and cloud sync controls</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
-                <div className="space-y-2">
-                  <Label>Auto-delete recordings after days</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={settings.privacy.autoDeleteDays}
-                    onBlur={handleSettingsTextBlur}
-                    onKeyDown={handleSettingsTextKeyDown}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      const nextDays = Math.max(0, Number(e.target.value) || 0);
-                      void updateSettings({
-                        ...settings,
-                        privacy: { ...settings.privacy, autoDeleteDays: nextDays },
-                      });
-                    }}
-                  />
-                  <p className="text-sm text-muted-foreground">Set to 0 to keep all recordings indefinitely.</p>
-                </div>
-
-                <div className="h-px bg-border" />
-
                 <div className="space-y-3">
                   <Label>Export defaults</Label>
                   <div className="grid grid-cols-2 gap-4">
@@ -1520,6 +1547,28 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       />
                     </div>
                   </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Export root limit (absolute path)</Label>
+                  <Input
+                    placeholder="/Users/you/Documents/Nautilus"
+                    value={settings.privacy.exportRoot ?? ""}
+                    onBlur={handleSettingsTextBlur}
+                    onKeyDown={handleSettingsTextKeyDown}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      void updateSettings({
+                        ...settings,
+                        privacy: {
+                          ...settings.privacy,
+                          exportRoot: e.target.value.trim() ? e.target.value.trim() : null,
+                        },
+                      })
+                    }
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    When set, exports are strictly restricted to this root directory or its subdirectories.
+                  </p>
                 </div>
 
                 <div className="flex items-center justify-between">
@@ -1570,9 +1619,30 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   />
                 </div>
 
-                {backupConfig && (
-                  <>
-                    <div className="h-px bg-border" />
+                <div className="h-px bg-border" />
+                
+                <div className="space-y-2">
+                  <Label>Auto-delete recordings after days</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={settings.privacy.autoDeleteDays}
+                    onBlur={handleSettingsTextBlur}
+                    onKeyDown={handleSettingsTextKeyDown}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                      const nextDays = Math.max(0, Number(e.target.value) || 0);
+                      void updateSettings({
+                        ...settings,
+                        privacy: { ...settings.privacy, autoDeleteDays: nextDays },
+                      });
+                    }}
+                  />
+                  <p className="text-xs text-muted-foreground">Set to 0 to keep all recordings indefinitely.</p>
+                </div>
+
+                {advancedTabs.storage && backupConfig && (
+                  <div className="pt-4 border-t space-y-5">
+                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
@@ -1617,8 +1687,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         />
                       </div>
                     </div>
-
-                    <div className="h-px bg-border" />
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
@@ -1698,7 +1766,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </div>
                     )}
 
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap gap-2 mt-4">
                       <Button
                         variant="outline"
                         disabled={backupBusy}
@@ -1809,7 +1877,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                     {backupStatus && <p className="text-sm text-muted-foreground">{backupStatus}</p>}
                     {backupSetupReport && (
-                      <div className="rounded-lg border p-3 space-y-2">
+                      <div className="rounded-lg border p-3 space-y-2 bg-muted/10">
                         <div className="flex items-center justify-between">
                           <Label className="text-sm">Cloud setup readiness</Label>
                           <span
@@ -1821,7 +1889,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         </div>
                         <div className="space-y-2">
                           {backupSetupReport.checks.map((check) => (
-                            <div key={check.id} className="rounded border p-2">
+                            <div key={check.id} className="rounded border p-2 bg-background">
                               <div className="flex items-center justify-between gap-2">
                                 <div className="flex items-center gap-2">
                                   {check.status === "pass" ? (
@@ -1846,16 +1914,19 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         For OneDrive, Google Drive, and Proton Drive, run `rclone config` first and create the remote.
                       </p>
                     )}
-                  </>
+                  </div>
                 )}
               </CardContent>
             </Card>
           )}
 
-          {activeTab === "ai" && (
+                    {activeTab === "ai" && (
             <Card>
               <CardHeader>
-                <CardTitle>AI Provider & Credentials</CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle>AI & Models</CardTitle>
+                  <AdvancedToggle checked={advancedTabs.ai} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, ai: c }))} />
+                </div>
                 <CardDescription>Choose your default brain provider and manage cloud keys</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
@@ -1936,7 +2007,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </select>
                     ) : (
                       <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                        <p className="text-amber-700 dark:text-amber-400">Enter your OpenAI API key above to fetch available models.</p>
+                        <p className="text-amber-700 dark:text-amber-400">Enter your OpenAI API key in advanced settings to fetch models.</p>
                       </div>
                     )
                   ) : settings.privacy.llmProvider === "anthropic" ? (
@@ -1957,7 +2028,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </select>
                     ) : (
                       <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                        <p className="text-amber-700 dark:text-amber-400">Enter your Anthropic API key above to fetch available models.</p>
+                        <p className="text-amber-700 dark:text-amber-400">Enter your Anthropic API key in advanced settings to fetch models.</p>
                       </div>
                     )
                   ) : settings.privacy.llmProvider === "gemini" ? (
@@ -1981,7 +2052,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </select>
                     ) : (
                       <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                        <p className="text-amber-700 dark:text-amber-400">Enter your Google AI API key above to fetch available models.</p>
+                        <p className="text-amber-700 dark:text-amber-400">Enter your Google AI API key in advanced settings to fetch models.</p>
                       </div>
                     )
                   ) : settings.privacy.llmProvider === "deepseek" ? (
@@ -2002,7 +2073,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </select>
                     ) : (
                       <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                        <p className="text-amber-700 dark:text-amber-400">Enter your DeepSeek API key above to fetch available models.</p>
+                        <p className="text-amber-700 dark:text-amber-400">Enter your DeepSeek API key in advanced settings to fetch models.</p>
                       </div>
                     )
                   ) : settings.privacy.llmProvider === "ollama-cloud" ? (
@@ -2023,7 +2094,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </select>
                     ) : (
                       <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                        <p className="text-amber-700 dark:text-amber-400">Enter your Ollama Cloud API key above to fetch available models.</p>
+                        <p className="text-amber-700 dark:text-amber-400">Enter your Ollama Cloud API key in advanced settings to fetch models.</p>
                       </div>
                     )
                   ) : (
@@ -2037,7 +2108,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       : settings.privacy.llmProvider !== "ollama" &&
                         ["openai", "anthropic", "gemini", "deepseek", "ollama-cloud"].includes(settings.privacy.llmProvider) &&
                         !hasApiKey && settings.privacy.llmProvider === provider
-                        ? "Add your API key above to fetch available models."
+                        ? "Add your API key below to fetch available models."
                         : "Models fetched from provider API."}
                   </p>
                 </div>
@@ -2077,290 +2148,289 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   </div>
                 )}
 
-                <div className="h-px bg-border" />
+                {advancedTabs.ai && (
+                  <div className="pt-4 border-t space-y-5">
+                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
 
-                <div className="space-y-2">
-                  <Label>Credential provider</Label>
-                  <div className="flex gap-2 items-center">
-                    <select
-                      value={provider}
-                      onChange={(e) => {
-                        const next = e.target.value;
-                        setProvider(next);
-                        // Persist provider selection to settings so it survives restarts
-                        if (settings) {
-                          updateSettings({
-                            ...settings,
-                            privacy: { ...settings.privacy, llmProvider: next },
-                          });
-                        }
-                        // Immediately refresh model list for the newly selected provider
-                        void refreshModelsForProvider(next);
-                      }}
-                      className="flex-1 p-2 border rounded-md bg-background"
-                    >
-                      <option value="openai">OpenAI</option>
-                      <option value="anthropic">Anthropic</option>
-                      <option value="gemini">Google Gemini</option>
-                      <option value="deepseek">DeepSeek</option>
-                      <option value="ollama-cloud">Ollama Cloud</option>
-                    </select>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      title="Refresh model list"
-                      onClick={async () => {
-                        console.log(`[DEBUG] Refresh clicked. Key len: ${apiKey.length}. Provider: ${provider}`);
-                        if (apiKey.trim()) {
-                          // If user typed a key but didn't save, save it now!
+                    <div className="space-y-2">
+                      <Label>Credential provider</Label>
+                      <div className="flex gap-2 items-center">
+                        <select
+                          value={provider}
+                          onChange={(e) => {
+                            const next = e.target.value;
+                            setProvider(next);
+                            // Persist provider selection to settings so it survives restarts
+                            if (settings) {
+                              updateSettings({
+                                ...settings,
+                                privacy: { ...settings.privacy, llmProvider: next },
+                              });
+                            }
+                            // Immediately refresh model list for the newly selected provider
+                            void refreshModelsForProvider(next);
+                          }}
+                          className="flex-1 p-2 border rounded-md bg-background"
+                        >
+                          <option value="openai">OpenAI</option>
+                          <option value="anthropic">Anthropic</option>
+                          <option value="gemini">Google Gemini</option>
+                          <option value="deepseek">DeepSeek</option>
+                          <option value="ollama-cloud">Ollama Cloud</option>
+                        </select>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          title="Refresh model list"
+                          onClick={async () => {
+                            console.log(`[DEBUG] Refresh clicked. Key len: ${apiKey.length}. Provider: ${provider}`);
+                            if (apiKey.trim()) {
+                              // If user typed a key but didn't save, save it now!
+                              setSavingApiKey(true);
+                              try {
+                                await setProviderSecret(provider, apiKey.trim());
+                                setApiKey("");
+                                setHasApiKey(true);
+                              } catch (e) {
+                                console.error("Failed to save key on refresh", e);
+                              } finally {
+                                setSavingApiKey(false);
+                              }
+                            }
+                            void refreshModelsForProvider(provider);
+                          }}
+                          disabled={modelsLoading || savingApiKey}
+                        >
+                          {modelsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                        </Button>
+                      </div>
+                      {!settings.privacy.remoteProcessingEnabled ? (
+                        <p className="text-xs text-amber-600">
+                          Remote processing is disabled. Stored cloud keys will not be used until policy is enabled.
+                        </p>
+                      ) : null}
+                      {settings.privacy.llmProvider === provider && settings.privacy.remoteProcessingEnabled && !hasApiKey ? (
+                        <p className="text-xs text-amber-600">
+                          Selected analysis provider has no stored key. Analysis requests will fail with a credential error.
+                        </p>
+                      ) : null}
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>API key</Label>
+                      <Input
+                        type="password"
+                        placeholder={hasApiKey ? "Key already stored (enter to replace)" : "Enter API key"}
+                        value={apiKey}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => setApiKey(e.target.value)}
+                        onKeyDown={async (e) => {
+                          if (e.key === "Enter" && apiKey.trim()) {
+                            console.log(`[DEBUG] Enter pressed. Saving key.`);
+                            e.preventDefault();
+                            if (savingApiKey) return;
+
+                            setSavingApiKey(true);
+                            setError(null);
+                            try {
+                              await setProviderSecret(provider, apiKey.trim());
+                              setApiKey("");
+                              setHasApiKey(true);
+                              await refreshModelsForProvider(provider);
+                            } catch (e) {
+                              setError(e instanceof Error ? e.message : "Failed to save API key");
+                            } finally {
+                              setSavingApiKey(false);
+                            }
+                          }
+                        }}
+                      />
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <Button
+                        onClick={async () => {
+                          if (!apiKey.trim()) return;
+                          console.log(`[DEBUG] Save Key clicked. Saving key.`);
                           setSavingApiKey(true);
+                          setError(null);
                           try {
                             await setProviderSecret(provider, apiKey.trim());
                             setApiKey("");
                             setHasApiKey(true);
+                            // Refresh models for this provider after saving key
+                            await refreshModelsForProvider(provider);
                           } catch (e) {
-                            console.error("Failed to save key on refresh", e);
+                            setError(e instanceof Error ? e.message : "Failed to save API key");
                           } finally {
                             setSavingApiKey(false);
                           }
-                        }
-                        void refreshModelsForProvider(provider);
-                      }}
-                      disabled={modelsLoading || savingApiKey}
-                    >
-                      {modelsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-                    </Button>
-                  </div>
-                  {!settings.privacy.remoteProcessingEnabled ? (
-                    <p className="text-xs text-amber-600">
-                      Remote processing is disabled. Stored cloud keys will not be used until policy is enabled.
-                    </p>
-                  ) : null}
-                  {settings.privacy.llmProvider === provider && settings.privacy.remoteProcessingEnabled && !hasApiKey ? (
-                    <p className="text-xs text-amber-600">
-                      Selected analysis provider has no stored key. Analysis requests will fail with a credential error.
-                    </p>
-                  ) : null}
-                </div>
-
-                <div className="space-y-2">
-                  <Label>API key</Label>
-                  <Input
-                    type="password"
-                    placeholder={hasApiKey ? "Key already stored (enter to replace)" : "Enter API key"}
-                    value={apiKey}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setApiKey(e.target.value)}
-                    onKeyDown={async (e) => {
-                      if (e.key === "Enter" && apiKey.trim()) {
-                        console.log(`[DEBUG] Enter pressed. Saving key.`);
-                        e.preventDefault();
-                        if (savingApiKey) return;
-
-                        setSavingApiKey(true);
-                        setError(null);
-                        try {
-                          await setProviderSecret(provider, apiKey.trim());
-                          setApiKey("");
-                          setHasApiKey(true);
-                          await refreshModelsForProvider(provider);
-                        } catch (e) {
-                          setError(e instanceof Error ? e.message : "Failed to save API key");
-                        } finally {
-                          setSavingApiKey(false);
-                        }
-                      }
-                    }}
-                  />
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <Button
-                    onClick={async () => {
-                      if (!apiKey.trim()) return;
-                      console.log(`[DEBUG] Save Key clicked. Saving key.`);
-                      setSavingApiKey(true);
-                      setError(null);
-                      try {
-                        await setProviderSecret(provider, apiKey.trim());
-                        setApiKey("");
-                        setHasApiKey(true);
-                        // Refresh models for this provider after saving key
-                        await refreshModelsForProvider(provider);
-                      } catch (e) {
-                        setError(e instanceof Error ? e.message : "Failed to save API key");
-                      } finally {
-                        setSavingApiKey(false);
-                      }
-                    }}
-                    disabled={savingApiKey || !apiKey.trim()}
-                  >
-                    {savingApiKey ? "Saving..." : "Save Key"}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={async () => {
-                      setSavingApiKey(true);
-                      setError(null);
-                      try {
-                        await clearProviderSecret(provider);
-                        setApiKey("");
-                        setHasApiKey(false);
-                      } catch (e) {
-                        setError(e instanceof Error ? e.message : "Failed to clear API key");
-                      } finally {
-                        setSavingApiKey(false);
-                      }
-                    }}
-                    disabled={savingApiKey}
-                  >
-                    Clear Key
-                  </Button>
-                  {hasApiKey && <span className="text-sm text-muted-foreground">Stored securely</span>}
-                </div>
-
-                <div className="h-px bg-border" />
-
-                <div className="space-y-2">
-                  <Label>Guided cloud onboarding</Label>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      variant="outline"
-                      onClick={async () => {
-                        setError(null);
-                        const checks: string[] = [];
-                        if (!settings.privacy.remoteProcessingEnabled) {
-                          checks.push("Remote processing is disabled.");
-                        }
-                        const keyPresent = await hasProviderSecret(provider);
-                        if (!keyPresent) {
-                          checks.push(`No API key stored for ${provider}.`);
-                        }
-                        if (checks.length === 0) {
-                          setCloudReadinessMessage("Cloud readiness checks passed.");
-                        } else {
-                          setCloudReadinessMessage(checks.join(" "));
-                        }
-                      }}
-                    >
-                      Run Readiness Check
-                    </Button>
-                    {!settings.privacy.remoteProcessingEnabled && (
-                      <Button
-                        onClick={async () => {
-                          const confirmed = window.confirm(
-                            "Enable remote processing? This allows transcript text to be sent to cloud providers."
-                          );
-                          if (!confirmed) {
-                            return;
-                          }
-                          updateSettings(
-                            {
-                              ...settings,
-                              privacy: {
-                                ...settings.privacy,
-                                remoteProcessingEnabled: true,
-                              },
-                            },
-                            { immediate: true }
-                          );
-                          setCloudReadinessMessage("Remote processing enabled. Run readiness check again.");
                         }}
+                        disabled={savingApiKey || !apiKey.trim()}
                       >
-                        Enable Remote Processing (Opt-in)
+                        {savingApiKey ? "Saving..." : "Save Key"}
                       </Button>
-                    )}
-                  </div>
-                  {cloudReadinessMessage ? (
-                    <p className="text-xs text-muted-foreground">{cloudReadinessMessage}</p>
-                  ) : null}
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          {activeTab === "ai" && settings && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Database className="h-5 w-5 text-violet-600" />
-                  Memory Search
-                </CardTitle>
-                <CardDescription>How Memory searches your transcripts when you ask a question</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <Label>Search mode</Label>
-                  <select
-                    value={settings.transcription.memorySearchMode}
-                    onChange={(e) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          memorySearchMode: e.target.value as "fts" | "ollama_embeddings",
-                        },
-                      })
-                    }
-                    className="w-full p-2 border rounded-md bg-background"
-                  >
-                    <option value="fts">Full-text search (built-in, no setup needed)</option>
-                    <option value="ollama_embeddings">Ollama Embeddings (semantic search, requires Ollama)</option>
-                  </select>
-                </div>
-
-                {settings.transcription.memorySearchMode === "ollama_embeddings" && (
-                  <>
-                    <div className="space-y-2">
-                      <Label>Embedding model</Label>
-                      <Input
-                        value={settings.transcription.embeddingModel}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              embeddingModel: e.target.value,
-                            },
-                          })
-                        }
-                        placeholder="nomic-embed-text"
-                        className="font-mono text-sm"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Ollama embedding model name. Run <code className="bg-muted px-1 rounded">ollama pull nomic-embed-text</code> first.
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 p-3">
-                      <div className="space-y-0.5">
-                        <p className="text-sm font-medium">Re-index embeddings</p>
-                        <p className="text-xs text-muted-foreground">
-                          Generate embeddings for all existing transcripts. Required after changing models.
-                        </p>
-                      </div>
                       <Button
                         variant="outline"
-                        size="sm"
-                        onClick={() => {
-                          void (async () => {
-                            try {
-                              const { reindexEmbeddings } = await import("@/lib/tauri");
-                              const result = await reindexEmbeddings();
-                              toast(
-                                `Indexed ${result.segments} segments from ${result.recordings} recordings${result.errors > 0 ? ` (${result.errors} errors)` : ""}`,
-                                result.errors > 0 ? "error" : "success"
-                              );
-                            } catch (err) {
-                              toast(err instanceof Error ? err.message : String(err), "error");
-                            }
-                          })();
+                        onClick={async () => {
+                          setSavingApiKey(true);
+                          setError(null);
+                          try {
+                            await clearProviderSecret(provider);
+                            setApiKey("");
+                            setHasApiKey(false);
+                          } catch (e) {
+                            setError(e instanceof Error ? e.message : "Failed to clear API key");
+                          } finally {
+                            setSavingApiKey(false);
+                          }
                         }}
+                        disabled={savingApiKey}
                       >
-                        <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-                        Re-index
+                        Clear Key
                       </Button>
+                      {hasApiKey && <span className="text-sm text-muted-foreground">Stored securely</span>}
                     </div>
-                  </>
+
+                    <div className="space-y-2 mt-4">
+                      <Label>Guided cloud onboarding</Label>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="outline"
+                          onClick={async () => {
+                            setError(null);
+                            const checks: string[] = [];
+                            if (!settings.privacy.remoteProcessingEnabled) {
+                              checks.push("Remote processing is disabled.");
+                            }
+                            const keyPresent = await hasProviderSecret(provider);
+                            if (!keyPresent) {
+                              checks.push(`No API key stored for ${provider}.`);
+                            }
+                            if (checks.length === 0) {
+                              setCloudReadinessMessage("Cloud readiness checks passed.");
+                            } else {
+                              setCloudReadinessMessage(checks.join(" "));
+                            }
+                          }}
+                        >
+                          Run Readiness Check
+                        </Button>
+                        {!settings.privacy.remoteProcessingEnabled && (
+                          <Button
+                            onClick={async () => {
+                              const confirmed = window.confirm(
+                                "Enable remote processing? This allows transcript text to be sent to cloud providers."
+                              );
+                              if (!confirmed) {
+                                return;
+                              }
+                              updateSettings(
+                                {
+                                  ...settings,
+                                  privacy: {
+                                    ...settings.privacy,
+                                    remoteProcessingEnabled: true,
+                                  },
+                                },
+                                { immediate: true }
+                              );
+                              setCloudReadinessMessage("Remote processing enabled. Run readiness check again.");
+                            }}
+                          >
+                            Enable Remote Processing (Opt-in)
+                          </Button>
+                        )}
+                      </div>
+                      {cloudReadinessMessage ? (
+                        <p className="text-xs text-muted-foreground">{cloudReadinessMessage}</p>
+                      ) : null}
+                    </div>
+
+                    <div className="pt-4 border-t space-y-4">
+                      <div className="space-y-1">
+                        <Label className="flex items-center gap-2">
+                          <Database className="h-4 w-4 text-violet-600" />
+                          Memory Search
+                        </Label>
+                        <p className="text-sm text-muted-foreground">How Memory searches your transcripts when you ask a question</p>
+                      </div>
+                      
+                      <div className="space-y-2">
+                        <Label>Search mode</Label>
+                        <select
+                          value={settings.transcription.memorySearchMode}
+                          onChange={(e) =>
+                            void updateSettings({
+                              ...settings,
+                              transcription: {
+                                ...settings.transcription,
+                                memorySearchMode: e.target.value as "fts" | "ollama_embeddings",
+                              },
+                            })
+                          }
+                          className="w-full p-2 border rounded-md bg-background"
+                        >
+                          <option value="fts">Full-text search (built-in, no setup needed)</option>
+                          <option value="ollama_embeddings">Ollama Embeddings (semantic search, requires Ollama)</option>
+                        </select>
+                      </div>
+
+                      {settings.transcription.memorySearchMode === "ollama_embeddings" && (
+                        <>
+                          <div className="space-y-2">
+                            <Label>Embedding model</Label>
+                            <Input
+                              value={settings.transcription.embeddingModel}
+                              onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                                void updateSettings({
+                                  ...settings,
+                                  transcription: {
+                                    ...settings.transcription,
+                                    embeddingModel: e.target.value,
+                                  },
+                                })
+                              }
+                              placeholder="nomic-embed-text"
+                              className="font-mono text-sm"
+                            />
+                            <p className="text-xs text-muted-foreground">
+                              Ollama embedding model name. Run <code className="bg-muted px-1 rounded">ollama pull nomic-embed-text</code> first.
+                            </p>
+                          </div>
+
+                          <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 p-3">
+                            <div className="space-y-0.5">
+                              <p className="text-sm font-medium">Re-index embeddings</p>
+                              <p className="text-xs text-muted-foreground">
+                                Generate embeddings for all existing transcripts. Required after changing models.
+                              </p>
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                void (async () => {
+                                  try {
+                                    const { reindexEmbeddings } = await import("@/lib/tauri");
+                                    const result = await reindexEmbeddings();
+                                    toast(
+                                      `Indexed ${result.segments} segments from ${result.recordings} recordings${result.errors > 0 ? ` (${result.errors} errors)` : ""}`,
+                                      result.errors > 0 ? "error" : "success"
+                                    );
+                                  } catch (err) {
+                                    toast(err instanceof Error ? err.message : String(err), "error");
+                                  }
+                                })();
+                              }}
+                            >
+                              <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                              Re-index
+                            </Button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
                 )}
               </CardContent>
             </Card>
