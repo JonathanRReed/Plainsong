@@ -3933,9 +3933,14 @@ fn get_frontmost_app_name() -> Option<String> {
     None
 }
 
-fn generate_default_dictation_prompt(active_app: Option<String>) -> String {
+fn generate_default_dictation_prompt(active_app: Option<String>, clipboard_text: Option<String>) -> String {
+    let mut base = "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
+        Fix any grammar, punctuation, and capitalization errors. Remove filler words (ums, ahs). 
+        Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
+        Just output the corrected text directly.".to_string();
+
     if let Some(app_name) = active_app {
-        format!(
+        base = format!(
             "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
             The user is currently dictating into the application: '{}'. 
             Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). 
@@ -3943,13 +3948,20 @@ fn generate_default_dictation_prompt(active_app: Option<String>) -> String {
             Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
             Just output the corrected text directly.",
             app_name
-        )
-    } else {
-        "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
-        Fix any grammar, punctuation, and capitalization errors. Remove filler words (ums, ahs). 
-        Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
-        Just output the corrected text directly.".to_string()
+        );
     }
+
+    if let Some(clip) = clipboard_text {
+        base = format!(
+            "{}
+
+For additional context, the user's clipboard currently contains the following text (they may be referencing it or replying to it):
+\"{}\"",
+            base, clip
+        );
+    }
+
+    base
 }
 
 async fn run_dictation_formatting_with_selected_provider(
@@ -3969,18 +3981,26 @@ async fn run_dictation_formatting_with_selected_provider(
     
     let settings = state.settings_manager.lock().await.settings().clone();
     
+        #[cfg(target_os = "macos")]
+    let clipboard_text = read_clipboard_text().ok().filter(|s| !s.trim().is_empty() && s.len() < 5000);
+    #[cfg(not(target_os = "macos"))]
+    let clipboard_text: Option<String> = None;
+
     let system_prompt = if let Some(custom_prompt) = &settings.transcription.dictation_custom_prompt {
         if !custom_prompt.trim().is_empty() {
+            let mut base = custom_prompt.clone();
             if let Some(app_name) = &active_app {
-                format!("{}\n\n[Context: User is dictating into application '{}']", custom_prompt, app_name)
-            } else {
-                custom_prompt.clone()
+                base = format!("{}\n\n[Context: User is dictating into application '{}']", base, app_name);
             }
+            if let Some(clip) = &clipboard_text {
+                base = format!("{}\n\n[Context: User's clipboard currently contains: '{}']", base, clip);
+            }
+            base
         } else {
-            generate_default_dictation_prompt(active_app)
+            generate_default_dictation_prompt(active_app, clipboard_text)
         }
     } else {
-        generate_default_dictation_prompt(active_app)
+        generate_default_dictation_prompt(active_app, clipboard_text)
     };
 
     match provider {
