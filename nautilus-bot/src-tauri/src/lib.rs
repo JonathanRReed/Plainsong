@@ -705,7 +705,8 @@ async fn stop_dictation(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    stop_dictation_session(state.inner(), &app, "manual", false).await
+    let paste_to_cursor = state.settings_manager.lock().await.settings().transcription.dictation_paste_to_cursor;
+    stop_dictation_session(state.inner(), &app, "manual", paste_to_cursor).await
 }
 
 #[tauri::command]
