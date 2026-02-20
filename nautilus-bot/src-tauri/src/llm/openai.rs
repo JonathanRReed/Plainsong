@@ -162,8 +162,16 @@ impl OpenAIClient {
 
     /// Summarize meeting
     pub async fn summarize(&self, transcript: &str, model: &str) -> Result<String> {
-        let system_prompt = "Provide a concise summary of the following meeting transcript. \
-            Focus on key points, decisions, and outcomes.";
+        let system_prompt = "You are a highly capable AI meeting assistant (similar to Granola or SuperWhisper). \
+Your task is to provide a comprehensive, well-structured, and highly readable summary of the following meeting transcript. \
+\
+Please organize the summary into the following sections:\
+1. **Executive Summary**: A brief 2-3 sentence overview of the meeting's main purpose and conclusion.\
+2. **Key Discussion Points**: Bullet points detailing the most important topics discussed, preserving context and nuance.\
+3. **Decisions Made**: A clear list of any final decisions or agreements reached during the meeting.\
+4. **Action Items**: A list of tasks assigned, including who is responsible and any mentioned deadlines.\
+\
+Ensure the tone is professional, objective, and easy to skim.";
 
         self.generate(model, transcript, Some(system_prompt)).await
     }
@@ -175,14 +183,14 @@ impl OpenAIClient {
         model: &str,
     ) -> Result<Vec<ActionItem>> {
         let prompt = format!(
-            "Extract all action items from the following meeting transcript. \
-            For each action item, identify:\n\
-            1. The task\n\
-            2. Who is responsible (if mentioned)\n\
-            3. Any deadlines (if mentioned)\n\n\
-            Format as a bulleted list.\n\n\
-            Transcript:\n{transcript}\n\n\
-            Action Items:"
+            "You are an expert AI meeting assistant. Extract all actionable items from the following meeting transcript. \
+For each action item, clearly identify:\n\
+1. The specific task or deliverable\n\
+2. Who is responsible (if mentioned, otherwise mark as 'Unassigned')\n\
+3. Any deadlines or timeframes mentioned (if none, mark as 'No deadline')\n\n\
+Format as a clean, highly readable bulleted list. If there are no action items, simply output 'No action items identified.'\n\n\
+Transcript:\n{transcript}\n\n\
+Action Items:"
         );
 
         let response = self.generate(model, &prompt, None).await?;

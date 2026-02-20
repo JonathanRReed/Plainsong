@@ -150,14 +150,14 @@ impl OllamaClient {
         model: &str,
     ) -> Result<Vec<ActionItem>> {
         let prompt = format!(
-            "Extract all action items from the following meeting transcript. \
-            For each action item, identify:\n\
-            1. The task\n\
-            2. Who is responsible (if mentioned)\n\
-            3. Any deadlines (if mentioned)\n\n\
-            Format as a bulleted list.\n\n\
-            Transcript:\n{transcript}\n\n\
-            Action Items:"
+            "You are an expert AI meeting assistant. Extract all actionable items from the following meeting transcript. \
+For each action item, clearly identify:\n\
+1. The specific task or deliverable\n\
+2. Who is responsible (if mentioned, otherwise mark as 'Unassigned')\n\
+3. Any deadlines or timeframes mentioned (if none, mark as 'No deadline')\n\n\
+Format as a clean, highly readable bulleted list. If there are no action items, simply output 'No action items identified.'\n\n\
+Transcript:\n{transcript}\n\n\
+Action Items:"
         );
 
         let response = self.generate(model, &prompt).await?;
