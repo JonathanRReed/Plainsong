@@ -1,7 +1,9 @@
 pub mod canary;
 pub mod distil_whisper;
+pub mod elevenlabs_scribe;
 pub mod manager;
 pub mod moonshine;
+pub mod openai_cloud;
 pub mod parakeet;
 pub mod python_runtime;
 pub mod vibevoice;
@@ -86,6 +88,8 @@ pub enum AsrProviderType {
     Moonshine,
     VibeVoice,
     Voxtral,
+    ElevenLabsScribe,
+    OpenAiCloud,
 }
 
 impl AsrProviderType {
@@ -98,6 +102,8 @@ impl AsrProviderType {
             AsrProviderType::Moonshine,
             AsrProviderType::VibeVoice,
             AsrProviderType::Voxtral,
+            AsrProviderType::ElevenLabsScribe,
+            AsrProviderType::OpenAiCloud,
         ]
     }
 
@@ -111,6 +117,8 @@ impl AsrProviderType {
             AsrProviderType::Moonshine => "UsefulSensors Moonshine",
             AsrProviderType::VibeVoice => "Microsoft VibeVoice",
             AsrProviderType::Voxtral => "Mistral Voxtral Mini",
+            AsrProviderType::ElevenLabsScribe => "ElevenLabs Scribe",
+            AsrProviderType::OpenAiCloud => "OpenAI Whisper (Cloud)",
         }
     }
 }
@@ -134,6 +142,12 @@ impl AsrProviderFactory {
             AsrProviderType::Moonshine => Box::new(moonshine::MoonshineProvider::new()),
             AsrProviderType::VibeVoice => Box::new(vibevoice::VibeVoiceProvider::new()),
             AsrProviderType::Voxtral => Box::new(voxtral::VoxtralProvider::new()),
+            AsrProviderType::ElevenLabsScribe => {
+                Box::new(elevenlabs_scribe::ElevenLabsScribeProvider::new())
+            }
+            AsrProviderType::OpenAiCloud => {
+                Box::new(openai_cloud::OpenAiCloudWhisperProvider::new())
+            }
         }
     }
 }

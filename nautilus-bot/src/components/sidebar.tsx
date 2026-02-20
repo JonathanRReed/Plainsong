@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
   Mic,
@@ -14,7 +15,7 @@ import {
   KeyRound,
 } from "lucide-react";
 import type { ViewId } from "@/App";
-import type { LicenseInfo } from "@/lib/tauri";
+import { getSettings, type LicenseInfo } from "@/lib/tauri";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
@@ -39,6 +40,45 @@ const navItems = [
   { id: "exports", label: "Exports", icon: FileOutput },
   { id: "settings", label: "Settings", icon: Settings },
 ];
+
+interface LocalModeStatus {
+  active: boolean;
+  label: string;
+  detail: string;
+}
+
+const DEFAULT_LOCAL_MODE_STATUS: LocalModeStatus = {
+  active: true,
+  label: "Local Mode",
+  detail: "Using local analysis provider and privacy-safe defaults.",
+};
+
+function deriveLocalModeStatus(
+  llmProvider: string,
+  remoteProcessingEnabled: boolean
+): LocalModeStatus {
+  if (!remoteProcessingEnabled) {
+    return {
+      active: true,
+      label: "Local Mode",
+      detail: "Remote processing is disabled by policy.",
+    };
+  }
+
+  if (llmProvider === "ollama") {
+    return {
+      active: true,
+      label: "Local Mode",
+      detail: "Default analysis provider is local (Ollama).",
+    };
+  }
+
+  return {
+    active: false,
+    label: "Cloud Enabled",
+    detail: `Remote processing enabled with '${llmProvider}' as default analysis provider.`,
+  };
+}
 
 function LicenseBadge({
   license,
@@ -137,6 +177,40 @@ export function Sidebar({
   onActivateClick,
 }: SidebarProps) {
   const { isRecording, formattedDuration, recordingMode } = useRecording();
+  const [localModeStatus, setLocalModeStatus] = useState<LocalModeStatus>(DEFAULT_LOCAL_MODE_STATUS);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const refreshLocalMode = async () => {
+      try {
+        const settings = await getSettings();
+        if (!mounted) {
+          return;
+        }
+        setLocalModeStatus(
+          deriveLocalModeStatus(
+            settings.privacy.llmProvider,
+            settings.privacy.remoteProcessingEnabled
+          )
+        );
+      } catch {
+        if (mounted) {
+          setLocalModeStatus(DEFAULT_LOCAL_MODE_STATUS);
+        }
+      }
+    };
+
+    void refreshLocalMode();
+    const intervalId = setInterval(() => {
+      void refreshLocalMode();
+    }, 5000);
+
+    return () => {
+      mounted = false;
+      clearInterval(intervalId);
+    };
+  }, []);
 
   return (
     <TooltipProvider>
@@ -226,15 +300,25 @@ export function Sidebar({
             {!isCollapsed && <span className="text-xs text-muted-foreground">Theme</span>}
           </div>
 
-          <div
-            className={cn(
-              "flex items-center gap-2 text-xs text-muted-foreground",
-              isCollapsed && "justify-center"
-            )}
-          >
-            <div className="h-2 w-2 rounded-full bg-green-500" />
-            {!isCollapsed && <span>Local Mode</span>}
-          </div>
+          <Tooltip delayDuration={0}>
+            <TooltipTrigger asChild>
+              <div
+                className={cn(
+                  "flex items-center gap-2 text-xs text-muted-foreground",
+                  isCollapsed && "justify-center"
+                )}
+              >
+                <div
+                  className={cn(
+                    "h-2 w-2 rounded-full",
+                    localModeStatus.active ? "bg-green-500" : "bg-amber-500"
+                  )}
+                />
+                {!isCollapsed && <span>{localModeStatus.label}</span>}
+              </div>
+            </TooltipTrigger>
+            <TooltipContent side="right">{localModeStatus.detail}</TooltipContent>
+          </Tooltip>
         </div>
       </div>
     </TooltipProvider>

@@ -1,4 +1,4 @@
-import { useMemo, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -6,8 +6,11 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useProjects } from "@/hooks/use-projects";
 import { useRecordings } from "@/hooks/use-recordings";
-import { analyzeRecordings, searchTranscripts } from "@/lib/tauri";
-import { Folder, FileAudio, Clock, Activity } from "lucide-react";
+import { analyzeRecordings, askMemory, searchTranscripts, validateLicense } from "@/lib/tauri";
+import type { LicenseInfo } from "@/lib/tauri";
+import { deriveEntitlement } from "@/hooks/use-license-features";
+import { Folder, FileAudio, Clock, Activity, Brain, Loader2 } from "lucide-react";
+import { TierBadge } from "@/components/tier-badge";
 
 export function DashboardView() {
   const { projects } = useProjects();
@@ -35,6 +38,23 @@ export function DashboardView() {
   }>>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [memoryQuery, setMemoryQuery] = useState("");
+  const [memoryAnswer, setMemoryAnswer] = useState<string | null>(null);
+  const [memoryCitations, setMemoryCitations] = useState<Array<{
+    text: string;
+    startTime?: number;
+    endTime?: number;
+    recordingId?: string;
+  }>>([]);
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
+  const [license, setLicense] = useState<LicenseInfo | null>(null);
+
+  const entitlement = deriveEntitlement(license);
+
+  useEffect(() => {
+    void validateLicense().then(setLicense).catch(() => {});
+  }, []);
 
   const recentRecordings = useMemo(() => recordings.slice(0, 10), [recordings]);
   const totalDuration = useMemo(() => recordings.reduce((acc, r) => acc + r.duration, 0), [recordings]);
@@ -46,6 +66,21 @@ export function DashboardView() {
     acc[key].push(recording);
     return acc;
   }, {}), [recordings]);
+
+  const runMemoryQuery = async () => {
+    if (!memoryQuery.trim()) return;
+    setMemoryLoading(true);
+    setMemoryError(null);
+    try {
+      const result = await askMemory(memoryQuery.trim());
+      setMemoryAnswer(result.response);
+      setMemoryCitations(result.citations);
+    } catch (error) {
+      setMemoryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMemoryLoading(false);
+    }
+  };
 
   const runGlobalSearch = async () => {
     if (!globalQuery.trim()) return;
@@ -131,6 +166,51 @@ export function DashboardView() {
             </Card>
           </div>
           
+          <Card className={!entitlement.proEnabled ? "opacity-75" : ""}>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Brain className="h-5 w-5 text-violet-500" />
+                Memory
+                <TierBadge required="pro" unlocked={entitlement.proEnabled} />
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Ask anything about your meetings. Nautilus searches all transcripts and answers with citations.
+              </p>
+              <div className="flex gap-2">
+                <Input
+                  value={memoryQuery}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setMemoryQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") void runMemoryQuery(); }}
+                  placeholder={entitlement.proEnabled ? "What did we decide about the Q3 budget?" : "Requires Pro license or trial"}
+                  disabled={!entitlement.proEnabled || memoryLoading}
+                />
+                <Button
+                  onClick={() => void runMemoryQuery()}
+                  disabled={!entitlement.proEnabled || memoryLoading || !memoryQuery.trim()}
+                >
+                  {memoryLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Ask"}
+                </Button>
+              </div>
+              {memoryError && <p className="text-sm text-destructive">{memoryError}</p>}
+              {memoryAnswer && (
+                <div className="space-y-2 rounded-md border p-3 text-sm">
+                  <p className="whitespace-pre-wrap">{memoryAnswer}</p>
+                  {memoryCitations.length > 0 && (
+                    <div className="space-y-1 border-t pt-2">
+                      {memoryCitations.map((c, i) => (
+                        <p key={i} className="text-xs text-muted-foreground">
+                          [{c.recordingId ?? "recording"}] {c.startTime?.toFixed(1)}s–{c.endTime?.toFixed(1)}s: {c.text}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           <Card>
             <CardHeader>
               <CardTitle>Cross-Recording Search</CardTitle>

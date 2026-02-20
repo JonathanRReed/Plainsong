@@ -265,6 +265,11 @@ export async function extractActionItems(
   return await invoke("extract_action_items", { recordingId, model });
 }
 
+/** Ask a question across all meeting transcripts (AutoRAG Memory). Requires Pro or trial. */
+export async function askMemory(query: string): Promise<LlmAnalysisResult> {
+  return await invoke("ask_memory", { query });
+}
+
 export async function searchTranscripts(
   query: string,
   limit = 20,
@@ -275,6 +280,25 @@ export async function searchTranscripts(
 
 export async function getOllamaStatus(): Promise<boolean> {
   return await invoke("get_ollama_status");
+}
+
+export interface EmbeddingStatus {
+  embeddingCount: number;
+  ollamaAvailable: boolean;
+}
+
+export interface ReindexResult {
+  recordings: number;
+  segments: number;
+  errors: number;
+}
+
+export async function reindexEmbeddings(): Promise<ReindexResult> {
+  return await invoke("reindex_embeddings");
+}
+
+export async function getEmbeddingStatus(): Promise<EmbeddingStatus> {
+  return await invoke("get_embedding_status");
 }
 
 export async function listOllamaModels(): Promise<string[]> {
@@ -531,6 +555,20 @@ export async function activateLicense(key: string): Promise<LicenseInfo> {
 /** Deactivate this device (calls LS deactivate endpoint, clears local state). */
 export async function deactivateLicense(): Promise<void> {
   await invoke("deactivate_license");
+}
+
+export interface EntitlementInfo {
+  trialActive: boolean;
+  licenseValid: boolean;
+  tier: "free" | "pro" | "friends";
+  proEnabled: boolean;
+  experimentalEnabled: boolean;
+  canUpdate: boolean;
+}
+
+/** Get current entitlement (no network call, reads cached license state). */
+export async function getEntitlement(): Promise<EntitlementInfo> {
+  return await invoke("get_entitlement");
 }
 
 // ── Update System ─────────────────────────────────────────────────────────────

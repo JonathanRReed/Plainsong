@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsView } from "@/components/views/settings-view-simple";
+import { ToastProvider } from "@/components/toast";
 
 const baseSettings = {
   audio: {
@@ -12,6 +13,7 @@ const baseSettings = {
     voiceActivityDetection: true,
     silenceTimeoutSeconds: 3,
     autoGainControl: true,
+    manualGainDb: 0,
   },
   transcription: {
     defaultProvider: "whisper",
@@ -26,6 +28,10 @@ const baseSettings = {
     dictationSaveToInbox: true,
     dictationProfile: "speed" as const,
     dictationProjectId: "inbox",
+    speakerNamingMethod: "auto" as const,
+    silenceSkipEnabled: false,
+    memorySearchMode: "fts" as const,
+    embeddingModel: "nomic-embed-text",
   },
   ui: {
     alwaysOnTop: false,
@@ -161,7 +167,7 @@ describe("SettingsView performance behavior", () => {
 
   it("lazy-loads heavy security/storage data by tab", async () => {
     const tauri = await import("@/lib/tauri");
-    render(<SettingsView />);
+    render(<ToastProvider><SettingsView /></ToastProvider>);
 
     await screen.findByText("Configure Nautilus preferences");
     expect(tauri.getSettings).toHaveBeenCalledTimes(1);
@@ -184,7 +190,7 @@ describe("SettingsView performance behavior", () => {
 
   it("debounces rapid settings changes into a single save", async () => {
     const tauri = await import("@/lib/tauri");
-    render(<SettingsView />);
+    render(<ToastProvider><SettingsView /></ToastProvider>);
 
     await screen.findByText("Configure Nautilus preferences");
     vi.useFakeTimers();
@@ -203,7 +209,7 @@ describe("SettingsView performance behavior", () => {
 
   it("flushes text-field saves immediately on blur", async () => {
     const tauri = await import("@/lib/tauri");
-    render(<SettingsView />);
+    render(<ToastProvider><SettingsView /></ToastProvider>);
 
     await screen.findByText("Configure Nautilus preferences");
     fireEvent.click(screen.getByRole("button", { name: "Security" }));

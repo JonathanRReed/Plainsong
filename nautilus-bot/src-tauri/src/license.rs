@@ -83,6 +83,48 @@ pub struct LicenseInfo {
     pub trial_active: bool,
 }
 
+/// Unified entitlement object used for all feature and update gating.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Entitlement {
+    pub trial_active: bool,
+    pub license_valid: bool,
+    /// "free" | "pro" | "friends"
+    pub tier: String,
+    pub pro_enabled: bool,
+    pub experimental_enabled: bool,
+    pub can_update: bool,
+}
+
+pub fn build_entitlement(info: &LicenseInfo) -> Entitlement {
+    let pro_enabled = info.valid || info.trial_active;
+    let experimental_enabled = info.valid && info.tier == Tier::FriendsClub;
+    let can_update = info.valid || info.trial_active;
+    let tier = if info.valid && info.tier == Tier::FriendsClub {
+        "friends".to_string()
+    } else if info.valid || info.trial_active {
+        "pro".to_string()
+    } else {
+        "free".to_string()
+    };
+
+    Entitlement {
+        trial_active: info.trial_active,
+        license_valid: info.valid,
+        tier,
+        pro_enabled,
+        experimental_enabled,
+        can_update,
+    }
+}
+
+/// Build entitlement from current persisted state (no network call).
+pub fn get_current_entitlement() -> Entitlement {
+    let state = load_state();
+    let info = info_from_state(&state);
+    build_entitlement(&info)
+}
+
 // ── Lemon Squeezy API response shapes ────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -543,5 +585,77 @@ mod tests {
         let (remaining, nag) = trial_status(&state, false);
         assert_eq!(remaining, 0);
         assert!(nag);
+    }
+
+    // ── Entitlement tests ────────────────────────────────────────────────
+
+    fn make_info(valid: bool, trial_active: bool, tier: Tier) -> LicenseInfo {
+        LicenseInfo {
+            key: if valid {
+                "k".to_string()
+            } else {
+                String::new()
+            },
+            instance_id: String::new(),
+            tier,
+            valid,
+            ls_status: if valid {
+                "active".to_string()
+            } else {
+                String::new()
+            },
+            activations_limit: 5,
+            activations_usage: 1,
+            last_validated_at: String::new(),
+            trial_days_remaining: if trial_active { 20 } else { 0 },
+            nag_required: !valid && !trial_active,
+            trial_active,
+        }
+    }
+
+    #[test]
+    fn entitlement_trial_active_grants_pro() {
+        let info = make_info(false, true, Tier::None);
+        let ent = build_entitlement(&info);
+        assert!(ent.trial_active);
+        assert!(!ent.license_valid);
+        assert!(ent.pro_enabled);
+        assert!(!ent.experimental_enabled);
+        assert!(ent.can_update);
+        assert_eq!(ent.tier, "pro");
+    }
+
+    #[test]
+    fn entitlement_valid_pro_license() {
+        let info = make_info(true, false, Tier::Pro);
+        let ent = build_entitlement(&info);
+        assert!(!ent.trial_active);
+        assert!(ent.license_valid);
+        assert!(ent.pro_enabled);
+        assert!(!ent.experimental_enabled);
+        assert!(ent.can_update);
+        assert_eq!(ent.tier, "pro");
+    }
+
+    #[test]
+    fn entitlement_valid_friends_license() {
+        let info = make_info(true, false, Tier::FriendsClub);
+        let ent = build_entitlement(&info);
+        assert!(ent.pro_enabled);
+        assert!(ent.experimental_enabled);
+        assert!(ent.can_update);
+        assert_eq!(ent.tier, "friends");
+    }
+
+    #[test]
+    fn entitlement_expired_trial_no_license() {
+        let info = make_info(false, false, Tier::None);
+        let ent = build_entitlement(&info);
+        assert!(!ent.trial_active);
+        assert!(!ent.license_valid);
+        assert!(!ent.pro_enabled);
+        assert!(!ent.experimental_enabled);
+        assert!(!ent.can_update);
+        assert_eq!(ent.tier, "free");
     }
 }

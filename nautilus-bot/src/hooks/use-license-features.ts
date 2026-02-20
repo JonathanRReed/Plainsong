@@ -9,6 +9,16 @@ export interface FeatureFlags {
   prioritySupport: boolean;
 }
 
+export interface Entitlement {
+  trialActive: boolean;
+  licenseValid: boolean;
+  tier: "free" | "pro" | "friends";
+  proEnabled: boolean;
+  experimentalEnabled: boolean;
+  canUpdate: boolean;
+  features: FeatureFlags;
+}
+
 const TIER_FEATURES: Record<LicenseTier, FeatureFlags> = {
   none: {
     whisperLargeModel: false,
@@ -33,17 +43,53 @@ const TIER_FEATURES: Record<LicenseTier, FeatureFlags> = {
   },
 };
 
+export function deriveEntitlement(license: LicenseInfo | null): Entitlement {
+  const trialActive = license?.trialActive ?? false;
+  const licenseValid = license?.valid ?? false;
+  const rawTier = license?.tier ?? "none";
+
+  const tier: Entitlement["tier"] =
+    licenseValid && rawTier === "friends_club"
+      ? "friends"
+      : licenseValid || trialActive
+        ? "pro"
+        : "free";
+
+  const proEnabled = licenseValid || trialActive;
+  const experimentalEnabled = licenseValid && rawTier === "friends_club";
+  const canUpdate = licenseValid || trialActive;
+
+  const effectiveTier: LicenseTier =
+    licenseValid ? rawTier : trialActive ? "pro" : "none";
+  const features = TIER_FEATURES[effectiveTier] ?? TIER_FEATURES.none;
+
+  return {
+    trialActive,
+    licenseValid,
+    tier,
+    proEnabled,
+    experimentalEnabled,
+    canUpdate,
+    features,
+  };
+}
+
+export function useEntitlement(license: LicenseInfo | null): Entitlement {
+  return useMemo(
+    () => deriveEntitlement(license),
+    [license?.valid, license?.tier, license?.trialActive]
+  );
+}
+
 export function useLicenseFeatures(license: LicenseInfo | null): FeatureFlags {
   return useMemo(() => {
-    const tier = license?.valid ? license.tier : "none";
-    return TIER_FEATURES[tier] ?? TIER_FEATURES.none;
-  }, [license?.valid, license?.tier]);
+    return deriveEntitlement(license).features;
+  }, [license?.valid, license?.tier, license?.trialActive]);
 }
 
 export function isFeatureAllowed(
   license: LicenseInfo | null,
   feature: keyof FeatureFlags
 ): boolean {
-  const tier = license?.valid ? license.tier : "none";
-  return TIER_FEATURES[tier]?.[feature] ?? false;
+  return deriveEntitlement(license).features[feature];
 }

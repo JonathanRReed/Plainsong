@@ -134,8 +134,20 @@ impl AsrProvider for WhisperProvider {
         tracing::info!("Loading audio file for Whisper: {:?}", audio_path);
 
         // Load and preprocess audio
-        let audio_data = crate::audio::utils::load_audio_file(audio_path)
+        let mut audio_data = crate::audio::utils::load_audio_file(audio_path)
             .context("Failed to load audio file")?;
+
+        // Whisper requires > 1000ms of audio; pad with silence to 1.1s if needed
+        let min_samples = (16000.0_f32 * 1.1).ceil() as usize;
+        if !audio_data.is_empty() && audio_data.len() < min_samples {
+            tracing::info!(
+                "Whisper audio too short ({} samples / {:.0}ms), padding to {}ms",
+                audio_data.len(),
+                audio_data.len() as f64 / 16.0,
+                min_samples as f64 / 16.0
+            );
+            audio_data.resize(min_samples, 0.0);
+        }
 
         tracing::info!(
             "Whisper received {} samples (sample rate 16000, duration {:.2}s)",

@@ -254,7 +254,11 @@ function App() {
                         </div>
                       }
                     >
-                      <ActiveView />
+                      {activeView === "settings" ? (
+                        <SettingsView onLicenseChange={setLicense} />
+                      ) : (
+                        <ActiveView />
+                      )}
                     </Suspense>
                   </main>
                   <RecordingOverlay isDictation={activeView === "dictation"} />

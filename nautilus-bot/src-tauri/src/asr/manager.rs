@@ -43,6 +43,7 @@ pub struct AsrManager {
     default_provider: RwLock<AsrProviderType>,
     selected_model_id: RwLock<String>,
     allow_whisper_fallback: RwLock<bool>,
+    silence_skip_enabled: RwLock<bool>,
     last_runtime_errors: RwLock<HashMap<AsrProviderType, String>>,
     models_dir: PathBuf,
 }
@@ -57,6 +58,7 @@ impl AsrManager {
         std::fs::create_dir_all(&models_dir).ok();
 
         Self {
+            silence_skip_enabled: RwLock::new(false),
             default_provider: RwLock::new(AsrProviderType::Whisper),
             selected_model_id: RwLock::new("base.en".to_string()),
             allow_whisper_fallback: RwLock::new(false),
@@ -91,6 +93,14 @@ impl AsrManager {
 
     pub async fn allow_whisper_fallback(&self) -> bool {
         *self.allow_whisper_fallback.read().await
+    }
+
+    pub async fn set_silence_skip_enabled(&self, enabled: bool) {
+        *self.silence_skip_enabled.write().await = enabled;
+    }
+
+    pub async fn silence_skip_enabled(&self) -> bool {
+        *self.silence_skip_enabled.read().await
     }
 
     /// Get a provider by type - creates fresh instance each time
@@ -157,8 +167,28 @@ impl AsrManager {
         };
         let provider = Self::provider_with_model(provider_type, Some(resolved_model.as_str()));
         let fallback_allowed = self.allow_whisper_fallback().await;
+        let skip_silence = self.silence_skip_enabled().await;
 
-        let primary_result = match (file_path, audio_data) {
+        // Pre-process: remove silence from audio bytes if enabled
+        let processed_bytes: Option<Vec<u8>> = if skip_silence {
+            audio_data.and_then(|bytes| {
+                match crate::audio::utils::remove_silence_from_wav_bytes(bytes) {
+                    Ok(filtered) => Some(filtered),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Silence skip preprocessing failed, using original audio: {}",
+                            e
+                        );
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
+        let effective_audio_data = processed_bytes.as_deref().or(audio_data);
+
+        let primary_result = match (file_path, effective_audio_data) {
             (Some(path), None) => provider.transcribe(path).await,
             (None, Some(bytes)) => provider.transcribe_bytes(bytes).await,
             _ => Err(anyhow::anyhow!("Invalid transcription input")),
@@ -600,6 +630,50 @@ fn runtime_diagnostics_for_provider(
                 "Voxtral Mini (Mistral) runtime ready.",
                 last_error,
             )
+        }
+        AsrProviderType::ElevenLabsScribe => {
+            let has_key = std::env::var("ELEVENLABS_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .is_some();
+            RuntimeDiagnosticsInternal {
+                runtime_status: if has_key {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingModel
+                },
+                runtime_message: Some(if has_key {
+                    "ElevenLabs Scribe cloud API ready.".to_string()
+                } else {
+                    "Set ELEVENLABS_API_KEY to enable ElevenLabs Scribe.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                },
+            }
+        }
+        AsrProviderType::OpenAiCloud => {
+            let has_key = std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .is_some();
+            RuntimeDiagnosticsInternal {
+                runtime_status: if has_key {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingModel
+                },
+                runtime_message: Some(if has_key {
+                    "OpenAI Whisper cloud API ready.".to_string()
+                } else {
+                    "Set OPENAI_API_KEY to enable OpenAI Whisper cloud.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                },
+            }
         }
     }
 }

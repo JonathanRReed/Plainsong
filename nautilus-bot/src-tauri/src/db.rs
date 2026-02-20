@@ -240,6 +240,25 @@ impl Database {
         }
 
         self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS transcript_embeddings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recording_id TEXT NOT NULL,
+                segment_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                model TEXT NOT NULL,
+                start_time REAL,
+                end_time REAL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_embeddings_recording ON transcript_embeddings(recording_id)",
+            [],
+        )?;
+
+        self.conn.execute(
             "CREATE TRIGGER IF NOT EXISTS audit_log_no_update
              BEFORE UPDATE ON audit_log
              BEGIN
@@ -1014,6 +1033,130 @@ impl Database {
 
         entries.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
     }
+
+    // ── Embedding storage for vector search ──────────────────────────────
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_embedding(
+        &self,
+        recording_id: &str,
+        segment_id: &str,
+        text: &str,
+        embedding: &[f32],
+        model: &str,
+        start_time: f64,
+        end_time: f64,
+    ) -> Result<()> {
+        let blob: Vec<u8> = embedding
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        self.conn.execute(
+            "INSERT INTO transcript_embeddings (recording_id, segment_id, text, embedding, model, start_time, end_time, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![recording_id, segment_id, text, blob, model, start_time, end_time, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn has_embeddings(&self, recording_id: &str) -> bool {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM transcript_embeddings WHERE recording_id = ?1",
+                params![recording_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0
+    }
+
+    pub fn delete_embeddings(&self, recording_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM transcript_embeddings WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_all_embeddings(&self) -> Result<usize> {
+        let count = self.conn.execute("DELETE FROM transcript_embeddings", [])?;
+        Ok(count)
+    }
+
+    pub fn search_embeddings(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT recording_id, segment_id, text, embedding, start_time, end_time
+             FROM transcript_embeddings",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let recording_id: String = row.get(0)?;
+            let segment_id: String = row.get(1)?;
+            let text: String = row.get(2)?;
+            let blob: Vec<u8> = row.get(3)?;
+            let start_time: f64 = row.get(4)?;
+            let end_time: f64 = row.get(5)?;
+            Ok((recording_id, segment_id, text, blob, start_time, end_time))
+        })?;
+
+        let mut scored: Vec<(f64, SearchHit)> = Vec::new();
+        for row in rows {
+            let (recording_id, segment_id, text, blob, start_time, end_time) = row?;
+            let embedding = blob_to_f32_vec(&blob);
+            let score = crate::llm::cosine_similarity(query_embedding, &embedding) as f64;
+            scored.push((
+                score,
+                SearchHit {
+                    recording_id,
+                    recording_title: String::new(),
+                    project_id: String::new(),
+                    segment_id,
+                    text,
+                    start_time,
+                    end_time,
+                    score,
+                },
+            ));
+        }
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+
+        // Backfill recording titles
+        let hits: Vec<SearchHit> = scored
+            .into_iter()
+            .map(|(_, mut hit)| {
+                if let Ok(title) = self.conn.query_row(
+                    "SELECT title FROM recordings WHERE id = ?1",
+                    params![&hit.recording_id],
+                    |row| row.get::<_, String>(0),
+                ) {
+                    hit.recording_title = title;
+                }
+                hit
+            })
+            .collect();
+
+        Ok(hits)
+    }
+
+    pub fn embedding_count(&self) -> Result<i64> {
+        self.conn
+            .query_row("SELECT COUNT(*) FROM transcript_embeddings", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| e.into())
+    }
+}
+
+fn blob_to_f32_vec(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect()
 }
 
 fn build_fts_query(query: &str) -> String {

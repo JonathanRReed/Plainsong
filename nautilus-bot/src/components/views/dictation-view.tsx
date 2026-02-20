@@ -25,9 +25,12 @@ export function DictationView() {
   const { isRecording, formattedDuration, startDictation, stopDictation } = useRecording();
   const { projects } = useProjects();
   const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
-  const hotkeyLabel = isMac
+  const fallbackHotkeyLabel = isMac
     ? "Cmd + Shift + Space or Ctrl + Shift + Space"
     : "Ctrl + Shift + Space";
+  const defaultShortcut = isMac ? "Cmd+Shift+Space" : "Ctrl+Shift+Space";
+  const [hotkeyLabel, setHotkeyLabel] = useState(fallbackHotkeyLabel);
+  const [hotkeyShortcut, setHotkeyShortcut] = useState(defaultShortcut);
   const [transcribedText, setTranscribedText] = useState("");
   const [lastProvider, setLastProvider] = useState<string | null>(null);
   const [lastModelId, setLastModelId] = useState<string | null>(null);
@@ -47,6 +50,9 @@ export function DictationView() {
         setSaveToInbox(settings.transcription.dictationSaveToInbox);
         setDictationProfile(settings.transcription.dictationProfile);
         setDefaultProjectId(settings.transcription.dictationProjectId || "inbox");
+        const shortcut = settings.shortcuts.toggleDictation || defaultShortcut;
+        setHotkeyLabel(shortcut);
+        setHotkeyShortcut(shortcut);
       })
       .catch((error) => {
         console.warn("Failed to load dictation preferences:", error);
@@ -54,7 +60,35 @@ export function DictationView() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [defaultShortcut, fallbackHotkeyLabel]);
+
+  const matchesShortcut = (event: KeyboardEvent, shortcut: string): boolean => {
+    const normalized = shortcut.replace(/\s+/g, "");
+    const parts = normalized.split("+").filter(Boolean);
+    if (parts.length < 2) {
+      return false;
+    }
+
+    const key = parts[parts.length - 1].toLowerCase();
+    const modifiers = new Set(parts.slice(0, -1).map((part) => part.toLowerCase()));
+
+    const expectedMeta = modifiers.has("cmd") || modifiers.has("meta") || modifiers.has("super");
+    const expectedCtrl = modifiers.has("ctrl") || modifiers.has("control");
+    const expectedAlt = modifiers.has("alt") || modifiers.has("option");
+    const expectedShift = modifiers.has("shift");
+
+    if (event.metaKey !== expectedMeta) return false;
+    if (event.ctrlKey !== expectedCtrl) return false;
+    if (event.altKey !== expectedAlt) return false;
+    if (event.shiftKey !== expectedShift) return false;
+
+    if (key === "space") {
+      return event.code === "Space";
+    }
+
+    const eventKey = event.key.length === 1 ? event.key.toLowerCase() : event.key.toLowerCase();
+    return eventKey === key;
+  };
 
   const persistDictationPreferences = async (
     updates: Partial<{ saveToInbox: boolean; profile: "speed" | "accuracy"; projectId: string }>
@@ -73,7 +107,7 @@ export function DictationView() {
   useEffect(() => {
     // Listen for hotkey visual feedback
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "Space") {
+      if (matchesShortcut(e, hotkeyShortcut)) {
         setHotkeyPressed(true);
         
         // Clear any existing timeout
@@ -93,7 +127,7 @@ export function DictationView() {
         clearTimeout(timeoutRef.current);
       }
     };
-  }, []);
+  }, [hotkeyShortcut]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -168,7 +202,7 @@ export function DictationView() {
             >
               <Keyboard className="h-4 w-4" />
               <span className="font-mono font-medium">{hotkeyLabel}</span>
-              <span className="text-muted-foreground ml-2">to hold</span>
+              <span className="text-muted-foreground ml-2">to toggle</span>
             </div>
             <div className="flex items-center gap-2">
               <input
@@ -203,8 +237,8 @@ export function DictationView() {
                 Quick Capture
               </CardTitle>
               <CardDescription>
-                Press and hold the global hotkey to start dictating. 
-                Release to stop and transcribe.
+                Press the global hotkey to start dictating.
+                Press again to stop and transcribe.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -237,7 +271,7 @@ export function DictationView() {
                     <div className="text-center">
                       <p className="text-lg font-medium">Ready to capture</p>
                       <p className="text-muted-foreground mt-1">
-                        Hold and keep pressed: {hotkeyLabel}, release to transcribe
+                        Press {hotkeyLabel} to start, press again to stop
                       </p>
                     </div>
                     <Button 
@@ -286,7 +320,7 @@ export function DictationView() {
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground">
-                  Text appears at your cursor position within seconds of releasing the hotkey.
+                  Text appears at your cursor position within seconds of pressing the hotkey again.
                 </p>
               </CardContent>
             </Card>
@@ -348,7 +382,7 @@ export function DictationView() {
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Transcription Model</label>
+                  <label className="text-sm font-medium">Dictation profile</label>
                   <select
                     className="w-full p-2 border rounded-md bg-background"
                     value={dictationProfile}
@@ -358,9 +392,12 @@ export function DictationView() {
                       void persistDictationPreferences({ profile });
                     }}
                   >
-                    <option value="speed">Speed (Whisper Turbo)</option>
-                    <option value="accuracy">Accuracy (Whisper Large)</option>
+                    <option value="speed">Speed</option>
+                    <option value="accuracy">Accuracy</option>
                   </select>
+                  <p className="text-xs text-muted-foreground">
+                    ASR model selection follows your global default local ASR model in Settings.
+                  </p>
                 </div>
                 
                 <div className="space-y-2">

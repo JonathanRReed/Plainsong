@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
+import { LOCAL_ASR_MODEL_GROUPS } from "@/lib/asr-models";
 import { invoke } from "@tauri-apps/api/core";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -27,9 +28,15 @@ import {
 
 interface AsrProviderManagerProps {
   className?: string;
+  selectedModelId?: string;
+  onSelectedModelChange?(modelId: string): void;
 }
 
-export function AsrProviderManager({ className }: AsrProviderManagerProps) {
+export function AsrProviderManager({
+  className,
+  selectedModelId,
+  onSelectedModelChange,
+}: AsrProviderManagerProps) {
   const [providers, setProviders] = useState<AsrProviderInfo[]>([]);
   const [defaultProvider, setDefaultProvider] = useState<AsrProviderType>("whisper");
   const [isLoading, setIsLoading] = useState(false);
@@ -273,6 +280,34 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         </TabsList>
 
         <TabsContent value="providers" className="space-y-4">
+          {onSelectedModelChange ? (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Default local ASR model</CardTitle>
+                <CardDescription>
+                  Uses the same setting as General. Provider stays separate below.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <select
+                  className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                  value={selectedModelId ?? "base.en"}
+                  onChange={(event) => onSelectedModelChange(event.target.value)}
+                >
+                  {LOCAL_ASR_MODEL_GROUPS.map((group) => (
+                    <optgroup key={group.label} label={group.label}>
+                      {group.options.map((model) => (
+                        <option key={model.id} value={model.id}>
+                          {model.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </CardContent>
+            </Card>
+          ) : null}
+
           <div className="grid gap-4">
             {providers.length === 0 ? (
               <Card>

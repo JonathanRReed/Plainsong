@@ -71,6 +71,8 @@ pub struct AudioSettings {
     pub silence_timeout_seconds: f32,
     /// Auto-gain control
     pub auto_gain_control: bool,
+    /// Manual gain (dB) when auto-gain is off (-20 to +20)
+    pub manual_gain_db: f32,
 }
 
 impl Default for AudioSettings {
@@ -84,6 +86,7 @@ impl Default for AudioSettings {
             voice_activity_detection: true,
             silence_timeout_seconds: 3.0,
             auto_gain_control: true,
+            manual_gain_db: 0.0,
         }
     }
 }
@@ -108,6 +111,10 @@ pub struct TranscriptionSettings {
     pub language: Option<String>,
     /// Number of speakers (0 = auto-detect)
     pub num_speakers: usize,
+    /// Speaker naming method: auto (infer from speech), numbered, manual
+    pub speaker_naming_method: String,
+    /// Skip silence segments during transcription (Pro/Friends Club feature)
+    pub silence_skip_enabled: bool,
     /// Save raw transcript without formatting
     pub save_raw_transcript: bool,
     /// Persist dictation outputs into project storage.
@@ -116,6 +123,10 @@ pub struct TranscriptionSettings {
     pub dictation_profile: String,
     /// Target project for saved dictations.
     pub dictation_project_id: String,
+    /// Memory search mode: "fts" (default) or "ollama_embeddings"
+    pub memory_search_mode: String,
+    /// Ollama embedding model name (e.g. "nomic-embed-text")
+    pub embedding_model: String,
 }
 
 impl Default for TranscriptionSettings {
@@ -129,10 +140,14 @@ impl Default for TranscriptionSettings {
             intelligent_punctuation: true,
             language: None,
             num_speakers: 0,
+            speaker_naming_method: "auto".to_string(),
+            silence_skip_enabled: false,
             save_raw_transcript: false,
             dictation_save_to_inbox: true,
             dictation_profile: "speed".to_string(),
             dictation_project_id: "inbox".to_string(),
+            memory_search_mode: "fts".to_string(),
+            embedding_model: "nomic-embed-text".to_string(),
         }
     }
 }
@@ -276,8 +291,8 @@ impl Default for KeyboardShortcuts {
     fn default() -> Self {
         Self {
             toggle_recording: "Ctrl+Shift+R".to_string(),
-            toggle_dictation: "Ctrl+Shift+Space".to_string(),
-            toggle_dictation_alternates: default_dictation_alternate_shortcuts(),
+            toggle_dictation: default_dictation_shortcut().to_string(),
+            toggle_dictation_alternates: Vec::new(),
             open_window: "Ctrl+Shift+N".to_string(),
             quick_export: "Ctrl+Shift+E".to_string(),
             focus_search: "Ctrl+Shift+F".to_string(),
@@ -285,16 +300,41 @@ impl Default for KeyboardShortcuts {
     }
 }
 
-fn default_dictation_alternate_shortcuts() -> Vec<String> {
+fn default_dictation_shortcut() -> &'static str {
     #[cfg(target_os = "macos")]
     {
-        vec!["Cmd+Shift+Space".to_string()]
+        "Cmd+Shift+Space"
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        Vec::new()
+        "Ctrl+Shift+Space"
     }
+}
+
+fn normalize_keyboard_shortcuts(shortcuts: &mut KeyboardShortcuts) {
+    if shortcuts.toggle_dictation.trim().is_empty() {
+        shortcuts.toggle_dictation = default_dictation_shortcut().to_string();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let has_cmd_alternate = shortcuts
+            .toggle_dictation_alternates
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case("Cmd+Shift+Space"));
+        if shortcuts
+            .toggle_dictation
+            .eq_ignore_ascii_case("Ctrl+Shift+Space")
+            && has_cmd_alternate
+        {
+            shortcuts.toggle_dictation = "Cmd+Shift+Space".to_string();
+        }
+    }
+
+    // New policy: one shortcut per action. Keep legacy field for compatibility,
+    // but clear persisted alternates during load/migration.
+    shortcuts.toggle_dictation_alternates.clear();
 }
 
 /// Update channel (stable or beta)
@@ -370,11 +410,12 @@ impl SettingsManager {
     /// Create new settings manager
     pub fn new() -> Result<Self> {
         let config_path = Self::config_path()?;
-        let settings = if config_path.exists() {
+        let mut settings = if config_path.exists() {
             Self::load_from_file(&config_path)?
         } else {
             Settings::default()
         };
+        normalize_keyboard_shortcuts(&mut settings.shortcuts);
 
         Ok(Self {
             settings,

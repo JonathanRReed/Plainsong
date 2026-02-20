@@ -18,6 +18,7 @@ export interface AudioSettings {
   voiceActivityDetection: boolean;
   silenceTimeoutSeconds: number;
   autoGainControl: boolean;
+  manualGainDb: number;
 }
 
 export interface TranscriptionSettings {
@@ -29,10 +30,14 @@ export interface TranscriptionSettings {
   intelligentPunctuation: boolean;
   language: string | null;
   numSpeakers: number;
+  speakerNamingMethod: "auto" | "numbered" | "manual";
+  silenceSkipEnabled: boolean;
   saveRawTranscript: boolean;
   dictationSaveToInbox: boolean;
   dictationProfile: "speed" | "accuracy";
   dictationProjectId: string;
+  memorySearchMode: "fts" | "ollama_embeddings";
+  embeddingModel: string;
 }
 
 export interface UiSettings {

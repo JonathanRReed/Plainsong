@@ -248,6 +248,55 @@ pub fn remove_silence(
     result
 }
 
+/// Decode WAV bytes, apply silence removal, and re-encode as WAV bytes.
+pub fn remove_silence_from_wav_bytes(wav_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use std::io::Cursor;
+
+    let cursor = Cursor::new(wav_bytes);
+    let mut reader = hound::WavReader::new(cursor)?;
+    let spec = reader.spec();
+
+    let samples: Vec<f32> = if spec.sample_format == hound::SampleFormat::Float {
+        reader.samples::<f32>().filter_map(|s| s.ok()).collect()
+    } else {
+        reader
+            .samples::<i16>()
+            .filter_map(|s| s.ok())
+            .map(|s| s as f32 / i16::MAX as f32)
+            .collect()
+    };
+
+    if samples.is_empty() {
+        return Ok(wav_bytes.to_vec());
+    }
+
+    // threshold=0.01 (~-40dB), min_silence=500ms
+    let filtered = remove_silence(&samples, 0.01, 500, spec.sample_rate);
+
+    if filtered.is_empty() {
+        return Ok(wav_bytes.to_vec());
+    }
+
+    let mut out_buf = Vec::new();
+    {
+        let cursor = Cursor::new(&mut out_buf);
+        let out_spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: spec.sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::new(cursor, out_spec)?;
+        for &sample in &filtered {
+            let clamped = sample.clamp(-1.0, 1.0);
+            writer.write_sample((clamped * i16::MAX as f32) as i16)?;
+        }
+        writer.finalize()?;
+    }
+
+    Ok(out_buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

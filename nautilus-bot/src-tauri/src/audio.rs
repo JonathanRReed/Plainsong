@@ -136,6 +136,8 @@ impl AudioCapture {
 
         let is_dictating = Arc::clone(&self.is_dictating);
         let buffer = Arc::clone(&self.dictation_buffer);
+        let stream_ready = Arc::new(AtomicBool::new(false));
+        let stream_ready_signal = Arc::clone(&stream_ready);
 
         let capture_handle = std::thread::spawn(move || {
             let capture_flag = Arc::clone(&is_dictating);
@@ -242,6 +244,8 @@ impl AudioCapture {
                 return;
             }
 
+            // Signal that the audio stream is now live
+            stream_ready_signal.store(true, Ordering::SeqCst);
             tracing::info!("Dictation audio stream started successfully");
 
             while capture_flag.load(Ordering::SeqCst) {
@@ -253,7 +257,17 @@ impl AudioCapture {
         });
         self.dictation_thread = Some(capture_handle);
 
-        tracing::info!("Dictation started");
+        // Wait for the audio stream to actually start (up to 500ms)
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while !stream_ready.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if stream_ready.load(Ordering::SeqCst) {
+            tracing::info!("Dictation started (stream confirmed live)");
+        } else {
+            tracing::warn!("Dictation started but stream-ready signal timed out after 500ms");
+        }
+
         Ok(())
     }
 
@@ -310,7 +324,7 @@ impl AudioCapture {
         );
 
         boost_quiet_audio(&mut samples);
-        ensure_min_duration(&mut samples, self.dictation_sample_rate, 1.0);
+        ensure_min_duration(&mut samples, self.dictation_sample_rate, 1.1);
 
         tracing::info!(
             "Dictation stopped: {} mono samples at {} Hz (after processing)",

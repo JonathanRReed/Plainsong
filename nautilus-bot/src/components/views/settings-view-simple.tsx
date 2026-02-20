@@ -7,6 +7,7 @@ import {
   type ChangeEvent,
   type KeyboardEvent,
 } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -45,7 +46,7 @@ import {
 } from "@/lib/tauri";
 import type { BackupConfig, BackupInfo, CloudSetupReport, SecurityStatus, LicenseInfo, DownloadedModel } from "@/lib/tauri";
 import type { PermissionDiagnostics } from "@/lib/tauri";
-import { validateLicense, deactivateLicense, isDiarizationModelAvailable, downloadDiarizationModel } from "@/lib/tauri";
+import { validateLicense, activateLicense, deactivateLicense, isDiarizationModelAvailable, downloadDiarizationModel } from "@/lib/tauri";
 import { isFeatureAllowed } from "@/hooks/use-license-features";
 import type { Settings } from "@/types/settings";
 import {
@@ -68,6 +69,8 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { UpdateStatusWidget, BetaChannelToggle } from "@/components/update";
+import { LOCAL_ASR_MODEL_GROUPS, QUICK_DOWNLOAD_ASR_MODELS } from "@/lib/asr-models";
+import { useToast } from "@/components/toast";
 
 type TabId = "asr" | "general" | "security" | "storage" | "ai" | "license" | "updates";
 type QueuedSettingsSave = {
@@ -83,6 +86,21 @@ type SettingsSaveScheduler = {
   flushing: boolean;
 };
 
+type ShortcutFieldKey =
+  | "toggleRecording"
+  | "toggleDictation"
+  | "openWindow"
+  | "quickExport"
+  | "focusSearch";
+
+const SHORTCUT_FIELD_CONFIG: Array<{ key: ShortcutFieldKey; label: string }> = [
+  { key: "toggleDictation", label: "Dictation" },
+  { key: "toggleRecording", label: "Recording" },
+  { key: "openWindow", label: "Open window" },
+  { key: "quickExport", label: "Quick export" },
+  { key: "focusSearch", label: "Search" },
+];
+
 const SETTINGS_SAVE_DEBOUNCE_MS = 350;
 
 function markSettingsPerf(markName: string) {
@@ -93,7 +111,11 @@ function markSettingsPerf(markName: string) {
   console.debug(`[perf] ${markName}`);
 }
 
-export function SettingsView() {
+type SettingsViewProps = {
+  onLicenseChange?: (info: LicenseInfo) => void;
+};
+
+export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const { theme, setTheme } = useTheme();
   const [activeTab, setActiveTab] = useState<TabId>("general");
   const [draftSettings, setDraftSettings] = useState<Settings | null>(null);
@@ -128,6 +150,10 @@ export function SettingsView() {
   const [hasLoadedSecurityTab, setHasLoadedSecurityTab] = useState(false);
   const [hasLoadedStorageTab, setHasLoadedStorageTab] = useState(false);
   const [licenseInfo, setLicenseInfo] = useState<LicenseInfo | null>(null);
+  const [licenseKeyInput, setLicenseKeyInput] = useState("");
+  const [licenseActivating, setLicenseActivating] = useState(false);
+  const [licenseError, setLicenseError] = useState<string | null>(null);
+  const [capturingShortcut, setCapturingShortcut] = useState<ShortcutFieldKey | null>(null);
   const mountedRef = useRef(true);
   const saveSchedulerRef = useRef<SettingsSaveScheduler>({
     nextVersion: 0,
@@ -138,6 +164,15 @@ export function SettingsView() {
   });
 
   const settings = draftSettings;
+  const { toast } = useToast();
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<string>("asr-provider-warning", (event) => {
+      toast(event.payload, "error");
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [toast]);
 
   const applySecurityStatusFromSettings = useCallback((next: Settings) => {
     setSecurityStatus((current) =>
@@ -220,6 +255,72 @@ export function SettingsView() {
       markSettingsPerf("settings-save-queued");
     },
     [flushPendingSettingsSave]
+  );
+
+  const formatShortcutFromKeyboardEvent = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
+    const parts: string[] = [];
+    if (event.metaKey) parts.push("Cmd");
+    if (event.ctrlKey) parts.push("Ctrl");
+    if (event.altKey) parts.push("Alt");
+    if (event.shiftKey) parts.push("Shift");
+
+    const key = event.key;
+    if (["Meta", "Control", "Alt", "Shift"].includes(key)) {
+      return null;
+    }
+    if (parts.length === 0) {
+      return null;
+    }
+
+    let mainKey = "";
+    if (key === " ") {
+      mainKey = "Space";
+    } else if (key.length === 1) {
+      mainKey = key.toUpperCase();
+    } else {
+      const normalized = key.startsWith("Arrow") ? key.replace("Arrow", "") : key;
+      mainKey = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+    }
+
+    return [...parts, mainKey].join("+");
+  }, []);
+
+  const handleShortcutKeyDown = useCallback(
+    (field: ShortcutFieldKey) => (event: KeyboardEvent<HTMLInputElement>) => {
+      if (event.key === "Tab") {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (event.key === "Escape") {
+        setCapturingShortcut(null);
+        return;
+      }
+
+      const nextShortcut = formatShortcutFromKeyboardEvent(event);
+      if (!nextShortcut) {
+        return;
+      }
+      if (!settings) {
+        return;
+      }
+
+      const next: Settings = {
+        ...settings,
+        shortcuts: {
+          ...settings.shortcuts,
+          [field]: nextShortcut,
+          toggleDictationAlternates: [],
+        },
+      };
+      setDraftSettings(next);
+      setError(null);
+      queueSettingsSave(next, 0);
+      void flushPendingSettingsSave();
+      setCapturingShortcut(null);
+    },
+    [flushPendingSettingsSave, formatShortcutFromKeyboardEvent, queueSettingsSave, settings]
   );
 
   useEffect(() => {
@@ -570,7 +671,20 @@ export function SettingsView() {
             ))}
           </div>
 
-          {activeTab === "asr" && <AsrProviderManager />}
+          {activeTab === "asr" && (
+            <AsrProviderManager
+              selectedModelId={settings.transcription.selectedModelId}
+              onSelectedModelChange={(modelId) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    selectedModelId: modelId,
+                  },
+                })
+              }
+            />
+          )}
 
           {activeTab === "general" && (
             <Card>
@@ -612,6 +726,40 @@ export function SettingsView() {
                   </div>
                 </div>
 
+                <div className="space-y-2">
+                  <Label className="flex items-center gap-1.5">
+                    Color scheme
+                    {!isFeatureAllowed(licenseInfo, "cloudSync") && (
+                      <span className="text-xs text-amber-600">Friends Club</span>
+                    )}
+                  </Label>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={document.documentElement.getAttribute("data-theme") ?? "default"}
+                    disabled={!isFeatureAllowed(licenseInfo, "cloudSync")}
+                    onChange={(e) => {
+                      const scheme = e.target.value;
+                      if (scheme === "default") {
+                        document.documentElement.removeAttribute("data-theme");
+                      } else {
+                        document.documentElement.setAttribute("data-theme", scheme);
+                      }
+                    }}
+                  >
+                    <option value="default">Default</option>
+                    <option value="dracula">Dracula</option>
+                    <option value="tokyo-night">Tokyo Night</option>
+                    <option value="solarized-dark">Solarized Dark</option>
+                    <option value="solarized-light">Solarized Light</option>
+                    <option value="gruvbox">Gruvbox Dark</option>
+                    <option value="nord">Nord</option>
+                    <option value="rose-pine">Rosé Pine</option>
+                    <option value="rose-pine-moon">Rosé Pine Moon</option>
+                    <option value="rose-pine-dawn">Rosé Pine Dawn</option>
+                    <option value="catppuccin">Catppuccin Mocha</option>
+                  </select>
+                </div>
+
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
                     <Label>Voice activity detection</Label>
@@ -630,25 +778,27 @@ export function SettingsView() {
 
                 {settings.audio.voiceActivityDetection && (
                   <div className="space-y-2">
-                    <Label>Silence timeout (seconds)</Label>
+                    <Label>Silence timeout (minutes)</Label>
                     <Input
                       type="number"
-                      min={1}
-                      max={60}
-                      value={settings.audio.silenceTimeoutSeconds}
+                      min={0.1}
+                      max={5}
+                      step={0.1}
+                      value={Math.round((settings.audio.silenceTimeoutSeconds / 60) * 10) / 10}
                       onBlur={handleSettingsTextBlur}
                       onKeyDown={handleSettingsTextKeyDown}
-                      onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                        const minutes = Math.max(0.1, Math.min(5, Number(e.target.value) || 0.05));
                         void updateSettings({
                           ...settings,
                           audio: {
                             ...settings.audio,
-                            silenceTimeoutSeconds: Math.max(1, Math.min(60, Number(e.target.value) || 3)),
+                            silenceTimeoutSeconds: Math.round(minutes * 60),
                           },
-                        })
-                      }
+                        });
+                      }}
                     />
-                    <p className="text-sm text-muted-foreground">Stop recording after this many seconds of silence</p>
+                    <p className="text-sm text-muted-foreground">Stop recording after this many minutes of silence</p>
                   </div>
                 )}
 
@@ -683,6 +833,31 @@ export function SettingsView() {
                     }
                   />
                 </div>
+
+                {!settings.audio.autoGainControl && (
+                  <div className="space-y-2">
+                    <Label>Manual gain ({settings.audio.manualGainDb > 0 ? "+" : ""}{settings.audio.manualGainDb.toFixed(1)} dB)</Label>
+                    <input
+                      type="range"
+                      min={-20}
+                      max={20}
+                      step={0.5}
+                      value={settings.audio.manualGainDb}
+                      className="w-full"
+                      onChange={(e) =>
+                        void updateSettings({
+                          ...settings,
+                          audio: { ...settings.audio, manualGainDb: Number(e.target.value) },
+                        })
+                      }
+                    />
+                    <div className="flex justify-between text-xs text-muted-foreground">
+                      <span>-20 dB</span>
+                      <span>0 dB</span>
+                      <span>+20 dB</span>
+                    </div>
+                  </div>
+                )}
 
                 <div className="h-px bg-border" />
 
@@ -773,6 +948,70 @@ export function SettingsView() {
                   )}
                 </div>
 
+                {settings.transcription.enableDiarization && diarizationAvailable && (
+                  <div className="rounded-md border border-border bg-muted/30 p-3 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium">Diarization model</p>
+                        <p className="text-xs text-muted-foreground">Wespeaker ECAPA-TDNN 512 (speaker embedding)</p>
+                      </div>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                        <CheckCircle2 className="h-3 w-3" /> Installed
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <Label className="flex items-center gap-1.5">
+                      Automatic silence skip
+                      {!isFeatureAllowed(licenseInfo, "autoDiarization") && (
+                        <span className="text-xs text-amber-600">Pro</span>
+                      )}
+                    </Label>
+                    <p className="text-sm text-muted-foreground">
+                      Remove silent segments before transcription for faster processing
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.transcription.silenceSkipEnabled}
+                    disabled={!isFeatureAllowed(licenseInfo, "autoDiarization")}
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: { ...settings.transcription, silenceSkipEnabled: checked },
+                      })
+                    }
+                  />
+                </div>
+
+                {settings.transcription.enableDiarization && (
+                  <div className="space-y-2">
+                    <Label>Speaker naming method</Label>
+                    <select
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                      value={settings.transcription.speakerNamingMethod}
+                      onChange={(e) =>
+                        void updateSettings({
+                          ...settings,
+                          transcription: {
+                            ...settings.transcription,
+                            speakerNamingMethod: e.target.value as "auto" | "numbered" | "manual",
+                          },
+                        })
+                      }
+                    >
+                      <option value="auto">Auto-detect from speech (recommended)</option>
+                      <option value="numbered">Numbered (Speaker 1, Speaker 2, ...)</option>
+                      <option value="manual">Manual only (set names yourself)</option>
+                    </select>
+                    <p className="text-sm text-muted-foreground">
+                      How speakers are named after diarization
+                    </p>
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <Label>Default local ASR model</Label>
                   <select
@@ -788,27 +1027,15 @@ export function SettingsView() {
                       })
                     }
                   >
-                    <optgroup label="Fast (Edge-friendly)">
-                      <option value="tiny">Whisper tiny — 39M params, fastest</option>
-                      <option value="tiny.en">Whisper tiny.en — English only</option>
-                      <option value="base">Whisper base — 74M params</option>
-                      <option value="base.en">Whisper base.en — English only</option>
-                    </optgroup>
-                    <optgroup label="Balanced">
-                      <option value="small">Whisper small — 244M params</option>
-                      <option value="small.en">Whisper small.en — English only</option>
-                      <option value="medium">Whisper medium — 769M params</option>
-                      <option value="medium.en">Whisper medium.en — English only</option>
-                    </optgroup>
-                    <optgroup label="Best Accuracy">
-                      <option value="large-v3">Whisper large-v3 — 1.5B params, 99+ languages</option>
-                      <option value="large-v3-turbo">Whisper large-v3-turbo — Fast + accurate</option>
-                    </optgroup>
-                    <optgroup label="Alternative Models">
-                      <option value="parakeet-tdt-0.6b-v3">Parakeet TDT 0.6B v3 — Ultra low-latency</option>
-                      <option value="canary-qwen-2.5b">Canary Qwen 2.5B — Max English accuracy</option>
-                      <option value="distil-large-v3">Distil-Whisper Large V3 — 6x faster</option>
-                    </optgroup>
+                    {LOCAL_ASR_MODEL_GROUPS.map((group) => (
+                      <optgroup key={group.label} label={group.label}>
+                        {group.options.map((model) => (
+                          <option key={model.id} value={model.id}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ))}
                   </select>
                   <p className="text-xs text-muted-foreground">
                     English-only models are faster. Use large-v3 for multilingual transcription.
@@ -818,13 +1045,7 @@ export function SettingsView() {
                 <div className="space-y-3">
                   <Label className="text-sm text-muted-foreground">Quick download — Top 5 ASR models</Label>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                    {[
-                      { id: "large-v3-turbo", name: "Whisper Large V3 Turbo", desc: "Fast + accurate", size: "1.6 GB" },
-                      { id: "large-v3", name: "Whisper Large V3", desc: "99+ languages", size: "2.9 GB" },
-                      { id: "base.en", name: "Whisper Base EN", desc: "Fast English", size: "142 MB" },
-                      { id: "small.en", name: "Whisper Small EN", desc: "Balanced English", size: "466 MB" },
-                      { id: "medium.en", name: "Whisper Medium EN", desc: "Best English", size: "1.5 GB" },
-                    ].map((model) => {
+                    {QUICK_DOWNLOAD_ASR_MODELS.map((model) => {
                       const isDownloaded = downloadedModels.some(
                         (d) => d.name.toLowerCase().includes(model.id.toLowerCase()) ||
                           d.name.toLowerCase().includes(model.id.replace(".en", "-en").toLowerCase())
@@ -835,7 +1056,7 @@ export function SettingsView() {
                         <div key={model.id} className="flex items-center justify-between p-2 rounded border bg-muted/30">
                           <div className="flex-1 min-w-0">
                             <p className="text-sm font-medium truncate">{model.name}</p>
-                            <p className="text-xs text-muted-foreground">{model.desc} · {model.size}</p>
+                            <p className="text-xs text-muted-foreground">{model.description} · {model.size}</p>
                           </div>
                           {isDownloaded ? (
                             <CheckCircle2 className="h-4 w-4 text-green-500 shrink-0 ml-2" />
@@ -955,35 +1176,29 @@ export function SettingsView() {
 
                 <div className="space-y-3">
                   <Label>Keyboard shortcuts</Label>
-                  <p className="text-sm text-muted-foreground">Global hotkeys for quick access</p>
-                  <div className="grid grid-cols-2 gap-3 text-sm">
-                    <div className="flex items-center justify-between p-2 rounded border">
-                      <span className="text-muted-foreground">Dictation</span>
-                      <kbd className="px-2 py-1 bg-muted rounded text-xs font-mono">
-                        {settings.shortcuts.toggleDictation}
-                      </kbd>
-                    </div>
-                    <div className="flex items-center justify-between p-2 rounded border">
-                      <span className="text-muted-foreground">Recording</span>
-                      <kbd className="px-2 py-1 bg-muted rounded text-xs font-mono">
-                        {settings.shortcuts.toggleRecording}
-                      </kbd>
-                    </div>
-                    <div className="flex items-center justify-between p-2 rounded border">
-                      <span className="text-muted-foreground">Quick export</span>
-                      <kbd className="px-2 py-1 bg-muted rounded text-xs font-mono">
-                        {settings.shortcuts.quickExport}
-                      </kbd>
-                    </div>
-                    <div className="flex items-center justify-between p-2 rounded border">
-                      <span className="text-muted-foreground">Search</span>
-                      <kbd className="px-2 py-1 bg-muted rounded text-xs font-mono">
-                        {settings.shortcuts.focusSearch}
-                      </kbd>
-                    </div>
+                  <p className="text-sm text-muted-foreground">
+                    Click a field, then press your preferred key combo (one shortcut per action).
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                    {SHORTCUT_FIELD_CONFIG.map((entry) => (
+                      <div key={entry.key} className="space-y-1">
+                        <Label className="text-xs text-muted-foreground">{entry.label}</Label>
+                        <Input
+                          value={settings.shortcuts[entry.key]}
+                          readOnly
+                          onFocus={() => setCapturingShortcut(entry.key)}
+                          onBlur={() => setCapturingShortcut(null)}
+                          onKeyDown={handleShortcutKeyDown(entry.key)}
+                          className="font-mono text-xs"
+                        />
+                        {capturingShortcut === entry.key ? (
+                          <p className="text-xs text-trusted">Listening… press combo, Esc to cancel</p>
+                        ) : null}
+                      </div>
+                    ))}
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Shortcuts can be customized in the app configuration file
+                    Changes save immediately, duplicate conflicts are blocked, and new bindings apply after relaunch.
                   </p>
                 </div>
 
@@ -1115,28 +1330,9 @@ export function SettingsView() {
 
                 <div className="space-y-2">
                   <Label>Default analysis provider</Label>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={settings.privacy.llmProvider}
-                    onChange={(e) =>
-                      void updateSettings({
-                        ...settings,
-                        privacy: { ...settings.privacy, llmProvider: e.target.value },
-                      })
-                    }
-                  >
-                    <option value="ollama">Ollama (Local)</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="gemini">Google Gemini</option>
-                    <option value="deepseek">DeepSeek</option>
-                    <option value="ollama-cloud">Ollama Cloud</option>
-                  </select>
-                  {!settings.privacy.remoteProcessingEnabled && settings.privacy.llmProvider !== "ollama" ? (
-                    <p className="text-sm text-amber-600">
-                      Remote provider is selected, but remote processing is disabled. Analysis commands will be blocked until policy is enabled.
-                    </p>
-                  ) : null}
+                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                    Managed in <span className="font-medium">AI &amp; Keys</span>. Current: {settings.privacy.llmProvider}
+                  </div>
                 </div>
 
                 <div className="space-y-2">
@@ -2082,6 +2278,94 @@ export function SettingsView() {
             </Card>
           )}
 
+          {activeTab === "ai" && settings && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Database className="h-5 w-5 text-violet-600" />
+                  Memory Search
+                </CardTitle>
+                <CardDescription>How Memory searches your transcripts when you ask a question</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label>Search mode</Label>
+                  <select
+                    value={settings.transcription.memorySearchMode}
+                    onChange={(e) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          memorySearchMode: e.target.value as "fts" | "ollama_embeddings",
+                        },
+                      })
+                    }
+                    className="w-full p-2 border rounded-md bg-background"
+                  >
+                    <option value="fts">Full-text search (built-in, no setup needed)</option>
+                    <option value="ollama_embeddings">Ollama Embeddings (semantic search, requires Ollama)</option>
+                  </select>
+                </div>
+
+                {settings.transcription.memorySearchMode === "ollama_embeddings" && (
+                  <>
+                    <div className="space-y-2">
+                      <Label>Embedding model</Label>
+                      <Input
+                        value={settings.transcription.embeddingModel}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              embeddingModel: e.target.value,
+                            },
+                          })
+                        }
+                        placeholder="nomic-embed-text"
+                        className="font-mono text-sm"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Ollama embedding model name. Run <code className="bg-muted px-1 rounded">ollama pull nomic-embed-text</code> first.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 p-3">
+                      <div className="space-y-0.5">
+                        <p className="text-sm font-medium">Re-index embeddings</p>
+                        <p className="text-xs text-muted-foreground">
+                          Generate embeddings for all existing transcripts. Required after changing models.
+                        </p>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          void (async () => {
+                            try {
+                              const { reindexEmbeddings } = await import("@/lib/tauri");
+                              const result = await reindexEmbeddings();
+                              toast(
+                                `Indexed ${result.segments} segments from ${result.recordings} recordings${result.errors > 0 ? ` (${result.errors} errors)` : ""}`,
+                                result.errors > 0 ? "error" : "success"
+                              );
+                            } catch (err) {
+                              toast(err instanceof Error ? err.message : String(err), "error");
+                            }
+                          })();
+                        }}
+                      >
+                        <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                        Re-index
+                      </Button>
+                    </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
           {activeTab === "updates" && (
             <Card>
               <CardHeader>
@@ -2129,7 +2413,7 @@ export function SettingsView() {
                           ? "text-amber-700 dark:text-amber-400"
                           : "text-emerald-700 dark:text-emerald-400"
                           }`}>
-                          {licenseInfo.tier === "friends_club" ? "Friends Club ⭐" : "Basic"}
+                          {licenseInfo.tier === "friends_club" ? "Friends Club ⭐" : "Pro"}
                         </span>
                       </div>
                       <div className="grid grid-cols-2 gap-2 text-sm">
@@ -2161,7 +2445,7 @@ export function SettingsView() {
                         className="text-destructive hover:bg-destructive/10"
                         onClick={() => {
                           if (!window.confirm("Deactivate Nautilus on this computer? You can reactivate later.")) return;
-                          void deactivateLicense().then(() => { setLicenseInfo(null); void validateLicense().then(setLicenseInfo); });
+                          void deactivateLicense().then(() => { setLicenseInfo(null); void validateLicense().then((info) => { setLicenseInfo(info); onLicenseChange?.(info); }); });
                         }}
                       >
                         Deactivate this device
@@ -2169,10 +2453,77 @@ export function SettingsView() {
                     </div>
                   </>
                 ) : licenseInfo.trialDaysRemaining > 0 ? (
-                  <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-2">
-                    <div className="flex items-center gap-2 text-sm font-medium">
-                      <XCircle className="h-4 w-4 text-muted-foreground" />
-                      <span>Free trial · {licenseInfo.trialDaysRemaining} days remaining</span>
+                  <div className="space-y-4">
+                    <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-2">
+                      <div className="flex items-center gap-2 text-sm font-medium">
+                        <XCircle className="h-4 w-4 text-muted-foreground" />
+                        <span>Free trial · {licenseInfo.trialDaysRemaining} days remaining</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground">All Pro features are available during your trial.</p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-sm">Already have a key?</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                          value={licenseKeyInput}
+                          onChange={(e) => { setLicenseError(null); setLicenseKeyInput(e.target.value); }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              void (async () => {
+                                const key = licenseKeyInput.trim();
+                                if (!key) return;
+                                setLicenseActivating(true);
+                                setLicenseError(null);
+                                try {
+                                  const info = await activateLicense(key);
+                                  setLicenseInfo(info);
+                                  onLicenseChange?.(info);
+                                  setLicenseKeyInput("");
+                                } catch (err) {
+                                  setLicenseError(err instanceof Error ? err.message : String(err));
+                                } finally {
+                                  setLicenseActivating(false);
+                                }
+                              })();
+                            }
+                          }}
+                          className="font-mono text-sm flex-1"
+                          spellCheck={false}
+                          autoComplete="off"
+                          disabled={licenseActivating}
+                        />
+                        <Button
+                          size="sm"
+                          disabled={licenseActivating || !licenseKeyInput.trim()}
+                          onClick={() => {
+                            void (async () => {
+                              const key = licenseKeyInput.trim();
+                              if (!key) return;
+                              setLicenseActivating(true);
+                              setLicenseError(null);
+                              try {
+                                const info = await activateLicense(key);
+                                setLicenseInfo(info);
+                                onLicenseChange?.(info);
+                                setLicenseKeyInput("");
+                              } catch (err) {
+                                setLicenseError(err instanceof Error ? err.message : String(err));
+                              } finally {
+                                setLicenseActivating(false);
+                              }
+                            })();
+                          }}
+                        >
+                          {licenseActivating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Activate"}
+                        </Button>
+                      </div>
+                      {licenseError && (
+                        <div className="flex items-start gap-2 text-sm text-destructive">
+                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                          <span>{licenseError}</span>
+                        </div>
+                      )}
                     </div>
                     <Button
                       size="sm"
@@ -2185,9 +2536,75 @@ export function SettingsView() {
                     </Button>
                   </div>
                 ) : (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800 p-4 space-y-3">
-                    <p className="text-sm text-amber-700 dark:text-amber-400 font-medium">Trial expired</p>
-                    <p className="text-xs text-muted-foreground">Enter a license key in Settings → License, or buy one below.</p>
+                  <div className="space-y-4">
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800 p-4 space-y-3">
+                      <p className="text-sm text-amber-700 dark:text-amber-400 font-medium">Trial expired</p>
+                      <p className="text-xs text-muted-foreground">Enter your license key below, or buy one to unlock updates and Pro features.</p>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-sm">License key</Label>
+                      <div className="flex gap-2">
+                        <Input
+                          placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                          value={licenseKeyInput}
+                          onChange={(e) => { setLicenseError(null); setLicenseKeyInput(e.target.value); }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              void (async () => {
+                                const key = licenseKeyInput.trim();
+                                if (!key) return;
+                                setLicenseActivating(true);
+                                setLicenseError(null);
+                                try {
+                                  const info = await activateLicense(key);
+                                  setLicenseInfo(info);
+                                  onLicenseChange?.(info);
+                                  setLicenseKeyInput("");
+                                } catch (err) {
+                                  setLicenseError(err instanceof Error ? err.message : String(err));
+                                } finally {
+                                  setLicenseActivating(false);
+                                }
+                              })();
+                            }
+                          }}
+                          className="font-mono text-sm flex-1"
+                          spellCheck={false}
+                          autoComplete="off"
+                          disabled={licenseActivating}
+                        />
+                        <Button
+                          size="sm"
+                          disabled={licenseActivating || !licenseKeyInput.trim()}
+                          onClick={() => {
+                            void (async () => {
+                              const key = licenseKeyInput.trim();
+                              if (!key) return;
+                              setLicenseActivating(true);
+                              setLicenseError(null);
+                              try {
+                                const info = await activateLicense(key);
+                                setLicenseInfo(info);
+                                onLicenseChange?.(info);
+                                setLicenseKeyInput("");
+                              } catch (err) {
+                                setLicenseError(err instanceof Error ? err.message : String(err));
+                              } finally {
+                                setLicenseActivating(false);
+                              }
+                            })();
+                          }}
+                        >
+                          {licenseActivating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Activate"}
+                        </Button>
+                      </div>
+                      {licenseError && (
+                        <div className="flex items-start gap-2 text-sm text-destructive">
+                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                          <span>{licenseError}</span>
+                        </div>
+                      )}
+                    </div>
                     <div className="flex gap-2">
                       <Button
                         size="sm"
@@ -2195,7 +2612,7 @@ export function SettingsView() {
                         onClick={() => window.open("https://nautilusbot.lemonsqueezy.com/buy/basic", "_blank", "noopener,noreferrer")}
                       >
                         <ExternalLink className="mr-1 h-3.5 w-3.5" />
-                        Buy Basic
+                        Buy Pro
                       </Button>
                       <Button
                         size="sm"

@@ -35,6 +35,7 @@ pub struct AppState {
     audio_capture: Arc<Mutex<audio::AudioCapture>>,
     asr_manager: Arc<asr::AsrManager>,
     ollama_client: Arc<llm::OllamaClient>,
+    ollama_embedder: Arc<llm::OllamaEmbedder>,
     #[allow(dead_code)]
     integration_manager: Arc<integrations::IntegrationManager>,
     settings_manager: Arc<Mutex<settings::SettingsManager>>,
@@ -54,6 +55,7 @@ pub struct AppState {
 
 const DICTATION_OVERLAY_LABEL: &str = "dictation-overlay";
 const RECORDING_OVERLAY_LABEL: &str = "recording-overlay";
+const RECORDING_TRAY_ID: &str = "recording-indicator";
 const DICTATION_MAX_DURATION_SECONDS: u64 = 120;
 const STREAMING_PREVIEW_MAX_SECONDS: f64 = 90.0;
 const VAULT_DB_KEY_SECRET: &str = "vault_db_key";
@@ -75,6 +77,7 @@ enum DictationSessionState {
 struct DictationSessionTracker {
     next_session_id: u64,
     active_session_id: Option<u64>,
+    started_at: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -221,6 +224,181 @@ struct SecurityStatus {
     llm_provider: String,
     remote_processing_enabled: bool,
     export_root: Option<String>,
+}
+
+#[cfg(desktop)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShortcutAction {
+    ToggleRecording,
+    ToggleDictation,
+    OpenWindow,
+    QuickExport,
+    FocusSearch,
+    EmergencyStopDictation,
+}
+
+#[cfg(desktop)]
+#[derive(Clone)]
+struct ShortcutBinding {
+    action: ShortcutAction,
+    shortcut: tauri_plugin_global_shortcut::Shortcut,
+}
+
+#[cfg(desktop)]
+fn canonicalize_shortcut_value(value: &str) -> Result<String, String> {
+    let mut has_cmd = false;
+    let mut has_ctrl = false;
+    let mut has_alt = false;
+    let mut has_shift = false;
+    let mut key: Option<String> = None;
+
+    for token in value
+        .split('+')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        let normalized = token.to_ascii_uppercase();
+        match normalized.as_str() {
+            "CMD" | "COMMAND" | "SUPER" | "META" => has_cmd = true,
+            "CTRL" | "CONTROL" => has_ctrl = true,
+            "ALT" | "OPTION" => has_alt = true,
+            "SHIFT" => has_shift = true,
+            _ => {
+                if key.is_some() {
+                    return Err(format!(
+                        "Shortcut '{}' must contain exactly one non-modifier key",
+                        value
+                    ));
+                }
+
+                let normalized_key = match normalized.as_str() {
+                    "ESC" => "Escape".to_string(),
+                    "RETURN" => "Enter".to_string(),
+                    "SPACEBAR" => "Space".to_string(),
+                    _ if normalized.len() == 1 => normalized.to_string(),
+                    _ => {
+                        let lower = normalized.to_ascii_lowercase();
+                        let mut chars = lower.chars();
+                        if let Some(first) = chars.next() {
+                            let mut titled = String::new();
+                            titled.push(first.to_ascii_uppercase());
+                            titled.push_str(chars.as_str());
+                            titled
+                        } else {
+                            normalized
+                        }
+                    }
+                };
+
+                key = Some(normalized_key);
+            }
+        }
+    }
+
+    if !(has_cmd || has_ctrl || has_alt || has_shift) {
+        return Err(format!(
+            "Shortcut '{}' must include at least one modifier key",
+            value
+        ));
+    }
+
+    let key = key.ok_or_else(|| format!("Shortcut '{}' must include a key", value))?;
+    let mut parts = Vec::new();
+    if has_cmd {
+        parts.push("Cmd");
+    }
+    if has_ctrl {
+        parts.push("Ctrl");
+    }
+    if has_alt {
+        parts.push("Alt");
+    }
+    if has_shift {
+        parts.push("Shift");
+    }
+    parts.push(key.as_str());
+    Ok(parts.join("+"))
+}
+
+#[cfg(desktop)]
+fn parse_shortcut_value(value: &str) -> Result<tauri_plugin_global_shortcut::Shortcut, String> {
+    let canonical = canonicalize_shortcut_value(value)?;
+    canonical
+        .parse::<tauri_plugin_global_shortcut::Shortcut>()
+        .map_err(|_| format!("Unsupported shortcut '{}'", value))
+}
+
+#[cfg(desktop)]
+fn shortcut_bindings_from_settings(
+    shortcuts: &settings::KeyboardShortcuts,
+) -> Result<Vec<ShortcutBinding>, String> {
+    let mut bindings = Vec::new();
+    let mut seen = std::collections::HashMap::<String, &'static str>::new();
+
+    let configured = [
+        (
+            ShortcutAction::ToggleRecording,
+            "toggle recording",
+            shortcuts.toggle_recording.as_str(),
+        ),
+        (
+            ShortcutAction::ToggleDictation,
+            "toggle dictation",
+            shortcuts.toggle_dictation.as_str(),
+        ),
+        (
+            ShortcutAction::OpenWindow,
+            "open window",
+            shortcuts.open_window.as_str(),
+        ),
+        (
+            ShortcutAction::QuickExport,
+            "quick export",
+            shortcuts.quick_export.as_str(),
+        ),
+        (
+            ShortcutAction::FocusSearch,
+            "focus search",
+            shortcuts.focus_search.as_str(),
+        ),
+    ];
+
+    for (action, action_label, value) in configured {
+        let canonical = canonicalize_shortcut_value(value)
+            .map_err(|error| format!("Invalid {} shortcut: {}", action_label, error))?;
+        if let Some(conflict) = seen.insert(canonical.clone(), action_label) {
+            return Err(format!(
+                "Shortcut conflict: '{}' is assigned to both '{}' and '{}'",
+                canonical, conflict, action_label
+            ));
+        }
+        let shortcut = parse_shortcut_value(&canonical)?;
+        bindings.push(ShortcutBinding { action, shortcut });
+    }
+
+    let emergency_canonical = canonicalize_shortcut_value("Ctrl+Shift+Escape")?;
+    if let Some(conflict) = seen.get(emergency_canonical.as_str()) {
+        return Err(format!(
+            "Shortcut conflict: emergency stop uses '{}' which is already assigned to '{}'",
+            emergency_canonical, conflict
+        ));
+    }
+    bindings.push(ShortcutBinding {
+        action: ShortcutAction::EmergencyStopDictation,
+        shortcut: parse_shortcut_value(emergency_canonical.as_str())?,
+    });
+
+    Ok(bindings)
+}
+
+#[cfg(desktop)]
+fn validate_shortcut_settings(shortcuts: &settings::KeyboardShortcuts) -> Result<(), String> {
+    shortcut_bindings_from_settings(shortcuts).map(|_| ())
+}
+
+#[cfg(not(desktop))]
+fn validate_shortcut_settings(_shortcuts: &settings::KeyboardShortcuts) -> Result<(), String> {
+    Ok(())
 }
 
 #[tauri::command]
@@ -1335,8 +1513,264 @@ async fn analyze_recordings(
 }
 
 #[tauri::command]
+async fn ask_memory(
+    state: tauri::State<'_, AppState>,
+    query: String,
+) -> Result<llm::AnalysisResult, String> {
+    let entitlement = license::get_current_entitlement();
+    if !entitlement.pro_enabled {
+        return Err("Memory requires a Pro license or active trial".to_string());
+    }
+
+    let (memory_search_mode, embedding_model) = {
+        let sm = state.settings_manager.lock().await;
+        let s = sm.settings();
+        (
+            s.transcription.memory_search_mode.clone(),
+            s.transcription.embedding_model.clone(),
+        )
+    };
+
+    let mut context_segments: Vec<AnalysisContextSegment> = Vec::new();
+
+    let used_embeddings = if memory_search_mode == "ollama_embeddings" {
+        match state.ollama_embedder.embed(&embedding_model, &query).await {
+            Ok(query_vec) => {
+                let db = state.db.lock().await;
+                match db.search_embeddings(&query_vec, 30) {
+                    Ok(hits) if !hits.is_empty() => {
+                        context_segments.extend(hits.into_iter().map(|hit| {
+                            AnalysisContextSegment {
+                                recording_id: hit.recording_id,
+                                recording_title: hit.recording_title,
+                                segment_id: hit.segment_id,
+                                text: hit.text,
+                                start_time: hit.start_time,
+                                end_time: hit.end_time,
+                            }
+                        }));
+                        true
+                    }
+                    Ok(_) => {
+                        tracing::info!("Embedding search returned no results, falling back to FTS");
+                        false
+                    }
+                    Err(e) => {
+                        tracing::warn!("Embedding search failed, falling back to FTS: {}", e);
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Ollama embedding failed, falling back to FTS: {}", e);
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    if !used_embeddings {
+        let db = state.db.lock().await;
+        let search_hits = db
+            .search_transcripts(&query, 30, None)
+            .map_err(|e| e.to_string())?;
+
+        context_segments.extend(search_hits.into_iter().map(|hit| AnalysisContextSegment {
+            recording_id: hit.recording_id,
+            recording_title: hit.recording_title,
+            segment_id: hit.segment_id,
+            text: hit.text,
+            start_time: hit.start_time,
+            end_time: hit.end_time,
+        }));
+    }
+
+    if context_segments.is_empty() {
+        return Err("No relevant transcripts found. Record some meetings first.".to_string());
+    }
+
+    let transcript_context = context_segments
+        .iter()
+        .map(|segment| {
+            format!(
+                "[recordingId:{}|title:{}|segmentId:{}|startTime:{:.2}|endTime:{:.2}] {}",
+                segment.recording_id,
+                segment.recording_title,
+                segment.segment_id,
+                segment.start_time,
+                segment.end_time,
+                segment.text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let strict_query = format!(
+        "{}\n\nReturn JSON only with schema:\n{{\"response\":\"string\",\"citations\":[{{\"recordingId\":\"string\",\"startTime\":number,\"endTime\":number,\"text\":\"string\",\"certainty\":number}}]}}\nCitations must use exact recordingId/startTime/endTime from provided transcript lines.",
+        query
+    );
+
+    let mut result = run_analysis_with_selected_provider(
+        state.inner(),
+        &transcript_context,
+        &strict_query,
+        None,
+    )
+    .await?;
+
+    if let Some(structured) = parse_structured_analysis_json(&result.response) {
+        if let Ok(validated) = validate_structured_citations(&structured.1, &context_segments) {
+            result.response = structured.0;
+            result.citations = validated;
+        }
+    }
+
+    let mut db = state.db.lock().await;
+    if let Err(error) = db.log_audit_event(
+        "memory_query",
+        Some(serde_json::json!({
+            "query": query,
+            "model": result.model,
+            "citation_count": result.citations.len()
+        })),
+        "info",
+    ) {
+        tracing::warn!("Failed to log memory query event: {}", error);
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
 async fn get_ollama_status(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     Ok(state.ollama_client.is_available().await)
+}
+
+#[tauri::command]
+async fn reindex_embeddings(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let embedding_model = {
+        let sm = state.settings_manager.lock().await;
+        sm.settings().transcription.embedding_model.clone()
+    };
+
+    if !state.ollama_embedder.is_available().await {
+        return Err("Ollama is not running. Start Ollama and try again.".to_string());
+    }
+
+    // Collect all transcripts
+    let transcripts = {
+        let db = state.db.lock().await;
+        db.get_recordings(None)
+            .map_err(|e: anyhow::Error| e.to_string())?
+            .into_iter()
+            .filter_map(|rec| {
+                db.get_transcript(&rec.id)
+                    .ok()
+                    .flatten()
+                    .map(|t| (rec.id, t))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // Clear existing embeddings
+    {
+        let db = state.db.lock().await;
+        db.delete_all_embeddings().map_err(|e| e.to_string())?;
+    }
+
+    let total_recordings = transcripts.len();
+    let mut total_segments = 0usize;
+    let mut errors = 0usize;
+
+    for (idx, (recording_id, transcript)) in transcripts.iter().enumerate() {
+        let texts: Vec<String> = transcript
+            .segments
+            .iter()
+            .filter(|s| !s.text.trim().is_empty())
+            .map(|s| s.text.clone())
+            .collect();
+
+        if texts.is_empty() {
+            continue;
+        }
+
+        match state
+            .ollama_embedder
+            .embed_batch(&embedding_model, &texts)
+            .await
+        {
+            Ok(embeddings) => {
+                let db = state.db.lock().await;
+                for (seg_idx, (segment, embedding)) in transcript
+                    .segments
+                    .iter()
+                    .filter(|s| !s.text.trim().is_empty())
+                    .zip(embeddings.iter())
+                    .enumerate()
+                {
+                    let segment_id = if segment.id.is_empty() {
+                        format!("seg_{}", seg_idx)
+                    } else {
+                        segment.id.clone()
+                    };
+                    if let Err(e) = db.save_embedding(
+                        recording_id,
+                        &segment_id,
+                        &segment.text,
+                        embedding,
+                        &embedding_model,
+                        segment.start_time,
+                        segment.end_time,
+                    ) {
+                        tracing::warn!("Failed to save embedding: {}", e);
+                        errors += 1;
+                    } else {
+                        total_segments += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to embed segments for recording {}: {}",
+                    recording_id,
+                    e
+                );
+                errors += 1;
+            }
+        }
+
+        let _ = app.emit(
+            "reindex-embeddings-progress",
+            serde_json::json!({
+                "current": idx + 1,
+                "total": total_recordings,
+                "segments": total_segments,
+            }),
+        );
+    }
+
+    Ok(serde_json::json!({
+        "recordings": total_recordings,
+        "segments": total_segments,
+        "errors": errors,
+    }))
+}
+
+#[tauri::command]
+async fn get_embedding_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let db = state.db.lock().await;
+    let count = db.embedding_count().map_err(|e| e.to_string())?;
+    let ollama_available = state.ollama_embedder.is_available().await;
+    Ok(serde_json::json!({
+        "embeddingCount": count,
+        "ollamaAvailable": ollama_available,
+    }))
 }
 
 #[tauri::command]
@@ -1841,6 +2275,7 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<settings::Set
 
 #[tauri::command]
 async fn save_settings(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     mut settings: settings::Settings,
 ) -> Result<(), String> {
@@ -1864,16 +2299,27 @@ async fn save_settings(
             .asr_manager
             .set_allow_whisper_fallback(settings.transcription.allow_whisper_fallback)
             .await;
+        state
+            .asr_manager
+            .set_silence_skip_enabled(settings.transcription.silence_skip_enabled)
+            .await;
 
         if settings.transcription.default_provider != previous_default_provider {
             if let Some(provider_type) =
                 asr_provider_from_settings_value(&settings.transcription.default_provider)
             {
+                state.asr_manager.set_default_provider(provider_type).await;
+
                 let provider = state.asr_manager.get_provider(provider_type).await;
-                if provider.is_available()
-                    && asr::AsrManager::is_provider_transcription_enabled(provider_type)
-                {
-                    state.asr_manager.set_default_provider(provider_type).await;
+                if !provider.is_available() {
+                    let warning = format!(
+                        "{} is not ready — Whisper fallback will be used for transcription",
+                        provider_type.display_name()
+                    );
+                    tracing::warn!("{}", warning);
+                    if let Err(e) = app.emit("asr-provider-warning", &warning) {
+                        tracing::warn!("Failed to emit asr-provider-warning: {}", e);
+                    }
                 }
             }
         }
@@ -1886,6 +2332,8 @@ async fn save_settings(
             &dictation_profile_from_settings_value(&settings.transcription.dictation_profile),
         )
         .to_string();
+        settings.shortcuts.toggle_dictation_alternates.clear();
+        validate_shortcut_settings(&settings.shortcuts)?;
         if settings
             .transcription
             .dictation_project_id
@@ -1965,6 +2413,11 @@ async fn activate_license(key: String) -> Result<license::LicenseInfo, String> {
 #[tauri::command]
 async fn deactivate_license() -> Result<(), String> {
     license::deactivate_license().await
+}
+
+#[tauri::command]
+fn get_entitlement() -> license::Entitlement {
+    license::get_current_entitlement()
 }
 
 // ── Update Commands ───────────────────────────────────────────────────────────
@@ -2414,6 +2867,7 @@ async fn start_dictation_session(
         let mut tracker = state.dictation_session_tracker.lock().await;
         tracker.next_session_id += 1;
         tracker.active_session_id = Some(tracker.next_session_id);
+        tracker.started_at = Some(std::time::Instant::now());
         tracker.next_session_id
     };
 
@@ -2589,21 +3043,11 @@ async fn stop_dictation_session_for_session(
     );
 
     let dictation_options = state.dictation_start_options.lock().await.clone();
-    let previous_model_id = state.asr_manager.selected_model_id().await;
-    let dictation_model_id =
-        resolve_dictation_model_id(&dictation_options.profile, &previous_model_id);
-    state
-        .asr_manager
-        .set_selected_model_id(dictation_model_id.clone())
-        .await;
+    let dictation_model_id = state.asr_manager.selected_model_id().await;
 
     let result = match state.asr_manager.transcribe_bytes(&audio_data).await {
         Ok(result) => result,
         Err(error) => {
-            state
-                .asr_manager
-                .set_selected_model_id(previous_model_id.clone())
-                .await;
             let message = error.to_string();
             {
                 let mut runtime_state = state.dictation_runtime_state.lock().await;
@@ -2629,10 +3073,6 @@ async fn stop_dictation_session_for_session(
             return Err(message);
         }
     };
-    state
-        .asr_manager
-        .set_selected_model_id(previous_model_id.clone())
-        .await;
 
     let mut pasted = false;
     let mut copied = false;
@@ -2880,80 +3320,56 @@ async fn should_show_recording_overlay(state: &AppState) -> bool {
     settings_manager.settings().ui.show_recording_popup
 }
 
-#[cfg(target_os = "macos")]
-fn is_dictation_hotkey_pressed_macos() -> bool {
-    use core_graphics::event::CGKeyCode;
-    use core_graphics::event_source::CGEventSourceStateID;
-
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGEventSourceKeyState(state_id: CGEventSourceStateID, key: CGKeyCode) -> bool;
-    }
-
-    unsafe {
-        let state_id = CGEventSourceStateID::CombinedSessionState;
-        let space_down = CGEventSourceKeyState(state_id, 49); // space
-        let control_down =
-            CGEventSourceKeyState(state_id, 59) || CGEventSourceKeyState(state_id, 62); // left/right ctrl
-        let command_down =
-            CGEventSourceKeyState(state_id, 55) || CGEventSourceKeyState(state_id, 54); // left/right cmd
-        let shift_down = CGEventSourceKeyState(state_id, 56) || CGEventSourceKeyState(state_id, 60); // left/right shift
-        space_down && shift_down && (control_down || command_down)
-    }
-}
-
-async fn handle_global_dictation_pressed(app: AppHandle) {
+async fn handle_global_dictation_toggle(app: AppHandle) {
     let state = app.state::<AppState>();
     let current_state = *state.dictation_runtime_state.lock().await;
-    if current_state != DictationSessionState::Idle {
-        return;
-    }
 
-    {
-        let active = state.dictation_hotkey_active.lock().await;
-        if *active {
-            return;
-        }
-    }
-    set_dictation_hotkey_flags(state.inner(), true, true).await;
-
-    let options = default_dictation_start_options(state.inner()).await;
-    let session_id = match start_dictation_session(state.inner(), &app, "hotkey", options).await {
-        Ok(id) => id,
-        Err(error) => {
-            set_dictation_hotkey_flags(state.inner(), false, false).await;
-            if !error.to_lowercase().contains("already in progress") {
-                tracing::warn!("Failed to start hotkey dictation: {}", error);
-                emit_dictation_state(&app, "error", None, Some(&error), None, None, None, None);
+    match current_state {
+        DictationSessionState::Idle => {
+            // Start dictation
+            let options = default_dictation_start_options(state.inner()).await;
+            match start_dictation_session(state.inner(), &app, "hotkey", options).await {
+                Ok(_id) => {
+                    tracing::info!("Dictation started via toggle hotkey");
+                }
+                Err(error) => {
+                    if !error.to_lowercase().contains("already in progress") {
+                        tracing::warn!("Failed to start hotkey dictation: {}", error);
+                        emit_dictation_state(
+                            &app, "error", None, Some(&error), None, None, None, None,
+                        );
+                    }
+                }
             }
-            return;
         }
-    };
+        DictationSessionState::Recording => {
+            // Stop dictation
+            let session_id = match active_dictation_session_id(state.inner()).await {
+                Some(value) => value,
+                None => return,
+            };
 
-    spawn_hotkey_release_fallback_monitor(app.clone(), session_id);
-}
-
-async fn handle_global_dictation_released(app: AppHandle) {
-    let state = app.state::<AppState>();
-    set_dictation_hotkey_flags(state.inner(), false, false).await;
-
-    let session_id = match active_dictation_session_id(state.inner()).await {
-        Some(value) => value,
-        None => return,
-    };
-
-    let current_state = *state.dictation_runtime_state.lock().await;
-    if current_state != DictationSessionState::Recording {
-        return;
-    }
-
-    if let Err(error) =
-        stop_dictation_session_for_session(state.inner(), &app, session_id, "released", true).await
-    {
-        tracing::warn!("Failed to stop hotkey dictation: {}", error);
-        let normalized = error.to_lowercase();
-        if !normalized.contains("stale") && !normalized.contains("no active dictation session") {
-            let _ = force_stop_dictation_session(state.inner(), &app, "forced").await;
+            if let Err(error) = stop_dictation_session_for_session(
+                state.inner(),
+                &app,
+                session_id,
+                "toggle",
+                true,
+            )
+            .await
+            {
+                tracing::warn!("Failed to stop hotkey dictation: {}", error);
+                let normalized = error.to_lowercase();
+                if !normalized.contains("stale")
+                    && !normalized.contains("no active dictation session")
+                {
+                    let _ = force_stop_dictation_session(state.inner(), &app, "forced").await;
+                }
+            }
+        }
+        _ => {
+            // Stopping/Transcribing/Done/Error — ignore
+            tracing::debug!("Dictation toggle ignored in state {:?}", current_state);
         }
     }
 }
@@ -3010,59 +3426,6 @@ fn schedule_dictation_idle_reset(
             stop_reason.as_deref(),
             outcome.as_deref(),
         );
-    });
-}
-
-fn spawn_hotkey_release_fallback_monitor(app: AppHandle, session_id: u64) {
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = app;
-        let _ = session_id;
-        return;
-    }
-
-    #[cfg(target_os = "macos")]
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(120)).await;
-
-        loop {
-            tokio::time::sleep(Duration::from_millis(75)).await;
-
-            let state = app.state::<AppState>();
-            let active_session = active_dictation_session_id(state.inner()).await;
-            if active_session != Some(session_id) {
-                break;
-            }
-
-            let current_state = *state.dictation_runtime_state.lock().await;
-            if current_state != DictationSessionState::Recording {
-                break;
-            }
-
-            if !is_dictation_hotkey_pressed_macos() {
-                tracing::warn!(
-                    "Global hotkey release event was missed; stopping dictation via key-state fallback"
-                );
-                if let Err(error) = stop_dictation_session_for_session(
-                    state.inner(),
-                    &app,
-                    session_id,
-                    "released",
-                    true,
-                )
-                .await
-                {
-                    tracing::warn!("Fallback stop failed: {}", error);
-                    let normalized = error.to_lowercase();
-                    if !normalized.contains("stale")
-                        && !normalized.contains("no active dictation session")
-                    {
-                        let _ = force_stop_dictation_session(state.inner(), &app, "forced").await;
-                    }
-                }
-                break;
-            }
-        }
     });
 }
 
@@ -3126,6 +3489,59 @@ fn emit_recording_state(
     });
     if let Err(error) = app.emit("meeting-recording-state-changed", payload) {
         tracing::warn!("Failed to emit meeting recording state: {}", error);
+    }
+
+    // Update macOS menu bar recording indicator
+    match phase {
+        "recording" => show_recording_tray_icon(app),
+        "stopped" | "error" | "idle" => hide_recording_tray_icon(app),
+        _ => {}
+    }
+}
+
+fn show_recording_tray_icon(app: &AppHandle) {
+    use tauri::tray::TrayIconBuilder;
+    // Only create if not already present
+    if app.tray_by_id(RECORDING_TRAY_ID).is_some() {
+        return;
+    }
+    // Build a small 16x16 red circle RGBA icon for the menu bar
+    let size: u32 = 16;
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    let center = size as f32 / 2.0;
+    let radius = center - 1.0;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let idx = ((y * size + x) * 4) as usize;
+            if dx * dx + dy * dy <= radius * radius {
+                rgba[idx] = 220; // R
+                rgba[idx + 1] = 38; // G
+                rgba[idx + 2] = 38; // B
+                rgba[idx + 3] = 255; // A
+            }
+        }
+    }
+    let icon = tauri::image::Image::new_owned(rgba, size, size);
+    match TrayIconBuilder::with_id(RECORDING_TRAY_ID)
+        .icon(icon)
+        .icon_as_template(true)
+        .tooltip("Nautilus — Recording in progress")
+        .build(app)
+    {
+        Ok(_) => tracing::debug!("Recording tray icon shown"),
+        Err(e) => tracing::warn!("Failed to create recording tray icon: {}", e),
+    }
+}
+
+fn hide_recording_tray_icon(app: &AppHandle) {
+    if let Some(tray) = app.tray_by_id(RECORDING_TRAY_ID) {
+        if let Err(e) = tray.set_visible(false) {
+            tracing::warn!("Failed to hide recording tray icon: {}", e);
+        }
+        // Remove it entirely
+        drop(tray);
     }
 }
 
@@ -3936,18 +4352,16 @@ pub fn run() {
     let db_init_started = std::time::Instant::now();
 
     let initial_db_key = secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
-        .map_err(|e| e.to_string())
-        .ok()
-        .flatten();
-    let database = db::Database::new_with_key(initial_db_key.as_deref())
-        .or_else(|error| {
-            tracing::warn!(
-                "Failed to open database with stored key (falling back to default): {}",
+        .expect("Failed to read database key from secure credential storage");
+    let database = db::Database::new_with_key(initial_db_key.as_deref()).unwrap_or_else(|error| {
+        if initial_db_key.is_some() {
+            panic!(
+                "Failed to open encrypted database with stored key. Restore keychain entry or migrate vault state. Root cause: {}",
                 error
             );
-            db::Database::new()
-        })
-        .expect("Failed to initialize database");
+        }
+        panic!("Failed to initialize local database: {}", error);
+    });
     #[cfg(debug_assertions)]
     tracing::debug!(
         "Database initialization completed in {:?}",
@@ -3969,6 +4383,7 @@ pub fn run() {
             audio_capture: Arc::new(Mutex::new(audio::AudioCapture::new())),
             asr_manager,
             ollama_client: Arc::new(llm::OllamaClient::new()),
+            ollama_embedder: Arc::new(llm::OllamaEmbedder::new()),
             integration_manager: Arc::new(integrations::IntegrationManager::new()),
             settings_manager: Arc::new(Mutex::new(settings_manager)),
             backup_manager: Arc::new(Mutex::new(backup::BackupManager::default())),
@@ -3987,7 +4402,7 @@ pub fn run() {
         .setup(|app| {
             let state = app.state::<AppState>();
             tauri::async_runtime::block_on(async {
-                let (configured_provider, selected_model_id, allow_whisper_fallback) = {
+                let (configured_provider, selected_model_id, allow_whisper_fallback, silence_skip) = {
                     let settings_manager = state.settings_manager.lock().await;
                     (
                         settings_manager.settings().transcription.default_provider.clone(),
@@ -4000,6 +4415,10 @@ pub fn run() {
                             .settings()
                             .transcription
                             .allow_whisper_fallback,
+                        settings_manager
+                            .settings()
+                            .transcription
+                            .silence_skip_enabled,
                     )
                 };
 
@@ -4010,6 +4429,10 @@ pub fn run() {
                 state
                     .asr_manager
                     .set_allow_whisper_fallback(allow_whisper_fallback)
+                    .await;
+                state
+                    .asr_manager
+                    .set_silence_skip_enabled(silence_skip)
                     .await;
 
                 if let Some(provider_type) =
@@ -4043,97 +4466,134 @@ pub fn run() {
 
             #[cfg(desktop)]
             {
-                use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
+                use tauri_plugin_global_shortcut::ShortcutState;
 
-                let ctrl_shift_space =
-                    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Space);
-                let ctrl_shift_n =
-                    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyN);
-                let ctrl_shift_escape =
-                    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::Escape);
-                #[cfg(target_os = "macos")]
-                let cmd_shift_space =
-                    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space);
-
-                let mut shortcut_bindings = vec![ctrl_shift_space, ctrl_shift_n, ctrl_shift_escape];
-                #[cfg(target_os = "macos")]
-                shortcut_bindings.push(cmd_shift_space);
-
-                match tauri_plugin_global_shortcut::Builder::new()
-                    .with_shortcuts(shortcut_bindings)
-                {
-                    Ok(builder) => {
-                        let result = app.handle().plugin(
-                            builder
-                                .with_handler(move |_app, shortcut, event| {
-                                    if shortcut == &ctrl_shift_n
-                                        && matches!(event.state(), ShortcutState::Pressed)
-                                    {
-                                        if let Err(error) = show_main_window(_app) {
-                                            tracing::warn!(
-                                                "Failed to show main window from shortcut: {}",
-                                                error
-                                            );
-                                        }
-                                        return;
-                                    }
-
-                                    if shortcut == &ctrl_shift_escape
-                                        && matches!(event.state(), ShortcutState::Pressed)
-                                    {
-                                        let app_handle = _app.clone();
-                                        tauri::async_runtime::spawn(async move {
-                                            let state = app_handle.state::<AppState>();
-                                            let current_state = *state.dictation_runtime_state.lock().await;
-                                            if current_state != DictationSessionState::Idle {
-                                                let _ = force_stop_dictation_session(
-                                                    state.inner(),
-                                                    &app_handle,
-                                                    "emergency",
-                                                )
-                                                .await;
-                                            }
-                                        });
-                                        return;
-                                    }
-
-                                    #[cfg(target_os = "macos")]
-                                    let is_dictation_shortcut =
-                                        shortcut == &ctrl_shift_space || shortcut == &cmd_shift_space;
-                                    #[cfg(not(target_os = "macos"))]
-                                    let is_dictation_shortcut = shortcut == &ctrl_shift_space;
-
-                                    if !is_dictation_shortcut {
-                                        return;
-                                    }
-
-                                    match event.state() {
-                                        ShortcutState::Pressed => {
-                                            tracing::info!("Global hotkey pressed: {:?}", shortcut);
-                                            _app.emit("dictation-hotkey-pressed", ()).ok();
-                                            let app_handle = _app.clone();
-                                            tauri::async_runtime::spawn(async move {
-                                                handle_global_dictation_pressed(app_handle).await;
-                                            });
-                                        }
-                                        ShortcutState::Released => {
-                                            tracing::info!("Global hotkey released: {:?}", shortcut);
-                                            _app.emit("dictation-hotkey-released", ()).ok();
-                                            let app_handle = _app.clone();
-                                            tauri::async_runtime::spawn(async move {
-                                                handle_global_dictation_released(app_handle).await;
-                                            });
-                                        }
-                                    }
-                                })
-                                .build(),
+                let configured_shortcuts = {
+                    let settings_manager = tauri::async_runtime::block_on(async {
+                        let settings_manager = state.settings_manager.lock().await;
+                        settings_manager.settings().shortcuts.clone()
+                    });
+                    shortcut_bindings_from_settings(&settings_manager).or_else(|error| {
+                        tracing::warn!(
+                            "Invalid shortcut settings ({}). Falling back to defaults.",
+                            error
                         );
-                        if let Err(e) = result {
-                            tracing::warn!("Failed to register global shortcut: {}. Accessibility permissions may be required.", e);
+                        let fallback = settings::KeyboardShortcuts::default();
+                        shortcut_bindings_from_settings(&fallback)
+                    })
+                };
+
+                match configured_shortcuts {
+                    Ok(shortcut_bindings) => {
+                        let registered_shortcuts = shortcut_bindings
+                            .iter()
+                            .map(|binding| binding.shortcut)
+                            .collect::<Vec<_>>();
+                        let bindings_for_handler = shortcut_bindings.clone();
+
+                        match tauri_plugin_global_shortcut::Builder::new()
+                            .with_shortcuts(registered_shortcuts)
+                        {
+                            Ok(builder) => {
+                                let result = app.handle().plugin(
+                                    builder
+                                        .with_handler(move |_app, shortcut, event| {
+                                            let Some(binding) = bindings_for_handler
+                                                .iter()
+                                                .find(|entry| entry.shortcut == *shortcut)
+                                            else {
+                                                return;
+                                            };
+
+                                            match binding.action {
+                                                ShortcutAction::OpenWindow
+                                                    if matches!(event.state(), ShortcutState::Pressed) =>
+                                                {
+                                                    if let Err(error) = show_main_window(_app) {
+                                                        tracing::warn!(
+                                                            "Failed to show main window from shortcut: {}",
+                                                            error
+                                                        );
+                                                    }
+                                                }
+                                                ShortcutAction::EmergencyStopDictation
+                                                    if matches!(event.state(), ShortcutState::Pressed) =>
+                                                {
+                                                    let app_handle = _app.clone();
+                                                    tauri::async_runtime::spawn(async move {
+                                                        let state = app_handle.state::<AppState>();
+                                                        let current_state =
+                                                            *state.dictation_runtime_state.lock().await;
+                                                        if current_state != DictationSessionState::Idle {
+                                                            let _ = force_stop_dictation_session(
+                                                                state.inner(),
+                                                                &app_handle,
+                                                                "emergency",
+                                                            )
+                                                            .await;
+                                                        }
+                                                    });
+                                                }
+                                                ShortcutAction::ToggleDictation
+                                                    if matches!(event.state(), ShortcutState::Pressed) =>
+                                                {
+                                                    tracing::info!(
+                                                        "Global dictation hotkey pressed (toggle): {:?}",
+                                                        shortcut
+                                                    );
+                                                    _app.emit("dictation-hotkey-pressed", ()).ok();
+                                                    let app_handle = _app.clone();
+                                                    tauri::async_runtime::spawn(async move {
+                                                        handle_global_dictation_toggle(app_handle)
+                                                            .await;
+                                                    });
+                                                }
+                                                ShortcutAction::ToggleRecording
+                                                    if matches!(event.state(), ShortcutState::Pressed) =>
+                                                {
+                                                    _app.emit(
+                                                        "shortcut-action",
+                                                        serde_json::json!({ "action": "toggle_recording" }),
+                                                    )
+                                                    .ok();
+                                                }
+                                                ShortcutAction::QuickExport
+                                                    if matches!(event.state(), ShortcutState::Pressed) =>
+                                                {
+                                                    _app.emit(
+                                                        "shortcut-action",
+                                                        serde_json::json!({ "action": "quick_export" }),
+                                                    )
+                                                    .ok();
+                                                }
+                                                ShortcutAction::FocusSearch
+                                                    if matches!(event.state(), ShortcutState::Pressed) =>
+                                                {
+                                                    _app.emit(
+                                                        "shortcut-action",
+                                                        serde_json::json!({ "action": "focus_search" }),
+                                                    )
+                                                    .ok();
+                                                }
+                                                _ => {}
+                                            }
+                                        })
+                                        .build(),
+                                );
+                                if let Err(e) = result {
+                                    tracing::warn!("Failed to register global shortcut: {}. Accessibility permissions may be required.", e);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to create global shortcut builder: {}. Accessibility permissions may be required.", e);
+                            }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Failed to create global shortcut builder: {}. Accessibility permissions may be required.", e);
+                    Err(error) => {
+                        tracing::warn!(
+                            "Failed to configure global shortcuts: {}. Hotkeys will be unavailable.",
+                            error
+                        );
                     }
                 }
             }
@@ -4175,6 +4635,8 @@ pub fn run() {
             extract_action_items,
             search_transcripts,
             get_ollama_status,
+            reindex_embeddings,
+            get_embedding_status,
             list_ollama_models,
             list_ollama_cloud_models,
             list_openai_models,
@@ -4243,6 +4705,8 @@ pub fn run() {
             activate_license,
             validate_license,
             deactivate_license,
+            get_entitlement,
+            ask_memory,
             check_for_updates,
             install_update,
             get_update_status,
@@ -4500,68 +4964,6 @@ fn dictation_options_from_settings(settings: &settings::Settings) -> models::Dic
         save_to_inbox: settings.transcription.dictation_save_to_inbox,
         project_id: Some(settings.transcription.dictation_project_id.clone()),
         profile: dictation_profile_from_settings_value(&settings.transcription.dictation_profile),
-    }
-}
-
-fn dictation_profile_to_model_id(profile: &models::DictationProfile) -> &'static str {
-    match profile {
-        models::DictationProfile::Speed => "large-v3-turbo",
-        models::DictationProfile::Accuracy => "large-v3",
-    }
-}
-
-fn resolve_dictation_model_id(
-    profile: &models::DictationProfile,
-    fallback_model_id: &str,
-) -> String {
-    let preferred = dictation_profile_to_model_id(profile);
-    if whisper_model_exists(preferred) {
-        return preferred.to_string();
-    }
-
-    if whisper_model_exists(fallback_model_id) {
-        let normalized_fallback = normalize_whisper_model_id(fallback_model_id);
-        tracing::warn!(
-            "Dictation profile model '{}' is unavailable; using selected model '{}'",
-            preferred,
-            normalized_fallback
-        );
-        return normalized_fallback.to_string();
-    }
-
-    if whisper_model_exists("base.en") {
-        tracing::warn!(
-            "Dictation profile model '{}' and selected model '{}' are unavailable; falling back to base.en",
-            preferred,
-            fallback_model_id
-        );
-        return "base.en".to_string();
-    }
-
-    preferred.to_string()
-}
-
-fn whisper_model_exists(model_id: &str) -> bool {
-    let root = match nautilus_data_root() {
-        Ok(path) => path,
-        Err(_) => return false,
-    };
-    root.join("models")
-        .join("whisper")
-        .join(format!("ggml-{}.bin", normalize_whisper_model_id(model_id)))
-        .exists()
-}
-
-fn normalize_whisper_model_id(model_id: &str) -> &'static str {
-    match model_id {
-        "large-v3-turbo" => "large-v3-turbo",
-        "large-v3" => "large-v3",
-        "medium" => "medium",
-        "medium.en" => "medium.en",
-        "small" => "small",
-        "small.en" => "small.en",
-        "base" => "base",
-        _ => "base.en",
     }
 }
 
@@ -4843,6 +5245,8 @@ fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static st
         asr::AsrProviderType::Moonshine => "moonshine",
         asr::AsrProviderType::VibeVoice => "vibevoice",
         asr::AsrProviderType::Voxtral => "voxtral",
+        asr::AsrProviderType::ElevenLabsScribe => "elevenlabs_scribe",
+        asr::AsrProviderType::OpenAiCloud => "openai_cloud",
     }
 }
 
@@ -4855,6 +5259,8 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
         "moonshine" => Some(asr::AsrProviderType::Moonshine),
         "vibevoice" => Some(asr::AsrProviderType::VibeVoice),
         "voxtral" => Some(asr::AsrProviderType::Voxtral),
+        "elevenlabs_scribe" => Some(asr::AsrProviderType::ElevenLabsScribe),
+        "openai_cloud" => Some(asr::AsrProviderType::OpenAiCloud),
         _ => None,
     }
 }
