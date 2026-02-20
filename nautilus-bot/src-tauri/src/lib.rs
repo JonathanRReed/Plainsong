@@ -3320,12 +3320,19 @@ async fn should_show_recording_overlay(state: &AppState) -> bool {
     settings_manager.settings().ui.show_recording_popup
 }
 
-async fn handle_global_dictation_toggle(app: AppHandle) {
+async fn handle_global_dictation_toggle(app: AppHandle, is_press: bool) {
     let state = app.state::<AppState>();
+    let settings = state.settings_manager.lock().await.settings().clone();
+    let is_ptt = settings.transcription.dictation_push_to_talk;
+    let paste_to_cursor = settings.transcription.dictation_paste_to_cursor;
+    
     let current_state = *state.dictation_runtime_state.lock().await;
 
     match current_state {
         DictationSessionState::Idle => {
+            if !is_press {
+                return; // Releasing hotkey when idle does nothing
+            }
             // Start dictation
             let options = default_dictation_start_options(state.inner()).await;
             match start_dictation_session(state.inner(), &app, "hotkey", options).await {
@@ -3343,6 +3350,16 @@ async fn handle_global_dictation_toggle(app: AppHandle) {
             }
         }
         DictationSessionState::Recording => {
+            if is_ptt && is_press {
+                // In PTT mode, pressing while recording shouldn't stop it (it's already recording).
+                // Releasing it will stop it.
+                return;
+            }
+            if !is_ptt && !is_press {
+                // In Toggle mode, releasing shouldn't stop it.
+                return;
+            }
+            
             // Stop dictation
             let session_id = match active_dictation_session_id(state.inner()).await {
                 Some(value) => value,
@@ -3353,8 +3370,8 @@ async fn handle_global_dictation_toggle(app: AppHandle) {
                 state.inner(),
                 &app,
                 session_id,
-                "toggle",
-                true,
+                if is_ptt { "ptt_release" } else { "toggle" },
+                paste_to_cursor,
             )
             .await
             {
@@ -4534,18 +4551,23 @@ pub fn run() {
                                                         }
                                                     });
                                                 }
-                                                ShortcutAction::ToggleDictation
-                                                    if matches!(event.state(), ShortcutState::Pressed) =>
-                                                {
+                                                ShortcutAction::ToggleDictation => {
+                                                    let is_pressed = matches!(event.state(), ShortcutState::Pressed);
                                                     tracing::info!(
-                                                        "Global dictation hotkey pressed (toggle): {:?}",
+                                                        "Global dictation hotkey {}: {:?}",
+                                                        if is_pressed { "pressed" } else { "released" },
                                                         shortcut
                                                     );
-                                                    _app.emit("dictation-hotkey-pressed", ()).ok();
+                                                    
+                                                    if is_pressed {
+                                                        _app.emit("dictation-hotkey-pressed", ()).ok();
+                                                    } else {
+                                                        _app.emit("dictation-hotkey-released", ()).ok();
+                                                    }
+                                                    
                                                     let app_handle = _app.clone();
                                                     tauri::async_runtime::spawn(async move {
-                                                        handle_global_dictation_toggle(app_handle)
-                                                            .await;
+                                                        handle_global_dictation_toggle(app_handle, is_pressed).await;
                                                     });
                                                 }
                                                 ShortcutAction::ToggleRecording

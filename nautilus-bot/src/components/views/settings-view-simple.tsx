@@ -824,6 +824,48 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
+                        <Label>Push-to-talk dictation</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Hold shortcut to record, release to stop
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationPushToTalk}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationPushToTalk: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Type text at cursor automatically</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Automatically paste dictation text into active window
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationPasteToCursor}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationPasteToCursor: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
                         <Label>Allow Whisper fallback</Label>
                         <p className="text-sm text-muted-foreground">
                           If selected provider fails, fallback to Whisper
@@ -1085,6 +1127,48 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
+                        <Label>Push-to-talk dictation</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Hold shortcut to record, release to stop
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationPushToTalk}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationPushToTalk: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Type text at cursor automatically</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Automatically paste dictation text into active window
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationPasteToCursor}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationPasteToCursor: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
                         <Label>Show dictation popup</Label>
                         <p className="text-sm text-muted-foreground">Show an overlay when dictating text globally</p>
                       </div>
@@ -1227,6 +1311,48 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 {advancedTabs.security && (
                   <div className="pt-4 border-t space-y-5">
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Push-to-talk dictation</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Hold shortcut to record, release to stop
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationPushToTalk}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationPushToTalk: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Type text at cursor automatically</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Automatically paste dictation text into active window
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationPasteToCursor}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationPasteToCursor: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
                     
                     <div className="space-y-3">
                       <div className="flex items-center justify-between">
@@ -1543,6 +1669,48 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 {advancedTabs.storage && backupConfig && (
                   <div className="pt-4 border-t space-y-5">
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Push-to-talk dictation</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Hold shortcut to record, release to stop
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationPushToTalk}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationPushToTalk: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Type text at cursor automatically</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Automatically paste dictation text into active window
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationPasteToCursor}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationPasteToCursor: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
@@ -2051,6 +2219,48 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 {advancedTabs.ai && (
                   <div className="pt-4 border-t space-y-5">
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Push-to-talk dictation</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Hold shortcut to record, release to stop
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationPushToTalk}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationPushToTalk: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Type text at cursor automatically</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Automatically paste dictation text into active window
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationPasteToCursor}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationPasteToCursor: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
 
                     <div className="space-y-2">
                       <Label>Credential provider</Label>

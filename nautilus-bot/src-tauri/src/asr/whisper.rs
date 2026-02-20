@@ -170,6 +170,11 @@ impl AsrProvider for WhisperProvider {
 
         let mut params =
             whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+        
+        // Speed optimizations
+        let num_threads = std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4);
+        params.set_n_threads(std::cmp::min(num_threads, 8)); // Cap at 8 threads to avoid diminishing returns
+        
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);

@@ -32,6 +32,8 @@ export interface TranscriptionSettings {
   numSpeakers: number;
   speakerNamingMethod: "auto" | "numbered" | "manual";
   silenceSkipEnabled: boolean;
+  dictationPasteToCursor: boolean;
+  dictationPushToTalk: boolean;
   saveRawTranscript: boolean;
   dictationSaveToInbox: boolean;
   dictationProfile: "speed" | "accuracy";

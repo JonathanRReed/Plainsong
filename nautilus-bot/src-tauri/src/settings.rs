@@ -115,6 +115,10 @@ pub struct TranscriptionSettings {
     pub speaker_naming_method: String,
     /// Skip silence segments during transcription (Pro/Friends Club feature)
     pub silence_skip_enabled: bool,
+    /// Dictation: Paste text to cursor automatically
+    pub dictation_paste_to_cursor: bool,
+    /// Dictation: Use Push-to-Talk (start on press, stop on release)
+    pub dictation_push_to_talk: bool,
     /// Save raw transcript without formatting
     pub save_raw_transcript: bool,
     /// Persist dictation outputs into project storage.
@@ -142,6 +146,8 @@ impl Default for TranscriptionSettings {
             num_speakers: 0,
             speaker_naming_method: "auto".to_string(),
             silence_skip_enabled: false,
+            dictation_paste_to_cursor: true,
+            dictation_push_to_talk: false,
             save_raw_transcript: false,
             dictation_save_to_inbox: true,
             dictation_profile: "speed".to_string(),
