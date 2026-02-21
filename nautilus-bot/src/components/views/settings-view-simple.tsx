@@ -1096,27 +1096,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label>Allow Whisper fallback</Label>
-                        <p className="text-sm text-muted-foreground">
-                          If selected provider fails, fallback to Whisper
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.allowWhisperFallback}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              allowWhisperFallback: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
                         <Label>Automatic silence skip</Label>
                         <p className="text-sm text-muted-foreground">
                           Remove silent segments before transcription

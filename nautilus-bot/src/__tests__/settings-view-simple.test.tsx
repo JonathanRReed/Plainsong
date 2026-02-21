@@ -18,7 +18,6 @@ const baseSettings = {
   transcription: {
     defaultProvider: "whisper",
     selectedModelId: "base.en",
-    allowWhisperFallback: false,
     autoTranscribe: true,
     enableDiarization: true,
     intelligentPunctuation: true,

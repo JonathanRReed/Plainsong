@@ -108,8 +108,8 @@ fn run_moonshine_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
         .commit_from_file(model_dir.join(MOONSHINE_LOCAL_ENCODER))
         .context("Failed to load Moonshine encoder ONNX")?;
 
-    let audio_tensor = Tensor::from_array(audio_arr)
-        .context("Failed to create Moonshine audio tensor")?;
+    let audio_tensor =
+        Tensor::from_array(audio_arr).context("Failed to create Moonshine audio tensor")?;
 
     let enc_outputs = encoder
         .run(ort::inputs!["audio" => audio_tensor])
@@ -147,9 +147,8 @@ fn run_moonshine_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
 
         // Build token_ids tensor [1, n_tokens] as i32
         let token_i32: Vec<i32> = token_ids.iter().map(|&t| t as i32).collect();
-        let token_arr: Array<i32, IxDyn> =
-            Array::from_shape_vec(IxDyn(&[1, n_tokens]), token_i32)
-                .context("Failed to build Moonshine token array")?;
+        let token_arr: Array<i32, IxDyn> = Array::from_shape_vec(IxDyn(&[1, n_tokens]), token_i32)
+            .context("Failed to build Moonshine token array")?;
 
         // Rebuild context tensor from stored data + shape
         let ctx_arr: Array<f32, IxDyn> =
@@ -158,8 +157,7 @@ fn run_moonshine_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
 
         let token_tensor =
             Tensor::from_array(token_arr).context("Failed to create token tensor")?;
-        let ctx_tensor =
-            Tensor::from_array(ctx_arr).context("Failed to create context tensor")?;
+        let ctx_tensor = Tensor::from_array(ctx_arr).context("Failed to create context tensor")?;
 
         let dec_outputs = decoder
             .run(ort::inputs![
@@ -251,11 +249,10 @@ impl AsrProvider for MoonshineProvider {
         let audio_path_owned = audio_path.to_path_buf();
         let audio_for_dur = audio_path_owned.clone();
 
-        let text = tokio::task::spawn_blocking(move || {
-            run_moonshine_onnx(&model_dir, &audio_path_owned)
-        })
-        .await
-        .context("Moonshine inference task panicked")??;
+        let text =
+            tokio::task::spawn_blocking(move || run_moonshine_onnx(&model_dir, &audio_path_owned))
+                .await
+                .context("Moonshine inference task panicked")??;
 
         let duration = Self::wav_duration_seconds(&audio_for_dur);
         let segment = TranscriptSegment {
@@ -275,16 +272,13 @@ impl AsrProvider for MoonshineProvider {
             model_id: MOONSHINE_MODEL_ID.to_string(),
             requested_provider: AsrProviderType::Moonshine,
             actual_provider: AsrProviderType::Moonshine,
-            fallback_used: false,
-            fallback_reason: None,
         })
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let temp_path =
             std::env::temp_dir().join(format!("moonshine_{}.wav", uuid::Uuid::new_v4()));
-        std::fs::write(&temp_path, audio_data)
-            .context("failed to write temp wav for Moonshine")?;
+        std::fs::write(&temp_path, audio_data).context("failed to write temp wav for Moonshine")?;
         let result = self.transcribe(&temp_path).await;
         let _ = std::fs::remove_file(&temp_path);
         result

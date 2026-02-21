@@ -31,8 +31,6 @@ export interface Transcript {
   modelId?: string | null;
   requestedProvider?: string | null;
   actualProvider?: string | null;
-  fallbackUsed?: boolean | null;
-  fallbackReason?: string | null;
   createdAt?: string;
 }
 

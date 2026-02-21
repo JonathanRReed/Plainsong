@@ -26,7 +26,6 @@ export interface TranscriptionSettings {
   defaultProvider: string;
   selectedModelId: string;
   providerModelIds?: Record<string, string>;
-  allowWhisperFallback: boolean;
   autoTranscribe: boolean;
   enableDiarization: boolean;
   intelligentPunctuation: boolean;

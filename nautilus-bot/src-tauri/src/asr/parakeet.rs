@@ -19,11 +19,6 @@ const PARAKEET_ONNX_URL: &str =
     "https://huggingface.co/k2-fsa/sherpa-onnx-nemo-parakeet-tdt-0.6b-en/resolve/main/encoder.onnx";
 const PARAKEET_VOCAB_URL: &str =
     "https://huggingface.co/k2-fsa/sherpa-onnx-nemo-parakeet-tdt-0.6b-en/resolve/main/tokens.txt";
-// ---------------------------------------------------------------------------
-// Legacy filenames — also checked so users who placed model.onnx/vocab.txt work.
-// ---------------------------------------------------------------------------
-const PARAKEET_ONNX_FILE_ALT: &str = "model.onnx";
-const PARAKEET_VOCAB_FILE_ALT: &str = "vocab.txt";
 
 /// Returns true only if the file exists, is non-trivially sized, and does NOT
 /// start with an HTML/JSON error marker (which would indicate a failed download).
@@ -62,27 +57,11 @@ impl ParakeetProvider {
     }
 
     fn onnx_path(&self) -> PathBuf {
-        let primary = self.model_dir.join(PARAKEET_ONNX_FILE);
-        if is_valid_onnx_file(&primary) {
-            return primary;
-        }
-        let alt = self.model_dir.join(PARAKEET_ONNX_FILE_ALT);
-        if is_valid_onnx_file(&alt) {
-            return alt;
-        }
-        primary
+        self.model_dir.join(PARAKEET_ONNX_FILE)
     }
 
     fn vocab_path(&self) -> PathBuf {
-        let primary = self.model_dir.join(PARAKEET_VOCAB_FILE);
-        if primary.exists() {
-            return primary;
-        }
-        let alt = self.model_dir.join(PARAKEET_VOCAB_FILE_ALT);
-        if alt.exists() {
-            return alt;
-        }
-        primary
+        self.model_dir.join(PARAKEET_VOCAB_FILE)
     }
 
     fn has_required_files(&self) -> bool {
@@ -102,7 +81,6 @@ impl ParakeetProvider {
             Err(_) => 0.0,
         }
     }
-
 }
 
 impl Default for ParakeetProvider {
@@ -115,11 +93,7 @@ impl Default for ParakeetProvider {
 // Native ONNX inference (feature-gated)
 // ---------------------------------------------------------------------------
 #[cfg(feature = "asr-parakeet")]
-fn run_parakeet_onnx(
-    onnx_path: &Path,
-    vocab_path: &Path,
-    audio_path: &Path,
-) -> Result<String> {
+fn run_parakeet_onnx(onnx_path: &Path, vocab_path: &Path, audio_path: &Path) -> Result<String> {
     use crate::audio::mel::MelSpectrogram;
     use ndarray::{Array, IxDyn};
     use ort::session::builder::GraphOptimizationLevel;
@@ -148,15 +122,16 @@ fn run_parakeet_onnx(
     let n_frames = spec[0].len();
 
     // Transpose to [T, n_mels] then pack as [1, T, n_mels]
-    let flat: Vec<f32> = (0..n_frames)
-        .flat_map(|t| (0..n_mels).map(move |m| spec[m][t]))
-        .collect();
-    let signal_arr: Array<f32, IxDyn> =
-        Array::from_shape_vec(IxDyn(&[1, n_frames, n_mels]), flat)
-            .context("Failed to build mel array")?;
-    let len_arr: Array<i64, IxDyn> =
-        Array::from_shape_vec(IxDyn(&[1]), vec![n_frames as i64])
-            .context("Failed to build length array")?;
+    let mut flat: Vec<f32> = Vec::with_capacity(n_frames * n_mels);
+    for t in 0..n_frames {
+        for mel_bin in spec.iter().take(n_mels) {
+            flat.push(mel_bin[t]);
+        }
+    }
+    let signal_arr: Array<f32, IxDyn> = Array::from_shape_vec(IxDyn(&[1, n_frames, n_mels]), flat)
+        .context("Failed to build mel array")?;
+    let len_arr: Array<i64, IxDyn> = Array::from_shape_vec(IxDyn(&[1]), vec![n_frames as i64])
+        .context("Failed to build length array")?;
 
     // -----------------------------------------------------------------
     // 3. Load ONNX session
@@ -168,27 +143,27 @@ fn run_parakeet_onnx(
         .commit_from_file(onnx_path)
         .context("Failed to load Parakeet ONNX — ensure encoder.onnx is a valid NeMo CTC export")?;
 
-    // Build tensors — keep clones for the fallback attempt.
-    let signal_arr2 = signal_arr.clone();
-    let len_arr2 = len_arr.clone();
-    let signal_tensor =
-        Tensor::from_array(signal_arr).context("Failed to create signal tensor")?;
-    let len_tensor =
-        Tensor::from_array(len_arr).context("Failed to create length tensor")?;
+    // Inspect model input names to determine which naming convention was used when
+    // the ONNX was exported (sherpa-onnx: "x"/"x_lens"; NeMo: "processed_signal"/...).
+    // A single session.run() avoids the double-borrow that arises from storing a
+    // SessionOutputs<'_> lifetime while trying to reborrow the session.
+    let has_sherpa_names = session.inputs().iter().any(|inp| inp.name() == "x");
 
-    // Try sherpa-onnx naming ("x" / "x_lens") first, then NeMo export naming as fallback.
-    // Sequential attempts avoid needing session.inputs introspection.
-    let first_result =
-        session.run(ort::inputs!["x" => signal_tensor, "x_lens" => len_tensor]);
-    let outputs = if first_result.is_ok() {
-        first_result.unwrap()
+    let outputs = if has_sherpa_names {
+        let signal_tensor =
+            Tensor::from_array(signal_arr).context("Failed to create signal tensor")?;
+        let len_tensor = Tensor::from_array(len_arr).context("Failed to create length tensor")?;
+        session
+            .run(ort::inputs!["x" => signal_tensor, "x_lens" => len_tensor])
+            .context("Parakeet ONNX inference failed (sherpa-onnx input names x/x_lens)")?
     } else {
-        let s2 = Tensor::from_array(signal_arr2).context("Failed to rebuild signal tensor")?;
-        let l2 = Tensor::from_array(len_arr2).context("Failed to rebuild length tensor")?;
+        let signal_tensor =
+            Tensor::from_array(signal_arr).context("Failed to create signal tensor")?;
+        let len_tensor = Tensor::from_array(len_arr).context("Failed to create length tensor")?;
         session
             .run(ort::inputs![
-                "processed_signal" => s2,
-                "processed_signal_length" => l2
+                "processed_signal" => signal_tensor,
+                "processed_signal_length" => len_tensor
             ])
             .context(
                 "Parakeet ONNX inference failed — tried x/x_lens and \
@@ -206,7 +181,10 @@ fn run_parakeet_onnx(
         .context("Failed to extract logprobs from Parakeet ONNX output")?;
     let shape = logprobs_array.shape().to_vec();
     if shape.len() < 3 {
-        return Err(anyhow::anyhow!("Unexpected Parakeet output shape: {:?}", shape));
+        return Err(anyhow::anyhow!(
+            "Unexpected Parakeet output shape: {:?}",
+            shape
+        ));
     }
 
     // Shape is [1, T_out, V] for sherpa-onnx / NeMo CTC
@@ -225,7 +203,7 @@ fn run_parakeet_onnx(
         let best_id = frame
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(i, _)| i)
             .unwrap_or(blank_id);
         if best_id != blank_id && best_id != prev {
@@ -239,8 +217,8 @@ fn run_parakeet_onnx(
         .filter_map(|&id| vocab.get(id).map(String::as_str))
         .collect::<Vec<_>>()
         .concat()
-        .replace('▁', " ")   // SentencePiece space
-        .replace("##", "")    // WordPiece prefix
+        .replace('▁', " ") // SentencePiece space
+        .replace("##", "") // WordPiece prefix
         .trim()
         .to_string();
 
@@ -255,11 +233,7 @@ fn load_vocab(vocab_path: &Path) -> Result<Vec<String>> {
 }
 
 #[cfg(not(feature = "asr-parakeet"))]
-fn run_parakeet_onnx(
-    _onnx_path: &Path,
-    _vocab_path: &Path,
-    _audio_path: &Path,
-) -> Result<String> {
+fn run_parakeet_onnx(_onnx_path: &Path, _vocab_path: &Path, _audio_path: &Path) -> Result<String> {
     Err(anyhow::anyhow!(
         "Parakeet ONNX support is not compiled in. Rebuild with the `asr-parakeet` feature."
     ))
@@ -277,8 +251,8 @@ impl AsrProvider for ParakeetProvider {
     fn description(&self) -> &str {
         "NVIDIA Parakeet TDT 0.6B — native ONNX inference via sherpa-onnx community export. \
          Download provides encoder.onnx + tokens.txt from k2-fsa/sherpa-onnx-nemo-parakeet-tdt-0.6b-en. \
-         You can also place your own NeMo ONNX export (encoder.onnx/model.onnx + tokens.txt/vocab.txt) \
-         in the parakeet models folder."
+         You can also place your own NeMo ONNX export (encoder.onnx + tokens.txt) in the parakeet \
+         models folder."
     }
 
     fn is_available(&self) -> bool {
@@ -341,14 +315,11 @@ impl AsrProvider for ParakeetProvider {
             model_id: "parakeet-tdt-0.6b-v3".to_string(),
             requested_provider: AsrProviderType::Parakeet,
             actual_provider: AsrProviderType::Parakeet,
-            fallback_used: false,
-            fallback_reason: None,
         })
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        let temp_path =
-            std::env::temp_dir().join(format!("parakeet_{}.wav", uuid::Uuid::new_v4()));
+        let temp_path = std::env::temp_dir().join(format!("parakeet_{}.wav", uuid::Uuid::new_v4()));
         std::fs::write(&temp_path, audio_data).context("failed to write temp wav for Parakeet")?;
         let result = self.transcribe(&temp_path).await;
         let _ = std::fs::remove_file(&temp_path);
@@ -384,13 +355,16 @@ impl AsrProvider for ParakeetProvider {
                     tracing::info!("Parakeet encoder.onnx download: {:.1}%", p.percentage);
                 })
                 .await
-                .map_err(|e| anyhow::anyhow!(
-                    "Failed to download Parakeet ONNX from {}. \
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to download Parakeet ONNX from {}. \
                      If the URL is unavailable, manually place encoder.onnx in the parakeet \
                      models folder (export from NeMo with: model.export('encoder.onnx')). \
                      Error: {}",
-                    PARAKEET_ONNX_URL, e
-                ))?;
+                        PARAKEET_ONNX_URL,
+                        e
+                    )
+                })?;
         }
 
         // Download vocabulary/token list (~5 KB)

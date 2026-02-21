@@ -23,12 +23,11 @@ async fn runtime_diagnostics_cover_all_providers() {
 }
 
 #[tokio::test]
-async fn fallback_failures_are_explicit() {
+async fn provider_failures_are_explicit_without_fallback() {
     let manager = AsrManager::new();
     manager
         .set_selected_model_id("nonexistent-model".to_string())
         .await;
-    manager.set_allow_whisper_fallback(true).await;
 
     let missing_audio = PathBuf::from("/nonexistent/nautilus-test-audio.wav");
     let error = manager
@@ -37,8 +36,8 @@ async fn fallback_failures_are_explicit() {
         .expect_err("missing file should force a deterministic error");
     let message = error.to_string().to_lowercase();
     assert!(
-        message.contains("fallback") || message.contains("whisper"),
-        "expected explicit fallback error context, got: {}",
+        message.contains("failed"),
+        "expected explicit provider failure context, got: {}",
         message
     );
 }
@@ -49,7 +48,6 @@ async fn asr_errors_surface_non_empty_messages() {
     manager
         .set_selected_model_id("nonexistent-model".to_string())
         .await;
-    manager.set_allow_whisper_fallback(false).await;
 
     let error = manager
         .transcribe_bytes(&[])

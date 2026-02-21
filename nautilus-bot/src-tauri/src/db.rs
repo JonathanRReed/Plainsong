@@ -145,8 +145,6 @@ impl Database {
                 model_id TEXT,
                 requested_provider TEXT,
                 actual_provider TEXT,
-                fallback_used INTEGER,
-                fallback_reason TEXT,
                 created_at TEXT NOT NULL
             )",
             [],
@@ -164,14 +162,7 @@ impl Database {
             "ALTER TABLE transcripts ADD COLUMN actual_provider TEXT",
             [],
         );
-        let _ = self.conn.execute(
-            "ALTER TABLE transcripts ADD COLUMN fallback_used INTEGER",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE transcripts ADD COLUMN fallback_reason TEXT",
-            [],
-        );
+        self.migrate_transcripts_drop_fallback_columns()?;
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS audit_log (
@@ -282,6 +273,73 @@ impl Database {
             [Utc::now().to_rfc3339()],
         )?;
 
+        Ok(())
+    }
+
+    fn transcripts_has_column(&self, column_name: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(transcripts)")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column_name {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn migrate_transcripts_drop_fallback_columns(&self) -> Result<()> {
+        let has_fallback_used = self.transcripts_has_column("fallback_used")?;
+        let has_fallback_reason = self.transcripts_has_column("fallback_reason")?;
+        if !has_fallback_used && !has_fallback_reason {
+            return Ok(());
+        }
+
+        self.conn.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE transcripts RENAME TO transcripts_legacy_fallback;
+             CREATE TABLE transcripts (
+                id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL,
+                segments TEXT,
+                full_text TEXT,
+                language TEXT,
+                confidence REAL,
+                model TEXT,
+                model_id TEXT,
+                requested_provider TEXT,
+                actual_provider TEXT,
+                created_at TEXT NOT NULL
+             );
+             INSERT INTO transcripts (
+                id,
+                recording_id,
+                segments,
+                full_text,
+                language,
+                confidence,
+                model,
+                model_id,
+                requested_provider,
+                actual_provider,
+                created_at
+             )
+             SELECT
+                id,
+                recording_id,
+                segments,
+                full_text,
+                language,
+                confidence,
+                model,
+                model_id,
+                requested_provider,
+                actual_provider,
+                created_at
+             FROM transcripts_legacy_fallback;
+             DROP TABLE transcripts_legacy_fallback;
+             COMMIT;",
+        )?;
         Ok(())
     }
 
@@ -470,7 +528,7 @@ impl Database {
 
     pub fn get_transcript(&self, recording_id: &str) -> Result<Option<Transcript>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, fallback_used, fallback_reason, created_at
+            "SELECT id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, created_at
              FROM transcripts WHERE recording_id = ?1",
         )?;
 
@@ -490,10 +548,8 @@ impl Database {
                 model_id: row.get(7)?,
                 requested_provider: row.get(8)?,
                 actual_provider: row.get(9)?,
-                fallback_used: row.get::<_, Option<i64>>(10)?.map(|value| value != 0),
-                fallback_reason: row.get(11)?,
                 created_at: row
-                    .get::<_, String>(12)?
+                    .get::<_, String>(10)?
                     .parse()
                     .unwrap_or_else(|_| Utc::now()),
             })
@@ -554,8 +610,8 @@ impl Database {
             params![&transcript.recording_id],
         )?;
         tx.execute(
-            "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, fallback_used, fallback_reason, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 &transcript.id,
                 &transcript.recording_id,
@@ -567,8 +623,6 @@ impl Database {
                 &transcript.model_id,
                 &transcript.requested_provider,
                 &transcript.actual_provider,
-                transcript.fallback_used.map(|value| if value { 1 } else { 0 }),
-                &transcript.fallback_reason,
                 transcript.created_at.to_rfc3339()
             ],
         )?;
@@ -1047,10 +1101,7 @@ impl Database {
         start_time: f64,
         end_time: f64,
     ) -> Result<()> {
-        let blob: Vec<u8> = embedding
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
         self.conn.execute(
             "INSERT INTO transcript_embeddings (recording_id, segment_id, text, embedding, model, start_time, end_time, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -1230,8 +1281,6 @@ mod tests {
             model_id: Some("base.en".to_string()),
             requested_provider: Some("whisper".to_string()),
             actual_provider: Some("whisper".to_string()),
-            fallback_used: Some(false),
-            fallback_reason: None,
             created_at: Utc::now(),
         }
     }
@@ -1455,8 +1504,8 @@ mod tests {
             .execute(
                 "INSERT INTO transcripts (
                     id, recording_id, segments, full_text, language, confidence, model, model_id,
-                    requested_provider, actual_provider, fallback_used, fallback_reason, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    requested_provider, actual_provider, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     "t-startup",
                     "r-startup",
@@ -1468,8 +1517,6 @@ mod tests {
                     "base.en",
                     "whisper",
                     "whisper",
-                    0,
-                    Option::<String>::None,
                     Utc::now().to_rfc3339(),
                 ],
             )

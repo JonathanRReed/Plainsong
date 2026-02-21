@@ -102,8 +102,6 @@ pub struct TranscriptionSettings {
     pub selected_model_id: String,
     /// Provider-specific model identifiers (keyed by provider value, e.g. "whisper")
     pub provider_model_ids: HashMap<String, String>,
-    /// If true, fallback to Whisper when selected provider fails
-    pub allow_whisper_fallback: bool,
     /// Auto-transcribe after recording
     pub auto_transcribe: bool,
     /// Enable speaker diarization
@@ -152,7 +150,6 @@ impl Default for TranscriptionSettings {
             default_provider: "whisper".to_string(),
             selected_model_id: "base.en".to_string(),
             provider_model_ids: HashMap::new(),
-            allow_whisper_fallback: false,
             auto_transcribe: true,
             enable_diarization: true,
             intelligent_punctuation: true,

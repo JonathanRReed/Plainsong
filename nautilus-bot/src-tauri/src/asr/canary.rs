@@ -42,7 +42,11 @@ impl CanaryProvider {
         match hound::WavReader::open(path) {
             Ok(reader) => {
                 let spec = reader.spec();
-                if spec.sample_rate == 0 { 0.0 } else { reader.duration() as f64 / spec.sample_rate as f64 }
+                if spec.sample_rate == 0 {
+                    0.0
+                } else {
+                    reader.duration() as f64 / spec.sample_rate as f64
+                }
             }
             Err(_) => 0.0,
         }
@@ -61,7 +65,10 @@ impl Default for CanaryProvider {
 /// Public entry point for running Whisper-Large-V3-Turbo inference on raw f32 samples.
 /// Called by canary.rs and voxtral.rs (which reuses the same encoder architecture).
 #[cfg(feature = "asr-canary")]
-pub(super) fn run_canary_inference_on_samples(samples: Vec<f32>, model_dir: &Path) -> Result<String> {
+pub(super) fn run_canary_inference_on_samples(
+    samples: Vec<f32>,
+    model_dir: &Path,
+) -> Result<String> {
     use crate::audio::mel::MelSpectrogram;
     use candle_core::{DType, Device, IndexOp, Tensor};
     use candle_nn::VarBuilder;
@@ -72,8 +79,8 @@ pub(super) fn run_canary_inference_on_samples(samples: Vec<f32>, model_dir: &Pat
 
     let cfg_text = std::fs::read_to_string(model_dir.join("config.json"))
         .context("Failed to read Canary config.json")?;
-    let config: Config = serde_json::from_str(&cfg_text)
-        .context("Failed to parse Canary config.json")?;
+    let config: Config =
+        serde_json::from_str(&cfg_text).context("Failed to parse Canary config.json")?;
 
     let n_mels = config.num_mel_bins;
     let n_frames = w::N_FRAMES;
@@ -96,8 +103,8 @@ pub(super) fn run_canary_inference_on_samples(samples: Vec<f32>, model_dir: &Pat
         VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)
             .context("Failed to load Canary weights")?
     };
-    let mut model = Whisper::load(&vb, config)
-        .context("Failed to initialise Canary Whisper model")?;
+    let mut model =
+        Whisper::load(&vb, config).context("Failed to initialise Canary Whisper model")?;
 
     let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
         .map_err(|e| anyhow::anyhow!("Failed to load Canary tokenizer: {}", e))?;
@@ -110,7 +117,9 @@ pub(super) fn run_canary_inference_on_samples(samples: Vec<f32>, model_dir: &Pat
     let sot = tokenizer.token_to_id(w::SOT_TOKEN).unwrap_or(50258);
     let eot = tokenizer.token_to_id(w::EOT_TOKEN).unwrap_or(50257);
     let transcribe = tokenizer.token_to_id(w::TRANSCRIBE_TOKEN).unwrap_or(50360);
-    let no_ts = tokenizer.token_to_id(w::NO_TIMESTAMPS_TOKEN).unwrap_or(50364);
+    let no_ts = tokenizer
+        .token_to_id(w::NO_TIMESTAMPS_TOKEN)
+        .unwrap_or(50364);
     let lang_en = tokenizer.token_to_id("<|en|>").unwrap_or(50259);
 
     let mut tokens: Vec<u32> = vec![sot, lang_en, transcribe, no_ts];
@@ -191,8 +200,8 @@ impl AsrProvider for CanaryProvider {
             size_mb: 1600.0,
             parameters: "809M".to_string(),
             languages: vec![
-                "en", "es", "de", "fr", "it", "pt", "pl", "nl", "tr", "ru", "uk",
-                "ar", "zh", "ja", "ko", "hi", "vi", "th", "id",
+                "en", "es", "de", "fr", "it", "pt", "pl", "nl", "tr", "ru", "uk", "ar", "zh", "ja",
+                "ko", "hi", "vi", "th", "id",
             ]
             .into_iter()
             .map(str::to_string)
@@ -216,11 +225,10 @@ impl AsrProvider for CanaryProvider {
         let audio_path_owned = audio_path.to_path_buf();
         let audio_path_for_dur = audio_path_owned.clone();
 
-        let text = tokio::task::spawn_blocking(move || {
-            run_canary_candle(&model_dir, &audio_path_owned)
-        })
-        .await
-        .context("Canary inference task panicked")??;
+        let text =
+            tokio::task::spawn_blocking(move || run_canary_candle(&model_dir, &audio_path_owned))
+                .await
+                .context("Canary inference task panicked")??;
 
         let duration = Self::wav_duration_seconds(&audio_path_for_dur);
         let segment = TranscriptSegment {
@@ -240,14 +248,11 @@ impl AsrProvider for CanaryProvider {
             model_id: CANARY_MODEL_ID.to_string(),
             requested_provider: AsrProviderType::Canary,
             actual_provider: AsrProviderType::Canary,
-            fallback_used: false,
-            fallback_reason: None,
         })
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        let temp_path =
-            std::env::temp_dir().join(format!("canary_{}.wav", uuid::Uuid::new_v4()));
+        let temp_path = std::env::temp_dir().join(format!("canary_{}.wav", uuid::Uuid::new_v4()));
         std::fs::write(&temp_path, audio_data).context("failed to write temp wav for Canary")?;
         let result = self.transcribe(&temp_path).await;
         let _ = std::fs::remove_file(&temp_path);

@@ -126,8 +126,7 @@ pub async fn export_backup_archive(
     backupId: String,
     targetPath: String,
 ) -> Result<(), String> {
-    let canonical_target =
-        crate::canonicalize_existing_absolute_path(&targetPath, "targetPath")?;
+    let canonical_target = crate::canonicalize_existing_absolute_path(&targetPath, "targetPath")?;
     if !canonical_target.is_dir() {
         return Err(format!(
             "targetPath must be an existing directory, got '{}'",

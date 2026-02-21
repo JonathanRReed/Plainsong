@@ -19,9 +19,9 @@ mod text;
 mod transcription;
 pub mod update;
 
+use anyhow::Result;
 use commands::backup::*;
 use commands::infra::*;
-use anyhow::Result;
 use rand::RngCore;
 use regex::Regex;
 use std::collections::HashMap;
@@ -729,7 +729,9 @@ fn is_diarization_model_available(modelId: Option<String>) -> bool {
     if id == "ecapa_tdnn_speaker" {
         return diarization::DiarizationEngine::is_real_available();
     }
-    diarization_model_path(id).map(|p| p.exists()).unwrap_or(false)
+    diarization_model_path(id)
+        .map(|p| p.exists())
+        .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -787,7 +789,13 @@ async fn stop_dictation(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    let paste_to_cursor = state.settings_manager.lock().await.settings().transcription.dictation_paste_to_cursor;
+    let paste_to_cursor = state
+        .settings_manager
+        .lock()
+        .await
+        .settings()
+        .transcription
+        .dictation_paste_to_cursor;
     stop_dictation_session(state.inner(), &app, "manual", paste_to_cursor).await
 }
 
@@ -910,7 +918,10 @@ async fn start_recording(
                 }
                 if pending.len() >= chunk_threshold {
                     let feed_slice = std::mem::take(&mut pending);
-                    if let Err(e) = streaming_transcriber.feed_audio(&session_id, &feed_slice).await {
+                    if let Err(e) = streaming_transcriber
+                        .feed_audio(&session_id, &feed_slice)
+                        .await
+                    {
                         tracing::warn!("Live streaming feed error: {}", e);
                     }
                 }
@@ -922,7 +933,9 @@ async fn start_recording(
                 pending.extend_from_slice(&chunk);
             }
             if !pending.is_empty() {
-                let _ = streaming_transcriber.feed_audio(&session_id, &pending).await;
+                let _ = streaming_transcriber
+                    .feed_audio(&session_id, &pending)
+                    .await;
             }
             let _ = streaming_transcriber.finalize_session(&session_id).await;
             recv_task.abort();
@@ -1037,9 +1050,6 @@ async fn stop_recording(
                 let language_clone = result.language.clone();
                 let requested_provider_clone = result.requested_provider;
                 let actual_provider_clone = result.actual_provider;
-                let fallback_used_clone = result.fallback_used;
-                let fallback_reason_clone = result.fallback_reason.clone();
-
                 let mut transcript = models::Transcript {
                     id: uuid::Uuid::new_v4().to_string(),
                     recording_id: recording_id_clone.clone(),
@@ -1066,8 +1076,6 @@ async fn stop_recording(
                     actual_provider: Some(
                         asr_provider_to_settings_value(result.actual_provider).to_string(),
                     ),
-                    fallback_used: Some(result.fallback_used),
-                    fallback_reason: result.fallback_reason.clone(),
                     created_at: chrono::Utc::now(),
                 };
 
@@ -1131,13 +1139,25 @@ async fn stop_recording(
 
                         let summary = match summary_res {
                             Ok(Ok(s)) => Some(s),
-                            Ok(Err(e)) => { tracing::warn!("Auto-summary failed: {}", e); None }
-                            Err(_) => { tracing::warn!("Auto-summary timed out"); None }
+                            Ok(Err(e)) => {
+                                tracing::warn!("Auto-summary failed: {}", e);
+                                None
+                            }
+                            Err(_) => {
+                                tracing::warn!("Auto-summary timed out");
+                                None
+                            }
                         };
                         let action_items: Vec<String> = match actions_res {
                             Ok(Ok(items)) => items.into_iter().map(|i| i.task).collect(),
-                            Ok(Err(e)) => { tracing::warn!("Auto action items failed: {}", e); vec![] }
-                            Err(_) => { tracing::warn!("Auto action items timed out"); vec![] }
+                            Ok(Err(e)) => {
+                                tracing::warn!("Auto action items failed: {}", e);
+                                vec![]
+                            }
+                            Err(_) => {
+                                tracing::warn!("Auto action items timed out");
+                                vec![]
+                            }
                         };
 
                         if summary.is_some() || !action_items.is_empty() {
@@ -1272,8 +1292,6 @@ async fn stop_recording(
                     "language": &language_clone,
                     "requested_provider": asr_provider_to_settings_value(requested_provider_clone),
                     "actual_provider": asr_provider_to_settings_value(actual_provider_clone),
-                    "fallback_used": fallback_used_clone,
-                    "fallback_reason": fallback_reason_clone,
                 });
                 if let Err(e) = db.log_audit_event("transcription_completed", Some(details), "info")
                 {
@@ -2018,7 +2036,10 @@ async fn list_ollama_cloud_models() -> Result<Vec<String>, String> {
         tracing::warn!("list_ollama_cloud_models called but secret is empty");
         return Ok(vec![]);
     } else {
-        tracing::debug!("list_ollama_cloud_models: secret present (len: {})", secret.len());
+        tracing::debug!(
+            "list_ollama_cloud_models: secret present (len: {})",
+            secret.len()
+        );
     }
 
     let client = llm::OllamaCloudClient::with_api_key(Some(secret));
@@ -2127,7 +2148,11 @@ async fn list_elevenlabs_asr_models() -> Result<Vec<String>, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let mut models: Vec<String> = parsed.models.into_iter().map(|entry| entry.model_id).collect();
+    let mut models: Vec<String> = parsed
+        .models
+        .into_iter()
+        .map(|entry| entry.model_id)
+        .collect();
     if models.is_empty() {
         models.push("scribe_v1".to_string());
     }
@@ -2490,7 +2515,10 @@ async fn set_asr_provider_model(
         &settings_manager.settings().transcription.default_provider,
     ) {
         if default_provider == providerType {
-            settings_manager.settings_mut().transcription.selected_model_id = modelId;
+            settings_manager
+                .settings_mut()
+                .transcription
+                .selected_model_id = modelId;
         }
     }
 
@@ -2625,33 +2653,31 @@ async fn save_settings(
     let previous_export_root = previous_settings.privacy.export_root.clone();
 
     let result: Result<(), String> = async {
-        settings.audio.silence_timeout_seconds = normalize_silence_timeout_seconds(
-            settings.audio.silence_timeout_seconds,
-        );
+        settings.audio.silence_timeout_seconds =
+            normalize_silence_timeout_seconds(settings.audio.silence_timeout_seconds);
 
-        let default_provider = asr_provider_from_settings_value(&settings.transcription.default_provider)
-            .unwrap_or(asr::AsrProviderType::Whisper);
+        let default_provider =
+            asr_provider_from_settings_value(&settings.transcription.default_provider)
+                .unwrap_or(asr::AsrProviderType::Whisper);
         settings.transcription.default_provider =
             asr_provider_to_settings_value(default_provider).to_string();
 
         let mut provider_model_map = provider_model_map_from_settings(&settings.transcription);
-        let selected_for_default = normalize_asr_model_id(
-            default_provider,
-            &settings.transcription.selected_model_id,
-        );
+        let selected_for_default =
+            normalize_asr_model_id(default_provider, &settings.transcription.selected_model_id);
         provider_model_map.insert(default_provider, selected_for_default.clone());
         settings.transcription.selected_model_id = selected_for_default;
-        settings.transcription.provider_model_ids = provider_model_map_to_settings(&provider_model_map);
+        settings.transcription.provider_model_ids =
+            provider_model_map_to_settings(&provider_model_map);
 
         let dictation_options = dictation_options_from_settings(&settings);
         state
             .asr_manager
             .set_provider_model_map(provider_model_map)
             .await;
-        state.asr_manager.set_default_provider(default_provider).await;
         state
             .asr_manager
-            .set_allow_whisper_fallback(settings.transcription.allow_whisper_fallback)
+            .set_default_provider(default_provider)
             .await;
         state
             .asr_manager
@@ -2662,7 +2688,7 @@ async fn save_settings(
             let provider = state.asr_manager.get_provider(default_provider).await;
             if !provider.is_available() {
                 let warning = format!(
-                    "{} is not ready — Whisper fallback will be used for transcription",
+                    "{} is not ready for transcription",
                     default_provider.display_name()
                 );
                 tracing::warn!("{}", warning);
@@ -2806,9 +2832,7 @@ async fn export_with_template(
             .ok_or("Recording not found")?;
 
         let transcript = db.get_transcript(&recordingId).map_err(|e| e.to_string())?;
-        let speaker_aliases = db
-            .get_speaker_aliases(&recordingId)
-            .unwrap_or_default();
+        let speaker_aliases = db.get_speaker_aliases(&recordingId).unwrap_or_default();
         (recording, transcript, speaker_aliases)
     };
 
@@ -2823,11 +2847,15 @@ async fn export_with_template(
         let mut by_speaker: BTreeMap<String, Vec<(f64, f64, String)>> = BTreeMap::new();
         if let Some(t) = &transcript {
             for seg in &t.segments {
-                let sid = seg.speaker_id.clone().unwrap_or_else(|| "unknown".to_string());
-                by_speaker
-                    .entry(sid)
-                    .or_default()
-                    .push((seg.start_time, seg.end_time, seg.text.clone()));
+                let sid = seg
+                    .speaker_id
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                by_speaker.entry(sid).or_default().push((
+                    seg.start_time,
+                    seg.end_time,
+                    seg.text.clone(),
+                ));
             }
         }
         by_speaker
@@ -2838,7 +2866,11 @@ async fn export_with_template(
                     .get(&speaker_id)
                     .and_then(|(n, _, _)| n.clone())
                     .unwrap_or_else(|| format!("Speaker {}", idx + 1));
-                export::templates::SpeakerInfo { id: speaker_id, name, segments }
+                export::templates::SpeakerInfo {
+                    id: speaker_id,
+                    name,
+                    segments,
+                }
             })
             .collect()
     };
@@ -2859,7 +2891,10 @@ async fn export_with_template(
                 None
             }
             Err(_) => {
-                tracing::warn!("Template summary timed out after {}ms", TEMPLATE_LLM_TIMEOUT_MS);
+                tracing::warn!(
+                    "Template summary timed out after {}ms",
+                    TEMPLATE_LLM_TIMEOUT_MS
+                );
                 None
             }
         }
@@ -2880,7 +2915,10 @@ async fn export_with_template(
                 vec![]
             }
             Err(_) => {
-                tracing::warn!("Template action items timed out after {}ms", TEMPLATE_LLM_TIMEOUT_MS);
+                tracing::warn!(
+                    "Template action items timed out after {}ms",
+                    TEMPLATE_LLM_TIMEOUT_MS
+                );
                 vec![]
             }
         }
@@ -3237,7 +3275,10 @@ async fn stop_dictation_session_for_session(
     // Remove leading/trailing silence to prevent Whisper hallucinations ("Thank you", repetitive loops)
     let processed_audio = crate::audio::utils::remove_silence_from_wav_bytes(&audio_data)
         .unwrap_or_else(|e| {
-            tracing::warn!("Failed to remove silence from dictation audio, using raw audio: {}", e);
+            tracing::warn!(
+                "Failed to remove silence from dictation audio, using raw audio: {}",
+                e
+            );
             audio_data.clone()
         });
 
@@ -3272,15 +3313,23 @@ async fn stop_dictation_session_for_session(
     };
 
     let transcription_latency_ms = transcription_start.elapsed().as_millis() as u64;
-    tracing::info!("Dictation transcription latency: {}ms", transcription_latency_ms);
+    tracing::info!(
+        "Dictation transcription latency: {}ms",
+        transcription_latency_ms
+    );
 
     let raw_text = result.text.clone();
 
     // Apply Smart Format if enabled (runs on all profiles when text meets minimum length)
-    let ai_formatting_enabled = state.settings_manager.lock().await.settings().transcription.dictation_ai_formatting;
+    let ai_formatting_enabled = state
+        .settings_manager
+        .lock()
+        .await
+        .settings()
+        .transcription
+        .dictation_ai_formatting;
     let should_run_ai_formatting =
-        ai_formatting_enabled
-            && result.text.chars().count() >= DICTATION_AI_FORMAT_MIN_CHARS;
+        ai_formatting_enabled && result.text.chars().count() >= DICTATION_AI_FORMAT_MIN_CHARS;
 
     if should_run_ai_formatting && !result.text.trim().is_empty() {
         emit_dictation_state(
@@ -3341,8 +3390,6 @@ async fn stop_dictation_session_for_session(
             "pasteError": paste_error,
             "requestedProvider": result.requested_provider,
             "actualProvider": result.actual_provider,
-            "fallbackUsed": result.fallback_used,
-            "fallbackReason": result.fallback_reason,
             "modelId": result.model_id,
             "latencyMs": transcription_latency_ms
         }),
@@ -3469,8 +3516,6 @@ async fn stop_dictation_session_for_session(
                 actual_provider: Some(
                     asr_provider_to_settings_value(result.actual_provider).to_string(),
                 ),
-                fallback_used: Some(result.fallback_used),
-                fallback_reason: result.fallback_reason.clone(),
                 created_at: now,
             };
 
@@ -3488,8 +3533,6 @@ async fn stop_dictation_session_for_session(
         "language": &result.language,
         "requested_provider": result.requested_provider,
         "actual_provider": result.actual_provider,
-        "fallback_used": result.fallback_used,
-        "fallback_reason": result.fallback_reason,
         "text_length": result.text.len(),
         "pasted": pasted,
         "copied": copied,
@@ -3569,7 +3612,7 @@ async fn handle_global_dictation_toggle(app: AppHandle, is_press: bool) {
     let settings = state.settings_manager.lock().await.settings().clone();
     let is_ptt = settings.transcription.dictation_push_to_talk;
     let paste_to_cursor = settings.transcription.dictation_paste_to_cursor;
-    
+
     let current_state = *state.dictation_runtime_state.lock().await;
 
     match current_state {
@@ -3587,7 +3630,14 @@ async fn handle_global_dictation_toggle(app: AppHandle, is_press: bool) {
                     if !error.to_lowercase().contains("already in progress") {
                         tracing::warn!("Failed to start hotkey dictation: {}", error);
                         emit_dictation_state(
-                            &app, "error", None, Some(&error), None, None, None, None,
+                            &app,
+                            "error",
+                            None,
+                            Some(&error),
+                            None,
+                            None,
+                            None,
+                            None,
                         );
                     }
                 }
@@ -3603,7 +3653,7 @@ async fn handle_global_dictation_toggle(app: AppHandle, is_press: bool) {
                 // In Toggle mode, releasing shouldn't stop it.
                 return;
             }
-            
+
             // Stop dictation
             let session_id = match active_dictation_session_id(state.inner()).await {
                 Some(value) => value,
@@ -4139,7 +4189,7 @@ fn get_frontmost_app_name() -> Option<String> {
         .arg("tell application \"System Events\" to get name of first application process whose frontmost is true")
         .output()
         .ok()?;
-        
+
     if output.status.success() {
         let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !name.is_empty() {
@@ -4165,7 +4215,7 @@ fn looks_repetitive_hallucination(text: &str) -> bool {
     let mut sentence_counts = std::collections::HashMap::<String, usize>::new();
     let mut sentence_total = 0usize;
 
-    for sentence in text.split_inclusive(|c| c == '.' || c == '!' || c == '?') {
+    for sentence in text.split_inclusive(['.', '!', '?']) {
         let normalized = normalize_sentence_for_compare(sentence);
         if normalized.is_empty() {
             continue;
@@ -4186,7 +4236,7 @@ fn collapse_repeated_sentence_runs(text: &str) -> String {
     let mut collapsed: Vec<&str> = Vec::new();
     let mut last_normalized = String::new();
 
-    for sentence in text.split_inclusive(|c| c == '.' || c == '!' || c == '?') {
+    for sentence in text.split_inclusive(['.', '!', '?']) {
         let trimmed = sentence.trim();
         if trimmed.is_empty() {
             continue;
@@ -4213,7 +4263,7 @@ fn dedupe_sentence_inventory(text: &str) -> String {
     let mut seen = std::collections::HashSet::<String>::new();
     let mut kept: Vec<&str> = Vec::new();
 
-    for sentence in text.split_inclusive(|c| c == '.' || c == '!' || c == '?') {
+    for sentence in text.split_inclusive(['.', '!', '?']) {
         let trimmed = sentence.trim();
         if trimmed.is_empty() {
             continue;
@@ -4281,24 +4331,28 @@ async fn run_dictation_formatting_with_selected_provider(
 ) -> Result<String, String> {
     let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state).await;
-    enforce_remote_provider_policy(provider.clone(), remote_processing_enabled)?;
+    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
 
     let selected_model = settings_model
         .as_deref()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| provider.default_model());
 
-    let active_app = tauri::async_runtime::spawn_blocking(|| get_frontmost_app_name())
-    .await
-    .unwrap_or(None);
-    
+    let active_app = tauri::async_runtime::spawn_blocking(get_frontmost_app_name)
+        .await
+        .unwrap_or(None);
+
     let settings = state.settings_manager.lock().await.settings().clone();
 
-    let system_prompt = if let Some(custom_prompt) = &settings.transcription.dictation_custom_prompt {
+    let system_prompt = if let Some(custom_prompt) = &settings.transcription.dictation_custom_prompt
+    {
         if !custom_prompt.trim().is_empty() {
             let mut base = custom_prompt.trim().to_string();
             if let Some(app_name) = &active_app {
-                base = format!("{}\n\n[Context: User is dictating into application '{}']", base, app_name);
+                base = format!(
+                    "{}\n\n[Context: User is dictating into application '{}']",
+                    base, app_name
+                );
             }
             base
         } else {
@@ -4311,39 +4365,45 @@ async fn run_dictation_formatting_with_selected_provider(
     match provider {
         AnalysisProvider::Ollama => state
             .ollama_client
-            .generate(selected_model, &format!("{}\n\n{}", system_prompt, transcript))
+            .generate(
+                selected_model,
+                &format!("{}\n\n{}", system_prompt, transcript),
+            )
             .await
             .map_err(|e| e.to_string()),
         AnalysisProvider::OllamaCloud => {
-            let api_key = provider_secret_for(provider.clone())?;
+            let api_key = provider_secret_for(provider)?;
             llm::OllamaCloudClient::with_api_key(Some(api_key))
-                .generate(selected_model, &format!("{}\n\n{}", system_prompt, transcript))
+                .generate(
+                    selected_model,
+                    &format!("{}\n\n{}", system_prompt, transcript),
+                )
                 .await
                 .map_err(|e| e.to_string())
         }
         AnalysisProvider::OpenAi => {
-            let api_key = provider_secret_for(provider.clone())?;
+            let api_key = provider_secret_for(provider)?;
             llm::OpenAIClient::with_api_key(Some(api_key))
                 .generate(selected_model, transcript, Some(&system_prompt))
                 .await
                 .map_err(|e| e.to_string())
         }
         AnalysisProvider::Anthropic => {
-            let api_key = provider_secret_for(provider.clone())?;
+            let api_key = provider_secret_for(provider)?;
             llm::AnthropicClient::with_api_key(Some(api_key))
                 .generate(selected_model, transcript, Some(&system_prompt))
                 .await
                 .map_err(|e| e.to_string())
         }
         AnalysisProvider::Gemini => {
-            let api_key = provider_secret_for(provider.clone())?;
+            let api_key = provider_secret_for(provider)?;
             llm::GeminiClient::with_api_key(Some(api_key))
                 .generate(selected_model, transcript, Some(&system_prompt))
                 .await
                 .map_err(|e| e.to_string())
         }
         AnalysisProvider::DeepSeek => {
-            let api_key = provider_secret_for(provider.clone())?;
+            let api_key = provider_secret_for(provider)?;
             llm::DeepSeekClient::with_api_key(Some(api_key))
                 .generate(selected_model, transcript, Some(&system_prompt))
                 .await
@@ -4886,13 +4946,12 @@ pub fn run() {
         .setup(|app| {
             let state = app.state::<AppState>();
             tauri::async_runtime::block_on(async {
-                let (configured_provider, allow_whisper_fallback, silence_skip, provider_model_map) =
+                let (configured_provider, silence_skip, provider_model_map) =
                 {
                     let settings_manager = state.settings_manager.lock().await;
                     let transcription = &settings_manager.settings().transcription;
                     (
                         transcription.default_provider.clone(),
-                        transcription.allow_whisper_fallback,
                         transcription.silence_skip_enabled,
                         provider_model_map_from_settings(transcription),
                     )
@@ -4901,10 +4960,6 @@ pub fn run() {
                 state
                     .asr_manager
                     .set_provider_model_map(provider_model_map)
-                    .await;
-                state
-                    .asr_manager
-                    .set_allow_whisper_fallback(allow_whisper_fallback)
                     .await;
                 state
                     .asr_manager
@@ -4923,7 +4978,7 @@ pub fn run() {
                                 .to_string();
                         if let Err(error) = settings_manager.save() {
                             tracing::warn!(
-                                "Failed to persist Whisper fallback for unsupported ASR provider: {}",
+                                "Failed to persist supported ASR provider after invalid config: {}",
                                 error
                             );
                         }
@@ -5017,13 +5072,13 @@ pub fn run() {
                                                         if is_pressed { "pressed" } else { "released" },
                                                         shortcut
                                                     );
-                                                    
+
                                                     if is_pressed {
                                                         _app.emit("dictation-hotkey-pressed", ()).ok();
                                                     } else {
                                                         _app.emit("dictation-hotkey-released", ()).ok();
                                                     }
-                                                    
+
                                                     let app_handle = _app.clone();
                                                     tauri::async_runtime::spawn(async move {
                                                         handle_global_dictation_toggle(app_handle, is_pressed).await;
@@ -5773,10 +5828,20 @@ fn normalize_silence_timeout_seconds(value: f32) -> f32 {
 
 fn normalize_asr_model_id(provider_type: asr::AsrProviderType, model_id: &str) -> String {
     let trimmed = model_id.trim();
-    if trimmed.is_empty() {
-        provider_type.default_model_id().to_string()
+    let candidate = if trimmed.is_empty() {
+        provider_type.default_model_id()
     } else {
-        trimmed.to_string()
+        trimmed
+    };
+
+    match provider_type {
+        asr::AsrProviderType::Voxtral => match candidate {
+            "voxtral-mini-4b" => "voxtral-local".to_string(),
+            "voxtral-local" | "voxtral-cloud" => candidate.to_string(),
+            _ => "voxtral-local".to_string(),
+        },
+        asr::AsrProviderType::VibeVoice => "vibevoice-asr".to_string(),
+        _ => candidate.to_string(),
     }
 }
 
@@ -5798,8 +5863,7 @@ fn provider_model_map_from_settings(
     if let Some(default_provider) =
         asr_provider_from_settings_value(&transcription.default_provider)
     {
-        let normalized =
-            normalize_asr_model_id(default_provider, &transcription.selected_model_id);
+        let normalized = normalize_asr_model_id(default_provider, &transcription.selected_model_id);
         map.insert(default_provider, normalized);
     }
 
@@ -5810,7 +5874,12 @@ fn provider_model_map_to_settings(
     map: &HashMap<asr::AsrProviderType, String>,
 ) -> HashMap<String, String> {
     map.iter()
-        .map(|(pt, model_id)| (asr_provider_to_settings_value(*pt).to_string(), model_id.clone()))
+        .map(|(pt, model_id)| {
+            (
+                asr_provider_to_settings_value(*pt).to_string(),
+                model_id.clone(),
+            )
+        })
         .collect()
 }
 
@@ -5845,7 +5914,10 @@ fn compute_wav_duration_seconds(audio_path: &str) -> i64 {
     }
 }
 
-pub(crate) fn canonicalize_existing_absolute_path(raw_path: &str, label: &str) -> Result<PathBuf, String> {
+pub(crate) fn canonicalize_existing_absolute_path(
+    raw_path: &str,
+    label: &str,
+) -> Result<PathBuf, String> {
     let trimmed = raw_path.trim();
     if trimmed.is_empty() {
         return Err(format!("{} cannot be empty", label));
@@ -6102,7 +6174,10 @@ fn schedule_clipboard_restore(previous: String, inserted_text: String) {
         }
 
         if let Err(error) = copy_to_clipboard(&previous) {
-            tracing::warn!("Failed to restore previous clipboard after paste success: {}", error);
+            tracing::warn!(
+                "Failed to restore previous clipboard after paste success: {}",
+                error
+            );
         }
     });
 }
@@ -6144,9 +6219,8 @@ fn paste_text_systemwide(text: &str) -> PasteOutcome {
 
         let paste_result = send_native_paste_key().or_else(|first_error| {
             std::thread::sleep(std::time::Duration::from_millis(45));
-            send_native_paste_key().map_err(|retry_error| {
-                format!("{} (retry failed: {})", first_error, retry_error)
-            })
+            send_native_paste_key()
+                .map_err(|retry_error| format!("{} (retry failed: {})", first_error, retry_error))
         });
 
         if let Err(error) = paste_result {

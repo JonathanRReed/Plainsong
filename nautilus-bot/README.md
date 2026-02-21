@@ -2,11 +2,11 @@
 
 Nautilus is a local-first desktop app for recording, transcribing, and auditing dictation/meeting audio.
 
-## Current Production Scope (2026-02-09)
+## Current Production Scope (2026-02-21)
 
 - Dictation capture via global hotkey
 - Meeting recording (microphone, optional system-loopback when available)
-- Whisper-based transcription with model download management
+- Multi-provider transcription (Whisper, Parakeet, Canary, Distil-Whisper, Moonshine, VibeVoice, Voxtral, OpenAI Cloud, ElevenLabs Scribe)
 - Transcript browsing, speaker labeling, and evidence export/verification
 - Local AI analysis via Ollama
 - Local backup plus cloud sync integrations (rclone/iCloud paths)
@@ -16,8 +16,14 @@ Nautilus is a local-first desktop app for recording, transcribing, and auditing 
 ### ASR Providers
 
 - **Whisper**: enabled in this build (production path)
-- **Parakeet**: model download path exists, inference is not enabled in this build
-- **Canary**: model download path exists, inference is not enabled in this build
+- **Parakeet**: native ONNX inference (`encoder.onnx` + `tokens.txt`)
+- **Canary**: native Candle inference
+- **Distil-Whisper**: native Candle inference
+- **Moonshine**: native ONNX inference
+- **VibeVoice**: managed Python runtime bridge
+- **Voxtral**: explicit local mode (Python bridge) and cloud mode (Mistral API)
+- **OpenAI Cloud**: live API transcription
+- **ElevenLabs Scribe**: live API transcription
 
 ### Diarization
 
@@ -64,6 +70,8 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo check --all-targets
 cargo test --lib
+cargo test --tests
+node ../scripts/live-cloud-asr-smoke.mjs
 ```
 
 ## Security Notes

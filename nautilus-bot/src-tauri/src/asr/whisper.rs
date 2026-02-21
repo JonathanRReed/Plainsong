@@ -170,18 +170,20 @@ impl AsrProvider for WhisperProvider {
 
         let mut params =
             whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
-        
+
         // Speed optimizations
-        let num_threads = std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4);
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get() as i32)
+            .unwrap_or(4);
         params.set_n_threads(std::cmp::min(num_threads, 8)); // Cap at 8 threads to avoid diminishing returns
-        
+
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
         params.set_language(Some("en"));
         params.set_translate(false);
-        
+
         // Anti-repetition and hallucination mitigation
         params.set_no_context(true); // Don't use previous context to prevent loop hallucinations
         params.set_entropy_thold(2.4); // Stricter entropy threshold
@@ -244,14 +246,11 @@ impl AsrProvider for WhisperProvider {
             model_id: self.model_id.clone(),
             requested_provider: AsrProviderType::Whisper,
             actual_provider: AsrProviderType::Whisper,
-            fallback_used: false,
-            fallback_reason: None,
         })
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        let temp_path =
-            std::env::temp_dir().join(format!("whisper_{}.wav", uuid::Uuid::new_v4()));
+        let temp_path = std::env::temp_dir().join(format!("whisper_{}.wav", uuid::Uuid::new_v4()));
         std::fs::write(&temp_path, audio_data)?;
         let result = self.transcribe(&temp_path).await;
         let _ = std::fs::remove_file(&temp_path);

@@ -84,11 +84,7 @@ impl OllamaEmbedder {
             .context("Ollama returned no embeddings")
     }
 
-    pub async fn embed_batch(
-        &self,
-        model: &str,
-        inputs: &[String],
-    ) -> Result<Vec<Vec<f32>>> {
+    pub async fn embed_batch(&self, model: &str, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }

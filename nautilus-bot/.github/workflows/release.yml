@@ -33,6 +33,12 @@ jobs:
       channel: ${{ steps.version.outputs.channel }}
       is_beta: ${{ steps.version.outputs.is_beta }}
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - name: Extract version
         id: version
         run: |
@@ -55,6 +61,34 @@ jobs:
           echo "channel=$CHANNEL"   >> $GITHUB_OUTPUT
           echo "is_beta=$IS_BETA"   >> $GITHUB_OUTPUT
           echo "Version: $VERSION | Channel: $CHANNEL | Beta: $IS_BETA"
+
+      - name: Validate live ASR secrets
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+        run: |
+          missing=()
+          [ -n "$OPENAI_API_KEY" ] || missing+=("OPENAI_API_KEY")
+          [ -n "$ELEVENLABS_API_KEY" ] || missing+=("ELEVENLABS_API_KEY")
+          [ -n "$MISTRAL_API_KEY" ] || missing+=("MISTRAL_API_KEY")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required live cloud ASR secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Run live cloud ASR smoke tests
+        working-directory: nautilus-bot
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+        run: node scripts/live-cloud-asr-smoke.mjs --out ../artifacts/cloud-asr-smoke.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cloud-asr-smoke
+          path: artifacts/cloud-asr-smoke.json
 
   # ── macOS (Universal: x86_64 + aarch64) ─────────────────────────────────────
   build-macos:
@@ -85,6 +119,18 @@ jobs:
         env:
           TAURI_SIGNING_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
         run: node scripts/inject-updater-pubkey.js
+
+      - name: Live cloud ASR integration tests (Rust)
+        working-directory: nautilus-bot/src-tauri
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+        run: cargo test --test asr_live_cloud_integration --no-default-features --features asr-all,sqlcipher -- --nocapture
+
+      - name: Local ASR performance gate (RTF <= 1.2)
+        working-directory: nautilus-bot/src-tauri
+        run: cargo test --test asr_local_performance_gate --no-default-features --features asr-all,sqlcipher -- --nocapture
 
       - name: Install Apple certificate into temp keychain
         if: env.APPLE_CERTIFICATE != ''

@@ -57,8 +57,6 @@ pub struct TranscriptionResult {
     pub model_id: String,
     pub requested_provider: AsrProviderType,
     pub actual_provider: AsrProviderType,
-    pub fallback_used: bool,
-    pub fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -136,8 +134,8 @@ impl AsrProviderType {
             AsrProviderType::Canary => "canary-qwen-2.5b",
             AsrProviderType::DistilWhisper => "distil-large-v3.5",
             AsrProviderType::Moonshine => "moonshine",
-            AsrProviderType::VibeVoice => "vibevoice",
-            AsrProviderType::Voxtral => "voxtral-mini-4b",
+            AsrProviderType::VibeVoice => "vibevoice-asr",
+            AsrProviderType::Voxtral => "voxtral-local",
             AsrProviderType::ElevenLabsScribe => "scribe_v1",
             AsrProviderType::OpenAiCloud => "whisper-1",
         }
@@ -204,13 +202,19 @@ impl AsrProviderType {
                 label: "Moonshine".to_string(),
             }],
             AsrProviderType::VibeVoice => vec![ModelOption {
-                id: "vibevoice".to_string(),
-                label: "VibeVoice".to_string(),
+                id: "vibevoice-asr".to_string(),
+                label: "VibeVoice ASR".to_string(),
             }],
-            AsrProviderType::Voxtral => vec![ModelOption {
-                id: "voxtral-mini-4b".to_string(),
-                label: "Voxtral Mini 4B".to_string(),
-            }],
+            AsrProviderType::Voxtral => vec![
+                ModelOption {
+                    id: "voxtral-local".to_string(),
+                    label: "Voxtral Mini 4B (Local)".to_string(),
+                },
+                ModelOption {
+                    id: "voxtral-cloud".to_string(),
+                    label: "Voxtral Mini 4B (Mistral Cloud)".to_string(),
+                },
+            ],
             AsrProviderType::ElevenLabsScribe => vec![ModelOption {
                 id: "scribe_v1".to_string(),
                 label: "Scribe v1".to_string(),
@@ -250,14 +254,16 @@ impl AsrProviderFactory {
                 selected_model_id,
             )),
             AsrProviderType::Moonshine => Box::new(moonshine::MoonshineProvider::new()),
-            AsrProviderType::VibeVoice => Box::new(vibevoice::VibeVoiceProvider::new()),
-            AsrProviderType::Voxtral => Box::new(voxtral::VoxtralProvider::new()),
-            AsrProviderType::ElevenLabsScribe => {
-                Box::new(elevenlabs_scribe::ElevenLabsScribeProvider::new(selected_model_id))
+            AsrProviderType::VibeVoice => {
+                Box::new(vibevoice::VibeVoiceProvider::new(selected_model_id))
             }
-            AsrProviderType::OpenAiCloud => {
-                Box::new(openai_cloud::OpenAiCloudWhisperProvider::new(selected_model_id))
-            }
+            AsrProviderType::Voxtral => Box::new(voxtral::VoxtralProvider::new(selected_model_id)),
+            AsrProviderType::ElevenLabsScribe => Box::new(
+                elevenlabs_scribe::ElevenLabsScribeProvider::new(selected_model_id),
+            ),
+            AsrProviderType::OpenAiCloud => Box::new(
+                openai_cloud::OpenAiCloudWhisperProvider::new(selected_model_id),
+            ),
         }
     }
 }

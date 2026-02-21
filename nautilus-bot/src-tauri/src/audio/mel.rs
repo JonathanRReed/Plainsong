@@ -43,7 +43,8 @@ impl MelSpectrogram {
         sample_rate: u32,
     ) -> Self {
         let window = hann_window(win_length);
-        let mel_filters = compute_mel_filters(n_mels, n_fft, sample_rate, 0.0, sample_rate as f32 / 2.0);
+        let mel_filters =
+            compute_mel_filters(n_mels, n_fft, sample_rate, 0.0, sample_rate as f32 / 2.0);
         Self {
             n_fft,
             hop_length,
@@ -96,11 +97,7 @@ impl MelSpectrogram {
         let mut mel_spec = vec![Vec::with_capacity(n_frames); self.n_mels];
         for frame in &power_frames {
             for (mel_idx, filter) in self.mel_filters.iter().enumerate() {
-                let energy: f32 = filter
-                    .iter()
-                    .zip(frame.iter())
-                    .map(|(w, p)| w * p)
-                    .sum();
+                let energy: f32 = filter.iter().zip(frame.iter()).map(|(w, p)| w * p).sum();
                 let log_val = if self.log_base_e {
                     (energy + self.log_offset).ln()
                 } else {
@@ -196,14 +193,14 @@ fn compute_mel_filters(
         let f_m = bin_points[m + 1];
         let f_m_plus = bin_points[m + 2];
 
-        for k in f_m_minus..f_m {
+        for (k, weight) in filters[m].iter_mut().enumerate().take(f_m).skip(f_m_minus) {
             if k < n_bins && f_m > f_m_minus {
-                filters[m][k] = (k - f_m_minus) as f32 / (f_m - f_m_minus) as f32;
+                *weight = (k - f_m_minus) as f32 / (f_m - f_m_minus) as f32;
             }
         }
-        for k in f_m..f_m_plus {
+        for (k, weight) in filters[m].iter_mut().enumerate().take(f_m_plus).skip(f_m) {
             if k < n_bins && f_m_plus > f_m {
-                filters[m][k] = (f_m_plus - k) as f32 / (f_m_plus - f_m) as f32;
+                *weight = (f_m_plus - k) as f32 / (f_m_plus - f_m) as f32;
             }
         }
     }
@@ -310,7 +307,11 @@ mod tests {
         // After Whisper normalization, values should be in roughly [-1, 1]
         for row in &spec {
             for &v in row {
-                assert!(v > -2.0 && v < 2.0, "Whisper normalized value out of range: {}", v);
+                assert!(
+                    v > -2.0 && v < 2.0,
+                    "Whisper normalized value out of range: {}",
+                    v
+                );
             }
         }
     }
@@ -322,6 +323,10 @@ mod tests {
         let samples: Vec<f32> = vec![1.0; n];
         let out = rfft(&samples);
         let mag_dc = (out[0].0 * out[0].0 + out[0].1 * out[0].1).sqrt();
-        assert!((mag_dc - n as f32).abs() < 1e-2, "DC magnitude mismatch: {}", mag_dc);
+        assert!(
+            (mag_dc - n as f32).abs() < 1e-2,
+            "DC magnitude mismatch: {}",
+            mag_dc
+        );
     }
 }

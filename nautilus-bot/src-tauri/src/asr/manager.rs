@@ -9,9 +9,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
 // Parakeet: native ONNX inference — sherpa-onnx format (encoder.onnx + tokens.txt)
-// Legacy names (model.onnx / vocab.txt) are also accepted by the provider itself.
-const PARAKEET_ONNX_NAMES: [&str; 2] = ["encoder.onnx", "model.onnx"];
-const PARAKEET_VOCAB_NAMES: [&str; 2] = ["tokens.txt", "vocab.txt"];
+const PARAKEET_ONNX_NAMES: [&str; 1] = ["encoder.onnx"];
+const PARAKEET_VOCAB_NAMES: [&str; 1] = ["tokens.txt"];
 // Canary: Whisper Large V3 Turbo via Candle (no Python)
 const CANARY_REQUIRED_FILES: [&str; 4] = [
     "model.safetensors",
@@ -27,11 +26,8 @@ const DISTIL_REQUIRED_FILES: [&str; 4] = [
     "preprocessor_config.json",
 ];
 // Moonshine: native ONNX (no Python)
-const MOONSHINE_REQUIRED_FILES: [&str; 3] = [
-    "encode.onnx",
-    "uncached_decode.onnx",
-    "tokenizer.json",
-];
+const MOONSHINE_REQUIRED_FILES: [&str; 3] =
+    ["encode.onnx", "uncached_decode.onnx", "tokenizer.json"];
 
 /// Manages multiple ASR providers
 #[allow(dead_code)]
@@ -39,7 +35,6 @@ pub struct AsrManager {
     default_provider: RwLock<AsrProviderType>,
     selected_model_id: RwLock<String>,
     provider_model_ids: RwLock<HashMap<AsrProviderType, String>>,
-    allow_whisper_fallback: RwLock<bool>,
     silence_skip_enabled: RwLock<bool>,
     last_runtime_errors: RwLock<HashMap<AsrProviderType, String>>,
     models_dir: PathBuf,
@@ -74,7 +69,6 @@ impl AsrManager {
             default_provider: RwLock::new(AsrProviderType::Whisper),
             selected_model_id: RwLock::new(AsrProviderType::Whisper.default_model_id().to_string()),
             provider_model_ids: RwLock::new(provider_model_ids),
-            allow_whisper_fallback: RwLock::new(false),
             last_runtime_errors: RwLock::new(HashMap::new()),
             models_dir,
         }
@@ -82,10 +76,20 @@ impl AsrManager {
 
     fn normalize_model_id(provider_type: AsrProviderType, model_id: &str) -> String {
         let trimmed = model_id.trim();
-        if trimmed.is_empty() {
-            provider_type.default_model_id().to_string()
+        let candidate = if trimmed.is_empty() {
+            provider_type.default_model_id()
         } else {
-            trimmed.to_string()
+            trimmed
+        };
+
+        match provider_type {
+            AsrProviderType::Voxtral => match candidate {
+                "voxtral-mini-4b" => "voxtral-local".to_string(),
+                "voxtral-local" | "voxtral-cloud" => candidate.to_string(),
+                _ => "voxtral-local".to_string(),
+            },
+            AsrProviderType::VibeVoice => "vibevoice-asr".to_string(),
+            _ => candidate.to_string(),
         }
     }
 
@@ -94,7 +98,12 @@ impl AsrManager {
         selected_model_id: Option<&str>,
     ) -> Box<dyn AsrProvider> {
         match provider_type {
-            AsrProviderType::Whisper | AsrProviderType::DistilWhisper => {
+            AsrProviderType::Whisper
+            | AsrProviderType::DistilWhisper
+            | AsrProviderType::Voxtral
+            | AsrProviderType::VibeVoice
+            | AsrProviderType::ElevenLabsScribe
+            | AsrProviderType::OpenAiCloud => {
                 AsrProviderFactory::create_with_model(provider_type, selected_model_id)
             }
             _ => AsrProviderFactory::create(provider_type),
@@ -160,14 +169,6 @@ impl AsrManager {
 
         *self.provider_model_ids.write().await = std::mem::take(&mut merged);
         *self.selected_model_id.write().await = default_selected;
-    }
-
-    pub async fn set_allow_whisper_fallback(&self, allow: bool) {
-        *self.allow_whisper_fallback.write().await = allow;
-    }
-
-    pub async fn allow_whisper_fallback(&self) -> bool {
-        *self.allow_whisper_fallback.read().await
     }
 
     pub async fn set_silence_skip_enabled(&self, enabled: bool) {
@@ -243,7 +244,6 @@ impl AsrManager {
             None => self.provider_model_id(provider_type).await,
         };
         let provider = Self::provider_with_model(provider_type, Some(resolved_model.as_str()));
-        let fallback_allowed = self.allow_whisper_fallback().await;
         let skip_silence = self.silence_skip_enabled().await;
 
         // Pre-process: remove silence from audio bytes if enabled
@@ -279,8 +279,6 @@ impl AsrManager {
                     .remove(&provider_type);
                 result.requested_provider = provider_type;
                 result.actual_provider = provider_type;
-                result.fallback_used = false;
-                result.fallback_reason = None;
                 if result.model_id.trim().is_empty() {
                     result.model_id = resolved_model.clone();
                 }
@@ -291,38 +289,11 @@ impl AsrManager {
                     .write()
                     .await
                     .insert(provider_type, primary_error.to_string());
-
-                if !fallback_allowed || provider_type == AsrProviderType::Whisper {
-                    return Err(anyhow::anyhow!(
-                        "{} failed: {}",
-                        provider_type.display_name(),
-                        primary_error
-                    ));
-                }
-
-                let fallback_provider = Self::provider_with_model(
-                    AsrProviderType::Whisper,
-                    Some(self.provider_model_id(AsrProviderType::Whisper).await.as_str()),
-                );
-                let fallback_result = match (file_path, audio_data) {
-                    (Some(path), None) => fallback_provider.transcribe(path).await,
-                    (None, Some(bytes)) => fallback_provider.transcribe_bytes(bytes).await,
-                    _ => Err(anyhow::anyhow!("Invalid fallback transcription input")),
-                };
-
-                let mut result = fallback_result.map_err(|fallback_error| {
-                    anyhow::anyhow!(
-                        "{} failed: {}; Whisper fallback failed: {}",
-                        provider_type.display_name(),
-                        primary_error,
-                        fallback_error
-                    )
-                })?;
-                result.requested_provider = provider_type;
-                result.actual_provider = AsrProviderType::Whisper;
-                result.fallback_used = true;
-                result.fallback_reason = Some(primary_error.to_string());
-                Ok(result)
+                Err(anyhow::anyhow!(
+                    "{} failed: {}",
+                    provider_type.display_name(),
+                    primary_error
+                ))
             }
         }
     }
@@ -593,15 +564,16 @@ fn runtime_diagnostics_for_provider(
                 let p = model_dir.join(f);
                 p.exists() && p.metadata().map(|m| m.len() > 4096).unwrap_or(false)
             });
-            let has_vocab = PARAKEET_VOCAB_NAMES.iter().any(|f| model_dir.join(f).exists());
+            let has_vocab = PARAKEET_VOCAB_NAMES
+                .iter()
+                .any(|f| model_dir.join(f).exists());
             let model_ready = has_onnx && has_vocab;
             if !model_ready {
                 return RuntimeDiagnosticsInternal {
                     runtime_status: RuntimeStatus::MissingModel,
                     runtime_message: Some(
                         "Parakeet model not downloaded. Download encoder.onnx + tokens.txt \
-                         (from k2-fsa/sherpa-onnx-nemo-parakeet-tdt-0.6b-en) or provide \
-                         your own NeMo ONNX export."
+                         (from k2-fsa/sherpa-onnx-nemo-parakeet-tdt-0.6b-en)."
                             .to_string(),
                     ),
                     runtime_details: RuntimeDetails {
@@ -670,41 +642,155 @@ fn runtime_diagnostics_for_provider(
             )
         }
 
-        AsrProviderType::VibeVoice => RuntimeDiagnosticsInternal {
-            runtime_status: RuntimeStatus::MissingRuntime,
-            runtime_message: Some(
-                "VibeVoice native integration is not yet available. Select a different provider."
-                    .to_string(),
-            ),
-            runtime_details: RuntimeDetails {
-                model_path: None,
-                python_path: None,
-            },
-        },
-        AsrProviderType::Voxtral => {
-            let has_key = has_provider_secret_or_env("mistral", "MISTRAL_API_KEY");
-            let model_dir = models_root.join("voxtral");
-            let has_local = ["config.json", "tokenizer.json", "model.safetensors"]
-                .iter()
-                .all(|f| model_dir.join(f).exists());
+        AsrProviderType::VibeVoice => {
+            let model_dir = models_root.join("vibevoice");
+            let model_ready = model_dir.join("config.json").exists()
+                && (model_dir.join("tokenizer.json").exists()
+                    || model_dir.join("tokenizer_config.json").exists())
+                && (model_dir.join("model.safetensors").exists()
+                    || model_dir.join("model.safetensors.index.json").exists()
+                    || std::fs::read_dir(&model_dir)
+                        .ok()
+                        .map(|entries| {
+                            entries.flatten().any(|entry| {
+                                entry
+                                    .path()
+                                    .extension()
+                                    .map(|ext| ext == "safetensors")
+                                    .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false));
+            let python = super::python_runtime::find_python_for_provider("vibevoice");
+
+            if !model_ready {
+                return RuntimeDiagnosticsInternal {
+                    runtime_status: RuntimeStatus::MissingModel,
+                    runtime_message: Some(
+                        "VibeVoice model not downloaded. Download model assets before use."
+                            .to_string(),
+                    ),
+                    runtime_details: RuntimeDetails {
+                        model_path: Some(model_dir.to_string_lossy().to_string()),
+                        python_path: python,
+                    },
+                };
+            }
+
+            if python.is_none() {
+                return RuntimeDiagnosticsInternal {
+                    runtime_status: RuntimeStatus::MissingRuntime,
+                    runtime_message: Some(
+                        "VibeVoice runtime missing: install Python with torch + transformers + librosa + soundfile."
+                            .to_string(),
+                    ),
+                    runtime_details: RuntimeDetails {
+                        model_path: Some(model_dir.to_string_lossy().to_string()),
+                        python_path: None,
+                    },
+                };
+            }
+
             RuntimeDiagnosticsInternal {
-                runtime_status: if has_local || has_key {
+                runtime_status: if provider_available {
                     RuntimeStatus::Ready
                 } else {
-                    RuntimeStatus::MissingRuntime
+                    RuntimeStatus::Error
                 },
-                runtime_message: Some(if has_local && has_key {
-                    "Voxtral ready \u2014 local model + cloud API available.".to_string()
-                } else if has_local {
-                    "Voxtral ready \u2014 local model (Canary encoder). Download Canary model for inference.".to_string()
-                } else if has_key {
-                    "Voxtral ready \u2014 Mistral cloud API active.".to_string()
-                } else {
-                    "Voxtral unavailable \u2014 download the model or set MISTRAL_API_KEY.".to_string()
-                }),
+                runtime_message: Some(
+                    last_error
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "VibeVoice runtime ready.".to_string()),
+                ),
                 runtime_details: RuntimeDetails {
-                    model_path: if has_local { Some(model_dir.to_string_lossy().to_string()) } else { None },
-                    python_path: None,
+                    model_path: Some(model_dir.to_string_lossy().to_string()),
+                    python_path: python,
+                },
+            }
+        }
+        AsrProviderType::Voxtral => {
+            let cloud_mode = selected_model_id.trim() == "voxtral-cloud";
+            let has_key = has_provider_secret_or_env("mistral", "MISTRAL_API_KEY");
+            let model_dir = models_root.join("voxtral");
+            if cloud_mode {
+                return RuntimeDiagnosticsInternal {
+                    runtime_status: if has_key {
+                        RuntimeStatus::Ready
+                    } else {
+                        RuntimeStatus::MissingRuntime
+                    },
+                    runtime_message: Some(if has_key {
+                        "Voxtral cloud runtime ready (Mistral API key present).".to_string()
+                    } else {
+                        "Voxtral cloud mode requires MISTRAL_API_KEY.".to_string()
+                    }),
+                    runtime_details: RuntimeDetails {
+                        model_path: None,
+                        python_path: None,
+                    },
+                };
+            }
+
+            let has_local = model_dir.join("config.json").exists()
+                && model_dir.join("tokenizer.json").exists()
+                && (model_dir.join("model.safetensors").exists()
+                    || model_dir.join("model.safetensors.index.json").exists()
+                    || std::fs::read_dir(&model_dir)
+                        .ok()
+                        .map(|entries| {
+                            entries.flatten().any(|entry| {
+                                entry
+                                    .path()
+                                    .extension()
+                                    .map(|ext| ext == "safetensors")
+                                    .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false));
+            let python = super::python_runtime::find_python_for_provider("voxtral_local");
+
+            if !has_local {
+                return RuntimeDiagnosticsInternal {
+                    runtime_status: RuntimeStatus::MissingModel,
+                    runtime_message: Some(
+                        "Voxtral local model not downloaded. Download model assets before use."
+                            .to_string(),
+                    ),
+                    runtime_details: RuntimeDetails {
+                        model_path: Some(model_dir.to_string_lossy().to_string()),
+                        python_path: python,
+                    },
+                };
+            }
+
+            if python.is_none() {
+                return RuntimeDiagnosticsInternal {
+                    runtime_status: RuntimeStatus::MissingRuntime,
+                    runtime_message: Some(
+                        "Voxtral local runtime missing: install Python with torch + transformers + librosa + soundfile."
+                            .to_string(),
+                    ),
+                    runtime_details: RuntimeDetails {
+                        model_path: Some(model_dir.to_string_lossy().to_string()),
+                        python_path: None,
+                    },
+                };
+            }
+
+            RuntimeDiagnosticsInternal {
+                runtime_status: if provider_available {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::Error
+                },
+                runtime_message: Some(
+                    last_error
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "Voxtral local runtime ready.".to_string()),
+                ),
+                runtime_details: RuntimeDetails {
+                    model_path: Some(model_dir.to_string_lossy().to_string()),
+                    python_path: python,
                 },
             }
         }

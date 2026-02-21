@@ -305,9 +305,9 @@ export function AsrProviderManager({
       case "moonshine":
         return "Use the Download button to fetch the Moonshine ONNX model (no Python needed)";
       case "voxtral":
-        return "Add a Mistral API key in Settings → API Keys, or use the Download button to pre-cache the local model";
+        return "Choose Voxtral local/cloud mode. Local mode requires Python (torch, transformers, librosa, soundfile) plus downloaded model assets. Cloud mode requires MISTRAL_API_KEY.";
       case "vibevoice":
-        return "VibeVoice native integration coming soon — select a different provider for now";
+        return "Install Python runtime deps (torch, transformers, librosa, soundfile) and download VibeVoice model assets with the Download button.";
       case "elevenlabs_scribe":
         return "Add an ElevenLabs API key in Settings → API Keys";
       case "openai_cloud":

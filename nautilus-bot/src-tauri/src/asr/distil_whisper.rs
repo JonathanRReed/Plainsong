@@ -122,11 +122,10 @@ impl AsrProvider for DistilWhisperProvider {
         let audio_path_owned = audio_path.to_path_buf();
         let audio_for_dur = audio_path_owned.clone();
 
-        let text = tokio::task::spawn_blocking(move || {
-            run_distil_candle(&model_dir, &audio_path_owned)
-        })
-        .await
-        .context("Distil-Whisper inference task panicked")??;
+        let text =
+            tokio::task::spawn_blocking(move || run_distil_candle(&model_dir, &audio_path_owned))
+                .await
+                .context("Distil-Whisper inference task panicked")??;
 
         let duration = Self::wav_duration_seconds(&audio_for_dur);
         let segment = TranscriptSegment {
@@ -146,14 +145,11 @@ impl AsrProvider for DistilWhisperProvider {
             model_id: DISTIL_MODEL_ID.to_string(),
             requested_provider: AsrProviderType::DistilWhisper,
             actual_provider: AsrProviderType::DistilWhisper,
-            fallback_used: false,
-            fallback_reason: None,
         })
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        let temp_path =
-            std::env::temp_dir().join(format!("distil_{}.wav", uuid::Uuid::new_v4()));
+        let temp_path = std::env::temp_dir().join(format!("distil_{}.wav", uuid::Uuid::new_v4()));
         std::fs::write(&temp_path, audio_data).context("failed to write temp wav for Distil")?;
         let result = self.transcribe(&temp_path).await;
         let _ = std::fs::remove_file(&temp_path);
@@ -191,7 +187,11 @@ impl AsrProvider for DistilWhisperProvider {
             manager
                 .download_file_unverified(&url, &destination, move |p| {
                     cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);
-                    tracing::info!("Distil-Whisper {} download: {:.1}%", file_name, p.percentage);
+                    tracing::info!(
+                        "Distil-Whisper {} download: {:.1}%",
+                        file_name,
+                        p.percentage
+                    );
                 })
                 .await?;
         }
