@@ -4381,17 +4381,65 @@ fn dedupe_sentence_inventory(text: &str) -> String {
     }
 }
 
-fn sanitize_dictation_output(candidate: &str, fallback: &str) -> String {
-    let candidate_was_repetitive = looks_repetitive_hallucination(candidate);
+fn strip_non_speech_placeholder(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
 
-    let cleaned = collapse_repeated_sentence_runs(candidate);
+    // Some ASR providers emit placeholder-like text for silence, e.g. "[blank audio]".
+    // Treat outputs composed entirely of these tokens as empty.
+    const NON_SPEECH_TOKENS: &[&str] = &[
+        "blank",
+        "audio",
+        "blankaudio",
+        "blank_audio",
+        "nospeech",
+        "no",
+        "speech",
+        "silence",
+        "inaudible",
+        "unintelligible",
+        "noise",
+        "music",
+    ];
+
+    let canonical: String = trimmed
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect();
+
+    let words: Vec<&str> = canonical.split_whitespace().collect();
+    if words.is_empty() {
+        return String::new();
+    }
+
+    if words.iter().all(|word| NON_SPEECH_TOKENS.contains(word)) {
+        return String::new();
+    }
+
+    trimmed.to_string()
+}
+
+fn sanitize_dictation_output(candidate: &str, fallback: &str) -> String {
+    let candidate = strip_non_speech_placeholder(candidate);
+    let fallback = strip_non_speech_placeholder(fallback);
+    let candidate_was_repetitive = looks_repetitive_hallucination(&candidate);
+
+    let cleaned = collapse_repeated_sentence_runs(&candidate);
     if cleaned.trim().is_empty() {
-        return fallback.trim().to_string();
+        return fallback;
     }
 
     if candidate_was_repetitive || looks_repetitive_hallucination(&cleaned) {
-        if !fallback.trim().is_empty() && !looks_repetitive_hallucination(fallback) {
-            return collapse_repeated_sentence_runs(fallback);
+        if !fallback.trim().is_empty() && !looks_repetitive_hallucination(&fallback) {
+            return collapse_repeated_sentence_runs(&fallback);
         }
 
         return dedupe_sentence_inventory(&cleaned);
@@ -5671,6 +5719,18 @@ mod tests {
         let fallback = "testing 1,2,3 this is a test.";
         let sanitized = sanitize_dictation_output(candidate, fallback);
         assert_eq!(sanitized, "testing 1,2,3 this is a test.");
+    }
+
+    #[test]
+    fn sanitize_dictation_output_treats_blank_audio_as_empty() {
+        let sanitized = sanitize_dictation_output("[blank audio]", "[blank audio]");
+        assert!(sanitized.is_empty());
+    }
+
+    #[test]
+    fn sanitize_dictation_output_treats_nospeech_token_as_empty() {
+        let sanitized = sanitize_dictation_output("<|nospeech|>", "<|nospeech|>");
+        assert!(sanitized.is_empty());
     }
 
     #[test]
