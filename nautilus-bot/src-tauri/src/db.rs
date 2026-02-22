@@ -363,7 +363,7 @@ impl Database {
         #[cfg(debug_assertions)]
         let start = std::time::Instant::now();
 
-        let inserted_rows = self.conn.execute(
+        let _inserted_rows = self.conn.execute(
             "INSERT INTO transcript_fts (recording_id, segment_id, text, start_time, end_time)
              SELECT
                 t.recording_id,
@@ -380,7 +380,7 @@ impl Database {
         #[cfg(debug_assertions)]
         tracing::debug!(
             "Backfilled transcript_fts with {} rows in {:?}",
-            inserted_rows,
+            _inserted_rows,
             start.elapsed()
         );
 
