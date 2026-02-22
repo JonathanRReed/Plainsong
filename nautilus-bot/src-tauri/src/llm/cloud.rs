@@ -187,17 +187,31 @@ Action Items:"
 
         let response = self.generate(model, &prompt).await?;
 
-        // Parse action items from response
+        // Parse action items from response (supports -, *, and numbered lists)
         let items: Vec<ActionItem> = response
             .lines()
-            .filter(|line| line.starts_with('-') || line.starts_with('*'))
-            .map(|line| ActionItem {
-                task: line
+            .filter(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with('-') 
+                    || trimmed.starts_with('*') 
+                    || trimmed.starts_with("•")
+                    || trimmed.chars().next().map_or(false, |c| c.is_ascii_digit())
+                        && trimmed.chars().nth(1).map_or(false, |c| c == '.' || c == ')')
+            })
+            .map(|line| {
+                let task = line
+                    .trim()
                     .trim_start_matches("- ")
                     .trim_start_matches("* ")
-                    .to_string(),
-                assignee: None,
-                deadline: None,
+                    .trim_start_matches("• ")
+                    .trim_start_matches(|c: char| c.is_ascii_digit())
+                    .trim_start_matches(|c: char| c == '.' || c == ')')
+                    .trim_start();
+                ActionItem {
+                    task: task.to_string(),
+                    assignee: None,
+                    deadline: None,
+                }
             })
             .collect();
 

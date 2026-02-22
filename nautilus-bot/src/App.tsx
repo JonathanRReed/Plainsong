@@ -10,6 +10,7 @@ import {
   type ErrorInfo,
   type ReactNode,
 } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Sidebar } from "@/components/sidebar";
 import { RecordingOverlay } from "@/components/recording-overlay";
@@ -22,7 +23,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { ActivationModal } from "@/components/activation-modal";
 import { NagModal, shouldShowNag } from "@/components/nag-modal";
 import { FirstRunWizard } from "@/components/first-run-wizard";
-import { ToastProvider } from "@/components/toast";
+import { ToastProvider, useToast } from "@/components/toast";
 import { validateLicense } from "@/lib/tauri";
 import type { LicenseInfo } from "@/lib/tauri";
 import { usePeriodicLicenseCheck } from "@/hooks/use-periodic-license-check";
@@ -125,6 +126,53 @@ function getOverlayMode(): OverlayMode {
 
 export const ONBOARDING_STORAGE_KEY = "nautilus_onboarding_complete";
 
+function OverlayBackgroundFix() {
+  useEffect(() => {
+    const overlay = getOverlayMode();
+    if (overlay) {
+      document.body.style.backgroundColor = "transparent";
+      document.documentElement.style.backgroundColor = "transparent";
+    }
+  }, []);
+  return null;
+}
+
+function AppRuntimeListeners() {
+  const { toast } = useToast();
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<string>("asr-provider-warning", (event) => {
+      const message = typeof event.payload === "string" ? event.payload.trim() : "";
+      if (message) {
+        toast(message, "error");
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [toast]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<void>("accessibility-permission-warning", () => {
+      toast(
+        "Accessibility permission required for dictation. Enable it in System Preferences > Privacy & Security > Accessibility.",
+        "error"
+      );
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [toast]);
+
+  return null;
+}
+
 function App() {
   const overlayMode = useMemo(getOverlayMode, []);
   const [activeView, setActiveView] = useState<ViewId>("dashboard");
@@ -192,12 +240,18 @@ function App() {
     console.debug(`[perf] view-change:${activeView}`);
   }, [activeView]);
 
+  useEffect(() => {
+    if (overlayMode || !licenseChecked) {
+      return;
+    }
+    const alreadyOnboarded = localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
+    setShowWizard(!alreadyOnboarded);
+  }, [overlayMode, licenseChecked]);
+
   const handleActivated = (info: LicenseInfo) => {
     setLicense(info);
     setShowActivationModal(false);
     setShowNag(false);
-    const alreadyOnboarded = localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
-    if (!alreadyOnboarded) setShowWizard(true);
   };
 
   const handleWizardComplete = () => {
@@ -209,6 +263,7 @@ function App() {
   if (overlayMode) {
     return (
       <ThemeProvider>
+        <OverlayBackgroundFix />
         <TooltipProvider>
           {overlayMode === "dictation" ? <DictationPopup /> : <RecordingPopup />}
         </TooltipProvider>
@@ -232,6 +287,7 @@ function App() {
   return (
     <ThemeProvider>
       <ToastProvider>
+        <AppRuntimeListeners />
         <TooltipProvider>
           <ErrorBoundary>
             <RecordingProvider>

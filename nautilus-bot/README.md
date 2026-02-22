@@ -6,7 +6,7 @@ Nautilus is a local-first desktop app for recording, transcribing, and auditing 
 
 - Dictation capture via global hotkey
 - Meeting recording (microphone, optional system-loopback when available)
-- Multi-provider transcription (Whisper, Parakeet, Canary, Distil-Whisper, Moonshine, VibeVoice, Voxtral, OpenAI Cloud, ElevenLabs Scribe)
+- Multi-provider transcription (Whisper, Parakeet, Canary, Distil-Whisper, Moonshine, Voxtral, OpenAI Cloud, ElevenLabs Scribe)
 - Transcript browsing, speaker labeling, and evidence export/verification
 - Local AI analysis via Ollama
 - Local backup plus cloud sync integrations (rclone/iCloud paths)
@@ -20,7 +20,6 @@ Nautilus is a local-first desktop app for recording, transcribing, and auditing 
 - **Canary**: native Candle inference
 - **Distil-Whisper**: native Candle inference
 - **Moonshine**: native ONNX inference
-- **VibeVoice**: managed Python runtime bridge
 - **Voxtral**: explicit local mode (Python bridge) and cloud mode (Mistral API)
 - **OpenAI Cloud**: live API transcription
 - **ElevenLabs Scribe**: live API transcription

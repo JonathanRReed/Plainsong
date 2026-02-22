@@ -33,17 +33,6 @@ impl ExportFormat {
             ExportFormat::Pdf => "pdf",
         }
     }
-
-    #[allow(dead_code)]
-    pub fn mime_type(&self) -> &'static str {
-        match self {
-            ExportFormat::Markdown => "text/markdown",
-            ExportFormat::Json => "application/json",
-            ExportFormat::Text => "text/plain",
-            #[cfg(feature = "export-pdf")]
-            ExportFormat::Pdf => "application/pdf",
-        }
-    }
 }
 
 impl std::str::FromStr for ExportFormat {

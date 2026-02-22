@@ -195,12 +195,17 @@ impl Database {
                 provider_name TEXT NOT NULL,
                 model_id TEXT NOT NULL,
                 runtime_status TEXT NOT NULL,
+                non_empty_transcript INTEGER NOT NULL DEFAULT 0,
                 processing_time_ms INTEGER NOT NULL,
                 confidence REAL NOT NULL,
                 created_at TEXT NOT NULL
             )",
             [],
         )?;
+        let _ = self.conn.execute(
+            "ALTER TABLE asr_benchmarks ADD COLUMN non_empty_transcript INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
 
         // Use FTS5 for cross-recording transcript retrieval.
         let fts_ready = self
@@ -272,6 +277,19 @@ impl Database {
              VALUES ('default', 'Inbox', 'Default inbox for new recordings', ?1, ?1)",
             [Utc::now().to_rfc3339()],
         )?;
+        self.conn.execute(
+            "INSERT OR IGNORE INTO projects (id, name, description, created_at, updated_at) 
+             VALUES ('inbox', 'Inbox', 'Default inbox for new recordings', ?1, ?1)",
+            [Utc::now().to_rfc3339()],
+        )?;
+
+        // Add summary and action_items columns to recordings table
+        let _ = self
+            .conn
+            .execute("ALTER TABLE recordings ADD COLUMN summary TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE recordings ADD COLUMN action_items TEXT", []);
 
         Ok(())
     }
@@ -449,13 +467,15 @@ impl Database {
 
     pub fn get_recordings(&self, project_id: Option<&str>) -> Result<Vec<Recording>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status
+            "SELECT id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status, summary, action_items
              FROM recordings WHERE (?1 IS NULL OR project_id = ?1) ORDER BY created_at DESC"
         )?;
 
         let pid_param: Option<&str> = project_id;
 
         let recordings = stmt.query_map(params![pid_param], |row| {
+            let action_items_json: Option<String> = row.get(10)?;
+            let action_items = action_items_json.and_then(|s| serde_json::from_str(&s).ok());
             Ok(Recording {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -472,6 +492,8 @@ impl Database {
                 source_type: row.get(6)?,
                 audio_path: row.get(7)?,
                 status: row.get(8)?,
+                summary: row.get(9)?,
+                action_items,
             })
         })?;
 
@@ -482,11 +504,13 @@ impl Database {
 
     pub fn get_recording(&self, recording_id: &str) -> Result<Option<Recording>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status
+            "SELECT id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status, summary, action_items
              FROM recordings WHERE id = ?1"
         )?;
 
         let result = stmt.query_row([recording_id], |row| {
+            let action_items_json: Option<String> = row.get(10)?;
+            let action_items = action_items_json.and_then(|s| serde_json::from_str(&s).ok());
             Ok(Recording {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -503,6 +527,8 @@ impl Database {
                 source_type: row.get(6)?,
                 audio_path: row.get(7)?,
                 status: row.get(8)?,
+                summary: row.get(9)?,
+                action_items,
             })
         });
 
@@ -601,6 +627,25 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_recording_analysis(
+        &mut self,
+        recording_id: &str,
+        summary: Option<&str>,
+        action_items: &[String],
+    ) -> Result<()> {
+        let action_items_json = serde_json::to_string(action_items)?;
+        self.conn.execute(
+            "UPDATE recordings SET summary = ?1, action_items = ?2, updated_at = ?3 WHERE id = ?4",
+            params![
+                summary,
+                action_items_json,
+                Utc::now().to_rfc3339(),
+                recording_id
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn save_transcript(&mut self, transcript: &Transcript) -> Result<()> {
         let segments_json = serde_json::to_string(&transcript.segments)?;
 
@@ -651,14 +696,15 @@ impl Database {
     pub fn save_asr_benchmark(&mut self, entry: &AsrBenchmarkEntry) -> Result<()> {
         self.conn.execute(
             "INSERT INTO asr_benchmarks (
-                id, provider_type, provider_name, model_id, runtime_status, processing_time_ms, confidence, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                id, provider_type, provider_name, model_id, runtime_status, non_empty_transcript, processing_time_ms, confidence, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &entry.id,
                 &entry.provider_type,
                 &entry.provider_name,
                 &entry.model_id,
                 &entry.runtime_status,
+                if entry.non_empty_transcript { 1 } else { 0 },
                 entry.processing_time_ms,
                 entry.confidence,
                 entry.created_at.to_rfc3339(),
@@ -669,7 +715,7 @@ impl Database {
 
     pub fn list_asr_benchmarks(&self, limit: usize) -> Result<Vec<AsrBenchmarkEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, provider_type, provider_name, model_id, runtime_status, processing_time_ms, confidence, created_at
+            "SELECT id, provider_type, provider_name, model_id, runtime_status, non_empty_transcript, processing_time_ms, confidence, created_at
              FROM asr_benchmarks
              ORDER BY created_at DESC
              LIMIT ?1",
@@ -682,10 +728,11 @@ impl Database {
                 provider_name: row.get(2)?,
                 model_id: row.get(3)?,
                 runtime_status: row.get(4)?,
-                processing_time_ms: row.get(5)?,
-                confidence: row.get(6)?,
+                non_empty_transcript: row.get::<_, i64>(5)? != 0,
+                processing_time_ms: row.get(6)?,
+                confidence: row.get(7)?,
                 created_at: row
-                    .get::<_, String>(7)?
+                    .get::<_, String>(8)?
                     .parse()
                     .unwrap_or_else(|_| Utc::now()),
             })
@@ -1023,6 +1070,22 @@ impl Database {
         Ok(())
     }
 
+    /// Update recording source type (meeting|dictation)
+    pub fn update_recording_source_type(
+        &mut self,
+        recording_id: &str,
+        source_type: &str,
+    ) -> Result<()> {
+        let updated = self.conn.execute(
+            "UPDATE recordings SET source_type = ?1, updated_at = ?2 WHERE id = ?3",
+            params![source_type, Utc::now().to_rfc3339(), recording_id],
+        )?;
+        if updated == 0 {
+            anyhow::bail!("Recording '{}' was not found", recording_id);
+        }
+        Ok(())
+    }
+
     /// Delete a project, reassigning its recordings to the Inbox project
     pub fn delete_project(&mut self, project_id: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
@@ -1132,6 +1195,45 @@ impl Database {
     pub fn delete_all_embeddings(&self) -> Result<usize> {
         let count = self.conn.execute("DELETE FROM transcript_embeddings", [])?;
         Ok(count)
+    }
+
+    pub fn purge_user_content(&mut self) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM speaker_aliases", [])?;
+        tx.execute("DELETE FROM transcripts", [])?;
+        let _ = tx.execute("DELETE FROM transcript_fts", []);
+        tx.execute("DELETE FROM recordings", [])?;
+        tx.execute("DELETE FROM asr_benchmarks", [])?;
+        tx.execute("DELETE FROM transcript_embeddings", [])?;
+        tx.execute("DELETE FROM projects", [])?;
+        tx.execute("DROP TRIGGER IF EXISTS audit_log_no_update", [])?;
+        tx.execute("DROP TRIGGER IF EXISTS audit_log_no_delete", [])?;
+        tx.execute("DELETE FROM audit_log", [])?;
+        tx.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS audit_log_no_update
+             BEFORE UPDATE ON audit_log
+             BEGIN
+                 SELECT RAISE(ABORT, 'audit_log is append-only');
+             END;
+             CREATE TRIGGER IF NOT EXISTS audit_log_no_delete
+             BEFORE DELETE ON audit_log
+             BEGIN
+                 SELECT RAISE(ABORT, 'audit_log is append-only');
+             END;",
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO projects (id, name, description, created_at, updated_at)
+             VALUES ('default', 'Inbox', 'Default inbox for new recordings', ?1, ?1)",
+            params![&now],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO projects (id, name, description, created_at, updated_at)
+             VALUES ('inbox', 'Inbox', 'Default inbox for new recordings', ?1, ?1)",
+            params![&now],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn search_embeddings(
@@ -1369,6 +1471,24 @@ mod tests {
     }
 
     #[test]
+    fn test_update_recording_source_type() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.update_recording_source_type("r1", "dictation").unwrap();
+
+        let rec = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(rec.source_type, "dictation");
+    }
+
+    #[test]
+    fn test_update_recording_source_type_missing_recording_fails() {
+        let mut db = in_memory_db();
+        let result = db.update_recording_source_type("missing-id", "dictation");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_delete_recording_removes_transcript() {
         let mut db = in_memory_db();
         db.create_recording(&sample_recording("r1", "inbox"))
@@ -1574,6 +1694,7 @@ mod tests {
             provider_name: "Whisper".to_string(),
             model_id: "large-v3-turbo".to_string(),
             runtime_status: "ready".to_string(),
+            non_empty_transcript: true,
             processing_time_ms: 1234,
             confidence: 0.91,
             created_at: Utc::now(),
@@ -1582,6 +1703,7 @@ mod tests {
         let rows = db.list_asr_benchmarks(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider_type, "whisper");
+        assert!(rows[0].non_empty_transcript);
     }
 
     #[test]

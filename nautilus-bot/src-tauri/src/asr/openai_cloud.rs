@@ -120,6 +120,7 @@ impl OpenAiCloudWhisperProvider {
             model_id: self.model_id.clone(),
             requested_provider: AsrProviderType::OpenAiCloud,
             actual_provider: AsrProviderType::OpenAiCloud,
+            fallback_reason: None,
         })
     }
 }

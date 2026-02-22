@@ -59,6 +59,9 @@ export type DownloadStatus =
 export interface BenchmarkResult {
   providerType: AsrProviderType;
   providerName: string;
+  modelId: string;
+  runtimeStatus: AsrRuntimeStatus;
+  nonEmptyTranscript: boolean;
   processingTimeMs: number;
   transcription: string;
   confidence: number;
@@ -70,7 +73,6 @@ export type AsrProviderType =
   | "canary"
   | "distil_whisper"
   | "moonshine"
-  | "vibevoice"
   | "voxtral"
   | "elevenlabs_scribe"
   | "openai_cloud";
@@ -115,6 +117,7 @@ export interface AsrBenchmarkEntry {
   providerName: string;
   modelId: string;
   runtimeStatus: string;
+  nonEmptyTranscript: boolean;
   processingTimeMs: number;
   confidence: number;
   createdAt: string;

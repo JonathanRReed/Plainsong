@@ -7,7 +7,6 @@ import {
   type ChangeEvent,
   type KeyboardEvent,
 } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,6 +14,7 @@ import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useTheme } from "@/components/theme-provider";
 import {
   createBackupDefault,
@@ -40,6 +40,7 @@ import {
   saveSettings,
   saveBackupConfig,
   setProviderSecret,
+  resetAppState,
   syncBackupToCloud,
   unlockVault,
   verifyBackupCloudConnection,
@@ -51,6 +52,7 @@ import type { DiarizationModelOption } from "@/lib/tauri";
 import { isFeatureAllowed, canUseFormattingAssistant, getThemeAccessLevel } from "@/hooks/use-license-features";
 import type { Settings } from "@/types/settings";
 import { normalizeThemeSchemeForAccess, themeSchemesForAccess } from "@/lib/theme-schemes";
+import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
 import {
   AlertCircle,
   CheckCircle2,
@@ -103,6 +105,7 @@ const SHORTCUT_FIELD_CONFIG: Array<{ key: ShortcutFieldKey; label: string }> = [
 ];
 
 const SETTINGS_SAVE_DEBOUNCE_MS = 350;
+const ONBOARDING_STORAGE_KEY = "nautilus_onboarding_complete";
 
 function markSettingsPerf(markName: string) {
   if (!import.meta.env.DEV || typeof performance === "undefined") {
@@ -175,6 +178,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [hasLoadedSecurityTab, setHasLoadedSecurityTab] = useState(false);
   const [hasLoadedStorageTab, setHasLoadedStorageTab] = useState(false);
+  const [resettingApp, setResettingApp] = useState(false);
+  const [showResetDialog, setShowResetDialog] = useState(false);
+  const [resetPhrase, setResetPhrase] = useState("");
   const [licenseInfo, setLicenseInfo] = useState<LicenseInfo | null>(null);
   const [licenseKeyInput, setLicenseKeyInput] = useState("");
   const [licenseActivating, setLicenseActivating] = useState(false);
@@ -200,14 +206,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
   const settings = draftSettings;
   const { toast } = useToast();
-
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void listen<string>("asr-provider-warning", (event) => {
-      toast(event.payload, "error");
-    }).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
-  }, [toast]);
+  const dictationShortcutBehaviorHint = settings?.transcription.dictationPushToTalk
+    ? "Hold shortcut to record, release to stop"
+    : "Press shortcut once to start, then press again to stop";
 
   const applySecurityStatusFromSettings = useCallback((next: Settings) => {
     setSecurityStatus((current) =>
@@ -292,6 +293,36 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     [flushPendingSettingsSave]
   );
 
+  const performReset = useCallback(async () => {
+    setResettingApp(true);
+    setError(null);
+    try {
+      const result = await resetAppState();
+      localStorage.removeItem(ONBOARDING_STORAGE_KEY);
+      toast(
+        `Reset complete. Removed ${result.deletedRecordings} recordings and deleted ${result.deletedAudioFiles} audio files.`,
+        "success"
+      );
+      if (
+        result.failedAudioFileDeletions.length > 0 ||
+        result.failedProviderSecretClears.length > 0
+      ) {
+        toast(
+          "Reset completed with warnings. Open logs for file or keychain cleanup failures.",
+          "error"
+        );
+      }
+      window.location.reload();
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to reset application state";
+      setError(message);
+      toast(message, "error");
+    } finally {
+      setResettingApp(false);
+    }
+  }, [toast]);
+
   const formatShortcutFromKeyboardEvent = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
     const parts: string[] = [];
     if (event.metaKey) parts.push("Cmd");
@@ -317,7 +348,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       mainKey = normalized.charAt(0).toUpperCase() + normalized.slice(1);
     }
 
-    return [...parts, mainKey].join("+");
+    return normalizeShortcut([...parts, mainKey].join("+"));
   }, []);
 
   const handleShortcutKeyDown = useCallback(
@@ -1042,7 +1073,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       <div className="space-y-0.5">
                         <Label>Push-to-talk dictation</Label>
                         <p className="text-sm text-muted-foreground">
-                          Hold shortcut to record, release to stop
+                          {dictationShortcutBehaviorHint}
                         </p>
                       </div>
                       <Switch
@@ -1130,6 +1161,46 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
+                        <Label>Auto-name meetings</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Generate a title after transcription completes (meetings only)
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.meetingAutoNameEnabled ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              meetingAutoNameEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Meeting auto-name model override (optional)</Label>
+                      <Input
+                        placeholder="Leave empty to use summary model"
+                        value={settings.transcription.meetingAutoNameModel ?? ""}
+                        onBlur={handleSettingsTextBlur}
+                        onKeyDown={handleSettingsTextKeyDown}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              meetingAutoNameModel: e.target.value.trim() ? e.target.value.trim() : null,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
                         <Label>Type text at cursor automatically</Label>
                         <p className="text-sm text-muted-foreground">
                           Automatically paste dictation text into active window
@@ -1143,6 +1214,26 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             transcription: {
                               ...settings.transcription,
                               dictationPasteToCursor: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Copy dictation text to clipboard</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Keep the latest dictation text available for manual paste
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationCopyToClipboard ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCopyToClipboard: checked,
                             },
                           })
                         }
@@ -1502,7 +1593,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       <div className="space-y-0.5">
                         <Label>Push-to-talk dictation</Label>
                         <p className="text-sm text-muted-foreground">
-                          Hold shortcut to record, release to stop
+                          {dictationShortcutBehaviorHint}
                         </p>
                       </div>
                       <Switch
@@ -1608,6 +1699,26 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         }
                       />
                     </div>
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Copy dictation text to clipboard</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Keep the latest dictation text available for manual paste
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationCopyToClipboard ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCopyToClipboard: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
@@ -1650,7 +1761,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </div>
                       <div className="grid gap-2">
                         {SHORTCUT_FIELD_CONFIG.map(({ key, label }) => {
-                          const currentVal = settings.shortcuts[key] || "None";
+                          const currentVal = settings.shortcuts[key]
+                            ? formatShortcutForDisplay(settings.shortcuts[key])
+                            : "None";
                           const isCapturing = capturingShortcut === key;
                           return (
                             <div key={key} className="flex items-center justify-between">
@@ -1691,7 +1804,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         })}
                       </div>
                       <p className="text-xs text-muted-foreground">
-                        Changes save immediately, duplicate conflicts are blocked, and new bindings apply after relaunch.
+                        Changes save immediately, duplicate conflicts are blocked, and new bindings apply instantly.
                       </p>
                     </div>
                   </div>
@@ -1758,7 +1871,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       <div className="space-y-0.5">
                         <Label>Push-to-talk dictation</Label>
                         <p className="text-sm text-muted-foreground">
-                          Hold shortcut to record, release to stop
+                          {dictationShortcutBehaviorHint}
                         </p>
                       </div>
                       <Switch
@@ -1859,6 +1972,26 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             transcription: {
                               ...settings.transcription,
                               dictationPasteToCursor: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Copy dictation text to clipboard</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Keep the latest dictation text available for manual paste
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationCopyToClipboard ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCopyToClipboard: checked,
                             },
                           })
                         }
@@ -2177,6 +2310,122 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   <p className="text-xs text-muted-foreground">Set to 0 to keep all recordings indefinitely.</p>
                 </div>
 
+                <div className="space-y-2">
+                  <Label>Auto-delete dictation recordings</Label>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={settings.transcription.dictationRetentionPreset ?? "never"}
+                    onChange={(e: any) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          dictationRetentionPreset: e.target.value,
+                        },
+                      })
+                    }
+                  >
+                    <option value="immediate">Immediately</option>
+                    <option value="24h">After 24 hours</option>
+                    <option value="72h">After 72 hours</option>
+                    <option value="never">Never</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                  {(settings.transcription.dictationRetentionPreset ?? "never") === "custom" && (
+                    <div className="space-y-2">
+                      <Label>Custom retention hours</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={settings.transcription.dictationRetentionCustomHours ?? 24}
+                        onBlur={handleSettingsTextBlur}
+                        onKeyDown={handleSettingsTextKeyDown}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                          const nextHours = Math.max(1, Number(e.target.value) || 1);
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationRetentionCustomHours: nextHours,
+                            },
+                          });
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-3">
+                  <div className="space-y-1">
+                    <Label className="text-destructive">Reset App Data</Label>
+                    <p className="text-sm text-muted-foreground">
+                      Deletes recordings, transcripts, projects, audit history, benchmark history, and saved cloud keys.
+                      Downloaded local ASR model assets are kept.
+                    </p>
+                  </div>
+                  <Button
+                    variant="destructive"
+                    disabled={resettingApp}
+                    onClick={() => {
+                      setResetPhrase("");
+                      setShowResetDialog(true);
+                    }}
+                  >
+                    {resettingApp ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                    Reset Everything On This Device
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    After reset, onboarding runs again on next launch.
+                  </p>
+                </div>
+
+                <Dialog open={showResetDialog} onOpenChange={setShowResetDialog}>
+                  <DialogContent>
+                    <DialogHeader>
+                      <DialogTitle>Reset everything on this device?</DialogTitle>
+                      <DialogDescription>
+                        Type <span className="font-semibold">RESET</span> to confirm permanent deletion of recordings,
+                        transcripts, projects, logs, and saved provider keys.
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-2">
+                      <Label htmlFor="reset-phrase">Confirmation</Label>
+                      <Input
+                        id="reset-phrase"
+                        value={resetPhrase}
+                        onChange={(event) => setResetPhrase(event.target.value)}
+                        placeholder="Type RESET"
+                        autoFocus
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Confirmation is case-insensitive.
+                      </p>
+                    </div>
+                    <DialogFooter>
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          setShowResetDialog(false);
+                          setResetPhrase("");
+                        }}
+                        disabled={resettingApp}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        disabled={resettingApp || resetPhrase.trim().toUpperCase() !== "RESET"}
+                        onClick={async () => {
+                          await performReset();
+                        }}
+                      >
+                        {resettingApp ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                        Confirm Reset
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+
                 {advancedTabs.storage && backupConfig && (
                   <div className="pt-4 border-t space-y-5">
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
@@ -2185,7 +2434,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       <div className="space-y-0.5">
                         <Label>Push-to-talk dictation</Label>
                         <p className="text-sm text-muted-foreground">
-                          Hold shortcut to record, release to stop
+                          {dictationShortcutBehaviorHint}
                         </p>
                       </div>
                       <Switch
@@ -2286,6 +2535,26 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             transcription: {
                               ...settings.transcription,
                               dictationPasteToCursor: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Copy dictation text to clipboard</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Keep the latest dictation text available for manual paste
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationCopyToClipboard ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCopyToClipboard: checked,
                             },
                           })
                         }
@@ -2804,7 +3073,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       <div className="space-y-0.5">
                         <Label>Push-to-talk dictation</Label>
                         <p className="text-sm text-muted-foreground">
-                          Hold shortcut to record, release to stop
+                          {dictationShortcutBehaviorHint}
                         </p>
                       </div>
                       <Switch
@@ -2905,6 +3174,26 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             transcription: {
                               ...settings.transcription,
                               dictationPasteToCursor: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Copy dictation text to clipboard</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Keep the latest dictation text available for manual paste
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationCopyToClipboard ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCopyToClipboard: checked,
                             },
                           })
                         }

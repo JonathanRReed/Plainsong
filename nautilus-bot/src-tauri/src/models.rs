@@ -13,6 +13,10 @@ pub struct Recording {
     pub source_type: String,
     pub audio_path: String,
     pub status: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub action_items: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,17 +107,6 @@ impl Default for DictationStartOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub struct AnalysisResult {
-    pub id: String,
-    pub recording_id: String,
-    pub query: String,
-    pub result: String,
-    pub created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AuditLogEntry {
     pub id: String,
     pub timestamp: DateTime<Utc>,
@@ -143,6 +136,7 @@ pub struct AsrBenchmarkEntry {
     pub provider_name: String,
     pub model_id: String,
     pub runtime_status: String,
+    pub non_empty_transcript: bool,
     pub processing_time_ms: i64,
     pub confidence: f64,
     pub created_at: DateTime<Utc>,

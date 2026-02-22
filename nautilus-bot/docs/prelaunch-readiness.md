@@ -14,7 +14,7 @@ This report summarizes launch-readiness status for the strict GA scope: **all AS
 - Removed fallback setting from app settings and UI.
 - Removed Parakeet legacy filename compatibility (`model.onnx`/`vocab.txt`); now `encoder.onnx` + `tokens.txt` only.
 - Fixed Parakeet `ort` API compatibility and compile blockers.
-- Implemented managed Python runtime bridge for VibeVoice and Voxtral local mode.
+- Implemented managed Python runtime bridge for Voxtral local mode.
 - Refactored Voxtral into explicit local/cloud modes (`voxtral-local`, `voxtral-cloud`) with no automatic local->cloud fallback.
 - Added live cloud smoke gate script and fixed WAV fixture.
 - Added live cloud Rust integration test gate and local ASR RTF performance gate test.

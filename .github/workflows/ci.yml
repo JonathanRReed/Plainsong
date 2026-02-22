@@ -70,6 +70,11 @@ jobs:
         run: cargo install cargo-audit --locked
         working-directory: nautilus-bot/src-tauri
 
+      - name: Validate cargo-audit ignore policy metadata
+        id: rust_audit_policy
+        run: ./scripts/run-cargo-audit-policy.sh --check-policy
+        working-directory: nautilus-bot/src-tauri
+
       - name: Rust dependency audit
         id: rust_audit
         run: ./scripts/run-cargo-audit-policy.sh
@@ -101,6 +106,7 @@ jobs:
             echo "| cargo clippy --all-targets -- -D warnings | ${{ steps.rust_clippy.outcome }} |"
             echo "| cargo check --all-targets | ${{ steps.rust_check.outcome }} |"
             echo "| cargo install cargo-audit --locked | ${{ steps.install_cargo_audit.outcome }} |"
+            echo "| ./scripts/run-cargo-audit-policy.sh --check-policy | ${{ steps.rust_audit_policy.outcome }} |"
             echo "| ./scripts/run-cargo-audit-policy.sh | ${{ steps.rust_audit.outcome }} |"
             echo "| cargo test --lib | ${{ steps.rust_tests.outcome }} |"
           } > "$report"

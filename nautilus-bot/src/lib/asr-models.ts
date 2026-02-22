@@ -53,7 +53,6 @@ export const LOCAL_ASR_MODEL_GROUPS: AsrModelOptionGroup[] = [
     label: "Other local providers",
     options: [
       { id: "moonshine", label: "Moonshine - UsefulSensors, edge-optimized" },
-      { id: "vibevoice-asr", label: "VibeVoice - Microsoft, streaming ASR" },
       { id: "voxtral-local", label: "Voxtral Mini (Local) - Mistral, multilingual" },
     ],
   },

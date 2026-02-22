@@ -130,6 +130,7 @@ impl VoxtralProvider {
             model_id: self.selected_model_id().to_string(),
             requested_provider: AsrProviderType::Voxtral,
             actual_provider: AsrProviderType::Voxtral,
+            fallback_reason: None,
         })
     }
 
@@ -152,9 +153,7 @@ impl VoxtralProvider {
 
         let text = output.text.unwrap_or_default().trim().to_string();
         if text.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Voxtral local returned an empty transcript. Verify local runtime and model artifacts."
-            ));
+            anyhow::bail!("Voxtral local returned an empty transcript");
         }
 
         Ok(TranscriptionResult {
@@ -172,6 +171,7 @@ impl VoxtralProvider {
             model_id: self.selected_model_id().to_string(),
             requested_provider: AsrProviderType::Voxtral,
             actual_provider: AsrProviderType::Voxtral,
+            fallback_reason: None,
         })
     }
 }

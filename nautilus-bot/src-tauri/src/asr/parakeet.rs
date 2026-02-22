@@ -474,6 +474,7 @@ impl AsrProvider for ParakeetProvider {
             model_id: "parakeet-tdt-ctc-110m".to_string(),
             requested_provider: AsrProviderType::Parakeet,
             actual_provider: AsrProviderType::Parakeet,
+            fallback_reason: None,
         })
     }
 

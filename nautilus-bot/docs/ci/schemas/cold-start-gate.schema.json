@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nautilusbot.app/schemas/ci/cold-start-gate.schema.json",
+  "title": "Cold Start Gate Artifact",
+  "type": "object",
+  "required": ["ok", "generatedAt", "command", "elapsedMs", "thresholdMs"],
+  "properties": {
+    "ok": { "type": "boolean" },
+    "generatedAt": { "type": "string", "minLength": 1 },
+    "command": { "type": "string", "minLength": 1 },
+    "elapsedMs": { "type": "number", "minimum": 0 },
+    "thresholdMs": { "type": "number", "exclusiveMinimum": 0 }
+  }
+}

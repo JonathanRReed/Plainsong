@@ -8,10 +8,11 @@ This checklist tracks remaining release blockers for strict all-provider GA on m
 - [ ] Confirm macOS signing/notarization secrets are set (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`, `KEYCHAIN_PASSWORD`).
 - [ ] Confirm Windows signing secrets are set (`WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`).
 - [ ] Confirm cloud ASR live-test secrets are set (`OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `MISTRAL_API_KEY`).
+- [ ] Optional but recommended for deterministic preflight provisioning: set `NAUTILUS_ASR_ASSET_BUNDLE_URL` to a tar/zip bundle that expands into `Nautilus/models/*`.
 
 ## B) Provider Runtime Prerequisites
 
-- [ ] Ensure local model assets are available for local-provider CI/perf gates (Whisper, Parakeet, Canary, Distil-Whisper, Moonshine, VibeVoice, Voxtral-local).
+- [ ] Ensure local model assets are available for local-provider CI/perf gates (Whisper, Parakeet, Canary, Distil-Whisper, Moonshine, Voxtral-local).
 - [ ] Ensure Python runtime dependencies are available where local Python-bridge providers are exercised (`torch`, `transformers`, `librosa`, `soundfile`, `huggingface_hub`).
 
 ## C) Automated Gates

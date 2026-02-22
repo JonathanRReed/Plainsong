@@ -6,7 +6,7 @@
  *   Power   – extended 4-step flow (permissions → model choice → hotkey → privacy overview)
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, type KeyboardEvent } from "react";
 import {
     Mic,
     ShieldCheck,
@@ -28,10 +28,14 @@ import {
     getPermissionDiagnostics,
     openPermissionSettings,
     downloadWhisperModel,
+    getSettings,
+    saveSettings,
     type PermissionDiagnostics,
 } from "@/lib/tauri";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import { Input } from "@/components/ui/input";
+import { defaultDictationShortcut, formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
 
 type Props = {
     onComplete(): void;
@@ -67,6 +71,10 @@ export function FirstRunWizard({ onComplete }: Props) {
     const [modelError, setModelError] = useState<string | null>(null);
     const [selectedModelId, setSelectedModelId] = useState("base.en");
     const [hotkeyDemoActive, setHotkeyDemoActive] = useState(false);
+    const [shortcutValue, setShortcutValue] = useState(defaultDictationShortcut());
+    const [hotkeyMode, setHotkeyMode] = useState<"hold_to_talk" | "toggle">("hold_to_talk");
+    const [hotkeySaving, setHotkeySaving] = useState(false);
+    const [hotkeySaveError, setHotkeySaveError] = useState<string | null>(null);
 
     const steps = track === "power" ? POWER_STEPS : NORMAL_STEPS;
     const stepIdx = steps.indexOf(step);
@@ -74,6 +82,24 @@ export function FirstRunWizard({ onComplete }: Props) {
 
     useEffect(() => {
         if (step === "permissions") void refreshPerms();
+    }, [step]);
+
+    useEffect(() => {
+        let mounted = true;
+        if (step !== "hotkey") return;
+        void getSettings()
+            .then((settings) => {
+                if (!mounted) return;
+                setShortcutValue(settings.shortcuts.toggleDictation || defaultDictationShortcut());
+                setHotkeyMode(settings.transcription.dictationPushToTalk ? "hold_to_talk" : "toggle");
+            })
+            .catch(() => {
+                // Ignore onboarding prefill errors and continue with defaults.
+            });
+
+        return () => {
+            mounted = false;
+        };
     }, [step]);
 
     const refreshPerms = async () => {
@@ -105,7 +131,29 @@ export function FirstRunWizard({ onComplete }: Props) {
         setStep("permissions");
     };
 
-    const nextStep = () => {
+    const persistHotkeyStep = useCallback(async () => {
+        setHotkeySaving(true);
+        setHotkeySaveError(null);
+        try {
+            const settings = await getSettings();
+            settings.shortcuts.toggleDictation = normalizeShortcut(shortcutValue);
+            settings.shortcuts.toggleDictationAlternates = [];
+            settings.transcription.dictationPushToTalk = hotkeyMode === "hold_to_talk";
+            await saveSettings(settings);
+            return true;
+        } catch (error) {
+            setHotkeySaveError(error instanceof Error ? error.message : String(error));
+            return false;
+        } finally {
+            setHotkeySaving(false);
+        }
+    }, [hotkeyMode, shortcutValue]);
+
+    const nextStep = async () => {
+        if (step === "hotkey") {
+            const saved = await persistHotkeyStep();
+            if (!saved) return;
+        }
         const idx = steps.indexOf(step);
         if (idx < steps.length - 1) {
             setStep(steps[idx + 1]);
@@ -172,7 +220,15 @@ export function FirstRunWizard({ onComplete }: Props) {
                     />
                 )}
                 {step === "hotkey" && (
-                    <HotkeyStep active={hotkeyDemoActive} onToggle={() => setHotkeyDemoActive((v) => !v)} />
+                    <HotkeyStep
+                        active={hotkeyDemoActive}
+                        onToggle={() => setHotkeyDemoActive((v) => !v)}
+                        shortcutValue={shortcutValue}
+                        onShortcutChange={setShortcutValue}
+                        hotkeyMode={hotkeyMode}
+                        onHotkeyModeChange={setHotkeyMode}
+                        saveError={hotkeySaveError}
+                    />
                 )}
                 {step === "privacy" && <PrivacyStep />}
 
@@ -183,10 +239,11 @@ export function FirstRunWizard({ onComplete }: Props) {
                             Skip setup
                         </Button>
                         <Button
-                            onClick={nextStep}
-                            disabled={isDownloading}
+                            onClick={() => void nextStep()}
+                            disabled={isDownloading || hotkeySaving}
                             id="wizard-next-btn"
                         >
+                            {hotkeySaving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
                             {isLastStep ? "Finish" : "Continue"}
                             <ChevronRight className="ml-1 h-4 w-4" />
                         </Button>
@@ -260,7 +317,7 @@ function PermissionsStep({
     return (
         <div className="space-y-4">
             <p className="text-sm text-muted-foreground">
-                Nautilus needs microphone access and accessibility permission to inject text at your cursor.
+                Nautilus needs microphone access and input-control permissions to type text at your cursor.
             </p>
 
             <div className="space-y-3">
@@ -463,24 +520,91 @@ function ModelChoiceStep({
     );
 }
 
-function HotkeyStep({ active, onToggle }: { active: boolean; onToggle(): void }) {
+function formatShortcutFromKeyboardEvent(event: KeyboardEvent<HTMLInputElement>) {
+    const parts: string[] = [];
+    if (event.metaKey) parts.push("Cmd");
+    if (event.ctrlKey) parts.push("Ctrl");
+    if (event.altKey) parts.push("Alt");
+    if (event.shiftKey) parts.push("Shift");
+
+    const key = event.key;
+    if (["Meta", "Control", "Alt", "Shift"].includes(key) || parts.length === 0) {
+        return null;
+    }
+
+    let mainKey = "";
+    if (key === " ") {
+        mainKey = "Space";
+    } else if (key.length === 1) {
+        mainKey = key.toUpperCase();
+    } else {
+        const normalized = key.startsWith("Arrow") ? key.replace("Arrow", "") : key;
+        mainKey = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+    }
+    return [...parts, mainKey].join("+");
+}
+
+function HotkeyStep({
+    active,
+    onToggle,
+    shortcutValue,
+    onShortcutChange,
+    hotkeyMode,
+    onHotkeyModeChange,
+    saveError,
+}: {
+    active: boolean;
+    onToggle(): void;
+    shortcutValue: string;
+    onShortcutChange(value: string): void;
+    hotkeyMode: "hold_to_talk" | "toggle";
+    onHotkeyModeChange(value: "hold_to_talk" | "toggle"): void;
+    saveError: string | null;
+}) {
+    const displayShortcut = formatShortcutForDisplay(shortcutValue);
+
     return (
         <div className="space-y-4">
             <p className="text-sm text-muted-foreground">
-                Hold{" "}
-                <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs">
-                    ⌘
-                </kbd>{" "}
-                +{" "}
-                <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs">
-                    ⇧
-                </kbd>{" "}
-                +{" "}
-                <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-xs">
-                    Space
-                </kbd>{" "}
-                anywhere to start dictating. Release to transcribe and paste.
+                {hotkeyMode === "hold_to_talk"
+                    ? `Hold ${displayShortcut} anywhere to start dictating. Release to transcribe and paste.`
+                    : `Press ${displayShortcut} anywhere to start dictating. Press again to transcribe and paste.`}
             </p>
+
+            <div className="space-y-2 rounded-lg border border-border p-3">
+                <label className="text-xs font-medium text-muted-foreground">Dictation shortcut</label>
+                <Input
+                    value={displayShortcut}
+                    readOnly
+                    onKeyDown={(event) => {
+                        if (event.key === "Tab") return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        if (event.key === "Escape") return;
+                        const parsed = formatShortcutFromKeyboardEvent(event);
+                        if (!parsed) return;
+                        onShortcutChange(parsed);
+                    }}
+                    className="font-mono text-center"
+                />
+                <p className="text-xs text-muted-foreground">
+                    Click the field and press your preferred key combination.
+                </p>
+            </div>
+
+            <div className="space-y-2 rounded-lg border border-border p-3">
+                <label className="text-xs font-medium text-muted-foreground">Hotkey behavior</label>
+                <select
+                    className="w-full rounded-md border border-border bg-background p-2 text-sm"
+                    value={hotkeyMode}
+                    onChange={(event) =>
+                        onHotkeyModeChange(event.target.value as "hold_to_talk" | "toggle")
+                    }
+                >
+                    <option value="hold_to_talk">Hold-to-talk</option>
+                    <option value="toggle">Toggle press</option>
+                </select>
+            </div>
 
             {/* Interactive demo */}
             <button
@@ -526,6 +650,7 @@ function HotkeyStep({ active, onToggle }: { active: boolean; onToggle(): void })
             <p className="text-xs text-muted-foreground">
                 You can change the hotkey anytime in Settings → General.
             </p>
+            {saveError && <p className="text-xs text-destructive">Failed to save hotkey: {saveError}</p>}
 
             <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">
                 <p className="text-xs font-medium">What you can do with Nautilus:</p>
@@ -563,10 +688,11 @@ function PrivacyStep() {
                 <div className="flex items-start gap-3 rounded-lg border border-border p-3">
                     <Shield className="mt-0.5 h-5 w-5 shrink-0 text-emerald-500" />
                     <div>
-                        <p className="text-sm font-medium">Audio stays on your Mac</p>
+                        <p className="text-sm font-medium">Audio stays on your device</p>
                         <p className="text-xs text-muted-foreground">
-                            All transcription runs locally via Whisper. Nothing is sent to a server unless
-                            you explicitly enable a cloud ASR or LLM provider.
+                            Local transcription runs via providers like Whisper, Parakeet, Canary, Distil-Whisper,
+                            Moonshine, and Voxtral-local. Nothing is sent to a server unless you explicitly
+                            enable cloud ASR or LLM providers.
                         </p>
                     </div>
                 </div>
@@ -616,7 +742,7 @@ function PrivacyStep() {
             </div>
 
             <p className="text-xs text-muted-foreground">
-                Review all privacy settings in Settings → Security.
+                Review privacy in Settings → Security. Use Settings → Storage to reset app data on this device.
             </p>
         </div>
     );

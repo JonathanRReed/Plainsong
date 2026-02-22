@@ -34,6 +34,10 @@ export async function forceStopDictation(): Promise<string> {
   return await invoke("force_stop_dictation");
 }
 
+export async function getDictationAudioLevel(): Promise<number> {
+  return await invoke("get_dictation_audio_level");
+}
+
 export async function startRecording(options: {
   mic: boolean;
   systemAudio: boolean;
@@ -76,6 +80,17 @@ export async function deleteRecording(recordingId: string): Promise<void> {
 
 export async function renameRecording(recordingId: string, newTitle: string): Promise<void> {
   await invoke("rename_recording", { recordingId, newTitle });
+}
+
+export async function retryMeetingAutoName(recordingId: string): Promise<void> {
+  await invoke("retry_meeting_auto_name", { recordingId });
+}
+
+export async function setRecordingSourceType(
+  recordingId: string,
+  sourceType: "meeting" | "dictation"
+): Promise<void> {
+  await invoke("set_recording_source_type", { recordingId, sourceType });
 }
 
 export async function deleteProject(projectId: string): Promise<void> {
@@ -462,8 +477,29 @@ export async function getSettings(): Promise<Settings> {
   return await invoke("get_settings");
 }
 
+export interface ResetAppStateResult {
+  deletedRecordings: number;
+  deletedAudioFiles: number;
+  failedAudioFileDeletions: string[];
+  clearedProviderSecrets: string[];
+  failedProviderSecretClears: string[];
+}
+
+export async function resetAppState(): Promise<ResetAppStateResult> {
+  return await invoke("reset_app_state");
+}
+
 export async function saveSettings(settings: Settings): Promise<void> {
   await invoke("save_settings", { settings });
+}
+
+export interface ShortcutApplyStatus {
+  ok: boolean;
+  message: string;
+}
+
+export async function applyGlobalShortcutsNow(): Promise<ShortcutApplyStatus> {
+  return await invoke("apply_global_shortcuts_now");
 }
 
 export async function hasProviderSecret(provider: string): Promise<boolean> {

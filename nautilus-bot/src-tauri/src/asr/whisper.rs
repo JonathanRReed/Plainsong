@@ -246,6 +246,7 @@ impl AsrProvider for WhisperProvider {
             model_id: self.model_id.clone(),
             requested_provider: AsrProviderType::Whisper,
             actual_provider: AsrProviderType::Whisper,
+            fallback_reason: None,
         })
     }
 

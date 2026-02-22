@@ -6,7 +6,6 @@ pub mod moonshine;
 pub mod openai_cloud;
 pub mod parakeet;
 pub mod python_runtime;
-pub mod vibevoice;
 pub mod voxtral;
 pub mod whisper;
 
@@ -57,6 +56,8 @@ pub struct TranscriptionResult {
     pub model_id: String,
     pub requested_provider: AsrProviderType,
     pub actual_provider: AsrProviderType,
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -91,7 +92,6 @@ pub enum AsrProviderType {
     Canary,
     DistilWhisper,
     Moonshine,
-    VibeVoice,
     Voxtral,
     ElevenLabsScribe,
     OpenAiCloud,
@@ -105,7 +105,6 @@ impl AsrProviderType {
             AsrProviderType::Canary,
             AsrProviderType::DistilWhisper,
             AsrProviderType::Moonshine,
-            AsrProviderType::VibeVoice,
             AsrProviderType::Voxtral,
             AsrProviderType::ElevenLabsScribe,
             AsrProviderType::OpenAiCloud,
@@ -120,7 +119,6 @@ impl AsrProviderType {
             AsrProviderType::Canary => "NVIDIA Canary Qwen",
             AsrProviderType::DistilWhisper => "Distil Whisper",
             AsrProviderType::Moonshine => "UsefulSensors Moonshine",
-            AsrProviderType::VibeVoice => "Microsoft VibeVoice",
             AsrProviderType::Voxtral => "Mistral Voxtral Mini",
             AsrProviderType::ElevenLabsScribe => "ElevenLabs Scribe",
             AsrProviderType::OpenAiCloud => "OpenAI Whisper (Cloud)",
@@ -134,7 +132,6 @@ impl AsrProviderType {
             AsrProviderType::Canary => "canary-qwen-2.5b",
             AsrProviderType::DistilWhisper => "distil-large-v3.5",
             AsrProviderType::Moonshine => "moonshine",
-            AsrProviderType::VibeVoice => "vibevoice-asr",
             AsrProviderType::Voxtral => "voxtral-local",
             AsrProviderType::ElevenLabsScribe => "scribe_v1",
             AsrProviderType::OpenAiCloud => "whisper-1",
@@ -201,10 +198,6 @@ impl AsrProviderType {
                 id: "moonshine".to_string(),
                 label: "Moonshine".to_string(),
             }],
-            AsrProviderType::VibeVoice => vec![ModelOption {
-                id: "vibevoice-asr".to_string(),
-                label: "VibeVoice ASR".to_string(),
-            }],
             AsrProviderType::Voxtral => vec![
                 ModelOption {
                     id: "voxtral-local".to_string(),
@@ -254,9 +247,6 @@ impl AsrProviderFactory {
                 selected_model_id,
             )),
             AsrProviderType::Moonshine => Box::new(moonshine::MoonshineProvider::new()),
-            AsrProviderType::VibeVoice => {
-                Box::new(vibevoice::VibeVoiceProvider::new(selected_model_id))
-            }
             AsrProviderType::Voxtral => Box::new(voxtral::VoxtralProvider::new(selected_model_id)),
             AsrProviderType::ElevenLabsScribe => Box::new(
                 elevenlabs_scribe::ElevenLabsScribeProvider::new(selected_model_id),

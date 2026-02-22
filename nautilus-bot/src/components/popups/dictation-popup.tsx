@@ -15,7 +15,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
-import { forceStopDictation } from "@/lib/tauri";
+import { forceStopDictation, getSettings, getDictationAudioLevel } from "@/lib/tauri";
 
 type DictationPhase = "idle" | "recording" | "stopping" | "transcribing" | "done" | "error";
 
@@ -36,8 +36,11 @@ export function DictationPopup() {
   const [elapsed, setElapsed] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<string | null>(null);
   const [compact, setCompact] = useState(false);
   const [sessionId, setSessionId] = useState<number | null>(null);
+  const [pushToTalk, setPushToTalk] = useState(true);
+  const [audioLevel, setAudioLevel] = useState(0);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -45,9 +48,16 @@ export function DictationPopup() {
     const setup = async () => {
       try {
         const initialState = await invoke<DictationStateChangedEvent>("get_dictation_overlay_state");
+        try {
+          const settings = await getSettings();
+          setPushToTalk(Boolean(settings.transcription.dictationPushToTalk));
+        } catch {
+          // Keep default mode if settings are temporarily unavailable.
+        }
         setPhase(initialState.phase);
         setMessage(initialState.message ?? null);
         setPreview(initialState.preview ?? null);
+        setOutcome(initialState.outcome ?? null);
         setSessionId(typeof initialState.sessionId === "number" ? initialState.sessionId : null);
         if (initialState.phase === "recording") {
           setStartedAtMs(
@@ -63,6 +73,7 @@ export function DictationPopup() {
         setPhase(payload.phase);
         setMessage(payload.message ?? null);
         setPreview(payload.preview ?? null);
+        setOutcome(payload.outcome ?? null);
         setSessionId(typeof payload.sessionId === "number" ? payload.sessionId : null);
         if (payload.phase === "recording") {
           const startMs =
@@ -92,6 +103,20 @@ export function DictationPopup() {
   }, [phase, startedAtMs]);
 
   useEffect(() => {
+    if (phase !== "recording") {
+      setAudioLevel(0);
+      return;
+    }
+
+    const id = setInterval(() => {
+      void getDictationAudioLevel()
+        .then((level) => setAudioLevel(level))
+        .catch(() => setAudioLevel(0));
+    }, 50);
+    return () => clearInterval(id);
+  }, [phase]);
+
+  useEffect(() => {
     const id = setInterval(() => {
       void invoke<DictationStateChangedEvent>("get_dictation_overlay_state")
         .then((state) => {
@@ -101,6 +126,7 @@ export function DictationPopup() {
             setPhase(state.phase);
             setMessage(state.message ?? null);
             setPreview(state.preview ?? null);
+            setOutcome(state.outcome ?? null);
             setSessionId(snapshotSessionId);
             if (state.phase === "recording") {
               setStartedAtMs(
@@ -155,7 +181,7 @@ export function DictationPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="rounded-2xl border border-white/20 bg-slate-950/90 px-4 py-3 shadow-2xl backdrop-blur-md">
+      <div className="rounded-2xl border border-cyan-400/35 bg-gradient-to-br from-slate-950/95 via-slate-900/90 to-cyan-950/55 px-4 py-3 backdrop-blur-md">
         <div
           className="mb-2 flex items-center justify-between text-slate-300"
           onMouseDown={() => void window.startDragging()}
@@ -201,8 +227,22 @@ export function DictationPopup() {
               <Mic className="h-5 w-5 text-orange-300 animate-pulse" />
             </div>
             <div className="flex-1">
-              <p className="text-sm font-semibold">Listening...</p>
-              {!compact && <p className="text-xs text-slate-300">Release hotkey to transcribe + paste</p>}
+              <p className="text-sm font-semibold">Listening</p>
+              {!compact && (
+                <>
+                  <div className="mt-1 h-1.5 w-full max-w-[200px] rounded-full bg-slate-700/50 overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-orange-400 to-orange-300 transition-all duration-75 rounded-full"
+                      style={{ width: `${Math.min(100, audioLevel * 100)}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-slate-300 mt-1">
+                    {pushToTalk
+                      ? "Release hotkey to transcribe + paste"
+                      : "Press the hotkey again to transcribe + paste"}
+                  </p>
+                </>
+              )}
             </div>
             <span className="font-mono text-sm text-orange-200">{elapsedText}</span>
             <button
@@ -240,7 +280,7 @@ export function DictationPopup() {
             <Loader2 className="h-5 w-5 animate-spin text-cyan-300" />
             <div>
               <p className="text-sm font-semibold">Transcribing</p>
-              <p className="text-xs text-slate-300">Inserting at cursor...</p>
+              <p className="text-xs text-slate-300">Preparing text for paste/clipboard…</p>
             </div>
           </div>
         )}
@@ -249,7 +289,13 @@ export function DictationPopup() {
           <div className="flex items-center gap-3 text-white">
             <CheckCircle2 className="h-5 w-5 text-emerald-300" />
             <div>
-              <p className="text-sm font-semibold">Inserted</p>
+              <p className="text-sm font-semibold">
+                {outcome === "pasted"
+                  ? "Paste command sent"
+                  : outcome === "copied"
+                    ? "Copied to clipboard"
+                    : "Transcription ready"}
+              </p>
               {!compact && message && (
                 <p className="text-xs text-slate-300 max-w-[280px]">{message}</p>
               )}
@@ -266,6 +312,11 @@ export function DictationPopup() {
             <div>
               <p className="text-sm font-semibold">Dictation failed</p>
               {!compact && message && <p className="text-xs text-slate-300 max-w-[280px]">{message}</p>}
+              {!compact && (
+                <p className="text-xs text-rose-200/90">
+                  Check microphone access, active provider, and shortcut permissions.
+                </p>
+              )}
             </div>
           </div>
         )}

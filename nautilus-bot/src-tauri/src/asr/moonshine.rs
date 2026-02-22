@@ -478,6 +478,7 @@ impl AsrProvider for MoonshineProvider {
             model_id: MOONSHINE_MODEL_ID.to_string(),
             requested_provider: AsrProviderType::Moonshine,
             actual_provider: AsrProviderType::Moonshine,
+            fallback_reason: None,
         })
     }
 

@@ -91,7 +91,6 @@ impl AsrManager {
                 "voxtral-local" | "voxtral-cloud" => candidate.to_string(),
                 _ => "voxtral-local".to_string(),
             },
-            AsrProviderType::VibeVoice => "vibevoice-asr".to_string(),
             _ => candidate.to_string(),
         }
     }
@@ -104,7 +103,6 @@ impl AsrManager {
             AsrProviderType::Whisper
             | AsrProviderType::DistilWhisper
             | AsrProviderType::Voxtral
-            | AsrProviderType::VibeVoice
             | AsrProviderType::ElevenLabsScribe
             | AsrProviderType::OpenAiCloud => {
                 AsrProviderFactory::create_with_model(provider_type, selected_model_id)
@@ -285,7 +283,6 @@ impl AsrManager {
                     .await
                     .remove(&provider_type);
                 result.requested_provider = provider_type;
-                result.actual_provider = provider_type;
                 if result.model_id.trim().is_empty() {
                     result.model_id = resolved_model.clone();
                 }
@@ -429,9 +426,13 @@ impl AsrManager {
             let start = std::time::Instant::now();
             match provider.transcribe(test_audio).await {
                 Ok(transcription) => {
+                    let non_empty_transcript = !transcription.text.trim().is_empty();
                     results.push(BenchmarkResult {
                         provider_type,
                         provider_name: provider.name().to_string(),
+                        model_id: selected_model.clone(),
+                        runtime_status: RuntimeStatus::Ready,
+                        non_empty_transcript,
                         processing_time_ms: start.elapsed().as_millis() as u64,
                         transcription: transcription.text,
                         confidence: transcription.confidence,
@@ -506,6 +507,9 @@ struct RuntimeDiagnosticsInternal {
 pub struct BenchmarkResult {
     pub provider_type: AsrProviderType,
     pub provider_name: String,
+    pub model_id: String,
+    pub runtime_status: RuntimeStatus,
+    pub non_empty_transcript: bool,
     pub processing_time_ms: u64,
     pub transcription: String,
     pub confidence: f64,
@@ -691,86 +695,6 @@ fn runtime_diagnostics_for_provider(
             )
         }
 
-        AsrProviderType::VibeVoice => {
-            let model_dir = models_root.join("vibevoice");
-            let has_config = is_valid_json_artifact(&model_dir.join("config.json"), 128);
-            let has_complete_shards = vibevoice_index_shards_present(&model_dir);
-            let has_full_weight =
-                is_valid_binary_artifact(&model_dir.join("model.safetensors"), 1024);
-            let model_ready = has_config && (has_full_weight || has_complete_shards);
-            let mut missing_files = Vec::new();
-            if !has_config {
-                missing_files.push("config.json (valid JSON)".to_string());
-            }
-            if !has_full_weight && !has_complete_shards {
-                missing_files.push(
-                    "model.safetensors or complete shards from model.safetensors.index.json"
-                        .to_string(),
-                );
-            }
-            if model_dir.join("model.safetensors.index.json").exists() && !has_complete_shards {
-                missing_files
-                    .push("all shards referenced by model.safetensors.index.json".to_string());
-            }
-            let python = super::python_runtime::find_python_for_provider("vibevoice");
-            let managed_python = super::python_runtime::managed_python_path();
-            let detected_python = python.or(managed_python);
-
-            if !model_ready {
-                return RuntimeDiagnosticsInternal {
-                    runtime_status: RuntimeStatus::MissingModel,
-                    runtime_message: Some(
-                        "VibeVoice model not downloaded. Download model assets before use."
-                            .to_string(),
-                    ),
-                    runtime_details: RuntimeDetails {
-                        model_path: Some(model_dir.to_string_lossy().to_string()),
-                        python_path: detected_python,
-                        missing_files,
-                        setup_action: Some(
-                            "Use Download on VibeVoice to fetch model assets and bootstrap managed runtime.".to_string(),
-                        ),
-                    },
-                };
-            }
-
-            if detected_python.is_none() {
-                return RuntimeDiagnosticsInternal {
-                    runtime_status: RuntimeStatus::MissingRuntime,
-                    runtime_message: Some(
-                        "VibeVoice runtime missing: bootstrap managed Python runtime (torch, transformers, librosa, soundfile)."
-                            .to_string(),
-                    ),
-                    runtime_details: RuntimeDetails {
-                        model_path: Some(model_dir.to_string_lossy().to_string()),
-                        python_path: None,
-                        missing_files: Vec::new(),
-                        setup_action: Some(
-                            "Click Download or Re-check runtime to bootstrap managed runtime.".to_string(),
-                        ),
-                    },
-                };
-            }
-
-            RuntimeDiagnosticsInternal {
-                runtime_status: if provider_available {
-                    RuntimeStatus::Ready
-                } else {
-                    RuntimeStatus::Error
-                },
-                runtime_message: Some(
-                    last_error
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "VibeVoice runtime ready.".to_string()),
-                ),
-                runtime_details: RuntimeDetails {
-                    model_path: Some(model_dir.to_string_lossy().to_string()),
-                    python_path: detected_python,
-                    missing_files: Vec::new(),
-                    setup_action: None,
-                },
-            }
-        }
         AsrProviderType::Voxtral => {
             let cloud_mode = selected_model_id.trim() == "voxtral-cloud";
             let has_key = has_provider_secret_or_env("mistral", "MISTRAL_API_KEY");
@@ -1037,32 +961,6 @@ fn missing_or_invalid_voxtral_local_files(model_dir: &Path) -> Vec<String> {
     missing
 }
 
-fn vibevoice_index_shards_present(model_dir: &Path) -> bool {
-    let index_path = model_dir.join("model.safetensors.index.json");
-    let Ok(raw) = std::fs::read_to_string(index_path) else {
-        return false;
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return false;
-    };
-    let Some(weight_map) = json.get("weight_map").and_then(|w| w.as_object()) else {
-        return false;
-    };
-    if weight_map.is_empty() {
-        return false;
-    }
-    let shard_names = weight_map
-        .values()
-        .filter_map(|v| v.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
-    if shard_names.is_empty() {
-        return false;
-    }
-    shard_names
-        .iter()
-        .all(|name| is_valid_binary_artifact(&model_dir.join(name), 1024))
-}
-
 fn migrate_legacy_local_artifacts(models_root: &Path) {
     let parakeet_dir = models_root.join("parakeet");
     if !parakeet_dir.exists() {
@@ -1212,10 +1110,7 @@ fn sanitize_whisper_model_id(model_id: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        migrate_legacy_local_artifacts, missing_or_invalid_voxtral_local_files,
-        vibevoice_index_shards_present,
-    };
+    use super::{migrate_legacy_local_artifacts, missing_or_invalid_voxtral_local_files};
     use std::path::PathBuf;
 
     fn temp_models_root() -> PathBuf {
@@ -1268,49 +1163,6 @@ mod tests {
         let tokens = std::fs::read(parakeet.join("tokens.txt")).expect("read tokens");
         assert_eq!(encoder, b"new-model");
         assert_eq!(tokens, b"new-vocab");
-        let _ = std::fs::remove_dir_all(models_root);
-    }
-
-    #[test]
-    fn vibevoice_index_requires_all_valid_shards() {
-        let models_root = temp_models_root();
-        let vibevoice = models_root.join("vibevoice");
-        std::fs::create_dir_all(&vibevoice).expect("create vibevoice dir");
-
-        let index = serde_json::json!({
-            "weight_map": {
-                "layer_0": "model-00001-of-00002.safetensors",
-                "layer_1": "model-00002-of-00002.safetensors"
-            }
-        });
-        std::fs::write(
-            vibevoice.join("model.safetensors.index.json"),
-            index.to_string(),
-        )
-        .expect("write index");
-
-        let mut shard = vec![0u8; 2048];
-        shard[0] = 1;
-        std::fs::write(vibevoice.join("model-00001-of-00002.safetensors"), shard)
-            .expect("write shard 1");
-        assert!(
-            !vibevoice_index_shards_present(&vibevoice),
-            "missing shard should fail readiness"
-        );
-
-        std::fs::write(vibevoice.join("model-00002-of-00002.safetensors"), b"short")
-            .expect("write invalid shard 2");
-        assert!(
-            !vibevoice_index_shards_present(&vibevoice),
-            "truncated shard should fail readiness"
-        );
-
-        let mut shard2 = vec![0u8; 2048];
-        shard2[0] = 1;
-        std::fs::write(vibevoice.join("model-00002-of-00002.safetensors"), shard2)
-            .expect("write valid shard 2");
-        assert!(vibevoice_index_shards_present(&vibevoice));
-
         let _ = std::fs::remove_dir_all(models_root);
     }
 

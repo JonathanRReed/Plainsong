@@ -303,6 +303,7 @@ impl AsrProvider for CanaryProvider {
             model_id: CANARY_MODEL_ID.to_string(),
             requested_provider: AsrProviderType::Canary,
             actual_provider: AsrProviderType::Canary,
+            fallback_reason: None,
         })
     }
 

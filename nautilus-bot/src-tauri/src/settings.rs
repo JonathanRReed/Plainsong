@@ -120,6 +120,8 @@ pub struct TranscriptionSettings {
     pub silence_skip_enabled: bool,
     /// Dictation: Paste text to cursor automatically
     pub dictation_paste_to_cursor: bool,
+    /// Dictation: Keep latest dictation result in clipboard
+    pub dictation_copy_to_clipboard: bool,
     /// Dictation: Use Push-to-Talk (start on press, stop on release)
     pub dictation_push_to_talk: bool,
     /// Dictation: Smart Format — LLM polishes text before insert
@@ -128,6 +130,10 @@ pub struct TranscriptionSettings {
     pub dictation_custom_prompt: Option<String>,
     /// Custom system prompt for Meeting Summaries
     pub meeting_custom_prompt: Option<String>,
+    /// Auto-generate meeting title when transcription finishes
+    pub meeting_auto_name_enabled: bool,
+    /// Optional model override for meeting title generation
+    pub meeting_auto_name_model: Option<String>,
     /// Save raw transcript without formatting
     pub save_raw_transcript: bool,
     /// Persist dictation outputs into project storage.
@@ -136,6 +142,12 @@ pub struct TranscriptionSettings {
     pub dictation_profile: String,
     /// Target project for saved dictations.
     pub dictation_project_id: String,
+    /// Dictation recording retention policy.
+    pub dictation_retention_preset: String,
+    /// Dictation retention custom duration in hours.
+    pub dictation_retention_custom_hours: u32,
+    /// Dictation: Silence timeout in seconds before auto-stop (0 = disabled)
+    pub dictation_silence_timeout_seconds: f32,
     /// Memory search mode: "fts" (default) or "ollama_embeddings"
     pub memory_search_mode: String,
     /// Ollama embedding model name (e.g. "nomic-embed-text")
@@ -159,14 +171,20 @@ impl Default for TranscriptionSettings {
             diarization_model_id: "ecapa_tdnn_speaker".to_string(),
             silence_skip_enabled: false,
             dictation_paste_to_cursor: true,
-            dictation_push_to_talk: false,
+            dictation_copy_to_clipboard: true,
+            dictation_push_to_talk: true,
             dictation_ai_formatting: false,
             dictation_custom_prompt: None,
             meeting_custom_prompt: None,
+            meeting_auto_name_enabled: true,
+            meeting_auto_name_model: None,
             save_raw_transcript: false,
             dictation_save_to_inbox: true,
             dictation_profile: "speed".to_string(),
             dictation_project_id: "inbox".to_string(),
+            dictation_retention_preset: "never".to_string(),
+            dictation_retention_custom_hours: 24,
+            dictation_silence_timeout_seconds: 0.0,
             memory_search_mode: "fts".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
             enable_auto_analysis: true,

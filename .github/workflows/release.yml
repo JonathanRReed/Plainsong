@@ -3,17 +3,17 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g., 1.2.3)'
+        description: "Version to release (e.g., 1.2.3)"
         required: true
         type: string
       channel:
-        description: 'Release channel'
+        description: "Release channel"
         required: true
-        default: 'stable'
+        default: "stable"
         type: choice
         options:
           - stable
@@ -21,11 +21,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  NODE_VERSION: '20'
-  RUST_VERSION: 'stable'
+  NODE_VERSION: "20"
+  RUST_VERSION: "stable"
 
 jobs:
-  # ── Extract version / channel ────────────────────────────────────────────────
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -57,12 +56,13 @@ jobs:
             IS_BETA="false"
           fi
 
-          echo "version=$VERSION"   >> $GITHUB_OUTPUT
-          echo "channel=$CHANNEL"   >> $GITHUB_OUTPUT
-          echo "is_beta=$IS_BETA"   >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "is_beta=$IS_BETA" >> "$GITHUB_OUTPUT"
           echo "Version: $VERSION | Channel: $CHANNEL | Beta: $IS_BETA"
 
-      - name: Validate live ASR secrets
+      - name: Validate live cloud ASR secrets
+        id: cloud_secret_check
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
@@ -77,22 +77,123 @@ jobs:
             exit 1
           fi
 
-      - name: Run live cloud ASR smoke tests
+      - name: Install dependencies
+        working-directory: nautilus-bot
+        run: npm ci
+
+      - name: Run live cloud ASR smoke gate
+        id: cloud_smoke
         working-directory: nautilus-bot
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-        run: node scripts/live-cloud-asr-smoke.mjs --out ../artifacts/cloud-asr-smoke.json
+        run: |
+          mkdir -p ../artifacts
+          node scripts/live-cloud-asr-smoke.mjs --out ../artifacts/cloud-asr-smoke.json
 
-      - uses: actions/upload-artifact@v4
+      - name: Validate cloud smoke artifact schema
+        working-directory: nautilus-bot
+        run: |
+          node scripts/validate-gate-artifact.mjs \
+            --schema docs/ci/schemas/cloud-asr-smoke.schema.json \
+            --file ../artifacts/cloud-asr-smoke.json
+
+      - name: Upload cloud smoke artifact
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: cloud-asr-smoke
           path: artifacts/cloud-asr-smoke.json
 
-  # ── macOS (Universal: x86_64 + aarch64) ─────────────────────────────────────
-  build-macos:
+  preflight-macos:
     needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: nautilus-bot/package-lock.json
+
+      - name: Install dependencies
+        working-directory: nautilus-bot
+        run: npm ci
+
+      - name: ASR asset + runtime preflight
+        id: asr_preflight
+        working-directory: nautilus-bot
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          NAUTILUS_ASR_ASSET_BUNDLE_URL: ${{ secrets.NAUTILUS_ASR_ASSET_BUNDLE_URL }}
+        run: |
+          mkdir -p ../artifacts
+          node scripts/provision-asr-assets.mjs --provision --out ../artifacts/asr-preflight-macos.json
+
+      - name: Validate macOS ASR preflight artifact schema
+        working-directory: nautilus-bot
+        run: |
+          node scripts/validate-gate-artifact.mjs \
+            --schema docs/ci/schemas/asr-preflight.schema.json \
+            --file ../artifacts/asr-preflight-macos.json
+
+      - name: Upload preflight artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asr-preflight-macos
+          path: artifacts/asr-preflight-macos.json
+
+  preflight-windows:
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: nautilus-bot/package-lock.json
+
+      - name: Install dependencies
+        working-directory: nautilus-bot
+        run: npm ci
+
+      - name: ASR asset + runtime preflight
+        id: asr_preflight
+        working-directory: nautilus-bot
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          NAUTILUS_ASR_ASSET_BUNDLE_URL: ${{ secrets.NAUTILUS_ASR_ASSET_BUNDLE_URL }}
+        shell: bash
+        run: |
+          mkdir -p ../artifacts
+          node scripts/provision-asr-assets.mjs --provision --out ../artifacts/asr-preflight-windows.json
+
+      - name: Validate Windows ASR preflight artifact schema
+        working-directory: nautilus-bot
+        shell: bash
+        run: |
+          node scripts/validate-gate-artifact.mjs \
+            --schema docs/ci/schemas/asr-preflight.schema.json \
+            --file ../artifacts/asr-preflight-windows.json
+
+      - name: Upload preflight artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asr-preflight-windows
+          path: artifacts/asr-preflight-windows.json
+
+  build-macos:
+    needs: [prepare, preflight-macos]
     runs-on: macos-latest
     permissions:
       contents: write
@@ -102,7 +203,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
+          cache: npm
           cache-dependency-path: nautilus-bot/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
@@ -120,17 +221,36 @@ jobs:
           TAURI_SIGNING_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
         run: node scripts/inject-updater-pubkey.js
 
-      - name: Live cloud ASR integration tests (Rust)
+      - name: Live cloud ASR integration gate
+        id: live_cloud_gate
         working-directory: nautilus-bot/src-tauri
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
           MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-        run: cargo test --test asr_live_cloud_integration --no-default-features --features asr-all,sqlcipher -- --nocapture
+        shell: bash
+        run: |
+          mkdir -p ../../artifacts
+          set -o pipefail
+          cargo test --test asr_live_cloud_integration --no-default-features --features asr-all,sqlcipher -- --nocapture | tee ../../artifacts/asr-live-cloud-gate.log
+
+      - name: Local ASR smoke gate
+        id: local_smoke_gate
+        working-directory: nautilus-bot/src-tauri
+        shell: bash
+        run: |
+          mkdir -p ../../artifacts
+          set -o pipefail
+          cargo test --test asr_local_provider_smoke --no-default-features --features asr-all,sqlcipher -- --nocapture | tee ../../artifacts/asr-local-smoke-gate.log
 
       - name: Local ASR performance gate (RTF <= 1.2)
+        id: local_perf_gate
         working-directory: nautilus-bot/src-tauri
-        run: cargo test --test asr_local_performance_gate --no-default-features --features asr-all,sqlcipher -- --nocapture
+        shell: bash
+        run: |
+          mkdir -p ../../artifacts
+          set -o pipefail
+          cargo test --test asr_local_performance_gate --no-default-features --features asr-all,sqlcipher -- --nocapture | tee ../../artifacts/asr-local-perf-gate.log
 
       - name: Install Apple certificate into temp keychain
         if: env.APPLE_CERTIFICATE != ''
@@ -151,6 +271,7 @@ jobs:
           security find-identity -v -p codesigning build.keychain
 
       - name: Build & sign (Tauri)
+        id: tauri_build
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -180,17 +301,90 @@ jobs:
           releaseDraft: false
           prerelease: ${{ needs.prepare.outputs.is_beta == 'true' }}
 
-      - uses: actions/upload-artifact@v4
+      - name: Cold-start gate (M1 baseline)
+        id: cold_start_gate
+        working-directory: nautilus-bot
+        shell: bash
+        run: |
+          mkdir -p ../artifacts
+          set -o pipefail
+          pkill -f '/Nautilus.app/Contents/MacOS/Nautilus' || true
+          node scripts/cold-start-gate.mjs --threshold-ms 2500 --ready-command "pgrep -f '/Nautilus.app/Contents/MacOS/Nautilus'" -- bash -lc "open \"src-tauri/target/release/bundle/macos/Nautilus.app\"" | tee ../artifacts/cold-start-macos.json
+          pkill -f '/Nautilus.app/Contents/MacOS/Nautilus' || true
+
+      - name: Validate cold-start artifact schema
+        id: cold_start_artifact
+        working-directory: nautilus-bot
+        run: |
+          node scripts/validate-gate-artifact.mjs \
+            --schema docs/ci/schemas/cold-start-gate.schema.json \
+            --file ../artifacts/cold-start-macos.json
+
+      - name: Verify packaged QA matrix
+        id: qa_matrix_gate
+        working-directory: nautilus-bot
+        run: node scripts/verify-qa-matrix.mjs --file docs/packaged-app-qa-matrix.md
+
+      - name: Export packaged QA evidence bundle
+        id: qa_evidence_bundle
+        working-directory: nautilus-bot
+        run: |
+          node scripts/export-qa-evidence-bundle.mjs \
+            --matrix docs/packaged-app-qa-matrix.md \
+            --out ../artifacts/packaged-qa-evidence-bundle-macos.json
+
+      - name: Validate packaged QA evidence bundle schema
+        id: qa_evidence_bundle_schema
+        working-directory: nautilus-bot
+        run: |
+          node scripts/validate-gate-artifact.mjs \
+            --schema docs/ci/schemas/packaged-qa-evidence-bundle.schema.json \
+            --file ../artifacts/packaged-qa-evidence-bundle-macos.json
+
+      - name: Create macOS gate summary
+        if: always()
+        working-directory: nautilus-bot
+        run: |
+          mkdir -p ../artifacts
+          report="../artifacts/release-gates-macos.md"
+          {
+            echo "# Release Gate Report (macOS)"
+            echo
+            echo "Generated at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo
+            echo "| Gate | Outcome |"
+            echo "| --- | --- |"
+            echo "| ASR preflight | ${{ needs.preflight-macos.result }} |"
+            echo "| Cloud integration gate | ${{ steps.live_cloud_gate.outcome }} |"
+            echo "| Local smoke gate | ${{ steps.local_smoke_gate.outcome }} |"
+            echo "| Local performance gate | ${{ steps.local_perf_gate.outcome }} |"
+            echo "| Build & sign | ${{ steps.tauri_build.outcome }} |"
+            echo "| Cold-start gate | ${{ steps.cold_start_gate.outcome }} |"
+            echo "| Cold-start artifact schema | ${{ steps.cold_start_artifact.outcome }} |"
+            echo "| Packaged QA matrix check | ${{ steps.qa_matrix_gate.outcome }} |"
+            echo "| Packaged QA evidence bundle | ${{ steps.qa_evidence_bundle.outcome }} |"
+            echo "| Packaged QA evidence schema | ${{ steps.qa_evidence_bundle_schema.outcome }} |"
+          } > "$report"
+
+      - name: Upload macOS artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: macos-artifacts
           path: |
             nautilus-bot/src-tauri/target/release/bundle/dmg/*.dmg
             nautilus-bot/src-tauri/target/release/bundle/macos/*.app.tar.gz
             nautilus-bot/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            artifacts/asr-live-cloud-gate.log
+            artifacts/asr-local-smoke-gate.log
+            artifacts/asr-local-perf-gate.log
+            artifacts/cold-start-macos.json
+            artifacts/release-gates-macos.md
+            artifacts/packaged-qa-evidence-bundle-macos.json
+            nautilus-bot/docs/packaged-app-qa-matrix.md
 
-  # ── Windows (x86_64) ─────────────────────────────────────────────────────────
   build-windows:
-    needs: prepare
+    needs: [prepare, preflight-windows]
     runs-on: windows-latest
     permissions:
       contents: write
@@ -200,7 +394,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
+          cache: npm
           cache-dependency-path: nautilus-bot/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
@@ -219,7 +413,39 @@ jobs:
           TAURI_SIGNING_PUBLIC_KEY: ${{ secrets.TAURI_SIGNING_PUBLIC_KEY }}
         run: node scripts/inject-updater-pubkey.js
 
+      - name: Live cloud ASR integration gate
+        id: live_cloud_gate
+        working-directory: nautilus-bot/src-tauri
+        shell: bash
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+        run: |
+          mkdir -p ../../artifacts
+          set -o pipefail
+          cargo test --test asr_live_cloud_integration --no-default-features --features asr-all,sqlcipher -- --nocapture | tee ../../artifacts/asr-live-cloud-gate-windows.log
+
+      - name: Local ASR smoke gate
+        id: local_smoke_gate
+        working-directory: nautilus-bot/src-tauri
+        shell: bash
+        run: |
+          mkdir -p ../../artifacts
+          set -o pipefail
+          cargo test --test asr_local_provider_smoke --no-default-features --features asr-all,sqlcipher -- --nocapture | tee ../../artifacts/asr-local-smoke-gate-windows.log
+
+      - name: Local ASR performance gate (RTF <= 1.2)
+        id: local_perf_gate
+        working-directory: nautilus-bot/src-tauri
+        shell: bash
+        run: |
+          mkdir -p ../../artifacts
+          set -o pipefail
+          cargo test --test asr_local_performance_gate --no-default-features --features asr-all,sqlcipher -- --nocapture | tee ../../artifacts/asr-local-perf-gate-windows.log
+
       - name: Build & sign (Tauri)
+        id: tauri_build
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -244,7 +470,56 @@ jobs:
           releaseDraft: false
           prerelease: ${{ needs.prepare.outputs.is_beta == 'true' }}
 
-      - uses: actions/upload-artifact@v4
+      - name: Verify packaged QA matrix
+        id: qa_matrix_gate
+        working-directory: nautilus-bot
+        run: node scripts/verify-qa-matrix.mjs --file docs/packaged-app-qa-matrix.md
+
+      - name: Export packaged QA evidence bundle
+        id: qa_evidence_bundle
+        working-directory: nautilus-bot
+        shell: bash
+        run: |
+          node scripts/export-qa-evidence-bundle.mjs \
+            --matrix docs/packaged-app-qa-matrix.md \
+            --out ../artifacts/packaged-qa-evidence-bundle-windows.json
+
+      - name: Validate packaged QA evidence bundle schema
+        id: qa_evidence_bundle_schema
+        working-directory: nautilus-bot
+        shell: bash
+        run: |
+          node scripts/validate-gate-artifact.mjs \
+            --schema docs/ci/schemas/packaged-qa-evidence-bundle.schema.json \
+            --file ../artifacts/packaged-qa-evidence-bundle-windows.json
+
+      - name: Create Windows gate summary
+        if: always()
+        working-directory: nautilus-bot
+        shell: bash
+        run: |
+          mkdir -p ../artifacts
+          report="../artifacts/release-gates-windows.md"
+          {
+            echo "# Release Gate Report (Windows)"
+            echo
+            echo "Generated at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo
+            echo "| Gate | Outcome |"
+            echo "| --- | --- |"
+            echo "| ASR preflight | ${{ needs.preflight-windows.result }} |"
+            echo "| Cloud integration gate | ${{ steps.live_cloud_gate.outcome }} |"
+            echo "| Local smoke gate | ${{ steps.local_smoke_gate.outcome }} |"
+            echo "| Local performance gate | ${{ steps.local_perf_gate.outcome }} |"
+            echo "| Build & sign | ${{ steps.tauri_build.outcome }} |"
+            echo "| Packaged QA matrix check | ${{ steps.qa_matrix_gate.outcome }} |"
+            echo "| Packaged QA evidence bundle | ${{ steps.qa_evidence_bundle.outcome }} |"
+            echo "| Packaged QA evidence schema | ${{ steps.qa_evidence_bundle_schema.outcome }} |"
+          } > "$report"
+
+      - name: Upload Windows artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: windows-artifacts
           path: |
@@ -252,11 +527,17 @@ jobs:
             nautilus-bot/src-tauri/target/release/bundle/msi/*.msi.sig
             nautilus-bot/src-tauri/target/release/bundle/nsis/*.exe
             nautilus-bot/src-tauri/target/release/bundle/nsis/*.exe.sig
+            artifacts/asr-live-cloud-gate-windows.log
+            artifacts/asr-local-smoke-gate-windows.log
+            artifacts/asr-local-perf-gate-windows.log
+            artifacts/release-gates-windows.md
+            artifacts/packaged-qa-evidence-bundle-windows.json
+            nautilus-bot/docs/packaged-app-qa-matrix.md
 
-  # ── Linux (x86_64 — .deb + .AppImage) ───────────────────────────────────────
   build-linux:
     needs: prepare
     runs-on: ubuntu-22.04
+    continue-on-error: true
     permissions:
       contents: write
     steps:
@@ -265,7 +546,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
+          cache: npm
           cache-dependency-path: nautilus-bot/package-lock.json
 
       - uses: dtolnay/rust-toolchain@stable
@@ -318,33 +599,15 @@ jobs:
           releaseDraft: false
           prerelease: ${{ needs.prepare.outputs.is_beta == 'true' }}
 
-      - name: GPG-sign Linux artifacts
-        if: env.GPG_PRIVATE_KEY != ''
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-        run: |
-          echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
-          for f in \
-            nautilus-bot/src-tauri/target/release/bundle/deb/*.deb \
-            nautilus-bot/src-tauri/target/release/bundle/appimage/*.AppImage; do
-            [ -f "$f" ] || continue
-            echo "$GPG_PASSPHRASE" | gpg --batch --passphrase-fd 0 \
-              --pinentry-mode loopback --detach-sign --armor "$f"
-          done
-
       - uses: actions/upload-artifact@v4
         with:
           name: linux-artifacts
           path: |
             nautilus-bot/src-tauri/target/release/bundle/deb/*.deb
-            nautilus-bot/src-tauri/target/release/bundle/deb/*.deb.sig
             nautilus-bot/src-tauri/target/release/bundle/appimage/*.AppImage
-            nautilus-bot/src-tauri/target/release/bundle/appimage/*.AppImage.sig
 
-  # ── Generate update manifests + deploy to Cloudflare R2 ─────────────────────
   generate-manifests:
-    needs: [prepare, build-macos, build-windows, build-linux]
+    needs: [prepare, build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -364,6 +627,7 @@ jobs:
           path: artifacts/windows
 
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: linux-artifacts
           path: artifacts/linux
@@ -380,7 +644,7 @@ jobs:
                           "linux:x86_64:linux:Nautilus_${VERSION}_amd64.AppImage"; do
             IFS=":" read -r OS ARCH DIR FILE <<< "$PLATFORM"
             [ -f "artifacts/$DIR/$FILE" ] || continue
-            node scripts/generate-update-manifest.js \
+            node nautilus-bot/scripts/generate-update-manifest.js \
               --version "$VERSION" \
               --platform "$OS" \
               --arch "$ARCH" \
@@ -395,7 +659,6 @@ jobs:
           name: update-manifests
           path: manifests/
 
-      # ── Deploy to Cloudflare R2 (S3-compatible API) ─────────────────────────
       - name: Deploy manifests to Cloudflare R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
@@ -404,9 +667,8 @@ jobs:
           R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
           R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
         run: |
-          # Skip if R2 secrets are not configured
           if [ -z "$AWS_ACCESS_KEY_ID" ]; then
-            echo "⚠️  Cloudflare R2 secrets not set — skipping CDN deploy."
+            echo "Cloudflare R2 secrets not set, skipping deploy."
             exit 0
           fi
           pip install --quiet awscli
@@ -414,29 +676,32 @@ jobs:
             --endpoint-url "$R2_ENDPOINT" \
             --delete \
             --cache-control "max-age=60, must-revalidate"
-          echo "✅ Manifests deployed to R2 bucket: ${R2_BUCKET}"
 
-
-  # ── Summary ──────────────────────────────────────────────────────────────────
   notify:
-    needs: [prepare, build-macos, build-windows, build-linux, generate-manifests]
+    needs: [prepare, preflight-macos, preflight-windows, build-macos, build-windows, build-linux, generate-manifests]
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Release summary
         run: |
+          PRE_MAC="${{ needs.preflight-macos.result }}"
+          PRE_WIN="${{ needs.preflight-windows.result }}"
           MAC="${{ needs.build-macos.result }}"
           WIN="${{ needs.build-windows.result }}"
           LIN="${{ needs.build-linux.result }}"
           MAN="${{ needs.generate-manifests.result }}"
-          echo "macOS:   $MAC"
-          echo "Windows: $WIN"
-          echo "Linux:   $LIN"
-          echo "CDN:     $MAN"
-          if [ "$MAC" = "success" ] && [ "$WIN" = "success" ] && \
-             [ "$LIN" = "success" ] && [ "$MAN" = "success" ]; then
-            echo "🚀 Release v${{ needs.prepare.outputs.version }} shipped on all platforms!"
+          echo "preflight-macos:   $PRE_MAC"
+          echo "preflight-windows: $PRE_WIN"
+          echo "macOS:             $MAC"
+          echo "Windows:           $WIN"
+          echo "Linux (non-blocking): $LIN"
+          echo "manifests/CDN:     $MAN"
+
+          if [ "$PRE_MAC" = "success" ] && [ "$PRE_WIN" = "success" ] && \
+             [ "$MAC" = "success" ] && [ "$WIN" = "success" ] && \
+             [ "$MAN" = "success" ]; then
+            echo "Release gates passed for macOS + Windows."
           else
-            echo "❌ At least one job failed — review logs above."
+            echo "At least one launch-blocking gate failed."
             exit 1
           fi

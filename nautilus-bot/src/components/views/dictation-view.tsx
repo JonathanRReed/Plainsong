@@ -1,13 +1,20 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { cn } from "@/lib/utils";
 import { useRecording } from "@/hooks/use-recording";
 import { useProjects } from "@/hooks/use-projects";
+import { useRecordings } from "@/hooks/use-recordings";
 import { getSettings, saveSettings } from "@/lib/tauri";
+import {
+  defaultDictationShortcut,
+  dictationInstruction,
+  formatShortcutForDisplay,
+  matchesShortcut,
+} from "@/lib/shortcuts";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Keyboard, Mic, Square, Zap, Save } from "lucide-react";
+import { Keyboard, Mic, Square, Zap, Save, RefreshCw } from "lucide-react";
 
 interface DictationTextReadyEvent {
   text: string;
@@ -16,6 +23,8 @@ interface DictationTextReadyEvent {
   pasteError?: string | null;
   requestedProvider?: string;
   actualProvider?: string;
+  fallbackReason?: string | null;
+  fallbackMessage?: string | null;
   modelId?: string;
   latencyMs?: number;
 }
@@ -23,24 +32,46 @@ interface DictationTextReadyEvent {
 export function DictationView() {
   const { isRecording, formattedDuration, startDictation, stopDictation } = useRecording();
   const { projects } = useProjects();
-  const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
-  const fallbackHotkeyLabel = isMac
-    ? "Cmd + Shift + Space or Ctrl + Shift + Space"
-    : "Ctrl + Shift + Space";
-  const defaultShortcut = isMac ? "Cmd+Shift+Space" : "Ctrl+Shift+Space";
-  const [hotkeyLabel, setHotkeyLabel] = useState(fallbackHotkeyLabel);
+  const { recordings, isLoading: dictationHistoryLoading, refetch: refetchDictationHistory } = useRecordings();
+  const defaultShortcut = defaultDictationShortcut();
+  const [hotkeyLabel, setHotkeyLabel] = useState(formatShortcutForDisplay(defaultShortcut));
   const [hotkeyShortcut, setHotkeyShortcut] = useState(defaultShortcut);
   const [transcribedText, setTranscribedText] = useState("");
   const [lastProvider, setLastProvider] = useState<string | null>(null);
   const [lastModelId, setLastModelId] = useState<string | null>(null);
+  const [fallbackStatus, setFallbackStatus] = useState<string | null>(null);
   const [pasteStatus, setPasteStatus] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const [saveToInbox, setSaveToInbox] = useState(true);
   const [dictationProfile, setDictationProfile] = useState<"speed" | "accuracy">("speed");
   const [defaultProjectId, setDefaultProjectId] = useState("inbox");
+  const [dictationPushToTalk, setDictationPushToTalk] = useState(true);
+  const [dictationCopyToClipboard, setDictationCopyToClipboard] = useState(true);
+  const [dictationRetentionPreset, setDictationRetentionPreset] = useState<
+    "immediate" | "24h" | "72h" | "never" | "custom"
+  >("never");
+  const [dictationRetentionCustomHours, setDictationRetentionCustomHours] = useState(24);
   const [hotkeyPressed, setHotkeyPressed] = useState(false);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const dictationHistory = useMemo(
+    () =>
+      recordings
+        .filter((recording) => recording.sourceType === "dictation")
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [recordings]
+  );
+  const pasteNeedsAttention = useMemo(() => {
+    if (!pasteStatus) return false;
+    const normalized = pasteStatus.toLowerCase();
+    if (normalized.includes("pasted")) return false;
+    return (
+      normalized.includes("clipboard") ||
+      normalized.includes("accessibility") ||
+      normalized.includes("blocked") ||
+      normalized.includes("permission")
+    );
+  }, [pasteStatus]);
 
   useEffect(() => {
     let mounted = true;
@@ -50,8 +81,12 @@ export function DictationView() {
         setSaveToInbox(settings.transcription.dictationSaveToInbox);
         setDictationProfile(settings.transcription.dictationProfile);
         setDefaultProjectId(settings.transcription.dictationProjectId || "inbox");
+        setDictationPushToTalk(settings.transcription.dictationPushToTalk);
+        setDictationCopyToClipboard(settings.transcription.dictationCopyToClipboard ?? true);
+        setDictationRetentionPreset(settings.transcription.dictationRetentionPreset ?? "never");
+        setDictationRetentionCustomHours(settings.transcription.dictationRetentionCustomHours ?? 24);
         const shortcut = settings.shortcuts.toggleDictation || defaultShortcut;
-        setHotkeyLabel(shortcut);
+        setHotkeyLabel(formatShortcutForDisplay(shortcut));
         setHotkeyShortcut(shortcut);
       })
       .catch((error) => {
@@ -60,44 +95,31 @@ export function DictationView() {
     return () => {
       mounted = false;
     };
-  }, [defaultShortcut, fallbackHotkeyLabel]);
-
-  const matchesShortcut = (event: KeyboardEvent, shortcut: string): boolean => {
-    const normalized = shortcut.replace(/\s+/g, "");
-    const parts = normalized.split("+").filter(Boolean);
-    if (parts.length < 2) {
-      return false;
-    }
-
-    const key = parts[parts.length - 1].toLowerCase();
-    const modifiers = new Set(parts.slice(0, -1).map((part) => part.toLowerCase()));
-
-    const expectedMeta = modifiers.has("cmd") || modifiers.has("meta") || modifiers.has("super");
-    const expectedCtrl = modifiers.has("ctrl") || modifiers.has("control");
-    const expectedAlt = modifiers.has("alt") || modifiers.has("option");
-    const expectedShift = modifiers.has("shift");
-
-    if (event.metaKey !== expectedMeta) return false;
-    if (event.ctrlKey !== expectedCtrl) return false;
-    if (event.altKey !== expectedAlt) return false;
-    if (event.shiftKey !== expectedShift) return false;
-
-    if (key === "space") {
-      return event.code === "Space";
-    }
-
-    const eventKey = event.key.length === 1 ? event.key.toLowerCase() : event.key.toLowerCase();
-    return eventKey === key;
-  };
+  }, [defaultShortcut]);
 
   const persistDictationPreferences = async (
-    updates: Partial<{ saveToInbox: boolean; profile: "speed" | "accuracy"; projectId: string }>
+    updates: Partial<{
+      saveToInbox: boolean;
+      profile: "speed" | "accuracy";
+      projectId: string;
+      pushToTalk: boolean;
+      copyToClipboard: boolean;
+      retentionPreset: "immediate" | "24h" | "72h" | "never" | "custom";
+      retentionCustomHours: number;
+    }>
   ) => {
     try {
       const settings = await getSettings();
       settings.transcription.dictationSaveToInbox = updates.saveToInbox ?? saveToInbox;
       settings.transcription.dictationProfile = updates.profile ?? dictationProfile;
       settings.transcription.dictationProjectId = updates.projectId ?? defaultProjectId;
+      settings.transcription.dictationPushToTalk = updates.pushToTalk ?? dictationPushToTalk;
+      settings.transcription.dictationCopyToClipboard =
+        updates.copyToClipboard ?? dictationCopyToClipboard;
+      settings.transcription.dictationRetentionPreset =
+        updates.retentionPreset ?? dictationRetentionPreset;
+      settings.transcription.dictationRetentionCustomHours =
+        updates.retentionCustomHours ?? dictationRetentionCustomHours;
       await saveSettings(settings);
     } catch (error) {
       console.warn("Failed to persist dictation preferences:", error);
@@ -142,6 +164,22 @@ export function DictationView() {
         if (payload?.actualProvider) {
           setLastProvider(payload.actualProvider);
         }
+        const hasProviderFallback =
+          !!payload?.requestedProvider &&
+          !!payload?.actualProvider &&
+          payload.requestedProvider !== payload.actualProvider;
+        if (payload?.fallbackMessage) {
+          setFallbackStatus(payload.fallbackMessage);
+        } else if (hasProviderFallback) {
+          const reason =
+            payload?.fallbackReason?.trim() ||
+            "Requested provider could not complete transcription.";
+          setFallbackStatus(
+            `ASR fallback: requested '${payload.requestedProvider}' but used '${payload.actualProvider}'. ${reason}`
+          );
+        } else {
+          setFallbackStatus(null);
+        }
         if (payload?.modelId) {
           setLastModelId(payload.modelId);
         }
@@ -149,7 +187,7 @@ export function DictationView() {
           setLatencyMs(payload.latencyMs);
         }
         if (payload?.pasted) {
-          setPasteStatus("Pasted into focused app");
+          setPasteStatus("Paste command sent (also copied to clipboard)");
         } else if (payload?.copied) {
           setPasteStatus(payload?.pasteError ?? "Copied to clipboard");
         } else if (payload?.pasteError) {
@@ -168,18 +206,11 @@ export function DictationView() {
   const handleStopDictation = async () => {
     try {
       const text = await stopDictation();
-      if (text?.trim()) {
-        setTranscribedText(text);
-        setDictationError(null);
-        setPasteStatus(null);
-
-        // Copy to clipboard
-        try {
-          await navigator.clipboard.writeText(text);
-        } catch (err) {
-          console.error("Failed to copy to clipboard:", err);
-        }
-      } else {
+        if (text?.trim()) {
+          setTranscribedText(text);
+          setDictationError(null);
+          void refetchDictationHistory();
+        } else {
         setDictationError(
           "No transcript was produced. Check your selected ASR provider/model and microphone input."
         );
@@ -188,6 +219,12 @@ export function DictationView() {
       const message = error instanceof Error ? error.message : String(error);
       setDictationError(message);
     }
+  };
+
+  const formatRecordingDuration = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
   return (
@@ -207,7 +244,9 @@ export function DictationView() {
             >
               <Keyboard className="h-4 w-4" />
               <span className="font-mono font-medium">{hotkeyLabel}</span>
-              <span className="text-muted-foreground ml-2">to toggle</span>
+              <span className="text-muted-foreground ml-2">
+                {dictationPushToTalk ? "hold to talk" : "toggle"}
+              </span>
             </div>
             <div className="flex items-center gap-2">
               <input
@@ -223,6 +262,22 @@ export function DictationView() {
               />
               <label htmlFor="saveToInbox" className="text-sm text-muted-foreground">
                 Save to Inbox
+              </label>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="copyToClipboard"
+                checked={dictationCopyToClipboard}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  setDictationCopyToClipboard(next);
+                  void persistDictationPreferences({ copyToClipboard: next });
+                }}
+                className="h-4 w-4"
+              />
+              <label htmlFor="copyToClipboard" className="text-sm text-muted-foreground">
+                Copy result to clipboard
               </label>
             </div>
           </div>
@@ -250,8 +305,7 @@ export function DictationView() {
                 Quick Capture
               </CardTitle>
               <CardDescription>
-                Press the global hotkey to start dictating.
-                Press again to stop and transcribe.
+                {dictationInstruction(hotkeyShortcut, dictationPushToTalk ? "hold_to_talk" : "toggle")}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -284,7 +338,9 @@ export function DictationView() {
                     <div className="text-center">
                       <p className="text-lg font-medium">Ready to capture</p>
                       <p className="text-muted-foreground mt-1">
-                        Press {hotkeyLabel} to start, press again to stop
+                        {dictationPushToTalk
+                          ? `Hold ${hotkeyLabel} to record and release to transcribe`
+                          : `Press ${hotkeyLabel} to start, press again to transcribe`}
                       </p>
                     </div>
                     <Button 
@@ -333,7 +389,7 @@ export function DictationView() {
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground">
-                  Text appears at your cursor position within seconds of pressing the hotkey again.
+                  Text appears at your cursor within seconds after transcription finishes.
                 </p>
               </CardContent>
             </Card>
@@ -346,9 +402,9 @@ export function DictationView() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  All dictations are saved to your Inbox for future reference and search.
-                </p>
+                  <p className="text-sm text-muted-foreground">
+                    All dictations are saved to your Inbox for future reference and search.
+                  </p>
               </CardContent>
             </Card>
           </div>
@@ -376,6 +432,16 @@ export function DictationView() {
                 <div className="p-4 bg-muted rounded-lg">
                   <p className="whitespace-pre-wrap">{transcribedText}</p>
                 </div>
+                {fallbackStatus && (
+                  <div className="mt-3 rounded-md border border-amber-400/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                    {fallbackStatus}
+                  </div>
+                )}
+                {pasteNeedsAttention && (
+                  <div className="mt-3 rounded-md border border-orange-400/50 bg-orange-500/10 px-3 py-2 text-xs text-orange-700 dark:text-orange-300">
+                    {pasteStatus}
+                  </div>
+                )}
                 {(lastProvider || lastModelId || latencyMs !== null) && (
                   <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                     {latencyMs !== null && (
@@ -393,6 +459,50 @@ export function DictationView() {
               </CardContent>
             </Card>
           )}
+
+          {/* Dictation History */}
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between">
+              <div>
+                <CardTitle>Saved Dictations</CardTitle>
+                <CardDescription>
+                  Dictation recordings retained by your current auto-delete policy.
+                </CardDescription>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => void refetchDictationHistory()}>
+                <RefreshCw className="h-4 w-4 mr-2" />
+                Refresh
+              </Button>
+            </CardHeader>
+            <CardContent>
+              {dictationHistoryLoading ? (
+                <p className="text-sm text-muted-foreground">Loading dictation history...</p>
+              ) : dictationHistory.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No saved dictations yet. If auto-delete is set to Immediate, history is intentionally not retained.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {dictationHistory.slice(0, 25).map((recording) => (
+                    <div
+                      key={recording.id}
+                      className="flex items-center justify-between rounded-md border p-3"
+                    >
+                      <div>
+                        <p className="font-medium">{recording.title}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(recording.createdAt).toLocaleString()} · {recording.status}
+                        </p>
+                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        {formatRecordingDuration(recording.duration)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
           
           {/* Settings */}
           <Card>
@@ -438,6 +548,60 @@ export function DictationView() {
                       </option>
                     ))}
                   </select>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Hotkey behavior</label>
+                  <select
+                    className="w-full p-2 border rounded-md bg-background"
+                    value={dictationPushToTalk ? "hold_to_talk" : "toggle"}
+                    onChange={(event) => {
+                      const pushToTalk = event.target.value === "hold_to_talk";
+                      setDictationPushToTalk(pushToTalk);
+                      void persistDictationPreferences({ pushToTalk });
+                    }}
+                  >
+                    <option value="hold_to_talk">Hold-to-talk</option>
+                    <option value="toggle">Toggle press</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Hold-to-talk starts on key press and transcribes on release.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Auto-delete dictation recordings</label>
+                  <select
+                    className="w-full p-2 border rounded-md bg-background"
+                    value={dictationRetentionPreset}
+                    onChange={(event) => {
+                      const preset = event.target.value as "immediate" | "24h" | "72h" | "never" | "custom";
+                      setDictationRetentionPreset(preset);
+                      void persistDictationPreferences({ retentionPreset: preset });
+                    }}
+                  >
+                    <option value="immediate">Immediately</option>
+                    <option value="24h">After 24 hours</option>
+                    <option value="72h">After 72 hours</option>
+                    <option value="never">Never</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                  {dictationRetentionPreset === "custom" && (
+                    <div className="space-y-2">
+                      <label className="text-xs text-muted-foreground">Custom hours</label>
+                      <input
+                        type="number"
+                        min={1}
+                        className="w-full p-2 border rounded-md bg-background"
+                        value={dictationRetentionCustomHours}
+                        onChange={(event) => {
+                          const nextHours = Math.max(1, Number(event.target.value) || 1);
+                          setDictationRetentionCustomHours(nextHours);
+                          void persistDictationPreferences({ retentionCustomHours: nextHours });
+                        }}
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
             </CardContent>

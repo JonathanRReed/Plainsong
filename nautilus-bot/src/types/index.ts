@@ -10,6 +10,8 @@ export interface Recording {
   transcript?: Transcript;
   metadata?: RecordingMetadata;
   status: "recording" | "processing" | "completed" | "error";
+  summary?: string;
+  actionItems?: string[];
 }
 
 export interface RecordingMetadata {

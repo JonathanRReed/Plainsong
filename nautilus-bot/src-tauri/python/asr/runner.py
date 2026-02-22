@@ -9,6 +9,14 @@ from pathlib import Path
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
+_VOXTRAL_RUNTIME = {
+    "model_spec": None,
+    "processor": None,
+    "model": None,
+    "device": None,
+    "dtype": None,
+}
+
 
 def emit(payload):
     sys.stdout.write(json.dumps(payload, ensure_ascii=True))
@@ -21,10 +29,6 @@ def emit_line(payload):
 
 
 def model_spec_for(provider: str, model_dir: Path) -> str:
-    if provider == "vibevoice":
-        if (model_dir / "config.json").exists():
-            return str(model_dir)
-        return "microsoft/VibeVoice-ASR"
     if provider == "voxtral_local":
         if (model_dir / "config.json").exists():
             return str(model_dir)
@@ -108,16 +112,69 @@ def _decode_generated(processor, outputs) -> str:
     return str(decoded[0]).strip()
 
 
+def _reset_voxtral_runtime(torch_module=None):
+    _VOXTRAL_RUNTIME["model_spec"] = None
+    _VOXTRAL_RUNTIME["processor"] = None
+    _VOXTRAL_RUNTIME["model"] = None
+    _VOXTRAL_RUNTIME["device"] = None
+    _VOXTRAL_RUNTIME["dtype"] = None
+    if torch_module is not None:
+        try:
+            if torch_module.cuda.is_available():
+                torch_module.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def _load_voxtral_runtime(model_spec: str):
+    import torch
+    from transformers import AutoProcessor, VoxtralRealtimeForConditionalGeneration
+
+    cached_spec = _VOXTRAL_RUNTIME["model_spec"]
+    cached_processor = _VOXTRAL_RUNTIME["processor"]
+    cached_model = _VOXTRAL_RUNTIME["model"]
+    cached_device = _VOXTRAL_RUNTIME["device"]
+    cached_dtype = _VOXTRAL_RUNTIME["dtype"]
+    if (
+        cached_spec == model_spec
+        and cached_processor is not None
+        and cached_model is not None
+        and cached_device is not None
+        and cached_dtype is not None
+    ):
+        return cached_processor, cached_model, cached_device, cached_dtype, torch
+
+    if cached_spec is not None and cached_spec != model_spec:
+        _reset_voxtral_runtime(torch)
+
+    processor = AutoProcessor.from_pretrained(model_spec, trust_remote_code=True)
+    device, dtype = _choose_device_dtype(torch)
+    _tune_torch_threads(torch, device)
+    model_kwargs = {
+        "trust_remote_code": True,
+        "torch_dtype": dtype,
+    }
+    if device == "cuda":
+        model_kwargs["device_map"] = "auto"
+    model = VoxtralRealtimeForConditionalGeneration.from_pretrained(model_spec, **model_kwargs)
+    if device != "cuda":
+        model = model.to(device)
+    model.eval()
+
+    _VOXTRAL_RUNTIME["model_spec"] = model_spec
+    _VOXTRAL_RUNTIME["processor"] = processor
+    _VOXTRAL_RUNTIME["model"] = model
+    _VOXTRAL_RUNTIME["device"] = device
+    _VOXTRAL_RUNTIME["dtype"] = dtype
+    return processor, model, device, dtype, torch
+
+
 def run_probe(provider: str):
-    if provider in {"vibevoice", "voxtral_local"}:
+    if provider == "voxtral_local":
         import torch  # noqa: F401
         import transformers  # noqa: F401
         import soundfile  # noqa: F401
         import librosa  # noqa: F401
-    if provider == "vibevoice":
-        import sentencepiece  # noqa: F401
-        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor  # noqa: F401
-        _require_transformers("4.57.6")
     if provider == "voxtral_local":
         from transformers import AutoProcessor, VoxtralRealtimeForConditionalGeneration  # noqa: F401
         from mistral_common.tokens.tokenizers.audio import Audio  # noqa: F401
@@ -129,19 +186,7 @@ def run_download(provider: str, model_dir: Path):
     from huggingface_hub import snapshot_download
 
     model_dir.mkdir(parents=True, exist_ok=True)
-    if provider == "vibevoice":
-        repo_id = "microsoft/VibeVoice-ASR"
-        allow_patterns = [
-            "*.json",
-            "*.safetensors",
-            "*.txt",
-            "*.model",
-            "*.py",
-            "tokenizer*",
-            "processor_config.json",
-            "*.bin",
-        ]
-    elif provider == "voxtral_local":
+    if provider == "voxtral_local":
         repo_id = "mistralai/Voxtral-Mini-4B-Realtime-2602"
         allow_patterns = [
             "*.json",
@@ -162,6 +207,7 @@ def run_download(provider: str, model_dir: Path):
         local_dir_use_symlinks=False,
         allow_patterns=allow_patterns,
     )
+
     return {"ok": True}
 
 
@@ -204,144 +250,10 @@ def _load_audio_array(audio_path: Path, target_sr: int):
     return audio, sr
 
 
-def run_transcribe_vibevoice(model_spec: str, audio_path: Path):
-    import torch
-    from transformers import AutoModelForCausalLM, AutoModelForSpeechSeq2Seq, AutoProcessor
-
-    _require_transformers("4.57.6")
-
-    pipeline_error = None
-    try:
-        from transformers import pipeline
-
-        pipe = pipeline(
-            task="automatic-speech-recognition",
-            model=model_spec,
-            trust_remote_code=True,
-        )
-        result = pipe(str(audio_path))
-        text = _extract_text(result)
-        if text:
-            return {
-                "text": text,
-                "language": result.get("language") if isinstance(result, dict) else "auto",
-                "confidence": 0.9,
-            }
-        pipeline_error = "pipeline returned empty transcription"
-    except Exception as exc:  # noqa: BLE001
-        pipeline_error = str(exc)
-
-    processor = AutoProcessor.from_pretrained(model_spec, trust_remote_code=True)
-    target_sr = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", 16000)
-    audio, _ = _load_audio_array(audio_path, target_sr)
-    max_new_tokens = _max_new_tokens_for_audio_length(len(audio), target_sr)
-    device, dtype = _choose_device_dtype(torch)
-    _tune_torch_threads(torch, device)
-
-    model = None
-    model_errors = []
-    for model_cls in (AutoModelForSpeechSeq2Seq, AutoModelForCausalLM):
-        try:
-            model = model_cls.from_pretrained(
-                model_spec,
-                trust_remote_code=True,
-                torch_dtype=dtype,
-            )
-            break
-        except Exception as exc:  # noqa: BLE001
-            model_errors.append(f"{model_cls.__name__}: {exc}")
-
-    if model is None:
-        errors = "; ".join(model_errors) if model_errors else "unknown model load failure"
-        raise RuntimeError(f"VibeVoice model loading failed ({errors})")
-
-    if hasattr(model, "to"):
-        model = model.to(device)
-    model.eval()
-
-    input_errors = []
-    inputs = None
-    builders = (
-        lambda: processor(
-            audio=audio,
-            sampling_rate=target_sr,
-            return_tensors="pt",
-            padding=True,
-            add_generation_prompt=True,
-        ),
-        lambda: processor(
-            audio=audio,
-            sampling_rate=target_sr,
-            return_tensors="pt",
-        ),
-        lambda: processor(
-            audio,
-            sampling_rate=target_sr,
-            return_tensors="pt",
-        ),
-    )
-    for builder in builders:
-        try:
-            inputs = builder()
-            break
-        except Exception as exc:  # noqa: BLE001
-            input_errors.append(str(exc))
-
-    if inputs is None:
-        raise RuntimeError(
-            "VibeVoice input preparation failed: "
-            + ("; ".join(input_errors) if input_errors else "unknown error")
-        )
-
-    prepared_inputs = _prepare_inputs_for_device(inputs, torch, device, dtype)
-    with torch.inference_mode():
-        outputs = model.generate(
-            **prepared_inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-        )
-    text = _decode_generated(processor, outputs)
-
-    if not text:
-        details = f"pipeline error: {pipeline_error}" if pipeline_error else "empty decoder output"
-        raise RuntimeError(f"VibeVoice returned an empty transcription ({details})")
-    return {
-        "text": text,
-        "language": "auto",
-        "confidence": 0.9,
-    }
-
-
-def run_transcribe_voxtral(model_spec: str, audio_path: Path):
-    import torch
-    from mistral_common.tokens.tokenizers.audio import Audio
-    from transformers import AutoProcessor, VoxtralRealtimeForConditionalGeneration
-
-    _require_transformers("5.2.0")
-
-    processor = AutoProcessor.from_pretrained(model_spec, trust_remote_code=True)
-    target_sr = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", 16000)
-    audio = Audio.from_file(str(audio_path), strict=False)
-    audio.resample(target_sr)
-    audio_array = audio.audio_array
+def _generate_voxtral_text(processor, model, torch, device: str, dtype, audio_array, target_sr: int):
     max_new_tokens = _max_new_tokens_for_audio_length(len(audio_array), target_sr)
-
-    device, dtype = _choose_device_dtype(torch)
-    _tune_torch_threads(torch, device)
-    model_kwargs = {
-        "trust_remote_code": True,
-        "torch_dtype": dtype,
-    }
-    if device == "cuda":
-        model_kwargs["device_map"] = "auto"
-    model = VoxtralRealtimeForConditionalGeneration.from_pretrained(model_spec, **model_kwargs)
-    if device != "cuda":
-        model = model.to(device)
-    model.eval()
-
     inputs = processor(audio_array, sampling_rate=target_sr, return_tensors="pt")
     prepared_inputs = _prepare_inputs_for_device(inputs, torch, device, dtype)
-
     with torch.inference_mode():
         outputs = model.generate(
             **prepared_inputs,
@@ -349,8 +261,47 @@ def run_transcribe_voxtral(model_spec: str, audio_path: Path):
             do_sample=False,
             temperature=0.0,
         )
+    return _decode_generated(processor, outputs)
 
-    text = _decode_generated(processor, outputs)
+
+def run_transcribe_voxtral(model_spec: str, audio_path: Path):
+    from mistral_common.tokens.tokenizers.audio import Audio
+
+    _require_transformers("5.2.0")
+
+    processor, model, device, dtype, torch = _load_voxtral_runtime(model_spec)
+    target_sr = getattr(getattr(processor, "feature_extractor", None), "sampling_rate", 16000)
+    audio = Audio.from_file(str(audio_path), strict=False)
+    audio.resample(target_sr)
+    audio_array = audio.audio_array
+    try:
+        text = _generate_voxtral_text(
+            processor, model, torch, device, dtype, audio_array, target_sr
+        )
+    except Exception:
+        _reset_voxtral_runtime(torch)
+        raise
+
+    if not text:
+        # Some long utterances can decode to empty in a single pass.
+        # Retry with smaller windows and concatenate non-empty chunks.
+        chunk_samples = max(target_sr * 12, target_sr)
+        parts = []
+        for start in range(0, len(audio_array), chunk_samples):
+            chunk = audio_array[start : start + chunk_samples]
+            if len(chunk) < target_sr:
+                continue
+            try:
+                chunk_text = _generate_voxtral_text(
+                    processor, model, torch, device, dtype, chunk, target_sr
+                )
+            except Exception:
+                _reset_voxtral_runtime(torch)
+                raise
+            if chunk_text:
+                parts.append(chunk_text.strip())
+        text = " ".join(parts).strip()
+
     if not text:
         raise RuntimeError("Voxtral local returned an empty transcription")
     return {
@@ -365,9 +316,7 @@ def run_transcribe(provider: str, model_dir: Path, audio_path: Path):
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
     model_spec = model_spec_for(provider, model_dir)
-    if provider == "vibevoice":
-        result = run_transcribe_vibevoice(model_spec, audio_path)
-    elif provider == "voxtral_local":
+    if provider == "voxtral_local":
         result = run_transcribe_voxtral(model_spec, audio_path)
     else:
         raise ValueError(f"Unsupported provider for transcription: {provider}")

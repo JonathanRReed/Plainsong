@@ -38,6 +38,12 @@ pub struct AudioCapture {
     vad_enabled: bool,
     /// Enable noise suppression
     noise_suppression_enabled: bool,
+    /// Current audio level (0.0 to 1.0) for visualization
+    dictation_audio_level: Arc<std::sync::atomic::AtomicU32>,
+    /// Last speech detection timestamp (milliseconds since start) for auto-stop
+    last_speech_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// Dictation start instant for timing
+    dictation_start: Arc<std::sync::Mutex<Option<Instant>>>,
 }
 
 #[allow(dead_code)]
@@ -101,6 +107,9 @@ impl AudioCapture {
             preprocessor: Some(preprocessor),
             vad_enabled: true,
             noise_suppression_enabled: true,
+            dictation_audio_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            last_speech_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            dictation_start: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -143,10 +152,17 @@ impl AudioCapture {
 
         self.is_dictating.store(true, Ordering::SeqCst);
 
+        // Reset speech tracking
+        self.last_speech_ms.store(0, Ordering::SeqCst);
+        *self.dictation_start.lock().unwrap() = Some(Instant::now());
+
         let is_dictating = Arc::clone(&self.is_dictating);
         let buffer = Arc::clone(&self.dictation_buffer);
         let stream_ready = Arc::new(AtomicBool::new(false));
         let stream_ready_signal = Arc::clone(&stream_ready);
+        let audio_level = Arc::clone(&self.dictation_audio_level);
+        let last_speech_ms = Arc::clone(&self.last_speech_ms);
+        let dictation_start = Arc::clone(&self.dictation_start);
 
         let capture_handle = std::thread::spawn(move || {
             let capture_flag = Arc::clone(&is_dictating);
@@ -170,20 +186,42 @@ impl AudioCapture {
             let is_dictating_f32 = Arc::clone(&is_dictating);
             let is_dictating_i16 = Arc::clone(&is_dictating);
             let is_dictating_u8 = Arc::clone(&is_dictating);
+            let audio_level_f32 = Arc::clone(&audio_level);
+            let audio_level_i16 = Arc::clone(&audio_level);
+            let audio_level_u8 = Arc::clone(&audio_level);
+            let last_speech_f32 = Arc::clone(&last_speech_ms);
+            let last_speech_i16 = Arc::clone(&last_speech_ms);
+            let last_speech_u8 = Arc::clone(&last_speech_ms);
+            let dictation_start_f32 = Arc::clone(&dictation_start);
+            let dictation_start_i16 = Arc::clone(&dictation_start);
+            let dictation_start_u8 = Arc::clone(&dictation_start);
+            const SPEECH_THRESHOLD: f32 = 0.02;
 
             let stream_result = match config.sample_format() {
                 cpal::SampleFormat::F32 => device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         if is_dictating_f32.load(Ordering::SeqCst) {
+                            let mut sum_sq: f64 = 0.0;
                             if num_channels == 1 {
                                 for &sample in data {
                                     buffer.push(sample);
+                                    sum_sq += (sample as f64) * (sample as f64);
                                 }
                             } else {
                                 for chunk in data.chunks_exact(num_channels) {
                                     let mono: f32 = chunk.iter().sum::<f32>() / num_channels as f32;
                                     buffer.push(mono);
+                                    sum_sq += (mono as f64) * (mono as f64);
+                                }
+                            }
+                            let rms = (sum_sq / data.len() as f64).sqrt() as f32;
+                            let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
+                            audio_level_f32.store(level, Ordering::SeqCst);
+                            if rms > SPEECH_THRESHOLD {
+                                if let Some(start) = dictation_start_f32.lock().unwrap().as_ref() {
+                                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                                    last_speech_f32.store(elapsed_ms, Ordering::SeqCst);
                                 }
                             }
                         }
@@ -195,9 +233,12 @@ impl AudioCapture {
                     &config.into(),
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
                         if is_dictating_i16.load(Ordering::SeqCst) {
+                            let mut sum_sq: f64 = 0.0;
                             if num_channels == 1 {
                                 for &sample in data {
-                                    buffer.push(sample as f32 / i16::MAX as f32);
+                                    let f = sample as f32 / i16::MAX as f32;
+                                    buffer.push(f);
+                                    sum_sq += (f as f64) * (f as f64);
                                 }
                             } else {
                                 for chunk in data.chunks_exact(num_channels) {
@@ -207,6 +248,16 @@ impl AudioCapture {
                                         .sum::<f32>()
                                         / num_channels as f32;
                                     buffer.push(mono);
+                                    sum_sq += (mono as f64) * (mono as f64);
+                                }
+                            }
+                            let rms = (sum_sq / data.len() as f64).sqrt() as f32;
+                            let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
+                            audio_level_i16.store(level, Ordering::SeqCst);
+                            if rms > SPEECH_THRESHOLD {
+                                if let Some(start) = dictation_start_i16.lock().unwrap().as_ref() {
+                                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                                    last_speech_i16.store(elapsed_ms, Ordering::SeqCst);
                                 }
                             }
                         }
@@ -218,9 +269,12 @@ impl AudioCapture {
                     &config.into(),
                     move |data: &[u8], _: &cpal::InputCallbackInfo| {
                         if is_dictating_u8.load(Ordering::SeqCst) {
+                            let mut sum_sq: f64 = 0.0;
                             if num_channels == 1 {
                                 for &sample in data {
-                                    buffer.push((sample as f32 - 128.0) / 128.0);
+                                    let f = (sample as f32 - 128.0) / 128.0;
+                                    buffer.push(f);
+                                    sum_sq += (f as f64) * (f as f64);
                                 }
                             } else {
                                 for chunk in data.chunks_exact(num_channels) {
@@ -230,6 +284,16 @@ impl AudioCapture {
                                         .sum::<f32>()
                                         / num_channels as f32;
                                     buffer.push(mono);
+                                    sum_sq += (mono as f64) * (mono as f64);
+                                }
+                            }
+                            let rms = (sum_sq / data.len() as f64).sqrt() as f32;
+                            let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
+                            audio_level_u8.store(level, Ordering::SeqCst);
+                            if rms > SPEECH_THRESHOLD {
+                                if let Some(start) = dictation_start_u8.lock().unwrap().as_ref() {
+                                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                                    last_speech_u8.store(elapsed_ms, Ordering::SeqCst);
                                 }
                             }
                         }
@@ -370,6 +434,42 @@ impl AudioCapture {
         }
 
         while self.dictation_buffer.pop().is_some() {}
+    }
+
+    /// Get the current audio level for dictation (0.0 to 1.0)
+    pub fn get_dictation_audio_level(&self) -> f32 {
+        let level = self.dictation_audio_level.load(Ordering::SeqCst);
+        level as f32 / u32::MAX as f32
+    }
+
+    /// Get the current silence duration in seconds (time since last speech detected)
+    pub fn get_silence_duration_seconds(&self) -> f32 {
+        let start_guard = self.dictation_start.lock().unwrap();
+        let start = match start_guard.as_ref() {
+            Some(s) => s,
+            None => return 0.0,
+        };
+        let current_ms = start.elapsed().as_millis() as u64;
+        let last_speech_ms = self.last_speech_ms.load(Ordering::SeqCst);
+        drop(start_guard);
+
+        if last_speech_ms == 0 {
+            return 0.0;
+        }
+
+        if current_ms > last_speech_ms {
+            (current_ms - last_speech_ms) as f32 / 1000.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Check if silence timeout has been exceeded and auto-stop should trigger
+    pub fn should_auto_stop_on_silence(&self, timeout_seconds: f32) -> bool {
+        if timeout_seconds <= 0.0 {
+            return false;
+        }
+        self.get_silence_duration_seconds() >= timeout_seconds
     }
 
     pub fn start_recording(&mut self, options: RecordingOptions) -> Result<String> {

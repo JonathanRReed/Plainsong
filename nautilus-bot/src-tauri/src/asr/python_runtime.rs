@@ -186,7 +186,7 @@ impl PythonAsrWorker {
 }
 
 fn supports_persistent_worker(provider: &str) -> bool {
-    matches!(provider, "vibevoice" | "voxtral_local")
+    matches!(provider, "voxtral_local")
 }
 
 async fn get_or_spawn_worker(
@@ -236,9 +236,6 @@ pub async fn shutdown_python_workers() {
 
 fn provider_import_probe(provider: &str) -> &'static str {
     match provider {
-        "vibevoice" => {
-            "import torch; import soundfile; import librosa; import sentencepiece; from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq"
-        }
         "voxtral_local" => {
             "import torch; import soundfile; import librosa; from transformers import AutoProcessor, VoxtralRealtimeForConditionalGeneration; from mistral_common.tokens.tokenizers.audio import Audio"
         }
@@ -248,16 +245,6 @@ fn provider_import_probe(provider: &str) -> &'static str {
 
 fn provider_requirements(provider: &str) -> &'static [&'static str] {
     match provider {
-        "vibevoice" => &[
-            "torch>=2.3.0",
-            "transformers>=4.57.6,<6",
-            "huggingface_hub>=0.29.0",
-            "sentencepiece>=0.2.0",
-            "soundfile>=0.12.1",
-            "librosa>=0.10.2",
-            "accelerate>=1.0.0",
-            "numpy>=1.26.0",
-        ],
         "voxtral_local" => &[
             "torch>=2.3.0",
             "transformers>=5.2.0,<6",

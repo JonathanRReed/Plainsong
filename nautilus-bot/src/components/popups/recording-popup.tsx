@@ -229,7 +229,7 @@ export function RecordingPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="rounded-2xl border border-cyan-400/30 bg-slate-950/92 px-4 py-3 shadow-2xl backdrop-blur-md">
+      <div className="rounded-2xl border border-cyan-400/30 bg-slate-950/92 px-4 py-3 backdrop-blur-md">
         <div
           className="mb-2 flex items-center justify-between text-slate-300"
           onMouseDown={() => void window.startDragging()}

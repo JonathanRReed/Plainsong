@@ -32,7 +32,6 @@ import {
   Zap,
   CloudLightning,
   Moon,
-  Waves,
   Mic
 } from "lucide-react";
 
@@ -233,8 +232,6 @@ export function AsrProviderManager({
         return <Zap className="h-5 w-5" />;
       case "moonshine":
         return <Moon className="h-5 w-5" />;
-      case "vibevoice":
-        return <Waves className="h-5 w-5" />;
       case "voxtral":
         return <Mic className="h-5 w-5" />;
       case "openai_cloud":
@@ -312,8 +309,6 @@ export function AsrProviderManager({
         return "Use the Download button to fetch the Moonshine ONNX model (no Python needed)";
       case "voxtral":
         return "Choose Voxtral local/cloud mode. Local mode requires Python (torch, transformers, librosa, soundfile) plus downloaded model assets. Cloud mode requires MISTRAL_API_KEY.";
-      case "vibevoice":
-        return "Install Python runtime deps (torch, transformers, librosa, soundfile) and download VibeVoice model assets with the Download button.";
       case "elevenlabs_scribe":
         return "Add an ElevenLabs API key in Settings → API Keys";
       case "openai_cloud":
@@ -688,13 +683,17 @@ export function AsrProviderManager({
                 <div className="space-y-2">
                   {benchmarkResults.map((result) => (
                     <div
-                      key={result.providerType}
+                      key={`${result.providerType}-${result.modelId}`}
                       className="flex items-center justify-between p-3 border rounded-lg"
                     >
                       <div>
                         <p className="font-medium">{result.providerName}</p>
                         <p className="text-sm text-muted-foreground">
-                          Confidence: {(result.confidence * 100).toFixed(1)}%
+                          {result.modelId} · {result.runtimeStatus} · Confidence:{" "}
+                          {(result.confidence * 100).toFixed(1)}%
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Transcript: {result.nonEmptyTranscript ? "non-empty" : "empty"}
                         </p>
                       </div>
                       <div className="text-right">
@@ -722,7 +721,8 @@ export function AsrProviderManager({
                       <div className="text-right">
                         <p>{(entry.processingTimeMs / 1000).toFixed(2)}s</p>
                         <p className="text-muted-foreground">
-                          {(entry.confidence * 100).toFixed(1)}%
+                          {(entry.confidence * 100).toFixed(1)}% ·{" "}
+                          {entry.nonEmptyTranscript ? "non-empty" : "empty"}
                         </p>
                       </div>
                     </div>

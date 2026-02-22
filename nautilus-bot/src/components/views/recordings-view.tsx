@@ -8,6 +8,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Input } from "@/components/ui/input";
 import { useRecordings } from "@/hooks/use-recordings";
 import { useRecording } from "@/hooks/use-recording";
+import { useToast } from "@/components/toast";
 import { ConsentDialog } from "@/components/recording-overlay";
 import { TranscriptViewer, TranscriptSearch } from "@/components/transcript-viewer";
 import { RecordingWaveform, WaveformVisualizer } from "@/components/waveform-visualizer";
@@ -21,9 +22,11 @@ import {
   renameSpeaker,
   deleteRecording,
   renameRecording,
+  retryMeetingAutoName,
+  setRecordingSourceType,
   isDiarizationModelAvailable,
 } from "@/lib/tauri";
-import type { Recording, Transcript } from "@/types";
+import type { Recording, Transcript, TranscriptSegment } from "@/types";
 import { listen } from "@tauri-apps/api/event";
 import {
   AlertCircle,
@@ -36,6 +39,7 @@ import {
   Mic2,
   MoreHorizontal,
   Play,
+  Search,
   Square,
   Trash2,
 } from "lucide-react";
@@ -43,6 +47,7 @@ import {
 export function RecordingsView() {
   const { recordings, refetch } = useRecordings();
   const { startMeeting, stopMeeting, isRecording, recordingId, formattedDuration } = useRecording();
+  const { toast } = useToast();
   const [showConsent, setShowConsent] = useState(false);
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null);
   const [showRecordingDetail, setShowRecordingDetail] = useState(false);
@@ -68,6 +73,15 @@ export function RecordingsView() {
   // Nautilus auto-analysis results keyed by recording ID
   type AutoAnalysis = { summary: string | null; actionItems: string[] };
   const [analysisCache, setAnalysisCache] = useState<Record<string, AutoAnalysis>>({});
+  const [autoNameIssue, setAutoNameIssue] = useState<{
+    recordingId: string;
+    message: string;
+  } | null>(null);
+  const [meetingSearch, setMeetingSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "completed" | "recording" | "error">(
+    "all"
+  );
+  const [isBulkReclassifying, setIsBulkReclassifying] = useState(false);
 
   useEffect(() => {
     if (lastRecordingState.current && !isRecording) {
@@ -123,6 +137,41 @@ export function RecordingsView() {
     };
   }, [isRecording, recordingId]);
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{
+      recordingId: string;
+      status: "ok" | "error";
+      newTitle?: string;
+      message?: string;
+      canRetry?: boolean;
+    }>("recording-title-updated", (event) => {
+      const { recordingId: updatedId, status, newTitle, message } = event.payload;
+      if (status === "ok" && newTitle) {
+        setAutoNameIssue((current) =>
+          current?.recordingId === updatedId ? null : current
+        );
+        setSelectedRecording((current) =>
+          current && current.id === updatedId ? { ...current, title: newTitle } : current
+        );
+        refetch();
+        return;
+      }
+      if (status === "error") {
+        setAutoNameIssue({
+          recordingId: updatedId,
+          message: message ?? "Meeting auto-name failed.",
+        });
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, [refetch]);
+
   const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean }) => {
     const startedId = await startMeeting({ ...options, projectId: "default" });
     if (startedId) {
@@ -142,23 +191,78 @@ export function RecordingsView() {
     setDiarizationError(null);
 
     try {
-      const [transcript, waveform, speakers] = await Promise.all([
+      const [transcriptResult, waveformResult, speakersResult] = await Promise.allSettled([
         getTranscript(recording.id),
         getRecordingWaveform(recording.id, 500),
         getSpeakers(recording.id),
       ]);
-      setSelectedTranscript(transcript);
-      setWaveformData(waveform);
-      setSpeakerNames(
-        speakers.reduce<Record<string, string>>((acc, speaker) => {
-          if (speaker.name) {
-            acc[speaker.id] = speaker.name;
-          }
-          return acc;
-        }, {})
-      );
+
+      let hadAnyFailure = false;
+
+      if (transcriptResult.status === "fulfilled") {
+        const transcript = transcriptResult.value;
+        const normalizedSegments: TranscriptSegment[] = Array.isArray(transcript?.segments)
+          ? transcript.segments
+              .filter((segment): segment is TranscriptSegment => {
+                return Boolean(
+                  segment &&
+                    typeof segment.text === "string" &&
+                    Number.isFinite(segment.startTime) &&
+                    Number.isFinite(segment.endTime)
+                );
+              })
+              .map((segment, index) => ({
+                id: segment.id || `${transcript?.id ?? recording.id}-segment-${index}`,
+                startTime: Number.isFinite(segment.startTime) ? segment.startTime : 0,
+                endTime: Number.isFinite(segment.endTime) ? segment.endTime : 0,
+                text: segment.text ?? "",
+                speakerId: segment.speakerId,
+                confidence: Number.isFinite(segment.confidence) ? segment.confidence : 0,
+              }))
+          : [];
+        setSelectedTranscript(
+          transcript
+            ? {
+                ...transcript,
+                segments: normalizedSegments,
+              }
+            : null
+        );
+      } else {
+        hadAnyFailure = true;
+        setSelectedTranscript(null);
+      }
+
+      if (waveformResult.status === "fulfilled") {
+        const waveform = waveformResult.value;
+        setWaveformData(Array.isArray(waveform) ? waveform : []);
+      } else {
+        hadAnyFailure = true;
+        setWaveformData([]);
+      }
+
+      if (speakersResult.status === "fulfilled") {
+        const speakers = Array.isArray(speakersResult.value) ? speakersResult.value : [];
+        setSpeakerNames(
+          speakers.reduce<Record<string, string>>((acc, speaker) => {
+            if (speaker.name) {
+              acc[speaker.id] = speaker.name;
+            }
+            return acc;
+          }, {})
+        );
+      } else {
+        hadAnyFailure = true;
+        setSpeakerNames({});
+      }
+
+      if (hadAnyFailure) {
+        setDetailError(
+          "Some recording details could not be loaded. Transcript content is still shown when available."
+        );
+      }
     } catch (error) {
-      setDetailError(error instanceof Error ? error.message : "Failed to load recording details");
+      setDetailError(error instanceof Error ? error.message : "Failed to load recording details.");
     } finally {
       setIsLoadingDetail(false);
     }
@@ -273,24 +377,94 @@ export function RecordingsView() {
     () => Boolean(selectedTranscript?.segments.some((segment) => Boolean(segment.speakerId))),
     [selectedTranscript]
   );
+  const meetings = useMemo(
+    () => recordings.filter((recording) => recording.sourceType === "meeting"),
+    [recordings]
+  );
+  const filteredMeetings = useMemo(() => {
+    const query = meetingSearch.trim().toLowerCase();
+    return meetings
+      .filter((meeting) => {
+        if (statusFilter !== "all" && meeting.status !== statusFilter) {
+          return false;
+        }
+        if (!query) return true;
+        const haystack = `${meeting.title} ${new Date(meeting.createdAt).toLocaleString()}`.toLowerCase();
+        return haystack.includes(query);
+      })
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [meetingSearch, meetings, statusFilter]);
+
+  const meetingStats = useMemo(() => {
+    const total = meetings.length;
+    const completed = meetings.filter((meeting) => meeting.status === "completed").length;
+    const errors = meetings.filter((meeting) => meeting.status === "error").length;
+    const totalSeconds = meetings.reduce((sum, meeting) => sum + Math.max(0, meeting.duration), 0);
+    return {
+      total,
+      completed,
+      errors,
+      totalHours: totalSeconds / 3600,
+    };
+  }, [meetings]);
+
+  const handleMarkAsDictation = async (recordingIdToUpdate: string) => {
+    try {
+      await setRecordingSourceType(recordingIdToUpdate, "dictation");
+      await refetch();
+      toast("Moved recording to Dictation.", "success");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to move recording to Dictation.";
+      toast(message, "error");
+    }
+  };
+
+  const handleBulkMarkFilteredAsDictation = async () => {
+    if (filteredMeetings.length === 0 || isBulkReclassifying) {
+      return;
+    }
+
+    setIsBulkReclassifying(true);
+    try {
+      await Promise.all(
+        filteredMeetings.map((recording) => setRecordingSourceType(recording.id, "dictation"))
+      );
+      await refetch();
+      toast(`Moved ${filteredMeetings.length} item(s) to Dictation.`, "success");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to move all filtered recordings.";
+      toast(message, "error");
+    } finally {
+      setIsBulkReclassifying(false);
+    }
+  };
+
+  const formatDuration = (seconds: number) => {
+    const safeSeconds = Math.max(0, seconds);
+    const mins = Math.floor(safeSeconds / 60);
+    const secs = safeSeconds % 60;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
 
   return (
     <div className="h-full flex flex-col">
       <div className="p-6 border-b flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Recordings</h1>
-          <p className="text-muted-foreground">Manage your captured audio</p>
+          <h1 className="text-2xl font-semibold">Meetings</h1>
+          <p className="text-muted-foreground">
+            Long-form sessions, meeting history, and transcript review.
+          </p>
         </div>
         <div className="flex gap-2">
           {isRecording ? (
             <Button variant="destructive" onClick={stopMeeting}>
               <Square className="h-4 w-4 mr-2 fill-current" />
-              Stop Recording
+              Stop Meeting
             </Button>
           ) : (
             <Button variant="active" onClick={() => setShowConsent(true)}>
               <Mic2 className="h-4 w-4 mr-2" />
-              New Recording
+              New Meeting
             </Button>
           )}
         </div>
@@ -298,6 +472,137 @@ export function RecordingsView() {
 
       <ScrollArea className="flex-1">
         <div className="p-6">
+          {autoNameIssue && (
+            <Card className="mb-4 border-amber-500/40 bg-amber-500/5">
+              <CardContent className="p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-amber-700 dark:text-amber-300">
+                      Meeting title generation failed
+                    </p>
+                    <p className="text-xs text-muted-foreground">{autoNameIssue.message}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        void retryMeetingAutoName(autoNameIssue.recordingId).catch((error) => {
+                          console.error("Retry meeting auto-name failed:", error);
+                          setAutoNameIssue({
+                            recordingId: autoNameIssue.recordingId,
+                            message:
+                              error instanceof Error
+                                ? error.message
+                                : "Meeting title retry failed.",
+                          });
+                        });
+                      }}
+                    >
+                      Retry
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setAutoNameIssue(null)}>
+                      Dismiss
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          <div className="mb-4 grid gap-3 md:grid-cols-4">
+            <Card>
+              <CardContent className="p-4">
+                <p className="text-xs text-muted-foreground">Total Meetings</p>
+                <p className="text-2xl font-semibold">{meetingStats.total}</p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4">
+                <p className="text-xs text-muted-foreground">Completed</p>
+                <p className="text-2xl font-semibold">{meetingStats.completed}</p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4">
+                <p className="text-xs text-muted-foreground">Total Time</p>
+                <p className="text-2xl font-semibold">{meetingStats.totalHours.toFixed(1)}h</p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-4">
+                <p className="text-xs text-muted-foreground">Errors</p>
+                <p className="text-2xl font-semibold">{meetingStats.errors}</p>
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card className="mb-4">
+            <CardContent className="p-4">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div className="relative w-full md:max-w-md">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    className="pl-9"
+                    placeholder="Search meetings by title or date…"
+                    value={meetingSearch}
+                    onChange={(event) => setMeetingSearch(event.target.value)}
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={filteredMeetings.length === 0 || isBulkReclassifying}
+                    onClick={() => {
+                      void handleBulkMarkFilteredAsDictation();
+                    }}
+                  >
+                    {isBulkReclassifying ? (
+                      <>
+                        <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                        Moving...
+                      </>
+                    ) : (
+                      "Mark Filtered as Dictation"
+                    )}
+                  </Button>
+                  <Button
+                    variant={statusFilter === "all" ? "active" : "outline"}
+                    size="sm"
+                    onClick={() => setStatusFilter("all")}
+                  >
+                    All
+                  </Button>
+                  <Button
+                    variant={statusFilter === "completed" ? "active" : "outline"}
+                    size="sm"
+                    onClick={() => setStatusFilter("completed")}
+                  >
+                    Completed
+                  </Button>
+                  <Button
+                    variant={statusFilter === "recording" ? "active" : "outline"}
+                    size="sm"
+                    onClick={() => setStatusFilter("recording")}
+                  >
+                    Recording
+                  </Button>
+                  <Button
+                    variant={statusFilter === "error" ? "active" : "outline"}
+                    size="sm"
+                    onClick={() => setStatusFilter("error")}
+                  >
+                    Error
+                  </Button>
+                </div>
+              </div>
+              <p className="mt-3 text-xs text-muted-foreground">
+                Seeing a dictation in this list? Use <span className="font-medium">••• → Mark as Dictation</span> to move it out of Meetings.
+              </p>
+            </CardContent>
+          </Card>
+
           {isRecording && recordingId && (
             <Card className="mb-4 border-active/40 bg-active/5">
               <CardContent className="p-4">
@@ -341,21 +646,27 @@ export function RecordingsView() {
             </Card>
           )}
 
-          {recordings.length === 0 ? (
+          {filteredMeetings.length === 0 ? (
             <div className="text-center py-12">
               <FileAudio className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-              <h3 className="text-lg font-medium">No recordings yet</h3>
+              <h3 className="text-lg font-medium">
+                {meetings.length === 0 ? "No meetings yet" : "No meetings match your filters"}
+              </h3>
               <p className="text-muted-foreground mt-1">
-                Start recording to capture meetings and dictations
+                {meetings.length === 0
+                  ? "Start a meeting to capture long-form conversation and notes"
+                  : "Try a different search or status filter."}
               </p>
-              <Button className="mt-4" variant="active" onClick={() => setShowConsent(true)}>
-                <Mic2 className="h-4 w-4 mr-2" />
-                Start Recording
-              </Button>
+              {meetings.length === 0 && (
+                <Button className="mt-4" variant="active" onClick={() => setShowConsent(true)}>
+                  <Mic2 className="h-4 w-4 mr-2" />
+                  Start Meeting
+                </Button>
+              )}
             </div>
           ) : (
             <div className="space-y-2">
-              {recordings.map((recording) => (
+              {filteredMeetings.map((recording) => (
                 <Card
                   key={recording.id}
                   className="hover:bg-accent/50 cursor-pointer transition-colors"
@@ -369,17 +680,18 @@ export function RecordingsView() {
                         </div>
                         <div>
                           <h3 className="font-medium">{recording.title}</h3>
-                          <p className="text-sm text-muted-foreground">
-                            {new Date(recording.createdAt).toLocaleString()} · {recording.sourceType}
-                          </p>
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <span>{new Date(recording.createdAt).toLocaleString()}</span>
+                            <span>•</span>
+                            <span className="capitalize">{recording.status}</span>
+                            <span>•</span>
+                            <span>Meeting</span>
+                          </div>
                         </div>
                       </div>
 
                       <div className="flex items-center gap-2">
-                        <span className="text-sm text-muted-foreground">
-                          {Math.floor(recording.duration / 60)}:
-                          {(recording.duration % 60).toString().padStart(2, "0")}
-                        </span>
+                        <span className="text-sm text-muted-foreground">{formatDuration(recording.duration)}</span>
                         <Button
                           variant="ghost"
                           size="icon"
@@ -421,6 +733,16 @@ export function RecordingsView() {
                             >
                               <FileOutput className="h-4 w-4 mr-2" />
                               View Details
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                await handleMarkAsDictation(recording.id);
+                              }}
+                            >
+                              <Mic2 className="h-4 w-4 mr-2" />
+                              Mark as Dictation
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
@@ -636,7 +958,7 @@ export function RecordingsView() {
             <DialogTitle>Delete Recording</DialogTitle>
             <DialogDescription>
               Are you sure you want to delete &ldquo;{showDeleteConfirm?.title}&rdquo;? This will
-              permanently remove the recording, its transcript, and audio file.
+              permanently remove the meeting, its transcript, and audio file.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -669,7 +991,7 @@ export function RecordingsView() {
             value={renameValue}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setRenameValue(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleRenameRecording()}
-            placeholder="New recording title"
+            placeholder="New meeting title"
           />
           <DialogFooter>
             <Button variant="outline" onClick={() => { setShowRenameDialog(null); setRenameValue(""); }}>

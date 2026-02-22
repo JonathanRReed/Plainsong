@@ -35,7 +35,7 @@ interface SidebarProps {
 const navItems = [
   { id: "dashboard", label: "Dashboard", icon: FileText },
   { id: "projects", label: "Projects", icon: Folder },
-  { id: "recordings", label: "Recordings", icon: AudioWaveform },
+  { id: "recordings", label: "Meetings", icon: AudioWaveform },
   { id: "dictation", label: "Dictation", icon: Mic },
   { id: "exports", label: "Exports", icon: FileOutput },
   { id: "settings", label: "Settings", icon: Settings },
