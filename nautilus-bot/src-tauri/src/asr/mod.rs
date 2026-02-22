@@ -130,7 +130,7 @@ impl AsrProviderType {
     pub fn default_model_id(&self) -> &'static str {
         match self {
             AsrProviderType::Whisper => "base.en",
-            AsrProviderType::Parakeet => "parakeet-tdt-0.6b-v3",
+            AsrProviderType::Parakeet => "parakeet-tdt-ctc-110m",
             AsrProviderType::Canary => "canary-qwen-2.5b",
             AsrProviderType::DistilWhisper => "distil-large-v3.5",
             AsrProviderType::Moonshine => "moonshine",
@@ -186,8 +186,8 @@ impl AsrProviderType {
                 },
             ],
             AsrProviderType::Parakeet => vec![ModelOption {
-                id: "parakeet-tdt-0.6b-v3".to_string(),
-                label: "Parakeet TDT 0.6B v3".to_string(),
+                id: "parakeet-tdt-ctc-110m".to_string(),
+                label: "Parakeet TDT CTC 110M".to_string(),
             }],
             AsrProviderType::Canary => vec![ModelOption {
                 id: "canary-qwen-2.5b".to_string(),

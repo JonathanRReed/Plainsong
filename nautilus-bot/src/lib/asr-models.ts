@@ -44,17 +44,17 @@ export const LOCAL_ASR_MODEL_GROUPS: AsrModelOptionGroup[] = [
   {
     label: "Provider-specific alternatives",
     options: [
-      { id: "parakeet-tdt-0.6b-v3", label: "Parakeet TDT 0.6B v3 - ultra low latency" },
+      { id: "parakeet-tdt-ctc-110m", label: "Parakeet TDT CTC 110M - ultra low latency" },
       { id: "canary-qwen-2.5b", label: "Canary Qwen 2.5B - max English accuracy" },
-      { id: "distil-large-v3", label: "Distil-Whisper Large V3 - 6x faster" },
+      { id: "distil-large-v3.5", label: "Distil-Whisper Large V3.5 - 6x faster" },
     ],
   },
   {
     label: "Other local providers",
     options: [
       { id: "moonshine", label: "Moonshine - UsefulSensors, edge-optimized" },
-      { id: "vibevoice", label: "VibeVoice - Microsoft, streaming ASR" },
-      { id: "voxtral", label: "Voxtral Mini - Mistral, multilingual" },
+      { id: "vibevoice-asr", label: "VibeVoice - Microsoft, streaming ASR" },
+      { id: "voxtral-local", label: "Voxtral Mini (Local) - Mistral, multilingual" },
     ],
   },
   {

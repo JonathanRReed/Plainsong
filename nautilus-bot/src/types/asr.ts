@@ -23,6 +23,8 @@ export type AsrRuntimeStatus = "ready" | "missing_runtime" | "missing_model" | "
 export interface AsrRuntimeDetails {
   pythonPath?: string;
   modelPath?: string;
+  missingFiles?: string[];
+  setupAction?: string | null;
 }
 
 export interface AsrRuntimeDiagnostics {

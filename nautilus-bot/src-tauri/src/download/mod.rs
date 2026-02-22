@@ -46,6 +46,7 @@ impl DownloadManager {
     }
 
     /// Download a file with progress tracking
+    #[allow(dead_code)]
     pub async fn download_file(
         &self,
         url: &str,
@@ -75,6 +76,21 @@ impl DownloadManager {
         }
 
         let response = request.send().await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let snippet = body.trim().chars().take(200).collect::<String>();
+            return Err(anyhow::anyhow!(
+                "Download failed for {}: HTTP {}{}",
+                url,
+                status,
+                if snippet.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", snippet)
+                }
+            ));
+        }
         let expected_sha256 = extract_sha256_from_headers(response.headers());
 
         // Get total size
@@ -162,11 +178,20 @@ impl DownloadManager {
             .ok_or_else(|| anyhow::anyhow!("Unknown Whisper model: {}", model_name))?;
 
         let destination = self.models_dir.join("whisper").join(&model_info.file_name);
+        let min_expected_bytes = min_expected_model_bytes(model_info.size_mb);
 
-        // Check if already downloaded
+        // Check if already downloaded and valid enough for use.
         if destination.exists() {
-            tracing::info!("Model {} already exists at {:?}", model_name, destination);
-            return Ok(destination);
+            if validate_whisper_artifact(&destination, min_expected_bytes).await {
+                tracing::info!("Model {} already exists at {:?}", model_name, destination);
+                return Ok(destination);
+            }
+            tracing::warn!(
+                "Existing Whisper model {} at {:?} failed validation. Re-downloading.",
+                model_name,
+                destination
+            );
+            tokio::fs::remove_file(&destination).await.ok();
         }
 
         tracing::info!(
@@ -175,8 +200,18 @@ impl DownloadManager {
             model_info.url
         );
 
-        self.download_file(&model_info.url, &destination, progress_callback)
+        // Whisper model assets are large LFS blobs; HF response etag/checksum metadata can be
+        // inconsistent across redirect hops. Use unverified transport then validate artifact bytes.
+        self.download_file_unverified(&model_info.url, &destination, progress_callback)
             .await?;
+
+        if !validate_whisper_artifact(&destination, min_expected_bytes).await {
+            tokio::fs::remove_file(&destination).await.ok();
+            return Err(anyhow::anyhow!(
+                "Downloaded Whisper model '{}' is invalid or incomplete. Re-try download.",
+                model_name
+            ));
+        }
 
         // Verify checksum if available
         if let Some(expected_checksum) = &model_info.sha256 {
@@ -227,6 +262,21 @@ impl DownloadManager {
         }
 
         let response = request.send().await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let snippet = body.trim().chars().take(200).collect::<String>();
+            return Err(anyhow::anyhow!(
+                "Download failed for {}: HTTP {}{}",
+                url,
+                status,
+                if snippet.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", snippet)
+                }
+            ));
+        }
         let total_size = response
             .content_length()
             .map(|l| l + start_byte)
@@ -526,22 +576,6 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
             sha256: None,
         },
         WhisperModelInfo {
-            name: "large-v1".to_string(),
-            file_name: "ggml-large-v1.bin".to_string(),
-            size_mb: 2900.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v1.bin"
-                .to_string(),
-            sha256: None,
-        },
-        WhisperModelInfo {
-            name: "large-v2".to_string(),
-            file_name: "ggml-large-v2.bin".to_string(),
-            size_mb: 2900.0,
-            url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v2.bin"
-                .to_string(),
-            sha256: None,
-        },
-        WhisperModelInfo {
             name: "large-v3".to_string(),
             file_name: "ggml-large-v3.bin".to_string(),
             size_mb: 2900.0,
@@ -575,6 +609,35 @@ async fn calculate_sha256(path: &PathBuf) -> Result<String> {
     Ok(format!("{:x}", result))
 }
 
+fn min_expected_model_bytes(size_mb: f64) -> u64 {
+    // Be tolerant of upstream size changes while still rejecting tiny HTML/LFS pointer payloads.
+    // 25% of expected size, with a 1 MB floor.
+    let bytes = (size_mb * 1024.0 * 1024.0 * 0.25) as u64;
+    bytes.max(1024 * 1024)
+}
+
+async fn validate_whisper_artifact(path: &PathBuf, min_expected_bytes: u64) -> bool {
+    use tokio::io::AsyncReadExt;
+
+    let Ok(meta) = tokio::fs::metadata(path).await else {
+        return false;
+    };
+    if meta.len() < min_expected_bytes {
+        return false;
+    }
+
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return false;
+    };
+    let mut first = [0u8; 1];
+    if file.read_exact(&mut first).await.is_err() {
+        return false;
+    }
+
+    first[0] != b'<' && first[0] != b'{'
+}
+
+#[allow(dead_code)]
 fn extract_sha256_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers
         .get("x-linked-etag")

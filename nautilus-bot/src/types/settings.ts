@@ -58,6 +58,7 @@ export interface UiSettings {
   fontSize: number;
   showDictationPopup: boolean;
   showRecordingPopup: boolean;
+  colorScheme: string;
 }
 
 export interface ExportSettings {

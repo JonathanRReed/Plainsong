@@ -35,27 +35,69 @@ impl VibeVoiceProvider {
     }
 
     fn has_local_model(&self) -> bool {
-        let has_config = self.model_dir.join("config.json").exists();
-        let has_tokenizer = self.model_dir.join("tokenizer.json").exists()
-            || self.model_dir.join("tokenizer_config.json").exists();
-
-        let has_weights = self.model_dir.join("model.safetensors").exists()
-            || self.model_dir.join("model.safetensors.index.json").exists()
-            || std::fs::read_dir(&self.model_dir)
-                .ok()
-                .map(|entries| {
-                    entries.flatten().any(|entry| {
-                        entry
-                            .path()
-                            .extension()
-                            .map(|ext| ext == "safetensors")
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
-
-        has_config && has_tokenizer && has_weights
+        let has_config = is_valid_json_artifact(&self.model_dir.join("config.json"), 128);
+        let has_single_weights =
+            is_valid_binary_artifact(&self.model_dir.join("model.safetensors"), 1024);
+        let has_index_shards = vibevoice_index_shards_present(&self.model_dir);
+        has_config && (has_single_weights || has_index_shards)
     }
+}
+
+fn is_valid_binary_artifact(path: &Path, min_bytes: u64) -> bool {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < min_bytes {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 1];
+    if file.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    buf[0] != b'<' && buf[0] != b'{'
+}
+
+fn is_valid_json_artifact(path: &Path, min_bytes: u64) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < min_bytes {
+        return false;
+    }
+    let Ok(raw) = std::fs::read(path) else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&raw).is_ok()
+}
+
+fn vibevoice_index_shards_present(model_dir: &Path) -> bool {
+    let index_path = model_dir.join("model.safetensors.index.json");
+    let Ok(raw) = std::fs::read_to_string(index_path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(weight_map) = json.get("weight_map").and_then(|w| w.as_object()) else {
+        return false;
+    };
+    if weight_map.is_empty() {
+        return false;
+    }
+    let shard_names = weight_map
+        .values()
+        .filter_map(|v| v.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if shard_names.is_empty() {
+        return false;
+    }
+    shard_names
+        .iter()
+        .all(|name| is_valid_binary_artifact(&model_dir.join(name), 1024))
 }
 
 impl Default for VibeVoiceProvider {
@@ -111,7 +153,12 @@ impl AsrProvider for VibeVoiceProvider {
         .await
         .context("VibeVoice Python transcription failed")?;
 
-        let text = output.text.unwrap_or_default();
+        let text = output.text.unwrap_or_default().trim().to_string();
+        if text.is_empty() {
+            return Err(anyhow::anyhow!(
+                "VibeVoice returned an empty transcript. Verify runtime dependencies and model artifacts."
+            ));
+        }
         let duration = self.transcribe_duration(audio_path).unwrap_or(0.0);
 
         Ok(TranscriptionResult {

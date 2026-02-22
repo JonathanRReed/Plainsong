@@ -52,24 +52,15 @@ impl VoxtralProvider {
     }
 
     fn has_local_model(&self) -> bool {
-        let has_config = self.model_dir.join("config.json").exists();
-        let has_tokenizer = self.model_dir.join("tokenizer.json").exists();
-        let has_weights = self.model_dir.join("model.safetensors").exists()
-            || self.model_dir.join("model.safetensors.index.json").exists()
-            || std::fs::read_dir(&self.model_dir)
-                .ok()
-                .map(|entries| {
-                    entries.flatten().any(|entry| {
-                        entry
-                            .path()
-                            .extension()
-                            .map(|ext| ext == "safetensors")
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
+        let has_config = is_valid_json_artifact(&self.model_dir.join("config.json"), 64);
+        let has_processor =
+            is_valid_json_artifact(&self.model_dir.join("processor_config.json"), 64);
+        let has_tekken = is_valid_json_artifact(&self.model_dir.join("tekken.json"), 64);
+        let has_weights = is_valid_binary_artifact(&self.model_dir.join("model.safetensors"), 1024)
+            || is_valid_binary_artifact(&self.model_dir.join("consolidated.safetensors"), 1024)
+            || has_any_valid_safetensors(&self.model_dir, 1024);
 
-        has_config && has_tokenizer && has_weights
+        has_config && has_processor && has_tekken && has_weights
     }
 
     fn api_key() -> Option<String> {
@@ -159,7 +150,12 @@ impl VoxtralProvider {
         .await
         .context("Voxtral local transcription failed")?;
 
-        let text = output.text.unwrap_or_default();
+        let text = output.text.unwrap_or_default().trim().to_string();
+        if text.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Voxtral local returned an empty transcript. Verify local runtime and model artifacts."
+            ));
+        }
 
         Ok(TranscriptionResult {
             text: text.clone(),
@@ -178,6 +174,52 @@ impl VoxtralProvider {
             actual_provider: AsrProviderType::Voxtral,
         })
     }
+}
+
+fn is_valid_binary_artifact(path: &Path, min_bytes: u64) -> bool {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < min_bytes {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 1];
+    if file.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    buf[0] != b'<' && buf[0] != b'{'
+}
+
+fn is_valid_json_artifact(path: &Path, min_bytes: u64) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < min_bytes {
+        return false;
+    }
+    let Ok(raw) = std::fs::read(path) else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&raw).is_ok()
+}
+
+fn has_any_valid_safetensors(model_dir: &Path, min_bytes: u64) -> bool {
+    std::fs::read_dir(model_dir)
+        .ok()
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                let path = entry.path();
+                path.extension()
+                    .map(|ext| ext == "safetensors")
+                    .unwrap_or(false)
+                    && is_valid_binary_artifact(&path, min_bytes)
+            })
+        })
+        .unwrap_or(false)
 }
 
 impl Default for VoxtralProvider {

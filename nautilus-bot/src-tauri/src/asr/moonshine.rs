@@ -3,11 +3,14 @@ use super::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "asr-parakeet")]
+use std::{cell::RefCell, thread_local};
 
 // ---------------------------------------------------------------------------
 // UsefulSensors Moonshine Base — native ONNX inference, no Python required.
-// Uses the official ONNX export: encode.onnx + uncached_decode.onnx.
+// Uses the official merged ONNX export: encoder_model.onnx + decoder_model_merged.onnx.
 // Input: raw 16 kHz f32 PCM (no mel preprocessing — Moonshine operates on
 // raw waveform directly). Tokenizer: SentencePiece BPE (32 768 tokens).
 // ---------------------------------------------------------------------------
@@ -15,22 +18,28 @@ const MOONSHINE_MODEL_ID: &str = "moonshine-base";
 const MOONSHINE_HF_REPO: &str = "UsefulSensors/moonshine";
 
 /// ONNX files and tokenizer shipped in the UsefulSensors/moonshine HF repo.
-const MOONSHINE_ENCODER_FILE: &str = "moonshine/base/encode.onnx";
-const MOONSHINE_DECODER_FILE: &str = "moonshine/base/uncached_decode.onnx";
-const MOONSHINE_TOKENIZER_FILE: &str = "moonshine/base/tokenizer.json";
+const MOONSHINE_ENCODER_FILE: &str = "onnx/merged/base/float/encoder_model.onnx";
+const MOONSHINE_DECODER_FILE: &str = "onnx/merged/base/float/decoder_model_merged.onnx";
+const MOONSHINE_TOKENIZER_FILE: &str = "onnx/merged/base/float/tokenizer.json";
 
 /// Local filenames stored in the model dir.
-const MOONSHINE_LOCAL_ENCODER: &str = "encode.onnx";
-const MOONSHINE_LOCAL_DECODER: &str = "uncached_decode.onnx";
+const MOONSHINE_LOCAL_ENCODER: &str = "encoder_model.onnx";
+const MOONSHINE_LOCAL_DECODER: &str = "decoder_model_merged.onnx";
 const MOONSHINE_LOCAL_TOKENIZER: &str = "tokenizer.json";
 
 /// BOS / EOS token IDs for the Moonshine tokenizer (only used in ONNX path).
 #[cfg(feature = "asr-parakeet")]
-const MOONSHINE_BOS: u32 = 1;
+const MOONSHINE_BOS: i64 = 1;
 #[cfg(feature = "asr-parakeet")]
-const MOONSHINE_EOS: u32 = 2;
+const MOONSHINE_EOS: i64 = 2;
 #[cfg(feature = "asr-parakeet")]
-const MOONSHINE_MAX_TOKENS: usize = 448;
+const MOONSHINE_MAX_TOKENS: usize = 192;
+#[cfg(feature = "asr-parakeet")]
+const MOONSHINE_NUM_LAYERS: usize = 8;
+#[cfg(feature = "asr-parakeet")]
+const MOONSHINE_NUM_KEY_VALUE_HEADS: usize = 8;
+#[cfg(feature = "asr-parakeet")]
+const MOONSHINE_HEAD_DIM: usize = 52;
 
 pub struct MoonshineProvider {
     model_dir: PathBuf,
@@ -47,9 +56,9 @@ impl MoonshineProvider {
     }
 
     fn has_required_files(&self) -> bool {
-        self.model_dir.join(MOONSHINE_LOCAL_ENCODER).exists()
-            && self.model_dir.join(MOONSHINE_LOCAL_DECODER).exists()
-            && self.model_dir.join(MOONSHINE_LOCAL_TOKENIZER).exists()
+        is_valid_onnx_file(&self.model_dir.join(MOONSHINE_LOCAL_ENCODER))
+            && is_valid_onnx_file(&self.model_dir.join(MOONSHINE_LOCAL_DECODER))
+            && is_valid_tokenizer_file(&self.model_dir.join(MOONSHINE_LOCAL_TOKENIZER))
     }
 
     fn wav_duration_seconds(path: &Path) -> f64 {
@@ -67,6 +76,37 @@ impl MoonshineProvider {
     }
 }
 
+fn is_valid_onnx_file(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < 4096 {
+        return false;
+    }
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 1];
+    if f.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    buf[0] != b'<' && buf[0] != b'{'
+}
+
+fn is_valid_tokenizer_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < 1024 {
+        return false;
+    }
+    let Ok(raw) = std::fs::read(path) else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&raw).is_ok()
+}
+
 impl Default for MoonshineProvider {
     fn default() -> Self {
         Self::new()
@@ -79,10 +119,42 @@ impl Default for MoonshineProvider {
 #[cfg(feature = "asr-parakeet")]
 fn run_moonshine_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
     use ndarray::{Array, IxDyn};
-    use ort::session::builder::GraphOptimizationLevel;
     use ort::session::Session;
     use ort::value::Tensor;
     use tokenizers::Tokenizer;
+
+    struct MoonshineRuntime {
+        model_dir_key: String,
+        encoder: Session,
+        decoder: Session,
+        tokenizer: Tokenizer,
+    }
+
+    fn load_runtime(model_dir: &Path) -> Result<MoonshineRuntime> {
+        let encoder = Session::builder()
+            .context("Failed to create Moonshine encoder builder")?
+            .commit_from_file(model_dir.join(MOONSHINE_LOCAL_ENCODER))
+            .context("Failed to load Moonshine encoder ONNX")?;
+
+        let decoder = Session::builder()
+            .context("Failed to create Moonshine decoder builder")?
+            .commit_from_file(model_dir.join(MOONSHINE_LOCAL_DECODER))
+            .context("Failed to load Moonshine decoder ONNX")?;
+
+        let tokenizer = Tokenizer::from_file(model_dir.join(MOONSHINE_LOCAL_TOKENIZER))
+            .map_err(|e| anyhow::anyhow!("Failed to load Moonshine tokenizer: {}", e))?;
+
+        Ok(MoonshineRuntime {
+            model_dir_key: model_dir.to_string_lossy().to_string(),
+            encoder,
+            decoder,
+            tokenizer,
+        })
+    }
+
+    thread_local! {
+        static RUNTIME_CACHE: RefCell<Option<MoonshineRuntime>> = const { RefCell::new(None) };
+    }
 
     // -----------------------------------------------------------------
     // 1. Load 16 kHz mono f32 samples (Moonshine takes raw waveform)
@@ -94,109 +166,243 @@ fn run_moonshine_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
         return Ok(String::new());
     }
 
-    // -----------------------------------------------------------------
-    // 2. Run encoder: input shape [1, n_samples]
-    // -----------------------------------------------------------------
-    let n = samples.len();
-    let audio_arr: Array<f32, IxDyn> = Array::from_shape_vec(IxDyn(&[1, n]), samples)
-        .context("Failed to build Moonshine audio array")?;
+    let model_dir_key = model_dir.to_string_lossy().to_string();
+    RUNTIME_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let should_reload = cache
+            .as_ref()
+            .map(|runtime| runtime.model_dir_key != model_dir_key)
+            .unwrap_or(true);
+        if should_reload {
+            *cache = Some(load_runtime(model_dir)?);
+        }
+        let runtime = cache
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Moonshine runtime cache unavailable"))?;
 
-    let mut encoder = Session::builder()
-        .context("Failed to create Moonshine encoder builder")?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .context("Failed to set optimization level")?
-        .commit_from_file(model_dir.join(MOONSHINE_LOCAL_ENCODER))
-        .context("Failed to load Moonshine encoder ONNX")?;
+        let encoder = &mut runtime.encoder;
+        let decoder = &mut runtime.decoder;
 
-    let audio_tensor =
-        Tensor::from_array(audio_arr).context("Failed to create Moonshine audio tensor")?;
+        // -----------------------------------------------------------------
+        // 3. Run encoder: input shape [1, n_samples]
+        // -----------------------------------------------------------------
+        let n = samples.len();
+        let audio_arr: Array<f32, IxDyn> = Array::from_shape_vec(IxDyn(&[1, n]), samples)
+            .context("Failed to build Moonshine audio array")?;
+        let audio_tensor =
+            Tensor::from_array(audio_arr).context("Failed to create Moonshine audio tensor")?;
+        let attention_mask_arr: Array<i64, IxDyn> =
+            Array::from_shape_vec(IxDyn(&[1, n]), vec![1; n])
+                .context("Failed to build Moonshine attention mask")?;
+        let attention_mask_tensor = Tensor::from_array(attention_mask_arr)
+            .context("Failed to create Moonshine attention mask tensor")?;
 
-    let enc_outputs = encoder
-        .run(ort::inputs!["audio" => audio_tensor])
-        .context("Moonshine encoder inference failed")?;
+        let encoder_input_names: HashSet<String> = encoder
+            .inputs()
+            .iter()
+            .map(|input| input.name().to_string())
+            .collect();
+        if !encoder_input_names.contains("input_values") {
+            return Err(anyhow::anyhow!(
+                "Unsupported Moonshine encoder inputs: {:?}",
+                encoder_input_names
+            ));
+        }
 
-    // Context shape: [1, seq_len, hidden_size]
-    let context_array = enc_outputs[0]
-        .try_extract_array::<f32>()
-        .context("Failed to extract Moonshine encoder context")?;
-    let context_shape = context_array.shape().to_vec();
-    let context_data: Vec<f32> = context_array.iter().copied().collect();
+        let mut encoder_inputs = ort::inputs!["input_values" => audio_tensor];
+        if encoder_input_names.contains("attention_mask") {
+            encoder_inputs.push(("attention_mask".into(), attention_mask_tensor.into()));
+        }
 
-    // -----------------------------------------------------------------
-    // 3. Load tokenizer
-    // -----------------------------------------------------------------
-    let tokenizer = Tokenizer::from_file(model_dir.join(MOONSHINE_LOCAL_TOKENIZER))
-        .map_err(|e| anyhow::anyhow!("Failed to load Moonshine tokenizer: {}", e))?;
+        let enc_outputs = encoder
+            .run(encoder_inputs)
+            .context("Moonshine encoder inference failed")?;
 
-    // -----------------------------------------------------------------
-    // 4. Autoregressive decode using uncached_decode.onnx
-    //    inputs: token_ids [1, n_tokens] int32, audio_context [1, S, H]
-    //    output: logits [1, n_tokens, vocab_size]
-    // -----------------------------------------------------------------
-    let mut decoder = Session::builder()
-        .context("Failed to create Moonshine decoder builder")?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .context("Failed to set decoder optimization level")?
-        .commit_from_file(model_dir.join(MOONSHINE_LOCAL_DECODER))
-        .context("Failed to load Moonshine decoder ONNX")?;
-
-    let mut token_ids: Vec<u32> = vec![MOONSHINE_BOS];
-
-    for _ in 0..MOONSHINE_MAX_TOKENS {
-        let n_tokens = token_ids.len();
-
-        // Build token_ids tensor [1, n_tokens] as i32
-        let token_i32: Vec<i32> = token_ids.iter().map(|&t| t as i32).collect();
-        let token_arr: Array<i32, IxDyn> = Array::from_shape_vec(IxDyn(&[1, n_tokens]), token_i32)
-            .context("Failed to build Moonshine token array")?;
-
-        // Rebuild context tensor from stored data + shape
-        let ctx_arr: Array<f32, IxDyn> =
-            Array::from_shape_vec(IxDyn(&context_shape), context_data.clone())
-                .context("Failed to rebuild Moonshine context array")?;
-
-        let token_tensor =
-            Tensor::from_array(token_arr).context("Failed to create token tensor")?;
-        let ctx_tensor = Tensor::from_array(ctx_arr).context("Failed to create context tensor")?;
-
-        let dec_outputs = decoder
-            .run(ort::inputs![
-                "token_ids" => token_tensor,
-                "audio_context" => ctx_tensor
-            ])
-            .context("Moonshine decoder inference failed")?;
-
-        // logits shape: [1, n_tokens, vocab_size] — take last position
-        let logits_array = dec_outputs[0]
+        // Context shape: [1, seq_len, hidden_size]
+        let _context_array = enc_outputs[0]
             .try_extract_array::<f32>()
-            .context("Failed to extract Moonshine logits")?;
-        let shape = logits_array.shape().to_vec();
-        let vocab_size = *shape.last().unwrap_or(&1);
-        let logits_flat: Vec<f32> = logits_array.iter().copied().collect();
+            .context("Failed to extract Moonshine encoder context")?;
 
-        // Last token's logits = offset [(n_tokens-1) * vocab_size ..]
-        let last_offset = (n_tokens - 1) * vocab_size;
-        let last_logits = &logits_flat[last_offset..last_offset + vocab_size];
-        let next_token = last_logits
+        // -----------------------------------------------------------------
+        // 5. Autoregressive decode using decoder_model_merged.onnx
+        // -----------------------------------------------------------------
+        let decoder_input_names_ordered = decoder
+            .inputs()
+            .iter()
+            .map(|input| input.name().to_string())
+            .collect::<Vec<_>>();
+        let decoder_output_names = decoder
+            .outputs()
+            .iter()
+            .map(|output| output.name().to_string())
+            .collect::<Vec<_>>();
+        let decoder_input_names: HashSet<String> =
+            decoder_input_names_ordered.iter().cloned().collect();
+        for required in ["input_ids", "encoder_hidden_states", "use_cache_branch"] {
+            if !decoder_input_names.contains(required) {
+                return Err(anyhow::anyhow!(
+                    "Unsupported Moonshine decoder inputs: missing '{}' in {:?}",
+                    required,
+                    decoder_input_names
+                ));
+            }
+        }
+        let needs_encoder_attention_mask = decoder_input_names.contains("encoder_attention_mask");
+
+        let past_key_names = decoder_input_names_ordered
+            .iter()
+            .filter(|name| name.starts_with("past_key_values."))
+            .cloned()
+            .collect::<Vec<_>>();
+        let past_key_indices = past_key_names
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i as u32)
-            .unwrap_or(MOONSHINE_EOS);
+            .map(|(idx, name)| (name.clone(), idx))
+            .collect::<HashMap<_, _>>();
 
-        if next_token == MOONSHINE_EOS {
-            break;
+        let enc_mask_arr: Array<i64, IxDyn> = Array::from_shape_vec(IxDyn(&[1, n]), vec![1; n])
+            .context("Failed to build mask array")?;
+        let enc_mask_tensor = Tensor::from_array(enc_mask_arr)
+            .context("Failed to create Moonshine encoder attention mask tensor")?;
+
+        let mut token_ids: Vec<i64> = vec![MOONSHINE_BOS];
+        let mut past_arrays: Vec<Array<f32, IxDyn>> = past_key_names
+            .iter()
+            .map(|_| {
+                Array::zeros(IxDyn(&[
+                    0,
+                    MOONSHINE_NUM_KEY_VALUE_HEADS,
+                    1,
+                    MOONSHINE_HEAD_DIM,
+                ]))
+            })
+            .collect();
+        if !past_key_names.is_empty() && past_key_names.len() != MOONSHINE_NUM_LAYERS * 4 {
+            tracing::warn!(
+                "Unexpected Moonshine past key tensor count: {}",
+                past_key_names.len()
+            );
         }
-        token_ids.push(next_token);
-    }
 
-    // Decode tokens (skip BOS)
-    let output_ids: Vec<u32> = token_ids[1..].to_vec();
-    let text = tokenizer
-        .decode(&output_ids, true)
-        .map_err(|e| anyhow::anyhow!("Moonshine tokenizer decode failed: {}", e))?;
+        let max_decode_steps = moonshine_max_tokens_for_audio(n);
+        for step in 0..max_decode_steps {
+            let use_cache_branch = step > 0;
+            let input_ids_values = if use_cache_branch {
+                vec![*token_ids.last().unwrap_or(&MOONSHINE_BOS)]
+            } else {
+                token_ids.clone()
+            };
+            let n_tokens = input_ids_values.len();
 
-    Ok(text.trim().to_string())
+            let input_ids_arr: Array<i64, IxDyn> =
+                Array::from_shape_vec(IxDyn(&[1, n_tokens]), input_ids_values)
+                    .context("Failed to build Moonshine input_ids")?;
+            let input_ids_tensor = Tensor::from_array(input_ids_arr)
+                .context("Failed to create Moonshine input_ids tensor")?;
+            let use_cache_arr: Array<bool, IxDyn> =
+                Array::from_shape_vec(IxDyn(&[1]), vec![use_cache_branch])
+                    .context("Failed to build Moonshine use_cache_branch tensor")?;
+            let use_cache_tensor = Tensor::from_array(use_cache_arr)
+                .context("Failed to create Moonshine use_cache_branch tensor")?;
+
+            let mut decoder_inputs = ort::inputs![
+                "input_ids" => input_ids_tensor,
+                "encoder_hidden_states" => &enc_outputs[0],
+                "use_cache_branch" => use_cache_tensor
+            ];
+            if needs_encoder_attention_mask {
+                decoder_inputs.push(("encoder_attention_mask".into(), (&enc_mask_tensor).into()));
+            }
+
+            for (name, past_array) in past_key_names.iter().zip(past_arrays.iter()) {
+                let tensor = Tensor::from_array(past_array.clone())
+                    .context("Failed to create Moonshine past_key_values tensor")?;
+                decoder_inputs.push((name.clone().into(), tensor.into()));
+            }
+
+            let dec_outputs = decoder.run(decoder_inputs).map_err(|error| {
+                anyhow::anyhow!(
+                    "Moonshine decoder inference failed at step {} (use_cache_branch={}, input_token_count={}): {}",
+                    step,
+                    use_cache_branch,
+                    n_tokens,
+                    error
+                )
+            })?;
+
+            // logits shape: [1, n_tokens, vocab_size] — take last position
+            let logits_array = dec_outputs[0]
+                .try_extract_array::<f32>()
+                .context("Failed to extract Moonshine logits")?;
+            let shape = logits_array.shape().to_vec();
+            let vocab_size = *shape.last().unwrap_or(&1);
+            let logits_flat: Vec<f32> = logits_array.iter().copied().collect();
+
+            // Last token's logits = offset [(n_tokens-1) * vocab_size ..]
+            let last_offset = (n_tokens - 1) * vocab_size;
+            let last_logits = &logits_flat[last_offset..last_offset + vocab_size];
+            let next_token = last_logits
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i as i64)
+                .unwrap_or(MOONSHINE_EOS);
+
+            if next_token == MOONSHINE_EOS {
+                break;
+            }
+            token_ids.push(next_token);
+
+            if !past_key_names.is_empty() {
+                let mut updated_past = past_arrays.clone();
+                for idx in 1..dec_outputs.len() {
+                    let Some(output_name) = decoder_output_names.get(idx) else {
+                        continue;
+                    };
+                    let Some(suffix) = output_name.strip_prefix("present.") else {
+                        continue;
+                    };
+                    let past_name = format!("past_key_values.{}", suffix);
+                    let Some(past_idx) = past_key_indices.get(past_name.as_str()) else {
+                        continue;
+                    };
+                    let past_array = dec_outputs[idx]
+                        .try_extract_array::<f32>()
+                        .context("Failed to extract Moonshine present key/value tensor")?
+                        .to_owned();
+                    if past_name.contains(".encoder.")
+                        && past_array.shape().first().copied().unwrap_or_default() == 0
+                    {
+                        // Some decoder steps return empty encoder cache placeholders; keep the
+                        // last non-empty encoder cache to avoid shape regressions in later steps.
+                        continue;
+                    }
+                    updated_past[*past_idx] = past_array;
+                }
+                past_arrays = updated_past;
+            }
+        }
+
+        // Decode tokens (skip BOS)
+        let output_ids: Vec<u32> = token_ids.iter().skip(1).map(|id| *id as u32).collect();
+        if output_ids.is_empty() {
+            return Ok(String::new());
+        }
+        let text = runtime
+            .tokenizer
+            .decode(&output_ids, true)
+            .map_err(|e| anyhow::anyhow!("Moonshine tokenizer decode failed: {}", e))?;
+
+        Ok(text.trim().to_string())
+    })
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn moonshine_max_tokens_for_audio(sample_count: usize) -> usize {
+    // Moonshine runs autoregressive decode; cap by utterance duration to reduce latency.
+    let seconds = sample_count as f32 / 16_000.0;
+    let estimated = (seconds * 5.0).ceil() as usize + 24;
+    estimated.clamp(32, MOONSHINE_MAX_TOKENS)
 }
 
 #[cfg(not(feature = "asr-parakeet"))]
@@ -310,8 +516,16 @@ impl AsrProvider for MoonshineProvider {
 
         for (i, (hf_path, local_name)) in files.into_iter().enumerate() {
             let destination = self.model_dir.join(local_name);
-            if destination.exists() {
+            let is_valid = if local_name.ends_with(".onnx") {
+                is_valid_onnx_file(&destination)
+            } else {
+                is_valid_tokenizer_file(&destination)
+            };
+            if is_valid {
                 continue;
+            }
+            if destination.exists() {
+                std::fs::remove_file(&destination).ok();
             }
             let url = format!(
                 "https://huggingface.co/{}/resolve/main/{}",

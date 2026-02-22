@@ -13,7 +13,7 @@ describe("getProviderSelectionStatus", () => {
     ).toEqual({ selectable: true, reason: null });
   });
 
-  it("requires download when not downloaded", () => {
+  it("stays selectable when download is required", () => {
     expect(
       getProviderSelectionStatus({
         inferenceEnabled: true,
@@ -21,10 +21,10 @@ describe("getProviderSelectionStatus", () => {
         downloadStatus: "NotDownloaded",
         runtimeStatus: "missing_model",
       })
-    ).toEqual({ selectable: false, reason: "download_required" });
+    ).toEqual({ selectable: true, reason: "download_required" });
   });
 
-  it("blocks when runtime is unavailable", () => {
+  it("stays selectable when runtime is unavailable", () => {
     expect(
       getProviderSelectionStatus({
         inferenceEnabled: true,
@@ -32,7 +32,7 @@ describe("getProviderSelectionStatus", () => {
         downloadStatus: "Downloaded",
         runtimeStatus: "missing_runtime",
       })
-    ).toEqual({ selectable: false, reason: "runtime_unavailable" });
+    ).toEqual({ selectable: true, reason: "runtime_unavailable" });
   });
 
   it("blocks when inference is disabled", () => {

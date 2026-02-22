@@ -41,7 +41,7 @@ interface MeetingRecordingStateChangedEvent {
 interface RecordingContextValue extends RecordingState {
   formattedDuration: string;
   startDictation: (options?: DictationStartOptions) => Promise<void>;
-  stopDictation: () => Promise<string | null>;
+  stopDictation: () => Promise<string>;
   startMeeting: (options: {
     mic: boolean;
     systemAudio: boolean;
@@ -112,7 +112,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       console.error("Failed to stop dictation:", error);
       clearTimer();
-      return null;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(message);
     }
   }, [clearTimer]);
 

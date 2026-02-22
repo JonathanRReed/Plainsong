@@ -158,6 +158,14 @@ struct PermissionDiagnostics {
     notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalModelRepairReport {
+    repaired_count: usize,
+    removed_paths: Vec<String>,
+    notes: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AnalysisProvider {
     Ollama,
@@ -1042,6 +1050,40 @@ async fn stop_recording(
 
         match asr_manager.transcribe(&path).await {
             Ok(result) => {
+                if result.text.trim().is_empty() && wav_file_has_non_silent_audio(&path, 0.003) {
+                    let error = format!(
+                        "{} returned an empty transcript for recording '{}'.",
+                        result.actual_provider.display_name(),
+                        recording_id_clone
+                    );
+                    tracing::error!("{}", error);
+                    let mut db = db_clone.lock().await;
+                    if let Err(update_error) =
+                        db.update_recording_status(&recording_id_clone, "error")
+                    {
+                        tracing::error!("Failed to update recording status: {}", update_error);
+                    }
+                    let details = serde_json::json!({
+                        "recording_id": &recording_id_clone,
+                        "error": &error
+                    });
+                    if let Err(audit_error) =
+                        db.log_audit_event("transcription_failed", Some(details), "error")
+                    {
+                        tracing::warn!("Failed to log audit event: {}", audit_error);
+                    }
+                    preview_task.abort();
+                    emit_recording_state(
+                        &app_handle,
+                        "error",
+                        Some(recording_id_clone.as_str()),
+                        None,
+                        None,
+                        Some(&error),
+                    );
+                    hide_overlay_window(&app_handle, RECORDING_OVERLAY_LABEL);
+                    return;
+                }
                 tracing::info!("Transcription completed for {}", recording_id_clone);
 
                 // Clone values before moving into struct
@@ -2426,6 +2468,29 @@ async fn get_asr_runtime_diagnostics(
 }
 
 #[tauri::command]
+async fn refresh_asr_runtime_probes(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    asr::python_runtime::shutdown_python_workers().await;
+    asr::python_runtime::clear_runtime_probe_cache();
+    state.asr_manager.clear_runtime_errors().await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn repair_local_model_cache(
+    state: tauri::State<'_, AppState>,
+) -> Result<LocalModelRepairReport, String> {
+    let models_root = dirs::data_dir()
+        .ok_or_else(|| "Could not find data directory".to_string())?
+        .join("Nautilus")
+        .join("models");
+    let report = repair_local_model_cache_at(&models_root);
+    asr::python_runtime::shutdown_python_workers().await;
+    asr::python_runtime::clear_runtime_probe_cache();
+    state.asr_manager.clear_runtime_errors().await;
+    Ok(report)
+}
+
+#[tauri::command]
 async fn get_default_asr_provider(
     state: tauri::State<'_, AppState>,
 ) -> Result<asr::AsrProviderType, String> {
@@ -2446,19 +2511,6 @@ async fn set_default_asr_provider(
         ));
     }
 
-    let provider = state.asr_manager.get_provider(providerType).await;
-    if !provider.is_available() {
-        let diagnostics = state
-            .asr_manager
-            .get_runtime_diagnostics(providerType)
-            .await;
-        return Err(diagnostics.runtime_message.unwrap_or_else(|| {
-            format!(
-                "ASR provider '{}' is not available in this build",
-                provider.name()
-            )
-        }));
-    }
     state.asr_manager.set_default_provider(providerType).await;
 
     let mut settings_manager = state.settings_manager.lock().await;
@@ -2500,8 +2552,9 @@ async fn set_asr_provider_model(
 ) -> Result<(), String> {
     state
         .asr_manager
-        .set_provider_model_id(providerType, modelId.clone())
+        .set_provider_model_id(providerType, modelId)
         .await;
+    let normalized_model_id = state.asr_manager.provider_model_id(providerType).await;
 
     let provider_key = asr_provider_to_settings_value(providerType).to_string();
     let mut settings_manager = state.settings_manager.lock().await;
@@ -2509,7 +2562,7 @@ async fn set_asr_provider_model(
         .settings_mut()
         .transcription
         .provider_model_ids
-        .insert(provider_key, modelId.clone());
+        .insert(provider_key, normalized_model_id.clone());
 
     if let Some(default_provider) = asr_provider_from_settings_value(
         &settings_manager.settings().transcription.default_provider,
@@ -2518,7 +2571,7 @@ async fn set_asr_provider_model(
             settings_manager
                 .settings_mut()
                 .transcription
-                .selected_model_id = modelId;
+                .selected_model_id = normalized_model_id;
         }
     }
 
@@ -2655,6 +2708,7 @@ async fn save_settings(
     let result: Result<(), String> = async {
         settings.audio.silence_timeout_seconds =
             normalize_silence_timeout_seconds(settings.audio.silence_timeout_seconds);
+        settings.ui.color_scheme = normalize_color_scheme_value(&settings.ui.color_scheme);
 
         let default_provider =
             asr_provider_from_settings_value(&settings.transcription.default_provider)
@@ -3365,6 +3419,47 @@ async fn stop_dictation_session_for_session(
     }
 
     result.text = sanitize_dictation_output(&result.text, &raw_text);
+    let processed_has_audio = wav_has_non_silent_audio(&processed_audio, 0.003);
+    let raw_has_audio = wav_has_non_silent_audio(&audio_data, 0.0015);
+    if result.text.trim().is_empty() {
+        let (message, outcome) = if processed_has_audio || raw_has_audio {
+            (
+                format!(
+                    "{} returned an empty transcript. Re-check runtime/model setup and try again.",
+                    result.actual_provider.display_name()
+                ),
+                "provider_error",
+            )
+        } else {
+            (
+                "No speech was detected in the dictation audio. Try speaking closer to the mic or increasing input gain."
+                    .to_string(),
+                "no_speech",
+            )
+        };
+        {
+            let mut runtime_state = state.dictation_runtime_state.lock().await;
+            *runtime_state = DictationSessionState::Error;
+        }
+        emit_dictation_state(
+            app,
+            "error",
+            None,
+            Some(&message),
+            None,
+            Some(session_id),
+            Some(stop_reason),
+            Some(outcome),
+        );
+        schedule_dictation_idle_reset(
+            app.clone(),
+            session_id,
+            Duration::from_secs(3),
+            Some(stop_reason.to_string()),
+            Some(outcome.to_string()),
+        );
+        return Err(message);
+    }
 
     let mut pasted = false;
     let mut copied = false;
@@ -4946,8 +5041,8 @@ pub fn run() {
         .setup(|app| {
             let state = app.state::<AppState>();
             tauri::async_runtime::block_on(async {
-                let (configured_provider, silence_skip, provider_model_map) =
-                {
+                let mut warnings = migrate_legacy_asr_artifacts();
+                let (configured_provider, silence_skip, mut provider_model_map) = {
                     let settings_manager = state.settings_manager.lock().await;
                     let transcription = &settings_manager.settings().transcription;
                     (
@@ -4959,30 +5054,93 @@ pub fn run() {
 
                 state
                     .asr_manager
-                    .set_provider_model_map(provider_model_map)
+                    .set_provider_model_map(provider_model_map.clone())
                     .await;
                 state
                     .asr_manager
                     .set_silence_skip_enabled(silence_skip)
                     .await;
 
-                if let Some(provider_type) =
-                    asr_provider_from_settings_value(&configured_provider)
-                {
-                    if asr::AsrManager::is_provider_transcription_enabled(provider_type) {
-                        state.asr_manager.set_default_provider(provider_type).await;
-                    } else {
-                        let mut settings_manager = state.settings_manager.lock().await;
-                        settings_manager.settings_mut().transcription.default_provider =
-                            asr_provider_to_settings_value(asr::AsrProviderType::Whisper)
-                                .to_string();
-                        if let Err(error) = settings_manager.save() {
-                            tracing::warn!(
-                                "Failed to persist supported ASR provider after invalid config: {}",
-                                error
-                            );
+                let configured_type =
+                    asr_provider_from_settings_value(&configured_provider).unwrap_or(asr::AsrProviderType::Whisper);
+                let configured_model = provider_model_map
+                    .get(&configured_type)
+                    .cloned()
+                    .unwrap_or_else(|| configured_type.default_model_id().to_string());
+                let configured_available = asr::AsrProviderFactory::create_with_model(
+                    configured_type,
+                    Some(configured_model.as_str()),
+                )
+                .is_available();
+                let configured_enabled = asr::AsrManager::is_provider_transcription_enabled(configured_type);
+
+                let mut resolved_provider = configured_type;
+                let mut resolved_model = configured_model;
+                if !(configured_available && configured_enabled) {
+                    let priority = [
+                        asr::AsrProviderType::Whisper,
+                        asr::AsrProviderType::Parakeet,
+                        asr::AsrProviderType::Canary,
+                        asr::AsrProviderType::DistilWhisper,
+                        asr::AsrProviderType::Moonshine,
+                        asr::AsrProviderType::VibeVoice,
+                        asr::AsrProviderType::Voxtral,
+                    ];
+
+                    for candidate in priority {
+                        if !asr::AsrManager::is_provider_transcription_enabled(candidate) {
+                            continue;
+                        }
+                        let candidate_model = if candidate == asr::AsrProviderType::Voxtral {
+                            "voxtral-local".to_string()
+                        } else {
+                            provider_model_map
+                                .get(&candidate)
+                                .cloned()
+                                .unwrap_or_else(|| candidate.default_model_id().to_string())
+                        };
+
+                        let provider =
+                            asr::AsrProviderFactory::create_with_model(candidate, Some(candidate_model.as_str()));
+                        if provider.is_available() {
+                            resolved_provider = candidate;
+                            resolved_model = candidate_model;
+                            break;
                         }
                     }
+
+                    if resolved_provider != configured_type {
+                        warnings.push(format!(
+                            "Default ASR provider '{}' was unavailable. Switched to '{}'.",
+                            configured_type.display_name(),
+                            resolved_provider.display_name()
+                        ));
+                    }
+                }
+
+                provider_model_map.insert(resolved_provider, resolved_model.clone());
+                state
+                    .asr_manager
+                    .set_provider_model_map(provider_model_map.clone())
+                    .await;
+                state.asr_manager.set_default_provider(resolved_provider).await;
+
+                {
+                    let mut settings_manager = state.settings_manager.lock().await;
+                    settings_manager.settings_mut().transcription.default_provider =
+                        asr_provider_to_settings_value(resolved_provider).to_string();
+                    settings_manager.settings_mut().transcription.selected_model_id =
+                        resolved_model.clone();
+                    settings_manager.settings_mut().transcription.provider_model_ids =
+                        provider_model_map_to_settings(&provider_model_map);
+                    if let Err(error) = settings_manager.save() {
+                        tracing::warn!("Failed to persist ASR startup normalization: {}", error);
+                    }
+                }
+
+                for warning in warnings {
+                    tracing::warn!("{}", warning);
+                    let _ = app.emit("asr-provider-warning", warning);
                 }
 
                 let db_encrypted = {
@@ -5189,6 +5347,8 @@ pub fn run() {
             delete_project,
             get_asr_providers,
             get_asr_runtime_diagnostics,
+            refresh_asr_runtime_probes,
+            repair_local_model_cache,
             get_default_asr_provider,
             set_default_asr_provider,
             get_asr_provider_model,
@@ -5390,6 +5550,16 @@ fn is_generic_speaker_name(name: &str) -> bool {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn temp_models_root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "nautilus-model-repair-tests-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp models root");
+        root
+    }
 
     fn seg(speaker_id: &str, text: &str) -> models::TranscriptSegment {
         models::TranscriptSegment {
@@ -5501,6 +5671,72 @@ mod tests {
         let fallback = "testing 1,2,3 this is a test.";
         let sanitized = sanitize_dictation_output(candidate, fallback);
         assert_eq!(sanitized, "testing 1,2,3 this is a test.");
+    }
+
+    #[test]
+    fn repair_local_model_cache_removes_invalid_artifacts_only() {
+        let root = temp_models_root();
+        let parakeet_dir = root.join("parakeet");
+        let whisper_dir = root.join("whisper");
+        std::fs::create_dir_all(&parakeet_dir).expect("create parakeet dir");
+        std::fs::create_dir_all(&whisper_dir).expect("create whisper dir");
+
+        let invalid_onnx = parakeet_dir.join("encoder.onnx");
+        let invalid_tokens = parakeet_dir.join("tokens.txt");
+        let valid_whisper = whisper_dir.join("ggml-base.en.bin");
+
+        std::fs::write(&invalid_onnx, b"<html>404</html>").expect("write invalid onnx");
+        std::fs::write(&invalid_tokens, "{ \"error\": \"missing\" }".repeat(8))
+            .expect("write invalid tokens");
+
+        let mut whisper_payload = vec![0u8; 1024 * 1024 + 1];
+        whisper_payload[0] = 1;
+        std::fs::write(&valid_whisper, whisper_payload).expect("write valid whisper model");
+
+        let report = repair_local_model_cache_at(&root);
+        assert_eq!(report.repaired_count, 2);
+        assert!(!invalid_onnx.exists(), "invalid ONNX should be removed");
+        assert!(!invalid_tokens.exists(), "invalid tokens should be removed");
+        assert!(
+            valid_whisper.exists(),
+            "valid whisper artifact must be preserved"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn repair_local_model_cache_preserves_valid_parakeet_artifacts() {
+        let root = temp_models_root();
+        let parakeet_dir = root.join("parakeet");
+        std::fs::create_dir_all(&parakeet_dir).expect("create parakeet dir");
+
+        let encoder = parakeet_dir.join("encoder.onnx");
+        let tokens = parakeet_dir.join("tokens.txt");
+        let mut encoder_payload = vec![0u8; 4097];
+        encoder_payload[0] = 1;
+        std::fs::write(&encoder, encoder_payload).expect("write valid encoder");
+        let token_lines = (0..64)
+            .map(|i| format!("tok{} {}\n", i, i))
+            .collect::<String>();
+        std::fs::write(&tokens, token_lines).expect("write valid tokens");
+
+        let report = repair_local_model_cache_at(&root);
+        assert_eq!(report.repaired_count, 0);
+        assert!(encoder.exists());
+        assert!(tokens.exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn token_list_validator_accepts_sentencepiece_style_tokens() {
+        let root = temp_models_root();
+        let tokens = root.join("tokens.txt");
+        let body = "<unk> 0\n▁t 1\n▁th 2\n▁a 3\nin 4\ns 5\ne 6\nr 7\n";
+        std::fs::write(&tokens, body).expect("write tokens");
+        assert!(is_valid_token_list_artifact(&tokens, 8));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
@@ -5654,6 +5890,72 @@ fn compute_wav_duration_seconds_from_bytes(audio_data: &[u8]) -> i64 {
                 error
             );
             0
+        }
+    }
+}
+
+fn wav_has_non_silent_audio(audio_data: &[u8], threshold: f32) -> bool {
+    let cursor = std::io::Cursor::new(audio_data);
+    match hound::WavReader::new(cursor) {
+        Ok(mut reader) => {
+            let spec = reader.spec();
+            if spec.sample_rate == 0 {
+                return false;
+            }
+            let max_abs = if spec.sample_format == hound::SampleFormat::Float {
+                reader
+                    .samples::<f32>()
+                    .filter_map(Result::ok)
+                    .map(f32::abs)
+                    .fold(0.0_f32, f32::max)
+            } else {
+                reader
+                    .samples::<i16>()
+                    .filter_map(Result::ok)
+                    .map(|sample| (sample as f32 / i16::MAX as f32).abs())
+                    .fold(0.0_f32, f32::max)
+            };
+            max_abs >= threshold
+        }
+        Err(error) => {
+            tracing::warn!(
+                "Failed to inspect dictation wav bytes for silence detection: {}",
+                error
+            );
+            false
+        }
+    }
+}
+
+fn wav_file_has_non_silent_audio(path: &Path, threshold: f32) -> bool {
+    match hound::WavReader::open(path) {
+        Ok(mut reader) => {
+            let spec = reader.spec();
+            if spec.sample_rate == 0 {
+                return false;
+            }
+            let max_abs = if spec.sample_format == hound::SampleFormat::Float {
+                reader
+                    .samples::<f32>()
+                    .filter_map(Result::ok)
+                    .map(f32::abs)
+                    .fold(0.0_f32, f32::max)
+            } else {
+                reader
+                    .samples::<i16>()
+                    .filter_map(Result::ok)
+                    .map(|sample| (sample as f32 / i16::MAX as f32).abs())
+                    .fold(0.0_f32, f32::max)
+            };
+            max_abs >= threshold
+        }
+        Err(error) => {
+            tracing::warn!(
+                "Failed to inspect wav file '{}' for silence detection: {}",
+                path.display(),
+                error
+            );
+            false
         }
     }
 }
@@ -5826,6 +6128,16 @@ fn normalize_silence_timeout_seconds(value: f32) -> f32 {
     value.clamp(MIN_SILENCE_TIMEOUT_SECONDS, MAX_SILENCE_TIMEOUT_SECONDS)
 }
 
+fn normalize_color_scheme_value(value: &str) -> String {
+    match value.trim() {
+        "default" | "rose-pine" | "rose-pine-dawn" | "solarized-dark" | "solarized-light"
+        | "dracula" | "tokyo-night" | "gruvbox" | "nord" | "rose-pine-moon" | "catppuccin" => {
+            value.trim().to_string()
+        }
+        _ => "default".to_string(),
+    }
+}
+
 fn normalize_asr_model_id(provider_type: asr::AsrProviderType, model_id: &str) -> String {
     let trimmed = model_id.trim();
     let candidate = if trimmed.is_empty() {
@@ -5835,6 +6147,10 @@ fn normalize_asr_model_id(provider_type: asr::AsrProviderType, model_id: &str) -
     };
 
     match provider_type {
+        asr::AsrProviderType::Parakeet => match candidate {
+            "parakeet-tdt-0.6b-v3" | "parakeet-tdt-ctc-110m" => "parakeet-tdt-ctc-110m".to_string(),
+            _ => "parakeet-tdt-ctc-110m".to_string(),
+        },
         asr::AsrProviderType::Voxtral => match candidate {
             "voxtral-mini-4b" => "voxtral-local".to_string(),
             "voxtral-local" | "voxtral-cloud" => candidate.to_string(),
@@ -5881,6 +6197,505 @@ fn provider_model_map_to_settings(
             )
         })
         .collect()
+}
+
+fn migrate_legacy_asr_artifacts() -> Vec<String> {
+    let models_root = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Nautilus")
+        .join("models");
+    let mut notices = Vec::new();
+
+    let parakeet_dir = models_root.join("parakeet");
+    if parakeet_dir.exists() {
+        let legacy_model = parakeet_dir.join("model.onnx");
+        let target_model = parakeet_dir.join("encoder.onnx");
+        if !target_model.exists() && is_valid_onnx_artifact(&legacy_model) {
+            match std::fs::copy(&legacy_model, &target_model) {
+                Ok(_) => {
+                    notices.push("Migrated legacy Parakeet model.onnx to encoder.onnx.".to_string())
+                }
+                Err(error) => notices.push(format!(
+                    "Failed migrating legacy Parakeet model.onnx -> encoder.onnx: {}",
+                    error
+                )),
+            }
+        } else if !target_model.exists() && legacy_model.exists() {
+            notices.push(
+                "Detected legacy Parakeet model.onnx, but artifact is invalid. Re-download encoder.onnx in Settings -> ASR Models."
+                    .to_string(),
+            );
+        }
+
+        let legacy_vocab = parakeet_dir.join("vocab.txt");
+        let target_vocab = parakeet_dir.join("tokens.txt");
+        if !target_vocab.exists() && is_valid_token_list_artifact(&legacy_vocab, 128) {
+            match std::fs::copy(&legacy_vocab, &target_vocab) {
+                Ok(_) => {
+                    notices.push("Migrated legacy Parakeet vocab.txt to tokens.txt.".to_string())
+                }
+                Err(error) => notices.push(format!(
+                    "Failed migrating legacy Parakeet vocab.txt -> tokens.txt: {}",
+                    error
+                )),
+            }
+        } else if !target_vocab.exists() && legacy_vocab.exists() {
+            notices.push(
+                "Detected legacy Parakeet vocab.txt, but artifact is invalid. Re-download tokens.txt in Settings -> ASR Models."
+                    .to_string(),
+            );
+        }
+    }
+
+    let moonshine_dir = models_root.join("moonshine");
+    if moonshine_dir.exists() {
+        let has_required_onnx = is_valid_onnx_artifact(&moonshine_dir.join("encoder_model.onnx"))
+            && is_valid_onnx_artifact(&moonshine_dir.join("decoder_model_merged.onnx"));
+        let has_legacy_payload = moonshine_dir.join("encode.onnx").exists()
+            || moonshine_dir.join("uncached_decode.onnx").exists()
+            || moonshine_dir.join("model.safetensors").exists()
+            || moonshine_dir.join("preprocessor_config.json").exists()
+            || moonshine_dir.join("generation_config.json").exists();
+        if has_legacy_payload && !has_required_onnx {
+            notices.push(
+                "Detected legacy Moonshine payload. Re-download Moonshine merged ONNX assets (encoder_model.onnx + decoder_model_merged.onnx) in Settings -> ASR Models."
+                    .to_string(),
+            );
+        }
+    }
+
+    notices
+}
+
+fn is_valid_onnx_artifact(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < 4096 {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 1];
+    if file.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    buf[0] != b'<' && buf[0] != b'{'
+}
+
+fn is_valid_token_list_artifact(path: &Path, min_bytes: u64) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < min_bytes {
+        return false;
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let trimmed = content.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with('{') {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("<html")
+        || lower.starts_with("<!doctype")
+        || lower.starts_with("<head")
+        || lower.starts_with("<body")
+    {
+        return false;
+    }
+
+    let valid_lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            let mut parts = line.split_whitespace();
+            let token = parts.next();
+            let maybe_id = parts.next_back();
+            token.is_some()
+                && maybe_id
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .is_some()
+        })
+        .take(8)
+        .count();
+
+    valid_lines >= 4
+}
+
+fn is_valid_json_artifact(path: &Path, min_bytes: u64) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < min_bytes {
+        return false;
+    }
+    let Ok(raw) = std::fs::read(path) else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&raw).is_ok()
+}
+
+fn is_valid_binary_artifact(path: &Path, min_bytes: u64) -> bool {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < min_bytes {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 1];
+    if file.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    buf[0] != b'<' && buf[0] != b'{'
+}
+
+fn remove_artifact(
+    path: &Path,
+    reason: &str,
+    removed_paths: &mut Vec<String>,
+    notes: &mut Vec<String>,
+) {
+    if !path.exists() {
+        return;
+    }
+    match std::fs::remove_file(path) {
+        Ok(_) => {
+            removed_paths.push(path.to_string_lossy().to_string());
+            notes.push(format!(
+                "Removed invalid artifact ({}): {}",
+                reason,
+                path.display()
+            ));
+        }
+        Err(error) => {
+            notes.push(format!(
+                "Failed removing invalid artifact '{}': {}",
+                path.display(),
+                error
+            ));
+        }
+    }
+}
+
+fn remove_invalid_safetensors_files(
+    model_dir: &Path,
+    min_bytes: u64,
+    removed_paths: &mut Vec<String>,
+    notes: &mut Vec<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(model_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_safetensors = path
+            .extension()
+            .map(|ext| ext == "safetensors")
+            .unwrap_or(false);
+        if is_safetensors && !is_valid_binary_artifact(&path, min_bytes) {
+            remove_artifact(&path, "invalid safetensors weights", removed_paths, notes);
+        }
+    }
+}
+
+fn vibevoice_index_is_complete(model_dir: &Path) -> bool {
+    let index_path = model_dir.join("model.safetensors.index.json");
+    let Ok(raw) = std::fs::read_to_string(index_path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(weight_map) = json.get("weight_map").and_then(|w| w.as_object()) else {
+        return false;
+    };
+    if weight_map.is_empty() {
+        return false;
+    }
+    let shard_names = weight_map
+        .values()
+        .filter_map(|value| value.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if shard_names.is_empty() {
+        return false;
+    }
+    shard_names.iter().all(|name| {
+        model_dir.join(name).exists() && is_valid_binary_artifact(&model_dir.join(name), 1024)
+    })
+}
+
+fn remove_download_temp_files(
+    model_dir: &Path,
+    removed_paths: &mut Vec<String>,
+    notes: &mut Vec<String>,
+) {
+    let Ok(entries) = std::fs::read_dir(model_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_tmp = path.extension().map(|ext| ext == "tmp").unwrap_or(false);
+        if is_tmp {
+            remove_artifact(&path, "stale temp download", removed_paths, notes);
+        }
+    }
+}
+
+fn repair_local_model_cache_at(models_root: &Path) -> LocalModelRepairReport {
+    let mut removed_paths: Vec<String> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+
+    if !models_root.exists() {
+        notes.push(format!(
+            "Models root does not exist yet: {}",
+            models_root.display()
+        ));
+        return LocalModelRepairReport {
+            repaired_count: 0,
+            removed_paths,
+            notes,
+        };
+    }
+
+    let whisper_dir = models_root.join("whisper");
+    if whisper_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&whisper_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let file_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                let is_whisper_bin = file_name.starts_with("ggml-")
+                    && path.extension().map(|ext| ext == "bin").unwrap_or(false);
+                if is_whisper_bin && !is_valid_binary_artifact(&path, 1024 * 1024) {
+                    remove_artifact(
+                        &path,
+                        "invalid whisper model binary",
+                        &mut removed_paths,
+                        &mut notes,
+                    );
+                }
+            }
+        }
+        remove_download_temp_files(&whisper_dir, &mut removed_paths, &mut notes);
+    }
+
+    let parakeet_dir = models_root.join("parakeet");
+    if parakeet_dir.exists() {
+        let encoder = parakeet_dir.join("encoder.onnx");
+        if !is_valid_onnx_artifact(&encoder) {
+            remove_artifact(
+                &encoder,
+                "invalid Parakeet encoder ONNX",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        let legacy_model = parakeet_dir.join("model.onnx");
+        if legacy_model.exists() && !is_valid_onnx_artifact(&legacy_model) {
+            remove_artifact(
+                &legacy_model,
+                "invalid legacy Parakeet model.onnx",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        let tokens = parakeet_dir.join("tokens.txt");
+        if tokens.exists() && !is_valid_token_list_artifact(&tokens, 128) {
+            remove_artifact(
+                &tokens,
+                "invalid Parakeet tokens.txt",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        let legacy_vocab = parakeet_dir.join("vocab.txt");
+        if legacy_vocab.exists() && !is_valid_token_list_artifact(&legacy_vocab, 128) {
+            remove_artifact(
+                &legacy_vocab,
+                "invalid legacy Parakeet vocab.txt",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        remove_download_temp_files(&parakeet_dir, &mut removed_paths, &mut notes);
+    }
+
+    let moonshine_dir = models_root.join("moonshine");
+    if moonshine_dir.exists() {
+        let encoder_model = moonshine_dir.join("encoder_model.onnx");
+        if encoder_model.exists() && !is_valid_onnx_artifact(&encoder_model) {
+            remove_artifact(
+                &encoder_model,
+                "invalid Moonshine encoder_model.onnx",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        let decoder_model = moonshine_dir.join("decoder_model_merged.onnx");
+        if decoder_model.exists() && !is_valid_onnx_artifact(&decoder_model) {
+            remove_artifact(
+                &decoder_model,
+                "invalid Moonshine decoder_model_merged.onnx",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        let tokenizer = moonshine_dir.join("tokenizer.json");
+        if tokenizer.exists() && !is_valid_json_artifact(&tokenizer, 1024) {
+            remove_artifact(
+                &tokenizer,
+                "invalid Moonshine tokenizer.json",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        let legacy_encode = moonshine_dir.join("encode.onnx");
+        if legacy_encode.exists() && !is_valid_onnx_artifact(&legacy_encode) {
+            remove_artifact(
+                &legacy_encode,
+                "invalid legacy Moonshine encode.onnx",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        let legacy_uncached = moonshine_dir.join("uncached_decode.onnx");
+        if legacy_uncached.exists() && !is_valid_onnx_artifact(&legacy_uncached) {
+            remove_artifact(
+                &legacy_uncached,
+                "invalid legacy Moonshine uncached_decode.onnx",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        remove_download_temp_files(&moonshine_dir, &mut removed_paths, &mut notes);
+    }
+
+    let canary_dir = models_root.join("canary");
+    if canary_dir.exists() {
+        let model = canary_dir.join("model.safetensors");
+        if model.exists() && !is_valid_binary_artifact(&model, 1024 * 1024) {
+            remove_artifact(
+                &model,
+                "invalid Canary model.safetensors",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        for json_name in ["config.json", "tokenizer.json", "preprocessor_config.json"] {
+            let path = canary_dir.join(json_name);
+            if path.exists() && !is_valid_json_artifact(&path, 128) {
+                remove_artifact(
+                    &path,
+                    "invalid Canary JSON artifact",
+                    &mut removed_paths,
+                    &mut notes,
+                );
+            }
+        }
+        remove_download_temp_files(&canary_dir, &mut removed_paths, &mut notes);
+    }
+
+    let distil_dir = models_root.join("distil_whisper");
+    if distil_dir.exists() {
+        let model = distil_dir.join("model.safetensors");
+        if model.exists() && !is_valid_binary_artifact(&model, 1024 * 1024) {
+            remove_artifact(
+                &model,
+                "invalid Distil-Whisper model.safetensors",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        for json_name in ["config.json", "tokenizer.json", "preprocessor_config.json"] {
+            let path = distil_dir.join(json_name);
+            if path.exists() && !is_valid_json_artifact(&path, 128) {
+                remove_artifact(
+                    &path,
+                    "invalid Distil-Whisper JSON artifact",
+                    &mut removed_paths,
+                    &mut notes,
+                );
+            }
+        }
+        remove_download_temp_files(&distil_dir, &mut removed_paths, &mut notes);
+    }
+
+    let vibevoice_dir = models_root.join("vibevoice");
+    if vibevoice_dir.exists() {
+        let config = vibevoice_dir.join("config.json");
+        if config.exists() && !is_valid_json_artifact(&config, 128) {
+            remove_artifact(
+                &config,
+                "invalid VibeVoice config.json",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        remove_invalid_safetensors_files(&vibevoice_dir, 1024, &mut removed_paths, &mut notes);
+        let index = vibevoice_dir.join("model.safetensors.index.json");
+        if index.exists() && !vibevoice_index_is_complete(&vibevoice_dir) {
+            remove_artifact(
+                &index,
+                "incomplete VibeVoice shard index",
+                &mut removed_paths,
+                &mut notes,
+            );
+        }
+        remove_download_temp_files(&vibevoice_dir, &mut removed_paths, &mut notes);
+    }
+
+    let voxtral_dir = models_root.join("voxtral");
+    if voxtral_dir.exists() {
+        for json_name in ["config.json", "processor_config.json", "tekken.json"] {
+            let path = voxtral_dir.join(json_name);
+            if path.exists() && !is_valid_json_artifact(&path, 64) {
+                remove_artifact(
+                    &path,
+                    "invalid Voxtral JSON artifact",
+                    &mut removed_paths,
+                    &mut notes,
+                );
+            }
+        }
+        for weight_name in ["model.safetensors", "consolidated.safetensors"] {
+            let path = voxtral_dir.join(weight_name);
+            if path.exists() && !is_valid_binary_artifact(&path, 1024) {
+                remove_artifact(
+                    &path,
+                    "invalid Voxtral safetensors weight",
+                    &mut removed_paths,
+                    &mut notes,
+                );
+            }
+        }
+        remove_invalid_safetensors_files(&voxtral_dir, 1024, &mut removed_paths, &mut notes);
+        remove_download_temp_files(&voxtral_dir, &mut removed_paths, &mut notes);
+    }
+
+    let repaired_count = removed_paths.len();
+    if repaired_count == 0 {
+        notes.push("No invalid local ASR artifacts were found.".to_string());
+    }
+
+    LocalModelRepairReport {
+        repaired_count,
+        removed_paths,
+        notes,
+    }
 }
 
 fn template_format_extension(format: &export::templates::ExportFormat) -> &'static str {

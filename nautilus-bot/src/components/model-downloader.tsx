@@ -55,8 +55,8 @@ const PROVIDER_BUNDLES: Array<{
   },
   {
     providerType: "parakeet",
-    label: "NVIDIA Parakeet TDT 0.6B",
-    description: "Downloads encoder.onnx + tokens.txt from the sherpa-onnx community export (native ONNX, no Python).",
+    label: "NVIDIA Parakeet TDT CTC 110M",
+    description: "Downloads encoder.onnx + tokens.txt from public CTC ONNX sources (native ONNX, no Python).",
     indicator: "parakeet/encoder.onnx",
   },
   {

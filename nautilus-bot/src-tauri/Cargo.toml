@@ -114,3 +114,21 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package.candle-core]
+opt-level = 3
+
+[profile.dev.package.candle-nn]
+opt-level = 3
+
+[profile.dev.package.candle-transformers]
+opt-level = 3
+
+[profile.dev.package.ort]
+opt-level = 3
+
+[profile.dev.package.whisper-rs]
+opt-level = 3

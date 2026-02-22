@@ -50,6 +50,7 @@ import { validateLicense, activateLicense, deactivateLicense, isDiarizationModel
 import type { DiarizationModelOption } from "@/lib/tauri";
 import { isFeatureAllowed, canUseFormattingAssistant, getThemeAccessLevel } from "@/hooks/use-license-features";
 import type { Settings } from "@/types/settings";
+import { normalizeThemeSchemeForAccess, themeSchemesForAccess } from "@/lib/theme-schemes";
 import {
   AlertCircle,
   CheckCircle2,
@@ -471,11 +472,35 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   }, [activeTab, hasLoadedStorageTab]);
 
   useEffect(() => {
-    if (activeTab !== "license" || licenseInfo !== null) return;
-    void validateLicense().then(setLicenseInfo).catch(() => {
-      setLicenseInfo({ key: "", instanceId: "", tier: "none", valid: false, lsStatus: "", activationsLimit: 5, activationsUsage: 0, lastValidatedAt: "", trialDaysRemaining: 30, nagRequired: false, trialActive: true });
-    });
-  }, [activeTab, licenseInfo]);
+    if (licenseInfo !== null) return;
+    let mounted = true;
+    void validateLicense()
+      .then((info) => {
+        if (mounted) {
+          setLicenseInfo(info);
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setLicenseInfo({
+            key: "",
+            instanceId: "",
+            tier: "none",
+            valid: false,
+            lsStatus: "",
+            activationsLimit: 5,
+            activationsUsage: 0,
+            lastValidatedAt: "",
+            trialDaysRemaining: 30,
+            nagRequired: false,
+            trialActive: true,
+          });
+        }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [licenseInfo]);
 
   useEffect(() => {
     if (!settings) return;
@@ -617,6 +642,36 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     },
     [flushPendingSettingsSave, queueSettingsSave]
   );
+
+  const applyColorScheme = useCallback((scheme: string) => {
+    const root = document.documentElement;
+    if (scheme === "default") {
+      root.removeAttribute("data-theme");
+      return;
+    }
+    root.setAttribute("data-theme", scheme);
+  }, []);
+
+  useEffect(() => {
+    if (!settings || licenseInfo === null) {
+      return;
+    }
+    const themeAccess = getThemeAccessLevel(licenseInfo);
+    const nextScheme = normalizeThemeSchemeForAccess(settings.ui.colorScheme, themeAccess);
+    applyColorScheme(nextScheme);
+    if (nextScheme !== settings.ui.colorScheme) {
+      void updateSettings(
+        {
+          ...settings,
+          ui: {
+            ...settings.ui,
+            colorScheme: nextScheme,
+          },
+        },
+        { immediate: true }
+      );
+    }
+  }, [applyColorScheme, licenseInfo, settings, updateSettings]);
 
   const refreshBackups = useCallback(async () => {
     const data = await listBackups();
@@ -1363,7 +1418,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                 {(() => {
                   const themeAccess = getThemeAccessLevel(licenseInfo);
-                  const currentScheme = document.documentElement.getAttribute("data-theme") ?? "default";
+                  const options = themeSchemesForAccess(themeAccess);
+                  const currentScheme = normalizeThemeSchemeForAccess(
+                    settings.ui.colorScheme,
+                    themeAccess
+                  );
                   return (
                     <div className="space-y-2">
                       <Label className="flex items-center gap-1.5">
@@ -1376,33 +1435,23 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                         value={currentScheme}
                         onChange={(e: any) => {
-                          const scheme = e.target.value;
-                          if (scheme === "default") {
-                            document.documentElement.removeAttribute("data-theme");
-                          } else {
-                            document.documentElement.setAttribute("data-theme", scheme);
-                          }
+                          const scheme = e.target.value as string;
+                          const normalized = normalizeThemeSchemeForAccess(scheme, themeAccess);
+                          applyColorScheme(normalized);
+                          void updateSettings({
+                            ...settings,
+                            ui: {
+                              ...settings.ui,
+                              colorScheme: normalized,
+                            },
+                          });
                         }}
                       >
-                        <option value="default">Default</option>
-                        {themeAccess !== "basic" && (
-                          <>
-                            <option value="rose-pine">Rosé Pine Night (Pro)</option>
-                            <option value="rose-pine-dawn">Rosé Pine Dawn (Pro)</option>
-                            <option value="solarized-dark">Solarized Dark (Pro)</option>
-                            <option value="solarized-light">Solarized Light (Pro)</option>
-                          </>
-                        )}
-                        {themeAccess === "friends" && (
-                          <>
-                            <option value="dracula">Dracula</option>
-                            <option value="tokyo-night">Tokyo Night</option>
-                            <option value="gruvbox">Gruvbox Dark</option>
-                            <option value="nord">Nord</option>
-                            <option value="rose-pine-moon">Rosé Pine Moon</option>
-                            <option value="catppuccin">Catppuccin Mocha</option>
-                          </>
-                        )}
+                        {options.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
                       </select>
                       {themeAccess === "basic" && (
                         <p className="text-xs text-muted-foreground">

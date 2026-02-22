@@ -196,6 +196,8 @@ pub struct UiSettings {
     pub show_dictation_popup: bool,
     /// Show meeting recording overlay popup
     pub show_recording_popup: bool,
+    /// Selected premium color scheme applied via `data-theme`
+    pub color_scheme: String,
 }
 
 impl Default for UiSettings {
@@ -210,6 +212,7 @@ impl Default for UiSettings {
             font_size: 14,
             show_dictation_popup: true,
             show_recording_popup: true,
+            color_scheme: "default".to_string(),
         }
     }
 }

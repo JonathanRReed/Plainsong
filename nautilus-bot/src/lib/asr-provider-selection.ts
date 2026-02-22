@@ -17,13 +17,10 @@ export function getProviderSelectionStatus(
     return { selectable: false, reason: "not_enabled" };
   }
   if (normalized.kind !== "downloaded") {
-    return { selectable: false, reason: "download_required" };
+    return { selectable: true, reason: "download_required" };
   }
-  if (provider.runtimeStatus !== "ready") {
-    return { selectable: false, reason: "runtime_unavailable" };
-  }
-  if (!provider.isAvailable) {
-    return { selectable: false, reason: "runtime_unavailable" };
+  if (provider.runtimeStatus !== "ready" || !provider.isAvailable) {
+    return { selectable: true, reason: "runtime_unavailable" };
   }
   return { selectable: true, reason: null };
 }

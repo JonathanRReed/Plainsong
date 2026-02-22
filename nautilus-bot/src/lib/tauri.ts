@@ -248,6 +248,20 @@ export async function downloadAsrModels(providerType: AsrProviderType): Promise<
   await invoke("download_asr_models", { providerType });
 }
 
+export interface LocalModelRepairReport {
+  repairedCount: number;
+  removedPaths: string[];
+  notes: string[];
+}
+
+export async function refreshAsrRuntimeProbes(): Promise<void> {
+  await invoke("refresh_asr_runtime_probes");
+}
+
+export async function repairLocalModelCache(): Promise<LocalModelRepairReport> {
+  return await invoke("repair_local_model_cache");
+}
+
 export async function benchmarkAsrProviders(testAudioPath: string): Promise<BenchmarkResult[]> {
   return await invoke("benchmark_asr_providers", { testAudioPath });
 }

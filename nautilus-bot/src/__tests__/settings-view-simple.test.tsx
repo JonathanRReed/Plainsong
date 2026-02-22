@@ -42,6 +42,7 @@ const baseSettings = {
     fontSize: 14,
     showDictationPopup: true,
     showRecordingPopup: true,
+    colorScheme: "default",
   },
   export: {
     defaultFormat: "markdown",
@@ -230,5 +231,74 @@ describe("SettingsView performance behavior", () => {
     await waitFor(() => {
       expect(tauri.saveSettings).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("shows only basic color schemes for trial users", async () => {
+    const tauri = await import("@/lib/tauri");
+    vi.mocked(tauri.validateLicense).mockResolvedValue({
+      key: "",
+      instanceId: "",
+      tier: "none",
+      valid: false,
+      lsStatus: "",
+      activationsLimit: 5,
+      activationsUsage: 0,
+      lastValidatedAt: "",
+      trialDaysRemaining: 30,
+      nagRequired: false,
+      trialActive: true,
+    });
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>
+    );
+
+    await screen.findByText("Configure Nautilus preferences");
+    const select = screen.getByRole("combobox");
+    expect(select).toHaveValue("default");
+    expect(screen.queryByText("Rose Pine Night (Pro)")).not.toBeInTheDocument();
+  });
+
+  it("persists selected color scheme for paid users", async () => {
+    const tauri = await import("@/lib/tauri");
+    vi.mocked(tauri.validateLicense).mockResolvedValue({
+      key: "pro-license",
+      instanceId: "instance",
+      tier: "pro",
+      valid: true,
+      lsStatus: "active",
+      activationsLimit: 5,
+      activationsUsage: 1,
+      lastValidatedAt: "",
+      trialDaysRemaining: 0,
+      nagRequired: false,
+      trialActive: false,
+    });
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>
+    );
+
+    await screen.findByText("Configure Nautilus preferences");
+    vi.useFakeTimers();
+
+    const select = screen.getByRole("combobox");
+    fireEvent.change(select, { target: { value: "rose-pine" } });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(tauri.saveSettings).toHaveBeenCalled();
+    const calls = vi.mocked(tauri.saveSettings).mock.calls;
+    const lastCall = calls[calls.length - 1];
+    expect(lastCall?.[0]?.ui?.colorScheme).toBe("rose-pine");
   });
 });

@@ -2,6 +2,10 @@ import { useState, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
+import {
+  refreshAsrRuntimeProbes,
+  repairLocalModelCache,
+} from "@/lib/tauri";
 import { invoke } from "@tauri-apps/api/core";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -48,6 +52,8 @@ export function AsrProviderManager({
   const [isBenchmarking, setIsBenchmarking] = useState(false);
   const [providerErrors, setProviderErrors] = useState<Record<string, string>>({});
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
+  const [repairingCache, setRepairingCache] = useState(false);
+  const [repairSummary, setRepairSummary] = useState<string | null>(null);
   const benchmarkFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -325,6 +331,27 @@ export function AsrProviderManager({
     }
   };
 
+  const handleRepairLocalCache = async () => {
+    setRepairingCache(true);
+    setRepairSummary(null);
+    try {
+      const report = await repairLocalModelCache();
+      await refreshAsrRuntimeProbes();
+      await loadProviders();
+      const removed = report.removedPaths.length;
+      if (removed > 0) {
+        setRepairSummary(`Removed ${removed} invalid artifact${removed === 1 ? "" : "s"}.`);
+      } else {
+        setRepairSummary("No invalid artifacts found.");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRepairSummary(`Repair failed: ${message}`);
+    } finally {
+      setRepairingCache(false);
+    }
+  };
+
   return (
     <div className={cn("space-y-6", className)}>
       <Tabs defaultValue="providers" className="space-y-4">
@@ -334,6 +361,27 @@ export function AsrProviderManager({
         </TabsList>
 
         <TabsContent value="providers" className="space-y-4">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Local Model Cache Repair</CardTitle>
+              <CardDescription>
+                Deletes only invalid local ASR artifacts, then re-checks runtime probes.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex items-center gap-3">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleRepairLocalCache}
+                disabled={repairingCache}
+              >
+                {repairingCache ? "Repairing..." : "Repair local cache"}
+              </Button>
+              {repairSummary ? (
+                <p className="text-xs text-muted-foreground">{repairSummary}</p>
+              ) : null}
+            </CardContent>
+          </Card>
           <div className="grid gap-4">
             {providers.length === 0 ? (
               <Card>
@@ -488,46 +536,70 @@ export function AsrProviderManager({
                         </div>
                         <div className="flex items-center gap-2">
                           {selection.selectable ? (
-                            <Button
-                              variant={defaultProvider === provider.providerType ? "default" : "outline"}
-                              size="sm"
-                              onClick={() => handleSetDefault(provider.providerType)}
-                            >
-                              {defaultProvider === provider.providerType ? "Default" : "Set Default"}
-                            </Button>
+                            <>
+                              <Button
+                                variant={defaultProvider === provider.providerType ? "default" : "outline"}
+                                size="sm"
+                                onClick={() => handleSetDefault(provider.providerType)}
+                              >
+                                {defaultProvider === provider.providerType ? "Default" : "Set Default"}
+                              </Button>
+                              {selection.reason === "download_required" &&
+                              isNotDownloaded(provider.downloadStatus) ? (
+                                <Button
+                                  size="sm"
+                                  onClick={() => handleDownload(provider.providerType)}
+                                  disabled={isLoading}
+                                >
+                                  <Download className="h-4 w-4 mr-2" />
+                                  Download
+                                </Button>
+                              ) : null}
+                              {selection.reason === "runtime_unavailable" ? (
+                                <>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => void copySetupCommand(provider.providerType)}
+                                  >
+                                    Copy setup info
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={async () => {
+                                      try {
+                                        await refreshAsrRuntimeProbes();
+                                      } catch (error) {
+                                        console.warn("Failed to refresh runtime probes:", error);
+                                      }
+                                      await loadProviders();
+                                    }}
+                                  >
+                                    Re-check runtime
+                                  </Button>
+                                  {defaultProvider === provider.providerType &&
+                                  provider.providerType !== "whisper" ? (
+                                    <Button
+                                      size="sm"
+                                      variant="secondary"
+                                      onClick={() => handleSetDefault("whisper")}
+                                    >
+                                      Switch to Whisper
+                                    </Button>
+                                  ) : null}
+                                </>
+                              ) : null}
+                            </>
                           ) : selection.reason === "runtime_unavailable" ? (
                             <>
                               <Button size="sm" variant="outline" disabled>
                                 Runtime setup required
                               </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => void copySetupCommand(provider.providerType)}
-                              >
-                                Copy setup info
-                              </Button>
-                              <Button size="sm" variant="outline" onClick={() => void loadProviders()}>
-                                Re-check runtime
-                              </Button>
-                              {defaultProvider === provider.providerType && provider.providerType !== "whisper" && (
-                                <Button size="sm" variant="secondary" onClick={() => handleSetDefault("whisper")}>
-                                  Switch to Whisper
-                                </Button>
-                              )}
                             </>
                           ) : selection.reason === "not_enabled" ? (
                             <Button size="sm" variant="outline" disabled>
                               Not enabled
-                            </Button>
-                          ) : isNotDownloaded(provider.downloadStatus) ? (
-                            <Button
-                              size="sm"
-                              onClick={() => handleDownload(provider.providerType)}
-                              disabled={isLoading}
-                            >
-                              <Download className="h-4 w-4 mr-2" />
-                              Download
                             </Button>
                           ) : null}
                         </div>
@@ -537,8 +609,20 @@ export function AsrProviderManager({
                           <p>{providerError ?? runtimeIssue}</p>
                           {selection.reason === "runtime_unavailable" && (
                             <>
+                              {provider.runtimeDetails?.missingFiles?.length ? (
+                                <p className="text-amber-100">
+                                  Missing:{" "}
+                                  <span className="font-mono">
+                                    {provider.runtimeDetails.missingFiles.join(", ")}
+                                  </span>
+                                </p>
+                              ) : null}
                               <p className="text-amber-100">
-                                How to enable: <span className="font-mono">{providerSetupCommand(provider.providerType)}</span>
+                                How to enable:{" "}
+                                <span className="font-mono">
+                                  {provider.runtimeDetails?.setupAction ??
+                                    providerSetupCommand(provider.providerType)}
+                                </span>
                               </p>
                               {provider.runtimeDetails?.pythonPath ? (
                                 <p className="text-amber-100">

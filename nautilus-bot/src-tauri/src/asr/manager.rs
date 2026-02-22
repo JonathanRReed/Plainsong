@@ -25,10 +25,6 @@ const DISTIL_REQUIRED_FILES: [&str; 4] = [
     "tokenizer.json",
     "preprocessor_config.json",
 ];
-// Moonshine: native ONNX (no Python)
-const MOONSHINE_REQUIRED_FILES: [&str; 3] =
-    ["encode.onnx", "uncached_decode.onnx", "tokenizer.json"];
-
 /// Manages multiple ASR providers
 #[allow(dead_code)]
 pub struct AsrManager {
@@ -58,6 +54,7 @@ impl AsrManager {
             .join("models");
 
         std::fs::create_dir_all(&models_dir).ok();
+        migrate_legacy_local_artifacts(&models_dir);
 
         let provider_model_ids: HashMap<AsrProviderType, String> = AsrProviderType::all()
             .into_iter()
@@ -83,6 +80,12 @@ impl AsrManager {
         };
 
         match provider_type {
+            AsrProviderType::Parakeet => match candidate {
+                "parakeet-tdt-0.6b-v3" | "parakeet-tdt-ctc-110m" => {
+                    "parakeet-tdt-ctc-110m".to_string()
+                }
+                _ => "parakeet-tdt-ctc-110m".to_string(),
+            },
             AsrProviderType::Voxtral => match candidate {
                 "voxtral-mini-4b" => "voxtral-local".to_string(),
                 "voxtral-local" | "voxtral-cloud" => candidate.to_string(),
@@ -177,6 +180,10 @@ impl AsrManager {
 
     pub async fn silence_skip_enabled(&self) -> bool {
         *self.silence_skip_enabled.read().await
+    }
+
+    pub async fn clear_runtime_errors(&self) {
+        self.last_runtime_errors.write().await.clear();
     }
 
     /// Get a provider by type - creates fresh instance each time
@@ -472,6 +479,9 @@ pub enum RuntimeStatus {
 pub struct RuntimeDetails {
     pub python_path: Option<String>,
     pub model_path: Option<String>,
+    #[serde(default)]
+    pub missing_files: Vec<String>,
+    pub setup_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -520,10 +530,8 @@ fn runtime_diagnostics_for_provider(
 
     match provider_type {
         AsrProviderType::Whisper => {
-            let model_path = models_root.join("whisper").join(format!(
-                "ggml-{}.bin",
-                sanitize_whisper_model_id(selected_model_id)
-            ));
+            let model_file = format!("ggml-{}.bin", sanitize_whisper_model_id(selected_model_id));
+            let model_path = models_root.join("whisper").join(&model_file);
             if !model_path.exists() {
                 return RuntimeDiagnosticsInternal {
                     runtime_status: RuntimeStatus::MissingModel,
@@ -534,6 +542,10 @@ fn runtime_diagnostics_for_provider(
                     runtime_details: RuntimeDetails {
                         model_path: Some(model_path.to_string_lossy().to_string()),
                         python_path: None,
+                        missing_files: vec![model_file],
+                        setup_action: Some(
+                            "Download a Whisper model in Settings -> ASR Models.".to_string(),
+                        ),
                     },
                 };
             }
@@ -544,6 +556,8 @@ fn runtime_diagnostics_for_provider(
                     runtime_details: RuntimeDetails {
                         model_path: Some(model_path.to_string_lossy().to_string()),
                         python_path: None,
+                        missing_files: Vec::new(),
+                        setup_action: None,
                     },
                 };
             }
@@ -555,30 +569,42 @@ fn runtime_diagnostics_for_provider(
                 runtime_details: RuntimeDetails {
                     model_path: Some(model_path.to_string_lossy().to_string()),
                     python_path: None,
+                    missing_files: Vec::new(),
+                    setup_action: None,
                 },
             }
         }
         AsrProviderType::Parakeet => {
             let model_dir = models_root.join("parakeet");
-            let has_onnx = PARAKEET_ONNX_NAMES.iter().any(|f| {
-                let p = model_dir.join(f);
-                p.exists() && p.metadata().map(|m| m.len() > 4096).unwrap_or(false)
-            });
+            let has_onnx = PARAKEET_ONNX_NAMES
+                .iter()
+                .any(|f| is_valid_onnx_artifact(&model_dir.join(f)));
             let has_vocab = PARAKEET_VOCAB_NAMES
                 .iter()
-                .any(|f| model_dir.join(f).exists());
+                .any(|f| is_valid_token_list_artifact(&model_dir.join(f), 128));
             let model_ready = has_onnx && has_vocab;
+            let mut missing_files = Vec::new();
+            if !has_onnx {
+                missing_files.push("encoder.onnx (valid ONNX export)".to_string());
+            }
+            if !has_vocab {
+                missing_files.push("tokens.txt (valid token list)".to_string());
+            }
             if !model_ready {
                 return RuntimeDiagnosticsInternal {
                     runtime_status: RuntimeStatus::MissingModel,
                     runtime_message: Some(
                         "Parakeet model not downloaded. Download encoder.onnx + tokens.txt \
-                         (from k2-fsa/sherpa-onnx-nemo-parakeet-tdt-0.6b-en)."
+                         from Settings -> ASR Models."
                             .to_string(),
                     ),
                     runtime_details: RuntimeDetails {
                         model_path: Some(model_dir.to_string_lossy().to_string()),
                         python_path: None,
+                        missing_files,
+                        setup_action: Some(
+                            "Download Parakeet artifacts (encoder.onnx + tokens.txt) in Settings -> ASR Models.".to_string(),
+                        ),
                     },
                 };
             }
@@ -596,6 +622,8 @@ fn runtime_diagnostics_for_provider(
                 runtime_details: RuntimeDetails {
                     model_path: Some(model_dir.to_string_lossy().to_string()),
                     python_path: None,
+                    missing_files: Vec::new(),
+                    setup_action: None,
                 },
             }
         }
@@ -608,7 +636,15 @@ fn runtime_diagnostics_for_provider(
                 provider_available,
                 model_dir,
                 model_ready,
-                "Canary model not downloaded. Download Whisper Large V3 Turbo safetensors first.",
+                &missing_required_files(
+                    models_root.join("canary").as_path(),
+                    &CANARY_REQUIRED_FILES,
+                ),
+                MissingModelCopy {
+                    message:
+                        "Canary model not downloaded. Download Whisper Large V3 Turbo safetensors first.",
+                    setup_action: "Download Canary model assets in Settings -> ASR Models.",
+                },
                 "Canary (Whisper Large V3 Turbo) native Candle inference ready.",
                 last_error,
             )
@@ -622,21 +658,34 @@ fn runtime_diagnostics_for_provider(
                 provider_available,
                 model_dir,
                 model_ready,
-                "Distil-Whisper model not downloaded. Download model.safetensors + config first.",
+                &missing_required_files(
+                    models_root.join("distil_whisper").as_path(),
+                    &DISTIL_REQUIRED_FILES,
+                ),
+                MissingModelCopy {
+                    message:
+                        "Distil-Whisper model not downloaded. Download model.safetensors + config first.",
+                    setup_action: "Download Distil-Whisper model assets in Settings -> ASR Models.",
+                },
                 "Distil-Whisper native Candle inference ready.",
                 last_error,
             )
         }
         AsrProviderType::Moonshine => {
             let model_dir = models_root.join("moonshine");
-            let model_ready = MOONSHINE_REQUIRED_FILES
-                .iter()
-                .all(|f| model_dir.join(f).exists());
+            let model_ready = is_valid_onnx_artifact(&model_dir.join("encoder_model.onnx"))
+                && is_valid_onnx_artifact(&model_dir.join("decoder_model_merged.onnx"))
+                && is_valid_json_artifact(&model_dir.join("tokenizer.json"), 1024);
             runtime_native_model(
                 provider_available,
                 model_dir,
                 model_ready,
-                "Moonshine ONNX model not downloaded. Download encode.onnx + uncached_decode.onnx first.",
+                &missing_or_invalid_moonshine_files(models_root.join("moonshine").as_path()),
+                MissingModelCopy {
+                    message:
+                        "Moonshine ONNX model not downloaded. Download encoder_model.onnx + decoder_model_merged.onnx first.",
+                    setup_action: "Re-download Moonshine ONNX assets in Settings -> ASR Models.",
+                },
                 "Moonshine native ONNX inference ready.",
                 last_error,
             )
@@ -644,24 +693,28 @@ fn runtime_diagnostics_for_provider(
 
         AsrProviderType::VibeVoice => {
             let model_dir = models_root.join("vibevoice");
-            let model_ready = model_dir.join("config.json").exists()
-                && (model_dir.join("tokenizer.json").exists()
-                    || model_dir.join("tokenizer_config.json").exists())
-                && (model_dir.join("model.safetensors").exists()
-                    || model_dir.join("model.safetensors.index.json").exists()
-                    || std::fs::read_dir(&model_dir)
-                        .ok()
-                        .map(|entries| {
-                            entries.flatten().any(|entry| {
-                                entry
-                                    .path()
-                                    .extension()
-                                    .map(|ext| ext == "safetensors")
-                                    .unwrap_or(false)
-                            })
-                        })
-                        .unwrap_or(false));
+            let has_config = is_valid_json_artifact(&model_dir.join("config.json"), 128);
+            let has_complete_shards = vibevoice_index_shards_present(&model_dir);
+            let has_full_weight =
+                is_valid_binary_artifact(&model_dir.join("model.safetensors"), 1024);
+            let model_ready = has_config && (has_full_weight || has_complete_shards);
+            let mut missing_files = Vec::new();
+            if !has_config {
+                missing_files.push("config.json (valid JSON)".to_string());
+            }
+            if !has_full_weight && !has_complete_shards {
+                missing_files.push(
+                    "model.safetensors or complete shards from model.safetensors.index.json"
+                        .to_string(),
+                );
+            }
+            if model_dir.join("model.safetensors.index.json").exists() && !has_complete_shards {
+                missing_files
+                    .push("all shards referenced by model.safetensors.index.json".to_string());
+            }
             let python = super::python_runtime::find_python_for_provider("vibevoice");
+            let managed_python = super::python_runtime::managed_python_path();
+            let detected_python = python.or(managed_python);
 
             if !model_ready {
                 return RuntimeDiagnosticsInternal {
@@ -672,21 +725,29 @@ fn runtime_diagnostics_for_provider(
                     ),
                     runtime_details: RuntimeDetails {
                         model_path: Some(model_dir.to_string_lossy().to_string()),
-                        python_path: python,
+                        python_path: detected_python,
+                        missing_files,
+                        setup_action: Some(
+                            "Use Download on VibeVoice to fetch model assets and bootstrap managed runtime.".to_string(),
+                        ),
                     },
                 };
             }
 
-            if python.is_none() {
+            if detected_python.is_none() {
                 return RuntimeDiagnosticsInternal {
                     runtime_status: RuntimeStatus::MissingRuntime,
                     runtime_message: Some(
-                        "VibeVoice runtime missing: install Python with torch + transformers + librosa + soundfile."
+                        "VibeVoice runtime missing: bootstrap managed Python runtime (torch, transformers, librosa, soundfile)."
                             .to_string(),
                     ),
                     runtime_details: RuntimeDetails {
                         model_path: Some(model_dir.to_string_lossy().to_string()),
                         python_path: None,
+                        missing_files: Vec::new(),
+                        setup_action: Some(
+                            "Click Download or Re-check runtime to bootstrap managed runtime.".to_string(),
+                        ),
                     },
                 };
             }
@@ -704,7 +765,9 @@ fn runtime_diagnostics_for_provider(
                 ),
                 runtime_details: RuntimeDetails {
                     model_path: Some(model_dir.to_string_lossy().to_string()),
-                    python_path: python,
+                    python_path: detected_python,
+                    missing_files: Vec::new(),
+                    setup_action: None,
                 },
             }
         }
@@ -727,27 +790,25 @@ fn runtime_diagnostics_for_provider(
                     runtime_details: RuntimeDetails {
                         model_path: None,
                         python_path: None,
+                        missing_files: if has_key {
+                            Vec::new()
+                        } else {
+                            vec!["MISTRAL_API_KEY".to_string()]
+                        },
+                        setup_action: if has_key {
+                            None
+                        } else {
+                            Some("Set MISTRAL_API_KEY in Settings -> API Keys.".to_string())
+                        },
                     },
                 };
             }
 
-            let has_local = model_dir.join("config.json").exists()
-                && model_dir.join("tokenizer.json").exists()
-                && (model_dir.join("model.safetensors").exists()
-                    || model_dir.join("model.safetensors.index.json").exists()
-                    || std::fs::read_dir(&model_dir)
-                        .ok()
-                        .map(|entries| {
-                            entries.flatten().any(|entry| {
-                                entry
-                                    .path()
-                                    .extension()
-                                    .map(|ext| ext == "safetensors")
-                                    .unwrap_or(false)
-                            })
-                        })
-                        .unwrap_or(false));
+            let missing_files = missing_or_invalid_voxtral_local_files(&model_dir);
+            let has_local = missing_files.is_empty();
             let python = super::python_runtime::find_python_for_provider("voxtral_local");
+            let managed_python = super::python_runtime::managed_python_path();
+            let detected_python = python.or(managed_python);
 
             if !has_local {
                 return RuntimeDiagnosticsInternal {
@@ -758,21 +819,30 @@ fn runtime_diagnostics_for_provider(
                     ),
                     runtime_details: RuntimeDetails {
                         model_path: Some(model_dir.to_string_lossy().to_string()),
-                        python_path: python,
+                        python_path: detected_python,
+                        missing_files,
+                        setup_action: Some(
+                            "Use Download on Voxtral (local mode) to fetch assets and bootstrap runtime."
+                                .to_string(),
+                        ),
                     },
                 };
             }
 
-            if python.is_none() {
+            if detected_python.is_none() {
                 return RuntimeDiagnosticsInternal {
                     runtime_status: RuntimeStatus::MissingRuntime,
                     runtime_message: Some(
-                        "Voxtral local runtime missing: install Python with torch + transformers + librosa + soundfile."
+                        "Voxtral local runtime missing: bootstrap managed Python runtime for local mode."
                             .to_string(),
                     ),
                     runtime_details: RuntimeDetails {
                         model_path: Some(model_dir.to_string_lossy().to_string()),
                         python_path: None,
+                        missing_files: Vec::new(),
+                        setup_action: Some(
+                            "Click Download or Re-check runtime to bootstrap managed runtime.".to_string(),
+                        ),
                     },
                 };
             }
@@ -790,7 +860,9 @@ fn runtime_diagnostics_for_provider(
                 ),
                 runtime_details: RuntimeDetails {
                     model_path: Some(model_dir.to_string_lossy().to_string()),
-                    python_path: python,
+                    python_path: detected_python,
+                    missing_files: Vec::new(),
+                    setup_action: None,
                 },
             }
         }
@@ -810,6 +882,16 @@ fn runtime_diagnostics_for_provider(
                 runtime_details: RuntimeDetails {
                     model_path: None,
                     python_path: None,
+                    missing_files: if has_key {
+                        Vec::new()
+                    } else {
+                        vec!["ELEVENLABS_API_KEY".to_string()]
+                    },
+                    setup_action: if has_key {
+                        None
+                    } else {
+                        Some("Set ELEVENLABS_API_KEY in Settings -> API Keys.".to_string())
+                    },
                 },
             }
         }
@@ -829,6 +911,16 @@ fn runtime_diagnostics_for_provider(
                 runtime_details: RuntimeDetails {
                     model_path: None,
                     python_path: None,
+                    missing_files: if has_key {
+                        Vec::new()
+                    } else {
+                        vec!["OPENAI_API_KEY".to_string()]
+                    },
+                    setup_action: if has_key {
+                        None
+                    } else {
+                        Some("Set OPENAI_API_KEY in Settings -> API Keys.".to_string())
+                    },
                 },
             }
         }
@@ -840,17 +932,20 @@ fn runtime_native_model(
     provider_available: bool,
     model_dir: PathBuf,
     model_ready: bool,
-    missing_model_message: &str,
+    missing_files: &[String],
+    missing_model_copy: MissingModelCopy<'_>,
     ready_message: &str,
     last_error: Option<&str>,
 ) -> RuntimeDiagnosticsInternal {
     if !model_ready {
         return RuntimeDiagnosticsInternal {
             runtime_status: RuntimeStatus::MissingModel,
-            runtime_message: Some(missing_model_message.to_string()),
+            runtime_message: Some(missing_model_copy.message.to_string()),
             runtime_details: RuntimeDetails {
                 model_path: Some(model_dir.to_string_lossy().to_string()),
                 python_path: None,
+                missing_files: missing_files.to_vec(),
+                setup_action: Some(missing_model_copy.setup_action.to_string()),
             },
         };
     }
@@ -868,8 +963,235 @@ fn runtime_native_model(
         runtime_details: RuntimeDetails {
             model_path: Some(model_dir.to_string_lossy().to_string()),
             python_path: None,
+            missing_files: Vec::new(),
+            setup_action: None,
         },
     }
+}
+
+struct MissingModelCopy<'a> {
+    message: &'a str,
+    setup_action: &'a str,
+}
+
+fn missing_required_files(model_dir: &Path, required_files: &[&str]) -> Vec<String> {
+    required_files
+        .iter()
+        .filter_map(|name| {
+            let path = model_dir.join(name);
+            if path.exists() {
+                None
+            } else {
+                Some((*name).to_string())
+            }
+        })
+        .collect()
+}
+
+fn missing_or_invalid_moonshine_files(model_dir: &Path) -> Vec<String> {
+    let mut missing = Vec::new();
+    if !is_valid_onnx_artifact(&model_dir.join("encoder_model.onnx")) {
+        missing.push("encoder_model.onnx (valid ONNX model)".to_string());
+    }
+    if !is_valid_onnx_artifact(&model_dir.join("decoder_model_merged.onnx")) {
+        missing.push("decoder_model_merged.onnx (valid ONNX model)".to_string());
+    }
+    if !is_valid_json_artifact(&model_dir.join("tokenizer.json"), 1024) {
+        missing.push("tokenizer.json (valid tokenizer)".to_string());
+    }
+    missing
+}
+
+fn has_any_safetensors(model_dir: &Path, min_bytes: u64) -> bool {
+    std::fs::read_dir(model_dir)
+        .ok()
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                let path = entry.path();
+                path.extension()
+                    .map(|ext| ext == "safetensors")
+                    .unwrap_or(false)
+                    && is_valid_binary_artifact(&path, min_bytes)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn missing_or_invalid_voxtral_local_files(model_dir: &Path) -> Vec<String> {
+    let mut missing = Vec::new();
+    if !is_valid_json_artifact(&model_dir.join("config.json"), 64) {
+        missing.push("config.json (valid JSON)".to_string());
+    }
+    if !is_valid_json_artifact(&model_dir.join("processor_config.json"), 64) {
+        missing.push("processor_config.json (valid JSON)".to_string());
+    }
+    if !is_valid_json_artifact(&model_dir.join("tekken.json"), 64) {
+        missing.push("tekken.json (valid JSON)".to_string());
+    }
+    let has_weights = is_valid_binary_artifact(&model_dir.join("model.safetensors"), 1024)
+        || is_valid_binary_artifact(&model_dir.join("consolidated.safetensors"), 1024)
+        || has_any_safetensors(model_dir, 1024);
+    if !has_weights {
+        missing.push("model.safetensors|consolidated.safetensors|*.safetensors".to_string());
+    }
+    missing
+}
+
+fn vibevoice_index_shards_present(model_dir: &Path) -> bool {
+    let index_path = model_dir.join("model.safetensors.index.json");
+    let Ok(raw) = std::fs::read_to_string(index_path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(weight_map) = json.get("weight_map").and_then(|w| w.as_object()) else {
+        return false;
+    };
+    if weight_map.is_empty() {
+        return false;
+    }
+    let shard_names = weight_map
+        .values()
+        .filter_map(|v| v.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if shard_names.is_empty() {
+        return false;
+    }
+    shard_names
+        .iter()
+        .all(|name| is_valid_binary_artifact(&model_dir.join(name), 1024))
+}
+
+fn migrate_legacy_local_artifacts(models_root: &Path) {
+    let parakeet_dir = models_root.join("parakeet");
+    if !parakeet_dir.exists() {
+        return;
+    }
+
+    let legacy_model = parakeet_dir.join("model.onnx");
+    let target_model = parakeet_dir.join("encoder.onnx");
+    if is_valid_onnx_artifact(&legacy_model) && !target_model.exists() {
+        if let Err(error) = std::fs::copy(&legacy_model, &target_model) {
+            tracing::warn!(
+                "Failed to migrate legacy Parakeet model.onnx -> encoder.onnx: {}",
+                error
+            );
+        }
+    } else if legacy_model.exists() && !target_model.exists() {
+        tracing::warn!(
+            "Legacy Parakeet model.onnx exists but is invalid; skipping migration and requiring redownload."
+        );
+    }
+
+    let legacy_vocab = parakeet_dir.join("vocab.txt");
+    let target_vocab = parakeet_dir.join("tokens.txt");
+    if is_valid_token_list_artifact(&legacy_vocab, 128) && !target_vocab.exists() {
+        if let Err(error) = std::fs::copy(&legacy_vocab, &target_vocab) {
+            tracing::warn!(
+                "Failed to migrate legacy Parakeet vocab.txt -> tokens.txt: {}",
+                error
+            );
+        }
+    } else if legacy_vocab.exists() && !target_vocab.exists() {
+        tracing::warn!(
+            "Legacy Parakeet vocab.txt exists but is invalid; skipping migration and requiring redownload."
+        );
+    }
+}
+
+fn is_valid_onnx_artifact(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < 4096 {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 1];
+    if file.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    buf[0] != b'<' && buf[0] != b'{'
+}
+
+fn is_valid_token_list_artifact(path: &Path, min_bytes: u64) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < min_bytes {
+        return false;
+    }
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let trimmed = content.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with('{') {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("<html")
+        || lower.starts_with("<!doctype")
+        || lower.starts_with("<head")
+        || lower.starts_with("<body")
+    {
+        return false;
+    }
+
+    let valid_lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            let mut parts = line.split_whitespace();
+            let token = parts.next();
+            let maybe_id = parts.next_back();
+            token.is_some()
+                && maybe_id
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .is_some()
+        })
+        .take(8)
+        .count();
+
+    valid_lines >= 4
+}
+
+fn is_valid_json_artifact(path: &Path, min_bytes: u64) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < min_bytes {
+        return false;
+    }
+    let Ok(raw) = std::fs::read(path) else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&raw).is_ok()
+}
+
+fn is_valid_binary_artifact(path: &Path, min_bytes: u64) -> bool {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < min_bytes {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 1];
+    if file.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    buf[0] != b'<' && buf[0] != b'{'
 }
 
 fn sanitize_whisper_model_id(model_id: &str) -> &'static str {
@@ -885,5 +1207,147 @@ fn sanitize_whisper_model_id(model_id: &str) -> &'static str {
         "large-v3-turbo" => "large-v3-turbo",
         "large-v3" => "large-v3",
         _ => "base.en",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        migrate_legacy_local_artifacts, missing_or_invalid_voxtral_local_files,
+        vibevoice_index_shards_present,
+    };
+    use std::path::PathBuf;
+
+    fn temp_models_root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "nautilus-asr-manager-tests-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp models root");
+        root
+    }
+
+    #[test]
+    fn migrates_legacy_parakeet_artifact_names() {
+        let models_root = temp_models_root();
+        let parakeet = models_root.join("parakeet");
+        std::fs::create_dir_all(&parakeet).expect("create parakeet dir");
+        let mut legacy_model = vec![0u8; 5000];
+        legacy_model[0] = 1;
+        std::fs::write(parakeet.join("model.onnx"), legacy_model).expect("write legacy model");
+        let vocab_body = (0..100)
+            .map(|i| format!("tok{} {}\n", i, i))
+            .collect::<String>();
+        std::fs::write(parakeet.join("vocab.txt"), vocab_body).expect("write legacy vocab");
+
+        migrate_legacy_local_artifacts(&models_root);
+
+        assert!(parakeet.join("encoder.onnx").exists());
+        assert!(parakeet.join("tokens.txt").exists());
+        let _ = std::fs::remove_dir_all(models_root);
+    }
+
+    #[test]
+    fn migration_does_not_overwrite_new_parakeet_artifacts() {
+        let models_root = temp_models_root();
+        let parakeet = models_root.join("parakeet");
+        std::fs::create_dir_all(&parakeet).expect("create parakeet dir");
+        let mut legacy_model = vec![0u8; 5000];
+        legacy_model[0] = 1;
+        std::fs::write(parakeet.join("model.onnx"), legacy_model).expect("write legacy model");
+        let vocab_body = (0..100)
+            .map(|i| format!("tok{} {}\n", i, i))
+            .collect::<String>();
+        std::fs::write(parakeet.join("vocab.txt"), vocab_body).expect("write legacy vocab");
+        std::fs::write(parakeet.join("encoder.onnx"), b"new-model").expect("write new model");
+        std::fs::write(parakeet.join("tokens.txt"), b"new-vocab").expect("write new vocab");
+
+        migrate_legacy_local_artifacts(&models_root);
+
+        let encoder = std::fs::read(parakeet.join("encoder.onnx")).expect("read encoder");
+        let tokens = std::fs::read(parakeet.join("tokens.txt")).expect("read tokens");
+        assert_eq!(encoder, b"new-model");
+        assert_eq!(tokens, b"new-vocab");
+        let _ = std::fs::remove_dir_all(models_root);
+    }
+
+    #[test]
+    fn vibevoice_index_requires_all_valid_shards() {
+        let models_root = temp_models_root();
+        let vibevoice = models_root.join("vibevoice");
+        std::fs::create_dir_all(&vibevoice).expect("create vibevoice dir");
+
+        let index = serde_json::json!({
+            "weight_map": {
+                "layer_0": "model-00001-of-00002.safetensors",
+                "layer_1": "model-00002-of-00002.safetensors"
+            }
+        });
+        std::fs::write(
+            vibevoice.join("model.safetensors.index.json"),
+            index.to_string(),
+        )
+        .expect("write index");
+
+        let mut shard = vec![0u8; 2048];
+        shard[0] = 1;
+        std::fs::write(vibevoice.join("model-00001-of-00002.safetensors"), shard)
+            .expect("write shard 1");
+        assert!(
+            !vibevoice_index_shards_present(&vibevoice),
+            "missing shard should fail readiness"
+        );
+
+        std::fs::write(vibevoice.join("model-00002-of-00002.safetensors"), b"short")
+            .expect("write invalid shard 2");
+        assert!(
+            !vibevoice_index_shards_present(&vibevoice),
+            "truncated shard should fail readiness"
+        );
+
+        let mut shard2 = vec![0u8; 2048];
+        shard2[0] = 1;
+        std::fs::write(vibevoice.join("model-00002-of-00002.safetensors"), shard2)
+            .expect("write valid shard 2");
+        assert!(vibevoice_index_shards_present(&vibevoice));
+
+        let _ = std::fs::remove_dir_all(models_root);
+    }
+
+    #[test]
+    fn voxtral_diagnostics_report_invalid_local_payloads() {
+        let models_root = temp_models_root();
+        let voxtral = models_root.join("voxtral");
+        std::fs::create_dir_all(&voxtral).expect("create voxtral dir");
+
+        std::fs::write(voxtral.join("config.json"), b"<html>not json</html>")
+            .expect("write invalid config");
+        std::fs::write(
+            voxtral.join("processor_config.json"),
+            serde_json::json!({"processor": "ok", "padding": "long-enough-for-min-size-check"})
+                .to_string(),
+        )
+        .expect("write processor config");
+        std::fs::write(
+            voxtral.join("tekken.json"),
+            serde_json::json!({"tokens": ["a", "b", "c"], "meta": "long-enough-for-min-size-check"})
+                .to_string(),
+        )
+        .expect("write tekken");
+        std::fs::write(voxtral.join("model.safetensors"), b"tiny").expect("write invalid weights");
+
+        let missing = missing_or_invalid_voxtral_local_files(&voxtral);
+        assert!(
+            missing.iter().any(|entry| entry.contains("config.json")),
+            "config should be reported invalid"
+        );
+        assert!(
+            missing
+                .iter()
+                .any(|entry| entry.contains("model.safetensors")),
+            "weights should be reported invalid"
+        );
+
+        let _ = std::fs::remove_dir_all(models_root);
     }
 }

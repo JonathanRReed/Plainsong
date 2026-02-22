@@ -4,6 +4,8 @@ use super::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "asr-canary")]
+use std::{cell::RefCell, thread_local};
 
 // ---------------------------------------------------------------------------
 // Model: openai/whisper-large-v3-turbo via Candle (max accuracy, no Python)
@@ -75,91 +77,144 @@ pub(super) fn run_canary_inference_on_samples(
     use candle_transformers::models::whisper::{self as w, model::Whisper, Config};
     use tokenizers::Tokenizer;
 
-    let device = Device::Cpu;
-
-    let cfg_text = std::fs::read_to_string(model_dir.join("config.json"))
-        .context("Failed to read Canary config.json")?;
-    let config: Config =
-        serde_json::from_str(&cfg_text).context("Failed to parse Canary config.json")?;
-
-    let n_mels = config.num_mel_bins;
-    let n_frames = w::N_FRAMES;
-
-    let mel_extractor = MelSpectrogram::new(512, 160, 400, n_mels, 16000);
-    let spec = mel_extractor.compute_whisper_normalized(&samples);
-
-    let mel_flat: Vec<f32> = (0..n_mels)
-        .flat_map(|m| {
-            let row = if m < spec.len() { &spec[m] } else { &[][..] };
-            (0..n_frames).map(move |t| if t < row.len() { row[t] } else { 0.0 })
-        })
-        .collect();
-
-    let mel_tensor = Tensor::from_vec(mel_flat, (1, n_mels, n_frames), &device)
-        .context("Failed to build mel tensor")?;
-
-    let weights_path = model_dir.join("model.safetensors");
-    let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)
-            .context("Failed to load Canary weights")?
-    };
-    let mut model =
-        Whisper::load(&vb, config).context("Failed to initialise Canary Whisper model")?;
-
-    let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
-        .map_err(|e| anyhow::anyhow!("Failed to load Canary tokenizer: {}", e))?;
-
-    let audio_features = model
-        .encoder
-        .forward(&mel_tensor, true)
-        .context("Canary encoder failed")?;
-
-    let sot = tokenizer.token_to_id(w::SOT_TOKEN).unwrap_or(50258);
-    let eot = tokenizer.token_to_id(w::EOT_TOKEN).unwrap_or(50257);
-    let transcribe = tokenizer.token_to_id(w::TRANSCRIBE_TOKEN).unwrap_or(50360);
-    let no_ts = tokenizer
-        .token_to_id(w::NO_TIMESTAMPS_TOKEN)
-        .unwrap_or(50364);
-    let lang_en = tokenizer.token_to_id("<|en|>").unwrap_or(50259);
-
-    let mut tokens: Vec<u32> = vec![sot, lang_en, transcribe, no_ts];
-    const MAX_NEW_TOKENS: usize = 448;
-
-    for _ in 0..MAX_NEW_TOKENS {
-        let token_tensor = Tensor::new(tokens.as_slice(), &device)
-            .context("Failed to create token tensor")?
-            .unsqueeze(0)
-            .context("unsqueeze failed")?;
-
-        let decoder_out = model
-            .decoder
-            .forward(&token_tensor, &audio_features, tokens.len() == 4)
-            .context("Canary decoder step failed")?;
-
-        let logits = model
-            .decoder
-            .final_linear(&decoder_out)
-            .context("final_linear failed")?;
-
-        let last_logits = logits.i((0, tokens.len() - 1))?;
-        let next_token = last_logits
-            .argmax(0)
-            .context("argmax failed")?
-            .to_scalar::<u32>()
-            .context("scalar failed")?;
-
-        if next_token == eot {
-            break;
-        }
-        tokens.push(next_token);
+    struct CanaryRuntime {
+        model_dir_key: String,
+        n_mels: usize,
+        device: Device,
+        tokenizer: Tokenizer,
+        model: Whisper,
     }
 
-    let output_ids: Vec<u32> = tokens[4..].to_vec();
-    let text = tokenizer
-        .decode(&output_ids, true)
-        .map_err(|e| anyhow::anyhow!("Tokenizer decode failed: {}", e))?;
+    fn load_runtime(model_dir: &Path) -> Result<CanaryRuntime> {
+        let device = Device::Cpu;
+        let cfg_text = std::fs::read_to_string(model_dir.join("config.json"))
+            .context("Failed to read Canary config.json")?;
+        let config: Config =
+            serde_json::from_str(&cfg_text).context("Failed to parse Canary config.json")?;
+        let n_mels = config.num_mel_bins;
 
-    Ok(text.trim().to_string())
+        let weights_path = model_dir.join("model.safetensors");
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)
+                .context("Failed to load Canary weights")?
+        };
+        let model =
+            Whisper::load(&vb, config).context("Failed to initialise Canary Whisper model")?;
+
+        let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
+            .map_err(|e| anyhow::anyhow!("Failed to load Canary tokenizer: {}", e))?;
+
+        Ok(CanaryRuntime {
+            model_dir_key: model_dir.to_string_lossy().to_string(),
+            n_mels,
+            device,
+            tokenizer,
+            model,
+        })
+    }
+
+    thread_local! {
+        static RUNTIME_CACHE: RefCell<Option<CanaryRuntime>> = const { RefCell::new(None) };
+    }
+
+    let model_dir_key = model_dir.to_string_lossy().to_string();
+    RUNTIME_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let should_reload = cache
+            .as_ref()
+            .map(|runtime| runtime.model_dir_key != model_dir_key)
+            .unwrap_or(true);
+        if should_reload {
+            *cache = Some(load_runtime(model_dir)?);
+        }
+
+        let runtime = cache
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Canary runtime cache unavailable"))?;
+
+        let n_frames = w::N_FRAMES;
+        let mel_extractor = MelSpectrogram::new(512, 160, 400, runtime.n_mels, 16000);
+        let spec = mel_extractor.compute_whisper_normalized(&samples);
+
+        let mel_flat: Vec<f32> = (0..runtime.n_mels)
+            .flat_map(|m| {
+                let row = if m < spec.len() { &spec[m] } else { &[][..] };
+                (0..n_frames).map(move |t| if t < row.len() { row[t] } else { 0.0 })
+            })
+            .collect();
+
+        let mel_tensor = Tensor::from_vec(mel_flat, (1, runtime.n_mels, n_frames), &runtime.device)
+            .context("Failed to build mel tensor")?;
+
+        let audio_features = runtime
+            .model
+            .encoder
+            .forward(&mel_tensor, true)
+            .context("Canary encoder failed")?;
+
+        let sot = runtime.tokenizer.token_to_id(w::SOT_TOKEN).unwrap_or(50258);
+        let eot = runtime.tokenizer.token_to_id(w::EOT_TOKEN).unwrap_or(50257);
+        let transcribe = runtime
+            .tokenizer
+            .token_to_id(w::TRANSCRIBE_TOKEN)
+            .unwrap_or(50360);
+        let no_ts = runtime
+            .tokenizer
+            .token_to_id(w::NO_TIMESTAMPS_TOKEN)
+            .unwrap_or(50364);
+        let lang_en = runtime.tokenizer.token_to_id("<|en|>").unwrap_or(50259);
+
+        let mut tokens: Vec<u32> = vec![sot, lang_en, transcribe, no_ts];
+        let max_new_tokens = max_new_tokens_for_audio(samples.len());
+
+        for _ in 0..max_new_tokens {
+            let token_tensor = Tensor::new(tokens.as_slice(), &runtime.device)
+                .context("Failed to create token tensor")?
+                .unsqueeze(0)
+                .context("unsqueeze failed")?;
+
+            let decoder_out = runtime
+                .model
+                .decoder
+                .forward(&token_tensor, &audio_features, tokens.len() == 4)
+                .context("Canary decoder step failed")?;
+
+            let logits = runtime
+                .model
+                .decoder
+                .final_linear(&decoder_out)
+                .context("final_linear failed")?;
+
+            let last_logits = logits.i((0, tokens.len() - 1))?;
+            let next_token = last_logits
+                .argmax(0)
+                .context("argmax failed")?
+                .to_scalar::<u32>()
+                .context("scalar failed")?;
+
+            if next_token == eot {
+                break;
+            }
+            tokens.push(next_token);
+        }
+
+        let output_ids: Vec<u32> = tokens[4..].to_vec();
+        let text = runtime
+            .tokenizer
+            .decode(&output_ids, true)
+            .map_err(|e| anyhow::anyhow!("Tokenizer decode failed: {}", e))?;
+
+        Ok(text.trim().to_string())
+    })
+}
+
+#[cfg(feature = "asr-canary")]
+fn max_new_tokens_for_audio(sample_count: usize) -> usize {
+    // Keep generation bounded to expected utterance length for dictation.
+    // This avoids excessive autoregressive decode steps on short clips.
+    let seconds = sample_count as f32 / 16_000.0;
+    let estimated = (seconds * 6.0).ceil() as usize + 32;
+    estimated.clamp(64, 320)
 }
 
 #[cfg(feature = "asr-canary")]

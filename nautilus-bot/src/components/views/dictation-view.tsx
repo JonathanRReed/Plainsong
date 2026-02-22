@@ -35,6 +35,7 @@ export function DictationView() {
   const [lastModelId, setLastModelId] = useState<string | null>(null);
   const [pasteStatus, setPasteStatus] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [dictationError, setDictationError] = useState<string | null>(null);
   const [saveToInbox, setSaveToInbox] = useState(true);
   const [dictationProfile, setDictationProfile] = useState<"speed" | "accuracy">("speed");
   const [defaultProjectId, setDefaultProjectId] = useState("inbox");
@@ -136,6 +137,7 @@ export function DictationView() {
         const text = payload?.text ?? "";
         if (text) {
           setTranscribedText(text);
+          setDictationError(null);
         }
         if (payload?.actualProvider) {
           setLastProvider(payload.actualProvider);
@@ -164,17 +166,27 @@ export function DictationView() {
   }, []);
 
   const handleStopDictation = async () => {
-    const text = await stopDictation();
-    if (text) {
-      setTranscribedText(text);
-      
-      // Copy to clipboard
-      try {
-        await navigator.clipboard.writeText(text);
-        // Could show toast notification here
-      } catch (err) {
-        console.error("Failed to copy to clipboard:", err);
+    try {
+      const text = await stopDictation();
+      if (text?.trim()) {
+        setTranscribedText(text);
+        setDictationError(null);
+        setPasteStatus(null);
+
+        // Copy to clipboard
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch (err) {
+          console.error("Failed to copy to clipboard:", err);
+        }
+      } else {
+        setDictationError(
+          "No transcript was produced. Check your selected ASR provider/model and microphone input."
+        );
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDictationError(message);
     }
   };
 
@@ -219,6 +231,14 @@ export function DictationView() {
       
       <ScrollArea className="flex-1">
         <div className="p-6 max-w-4xl mx-auto space-y-6">
+          {dictationError && (
+            <Card className="border-destructive/30 bg-destructive/10">
+              <CardContent className="p-4">
+                <p className="text-sm text-destructive">{dictationError}</p>
+              </CardContent>
+            </Card>
+          )}
+
           {/* Quick Capture Card */}
           <Card className={cn(
             "border-2 transition-all duration-300",
