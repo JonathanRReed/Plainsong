@@ -15,7 +15,6 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type {
   AsrBenchmarkEntry,
-  AsrModelOption,
   AsrProviderInfo,
   AsrProviderType,
   BenchmarkResult,
@@ -77,25 +76,8 @@ export function AsrProviderManager({
   const loadProviders = async () => {
     try {
       const data = await invoke<AsrProviderInfo[]>("get_asr_providers");
-      const hydrated = await Promise.all(
-        data.map(async (provider) => {
-          try {
-            const modelOptions = await invoke<AsrModelOption[]>(
-              "get_asr_provider_model_options",
-              {
-                providerType: provider.providerType,
-              }
-            );
-            return {
-              ...provider,
-              modelOptions: modelOptions.length > 0 ? modelOptions : provider.modelOptions,
-            };
-          } catch {
-            return provider;
-          }
-        })
-      );
-      setProviders(hydrated);
+      // Model options are already included in provider info - no need for extra API calls
+      setProviders(data);
     } catch (error) {
       console.error("Failed to load ASR providers:", error);
     }
@@ -382,6 +364,9 @@ export function AsrProviderManager({
               <Card>
                 <CardContent className="p-6 text-center">
                   <p className="text-muted-foreground">Loading providers...</p>
+                  <p className="text-xs text-muted-foreground mt-2">
+                    This may take up to 15 seconds on first load
+                  </p>
                 </CardContent>
               </Card>
             ) : (

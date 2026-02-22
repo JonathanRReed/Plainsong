@@ -32,34 +32,34 @@ impl WhisperProvider {
         let model_id = sanitize_model_id(selected_model_id.unwrap_or("base.en"));
         let model_path = models_dir.join(format!("ggml-{}.bin", model_id));
 
-        let mut provider = Self {
-            model_path: model_path.clone(),
-            models_dir,
-            model_id,
-            ctx: None,
+        // Check cache first without loading
+        let ctx = if model_path.exists() {
+            if let Ok(cache) = whisper_context_cache().lock() {
+                cache.get(&model_id).cloned()
+            } else {
+                None
+            }
+        } else {
+            None
         };
 
-        // Try to load the model if it exists.
-        if model_path.exists() {
-            if let Ok(cache) = whisper_context_cache().lock() {
-                if let Some(cached) = cache.get(&provider.model_id).cloned() {
-                    provider.ctx = Some(cached);
-                    return provider;
-                }
-            }
-            if let Err(e) = provider.load_model() {
-                tracing::error!("Failed to load Whisper model: {}", e);
-            }
+        Self {
+            model_path,
+            models_dir,
+            model_id,
+            ctx,
         }
-
-        provider
     }
 
-    fn load_model(&mut self) -> Result<()> {
+    fn model_spec(&self) -> WhisperModelSpec {
+        whisper_model_spec(&self.model_id)
+    }
+
+    fn load_model(&self) -> Result<Arc<whisper_rs::WhisperContext>> {
+        // Check cache first
         if let Ok(cache) = whisper_context_cache().lock() {
             if let Some(cached) = cache.get(&self.model_id).cloned() {
-                self.ctx = Some(cached);
-                return Ok(());
+                return Ok(cached);
             }
         }
 
@@ -76,14 +76,15 @@ impl WhisperProvider {
         if let Ok(mut cache) = whisper_context_cache().lock() {
             cache.insert(self.model_id.clone(), Arc::clone(&ctx));
         }
-        self.ctx = Some(ctx);
         tracing::info!("Whisper model loaded successfully");
-
-        Ok(())
+        Ok(ctx)
     }
 
-    fn model_spec(&self) -> WhisperModelSpec {
-        whisper_model_spec(&self.model_id)
+    fn get_or_load_ctx(&self) -> Result<Arc<whisper_rs::WhisperContext>> {
+        if let Some(ctx) = &self.ctx {
+            return Ok(Arc::clone(ctx));
+        }
+        self.load_model()
     }
 }
 
@@ -99,7 +100,8 @@ impl AsrProvider for WhisperProvider {
     }
 
     fn is_available(&self) -> bool {
-        self.ctx.is_some()
+        // Model is available if either already loaded in cache OR file exists
+        self.ctx.is_some() || self.model_path.exists()
     }
 
     fn model_info(&self) -> ModelInfo {
@@ -124,10 +126,7 @@ impl AsrProvider for WhisperProvider {
     }
 
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
-        let ctx = self
-            .ctx
-            .as_ref()
-            .context("Whisper model not loaded. Please download and load the model first.")?;
+        let ctx = self.get_or_load_ctx()?;
 
         let start_time = std::time::Instant::now();
 
@@ -286,8 +285,8 @@ impl AsrProvider for WhisperProvider {
             .download_whisper_model(model_name, progress_callback)
             .await?;
 
-        // Reload the model
-        let mut provider = Self::new(Some(model_name));
+        // Pre-load the model into cache after download
+        let provider = Self::new(Some(model_name));
         if let Err(e) = provider.load_model() {
             tracing::error!("Failed to load model after download: {}", e);
         }

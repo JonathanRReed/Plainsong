@@ -4,6 +4,45 @@ use super::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+#[cfg(feature = "asr-parakeet")]
+use ort::session::Session;
+
+// ---------------------------------------------------------------------------
+// ONNX Session Cache (reuse sessions across transcriptions)
+// ---------------------------------------------------------------------------
+#[cfg(feature = "asr-parakeet")]
+fn onnx_session_cache() -> &'static Mutex<Option<Session>> {
+    static CACHE: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn get_or_create_session(onnx_path: &Path) -> Result<std::sync::MutexGuard<'static, Option<Session>>> {
+    let mut cache = onnx_session_cache().lock().unwrap();
+    
+    // If session exists, return it
+    if cache.is_some() {
+        return Ok(cache);
+    }
+    
+    // Create new session
+    use ort::session::builder::GraphOptimizationLevel;
+    
+    tracing::info!("Creating new Parakeet ONNX session from {}", onnx_path.display());
+    let session = Session::builder()
+        .context("Failed to create ONNX session builder")?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .context("Failed to set opt level")?
+        .commit_from_file(onnx_path)
+        .context("Failed to load Parakeet ONNX — ensure encoder.onnx is a valid NeMo CTC export")?;
+    
+    *cache = Some(session);
+    
+    tracing::info!("Parakeet ONNX session cached successfully");
+    Ok(cache)
+}
 
 // ---------------------------------------------------------------------------
 // Model artifact filenames
@@ -174,8 +213,6 @@ impl Default for ParakeetProvider {
 #[cfg(feature = "asr-parakeet")]
 fn run_parakeet_onnx(onnx_path: &Path, vocab_path: &Path, audio_path: &Path) -> Result<String> {
     use ndarray::{Array, IxDyn};
-    use ort::session::builder::GraphOptimizationLevel;
-    use ort::session::Session;
     use ort::value::Tensor;
 
     // -----------------------------------------------------------------
@@ -184,18 +221,16 @@ fn run_parakeet_onnx(onnx_path: &Path, vocab_path: &Path, audio_path: &Path) -> 
     let samples = crate::audio::utils::load_audio_file(audio_path)
         .context("Failed to load audio for Parakeet")?;
     if samples.is_empty() {
+        tracing::warn!("Parakeet: audio samples are empty");
         return Ok(String::new());
     }
+    tracing::debug!("Parakeet: loaded {} audio samples", samples.len());
 
     // -----------------------------------------------------------------
-    // 2. Load ONNX session
+    // 2. Get or create ONNX session (CACHED for reuse)
     // -----------------------------------------------------------------
-    let mut session = Session::builder()
-        .context("Failed to create ONNX session builder")?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .context("Failed to set opt level")?
-        .commit_from_file(onnx_path)
-        .context("Failed to load Parakeet ONNX — ensure encoder.onnx is a valid NeMo CTC export")?;
+    let mut cache_guard = get_or_create_session(onnx_path)?;
+    let session = cache_guard.as_mut().context("ONNX session not initialized")?;
 
     // Inspect input names to determine export contract:
     // 1) sherpa-onnx: x/x_lens (mel)
@@ -217,10 +252,16 @@ fn run_parakeet_onnx(onnx_path: &Path, vocab_path: &Path, audio_path: &Path) -> 
         let mel = MelSpectrogram::parakeet_defaults();
         let spec = mel.compute(&samples); // [80][T]
         if spec.is_empty() || spec[0].is_empty() {
+            tracing::warn!(
+                "Parakeet: mel spectrogram empty (mels={}, frames={})",
+                spec.len(),
+                if spec.is_empty() { 0 } else { spec[0].len() }
+            );
             return Ok(String::new());
         }
         let n_mels = spec.len();
         let n_frames = spec[0].len();
+        tracing::debug!("Parakeet: mel spec {} mels x {} frames for sherpa/processed path", n_mels, n_frames);
 
         let mut flat: Vec<f32> = Vec::with_capacity(n_frames * n_mels);
         for t in 0..n_frames {
@@ -277,10 +318,16 @@ fn run_parakeet_onnx(onnx_path: &Path, vocab_path: &Path, audio_path: &Path) -> 
         let mel = MelSpectrogram::parakeet_defaults();
         let spec = mel.compute(&samples); // [80][T]
         if spec.is_empty() || spec[0].is_empty() {
+            tracing::warn!(
+                "Parakeet: mel spectrogram empty for raw_audio path (mels={}, frames={})",
+                spec.len(),
+                if spec.is_empty() { 0 } else { spec[0].len() }
+            );
             return Ok(String::new());
         }
         let n_mels = spec.len();
         let n_frames = spec[0].len();
+        tracing::debug!("Parakeet: mel spec {} mels x {} frames for raw_audio path", n_mels, n_frames);
         let mut flat: Vec<f32> = Vec::with_capacity(n_frames * n_mels);
         for mel_bin in spec.iter().take(n_mels) {
             flat.extend(mel_bin.iter().take(n_frames).copied());
@@ -361,6 +408,13 @@ fn run_parakeet_onnx(onnx_path: &Path, vocab_path: &Path, audio_path: &Path) -> 
         prev = best_id;
     }
 
+    tracing::debug!(
+        "Parakeet CTC: {} timesteps, {} tokens, vocab_size={}",
+        t_out,
+        token_ids.len(),
+        vocab.len()
+    );
+
     let text = token_ids
         .iter()
         .filter_map(|&id| vocab.get(id).map(String::as_str))
@@ -391,6 +445,7 @@ fn load_vocab(vocab_path: &Path) -> Result<Vec<String>> {
             }
         })
         .collect::<Vec<_>>();
+    tracing::debug!("Parakeet: loaded {} vocab tokens from {}", tokens.len(), vocab_path.display());
     Ok(tokens)
 }
 
@@ -450,11 +505,24 @@ impl AsrProvider for ParakeetProvider {
         let audio_path_owned = audio_path.to_path_buf();
         let audio_path_for_dur = audio_path_owned.clone();
 
+        tracing::info!(
+            "Parakeet transcription starting: onnx={}, vocab={}, audio={}",
+            onnx_path.display(),
+            vocab_path.display(),
+            audio_path_owned.display()
+        );
+
         let text = tokio::task::spawn_blocking(move || {
             run_parakeet_onnx(&onnx_path, &vocab_path, &audio_path_owned)
         })
         .await
         .context("Parakeet inference task panicked")??;
+
+        tracing::info!(
+            "Parakeet transcription complete: {} chars in {}ms",
+            text.len(),
+            start.elapsed().as_millis()
+        );
 
         let duration = Self::wav_duration_seconds(&audio_path_for_dur);
         let segment = TranscriptSegment {

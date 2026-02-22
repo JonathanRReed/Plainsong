@@ -437,9 +437,14 @@ impl AudioCapture {
     }
 
     /// Get the current audio level for dictation (0.0 to 1.0)
+    /// Uses power scaling to make normal speech levels more visible
     pub fn get_dictation_audio_level(&self) -> f32 {
         let level = self.dictation_audio_level.load(Ordering::SeqCst);
-        level as f32 / u32::MAX as f32
+        let raw = level as f32 / u32::MAX as f32;
+        // Apply power curve: sqrt makes low levels more visible
+        // Normal speech RMS ~0.01-0.15, after sqrt: 0.1-0.39
+        // Louder speech RMS ~0.1-0.5, after sqrt: 0.32-0.71
+        raw.sqrt()
     }
 
     /// Get the current silence duration in seconds (time since last speech detected)

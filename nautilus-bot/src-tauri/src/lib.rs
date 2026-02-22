@@ -1049,9 +1049,7 @@ async fn stop_dictation(
         let settings = state.settings_manager.lock().await.settings().clone();
         (
             settings.transcription.dictation_paste_to_cursor,
-            settings
-                .transcription
-                .dictation_copy_to_clipboard,
+            settings.transcription.dictation_copy_to_clipboard,
         )
     };
     stop_dictation_session(
@@ -3800,7 +3798,10 @@ async fn start_dictation_session(
 
     let silence_timeout_seconds = {
         let settings = state.settings_manager.lock().await;
-        settings.settings().transcription.dictation_silence_timeout_seconds
+        settings
+            .settings()
+            .transcription
+            .dictation_silence_timeout_seconds
     };
 
     let app_handle = app.clone();
@@ -3822,9 +3823,7 @@ async fn start_dictation_session(
                 let settings = state.settings_manager.lock().await.settings().clone();
                 (
                     settings.transcription.dictation_paste_to_cursor,
-                    settings
-                        .transcription
-                        .dictation_copy_to_clipboard,
+                    settings.transcription.dictation_copy_to_clipboard,
                 )
             };
             let _ = stop_dictation_session_for_session(
@@ -3862,7 +3861,10 @@ async fn start_dictation_session(
                     audio.should_auto_stop_on_silence(silence_timeout_seconds)
                 };
                 if should_stop {
-                    tracing::info!("Dictation auto-stop on silence after {:.1}s", silence_timeout_seconds);
+                    tracing::info!(
+                        "Dictation auto-stop on silence after {:.1}s",
+                        silence_timeout_seconds
+                    );
                     let (paste_to_cursor, copy_to_clipboard_enabled) = {
                         let settings = state.settings_manager.lock().await.settings().clone();
                         (
@@ -4032,7 +4034,9 @@ async fn stop_dictation_session_for_session(
         transcription_latency_ms
     );
 
-    if raw_has_audio && (looks_low_information_dictation(&result.text) || result.text.trim().is_empty()) {
+    if raw_has_audio
+        && (looks_low_information_dictation(&result.text) || result.text.trim().is_empty())
+    {
         if let Ok(trimmed_audio) = crate::audio::utils::remove_silence_from_wav_bytes(&audio_data) {
             let trimmed_has_audio = wav_has_non_silent_audio(&trimmed_audio, 0.003);
             if trimmed_audio != audio_data && trimmed_has_audio {

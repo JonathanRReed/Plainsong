@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 import { useRecording } from "@/hooks/use-recording";
 import { useProjects } from "@/hooks/use-projects";
 import { useRecordings } from "@/hooks/use-recordings";
-import { getSettings, saveSettings } from "@/lib/tauri";
+import { getSettings, saveSettings, getTranscript } from "@/lib/tauri";
 import {
   defaultDictationShortcut,
   dictationInstruction,
@@ -15,6 +15,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Keyboard, Mic, Square, Zap, Save, RefreshCw } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+
+import type { Recording, Transcript } from "@/types";
 
 interface DictationTextReadyEvent {
   text: string;
@@ -53,7 +56,32 @@ export function DictationView() {
   >("never");
   const [dictationRetentionCustomHours, setDictationRetentionCustomHours] = useState(24);
   const [hotkeyPressed, setHotkeyPressed] = useState(false);
+  const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null);
+  const [selectedTranscript, setSelectedTranscript] = useState<Transcript | null>(null);
+  const [isLoadingTranscript, setIsLoadingTranscript] = useState(false);
+  const [isDialogOpen, setIsDialogOpen] = useState(false);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    if (!isDialogOpen || !selectedRecording) {
+      setSelectedTranscript(null);
+      return;
+    }
+    setIsLoadingTranscript(true);
+    const fetchTranscript = async () => {
+      try {
+        const transcript = await getTranscript(selectedRecording.id);
+        setSelectedTranscript(transcript);
+      } catch (error) {
+        console.error("Failed to fetch transcript:", error);
+        setSelectedTranscript(null);
+      } finally {
+        setIsLoadingTranscript(false);
+      }
+    };
+    void fetchTranscript();
+  }, [isDialogOpen, selectedRecording]);
+
   const dictationHistory = useMemo(
     () =>
       recordings
@@ -486,7 +514,11 @@ export function DictationView() {
                   {dictationHistory.slice(0, 25).map((recording) => (
                     <div
                       key={recording.id}
-                      className="flex items-center justify-between rounded-md border p-3"
+                      className="flex items-center justify-between rounded-md border p-3 cursor-pointer hover:bg-muted/50 transition-colors"
+                      onClick={() => {
+                        setSelectedRecording(recording);
+                        setIsDialogOpen(true);
+                      }}
                     >
                       <div>
                         <p className="font-medium">{recording.title}</p>
@@ -497,12 +529,12 @@ export function DictationView() {
                       <p className="text-sm text-muted-foreground">
                         {formatRecordingDuration(recording.duration)}
                       </p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+                     </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           
           {/* Settings */}
           <Card>
@@ -608,6 +640,33 @@ export function DictationView() {
           </Card>
         </div>
       </ScrollArea>
+      
+      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{selectedRecording?.title ?? "Dictation"}</DialogTitle>
+          </DialogHeader>
+          {isLoadingTranscript ? (
+            <p className="text-muted-foreground">Loading transcript...</p>
+          ) : selectedTranscript ? (
+            <div className="space-y-4">
+              <div className="p-4 bg-muted rounded-lg">
+                <p className="whitespace-pre-wrap text-sm">
+                  {selectedTranscript.fullText}
+                </p>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                Duration: {selectedRecording ? formatRecordingDuration(selectedRecording.duration) : "N/A"} · 
+                Created: {selectedRecording ? new Date(selectedRecording.createdAt).toLocaleString() : "N/A"}
+              </div>
+            </div>
+          ) : (
+            <p className="text-muted-foreground">
+              No transcript available for this dictation.
+            </p>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

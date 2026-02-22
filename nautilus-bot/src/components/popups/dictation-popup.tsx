@@ -110,7 +110,13 @@ export function DictationPopup() {
 
     const id = setInterval(() => {
       void getDictationAudioLevel()
-        .then((level) => setAudioLevel(level))
+        .then((level) => {
+          // Apply additional scaling for better visualization
+          // The backend already applies sqrt, we boost it further
+          // and apply a minimum threshold to show some activity
+          const scaled = Math.max(0.05, Math.min(1, level * 2.5));
+          setAudioLevel(scaled);
+        })
         .catch(() => setAudioLevel(0));
     }, 50);
     return () => clearInterval(id);
@@ -230,13 +236,13 @@ export function DictationPopup() {
               <p className="text-sm font-semibold">Listening</p>
               {!compact && (
                 <>
-                  <div className="mt-1 h-1.5 w-full max-w-[200px] rounded-full bg-slate-700/50 overflow-hidden">
+                  <div className="mt-2 h-2 w-full max-w-[220px] rounded-full bg-slate-700/50 overflow-hidden">
                     <div
-                      className="h-full bg-gradient-to-r from-orange-400 to-orange-300 transition-all duration-75 rounded-full"
+                      className="h-full bg-gradient-to-r from-emerald-500 via-orange-400 to-rose-500 transition-all duration-50 rounded-full"
                       style={{ width: `${Math.min(100, audioLevel * 100)}%` }}
                     />
                   </div>
-                  <p className="text-xs text-slate-300 mt-1">
+                  <p className="text-xs text-slate-300 mt-1.5">
                     {pushToTalk
                       ? "Release hotkey to transcribe + paste"
                       : "Press the hotkey again to transcribe + paste"}

@@ -167,11 +167,11 @@ Action Items:"
             .lines()
             .filter(|line| {
                 let trimmed = line.trim();
-                trimmed.starts_with('-') 
-                    || trimmed.starts_with('*') 
+                trimmed.starts_with('-')
+                    || trimmed.starts_with('*')
                     || trimmed.starts_with("•")
-                    || trimmed.chars().next().map_or(false, |c| c.is_ascii_digit())
-                        && trimmed.chars().nth(1).map_or(false, |c| c == '.' || c == ')')
+                    || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
+                        && trimmed.chars().nth(1).is_some_and(|c| c == '.' || c == ')')
             })
             .map(|line| {
                 let task = line
@@ -180,7 +180,7 @@ Action Items:"
                     .trim_start_matches("* ")
                     .trim_start_matches("• ")
                     .trim_start_matches(|c: char| c.is_ascii_digit())
-                    .trim_start_matches(|c: char| c == '.' || c == ')')
+                    .trim_start_matches(['.', ')'])
                     .trim_start();
                 ActionItem {
                     task: task.to_string(),
