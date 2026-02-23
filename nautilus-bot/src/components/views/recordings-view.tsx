@@ -25,6 +25,7 @@ import {
   retryMeetingAutoName,
   setRecordingSourceType,
   isDiarizationModelAvailable,
+  updateTranscriptSegment,
 } from "@/lib/tauri";
 import type { Recording, Transcript, TranscriptSegment } from "@/types";
 import { listen } from "@tauri-apps/api/event";
@@ -63,6 +64,8 @@ export function RecordingsView() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<Recording | null>(null);
   const [showRenameDialog, setShowRenameDialog] = useState<Recording | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [isStopping, setIsStopping] = useState(false);
+  const [meetingNotes, setMeetingNotes] = useState("");
   const lastRecordingState = useRef(false);
 
   // Live streaming transcript state
@@ -172,12 +175,22 @@ export function RecordingsView() {
     };
   }, [refetch]);
 
-  const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean }) => {
-    const startedId = await startMeeting({ ...options, projectId: "default" });
-    if (startedId) {
-      refetch();
+  const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean; template?: string }) => {
+    try {
+      const startedId = await startMeeting({ ...options, projectId: "default" });
+      console.log("startMeeting returned:", startedId);
+      if (startedId) {
+        refetch();
+      }
+    } catch (error) {
+      console.error("Failed to start recording:", error);
+      toast(
+        error instanceof Error ? error.message : "Failed to start recording",
+        "error"
+      );
+    } finally {
+      setShowConsent(false);
     }
-    setShowConsent(false);
   };
 
   const loadRecordingDetail = async (recording: Recording) => {
@@ -457,9 +470,9 @@ export function RecordingsView() {
         </div>
         <div className="flex gap-2">
           {isRecording ? (
-            <Button variant="destructive" onClick={stopMeeting}>
+            <Button variant="destructive" disabled={isStopping} onClick={async () => { setIsStopping(true); try { await stopMeeting(); } finally { setIsStopping(false); } }}>
               <Square className="h-4 w-4 mr-2 fill-current" />
-              Stop Meeting
+              {isStopping ? "Stopping..." : "Stop Meeting"}
             </Button>
           ) : (
             <Button variant="active" onClick={() => setShowConsent(true)}>
@@ -618,6 +631,16 @@ export function RecordingsView() {
                   isRecording={isRecording}
                   height={56}
                 />
+                <div className="mt-3 border-t border-active/20 pt-3">
+                  <p className="text-xs font-medium text-muted-foreground mb-1">Meeting Notes <span className="opacity-50">(optional — AI will use these)</span></p>
+                  <textarea
+                    value={meetingNotes}
+                    onChange={(e) => setMeetingNotes(e.target.value)}
+                    placeholder="Jot key points, names, or topics as you go..."
+                    rows={3}
+                    className="w-full text-sm bg-background border border-border rounded-md px-3 py-2 resize-none placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-active"
+                  />
+                </div>
                 {streamChunks.length > 0 && (
                   <div className="mt-3 border-t border-active/20 pt-3">
                     <p className="text-xs font-medium text-active mb-1.5">Live Transcript</p>
@@ -864,6 +887,12 @@ export function RecordingsView() {
                       segments={filteredSegments}
                       speakerNames={speakerNames}
                       onRenameSpeaker={handleRenameSpeaker}
+                      onEditSegment={async (segmentId, newText) => {
+                        if (!selectedRecording) return;
+                        await updateTranscriptSegment(selectedRecording.id, segmentId, newText);
+                        const updated = await getTranscript(selectedRecording.id);
+                        if (updated) setSelectedTranscript(updated);
+                      }}
                     />
                   </div>
                 </>

@@ -40,7 +40,7 @@ crossbeam = "0.8"
 ringbuf = "0.4"
 
 # ASR Dependencies
-# Whisper support via whisper-rs
+# Whisper with Metal/CoreML GPU acceleration on macOS
 whisper-rs = { version = "0.14", optional = true }
 
 # ONNX Runtime for Parakeet and other ONNX models
@@ -57,6 +57,9 @@ tokenizers = { version = "0.21", optional = true }
 
 # Audio preprocessing
 rubato = { version = "0.16", optional = true }
+
+# FFT for FBank feature extraction in diarization
+rustfft = { version = "6.2", optional = true }
 
 # HTTP client for Ollama and downloads
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
@@ -85,11 +88,12 @@ indicatif = { version = "0.17", optional = true }
 genpdf = { version = "0.2", optional = true }
 base64 = { version = "0.21", optional = true }
 
+# Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.24"
 
 [features]
-default = ["custom-protocol", "asr-all", "sqlcipher"]
+default = ["custom-protocol", "asr-all", "sqlcipher", "whisper-gpu"]
 custom-protocol = ["tauri/custom-protocol"]
 
 # ASR Provider Features
@@ -97,6 +101,9 @@ asr-whisper = ["whisper-rs", "download-manager"]
 asr-parakeet = ["ort", "ndarray", "download-manager", "audio-processing"]
 asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager", "audio-processing"]
 asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization"]
+
+# Whisper GPU acceleration (Metal/CoreML on macOS, CUDA on Linux/Windows)
+whisper-gpu = ["whisper-rs?/metal", "whisper-rs?/coreml"]
 
 # SQLCipher for encrypted SQLite (optional, requires OpenSSL)
 sqlcipher = ["rusqlite/sqlcipher", "libsqlite3-sys/bundled-sqlcipher"]
@@ -107,7 +114,7 @@ audio-processing = ["rubato"]
 export-pdf = ["genpdf", "base64"]
 
 # Speaker diarization (requires ONNX runtime)
-diarization = ["ort", "ndarray"]
+diarization = ["ort", "ndarray", "rustfft"]
 
 [profile.release]
 opt-level = 3

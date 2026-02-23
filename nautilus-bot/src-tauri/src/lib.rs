@@ -56,6 +56,8 @@ pub struct AppState {
     vault_state: Arc<Mutex<VaultRuntimeState>>,
     /// Stop flag for the live recording streaming task; set to false to terminate it
     recording_stream_stop: Arc<AtomicBool>,
+    /// Per-recording template (standup, 1on1, sales, interview, brainstorm, auto)
+    recording_templates: Arc<StdMutex<std::collections::HashMap<String, String>>>,
     #[cfg(desktop)]
     active_shortcut_bindings: Arc<StdMutex<Vec<ShortcutBinding>>>,
 }
@@ -74,10 +76,11 @@ const VAULT_DB_KEY_SECRET: &str = "vault_db_key";
 const VAULT_UNLOCK_CHECK_SECRET: &str = "vault_unlock_check";
 const VAULT_RECORDING_KEY_SALT_LEN: usize = 16;
 const VAULT_UNLOCK_CHECK_PLAINTEXT: &[u8] = b"nautilus-vault-check";
-const RESETTABLE_PROVIDER_SECRETS: [&str; 7] = [
+const RESETTABLE_PROVIDER_SECRETS: [&str; 8] = [
     "openai",
     "elevenlabs",
     "anthropic",
+    "groq",
     "gemini",
     "deepseek",
     "ollama-cloud",
@@ -942,8 +945,8 @@ fn diarization_model_path(model_id: &str) -> Option<std::path::PathBuf> {
         .join("diarization");
     match model_id {
         "ecapa_tdnn_speaker" => Some(models_dir.join("ecapa_tdnn_speaker.onnx")),
-        "wespeaker_resnet" => Some(models_dir.join("wespeaker_resnet.onnx")),
-        "titanet_small" => Some(models_dir.join("titanet_small.onnx")),
+        "resnet34_speaker" => Some(models_dir.join("resnet34_speaker.onnx")),
+        "campplus_speaker" => Some(models_dir.join("campplus_speaker.onnx")),
         _ => None,
     }
 }
@@ -954,24 +957,24 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
         DiarizationModelOption {
             id: "ecapa_tdnn_speaker",
             label: "ECAPA-TDNN 512",
-            description: "Wespeaker ECAPA-TDNN — fast, accurate, recommended (~14 MB)",
+            description: "Fast and accurate — recommended for most use cases (~25 MB)",
             installed: diarization_model_path("ecapa_tdnn_speaker")
                 .map(|p| p.exists())
                 .unwrap_or(false),
         },
         DiarizationModelOption {
-            id: "wespeaker_resnet",
-            label: "WeSpeaker ResNet",
-            description: "WeSpeaker ResNet-based speaker embedding — high accuracy (~25 MB)",
-            installed: diarization_model_path("wespeaker_resnet")
+            id: "resnet34_speaker",
+            label: "ResNet34",
+            description: "Balanced performance — good accuracy with moderate speed (~30 MB)",
+            installed: diarization_model_path("resnet34_speaker")
                 .map(|p| p.exists())
                 .unwrap_or(false),
         },
         DiarizationModelOption {
-            id: "titanet_small",
-            label: "TitaNet Small",
-            description: "NVIDIA TitaNet-Small — compact and robust (~12 MB)",
-            installed: diarization_model_path("titanet_small")
+            id: "campplus_speaker",
+            label: "CAM++",
+            description: "Highest accuracy — best for challenging audio conditions (~35 MB)",
+            installed: diarization_model_path("campplus_speaker")
                 .map(|p| p.exists())
                 .unwrap_or(false),
         },
@@ -982,9 +985,6 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
 #[allow(non_snake_case)]
 fn is_diarization_model_available(modelId: Option<String>) -> bool {
     let id = modelId.as_deref().unwrap_or("ecapa_tdnn_speaker");
-    if id == "ecapa_tdnn_speaker" {
-        return diarization::DiarizationEngine::is_real_available();
-    }
     diarization_model_path(id)
         .map(|p| p.exists())
         .unwrap_or(false)
@@ -1009,17 +1009,10 @@ async fn download_diarization_model(
         );
     };
 
-    if id == "ecapa_tdnn_speaker" {
-        manager
-            .download_diarization_model(progress_callback)
-            .await
-            .map_err(|e| e.to_string())?;
-    } else {
-        return Err(format!(
-            "Model '{}' is not yet available for download. Only 'ecapa_tdnn_speaker' is currently supported.",
-            id
-        ));
-    }
+    manager
+        .download_diarization_model_by_id(id, progress_callback)
+        .await
+        .map_err(|e| e.to_string())?;
 
     tracing::info!("Diarization model '{}' downloaded successfully", id);
     Ok(())
@@ -1094,6 +1087,10 @@ async fn start_recording(
         .start_recording(options.clone())
         .map_err(|e| e.to_string())?;
 
+    // Get streaming queue info while holding the lock
+    let maybe_stream_info = audio.get_streaming_queue(&recording_id);
+    drop(audio); // Release lock BEFORE trying to re-acquire
+
     // Create recording entry in database
     let mut db = state.db.lock().await;
     db.create_recording(&models::Recording {
@@ -1114,6 +1111,13 @@ async fn start_recording(
     })
     .map_err(|e| e.to_string())?;
 
+    // Store template for this recording if specified
+    if let Some(ref template) = options.template {
+        if let Ok(mut templates) = state.recording_templates.lock() {
+            templates.insert(recording_id.clone(), template.clone());
+        }
+    }
+
     // Log audit event
     let details = serde_json::json!({
         "recording_id": &recording_id,
@@ -1126,11 +1130,7 @@ async fn start_recording(
     }
 
     // Launch live streaming transcription task (mic-only path has a sample queue)
-    let maybe_stream_info = {
-        let audio = state.audio_capture.lock().await;
-        audio.get_streaming_queue(&recording_id)
-    };
-
+    // (maybe_stream_info was already fetched above before releasing the audio lock)
     if let Some((stream_queue, sample_rate)) = maybe_stream_info {
         state.recording_stream_stop.store(true, Ordering::SeqCst);
         let stop_flag = Arc::clone(&state.recording_stream_stop);
@@ -1180,7 +1180,7 @@ async fn start_recording(
             });
 
             // Drain the sample queue and feed chunks while recording is active
-            let chunk_threshold = (sample_rate as usize) * 2; // 2-second chunks
+            let chunk_threshold = (sample_rate as usize) / 2; // 0.5-second chunks for faster partials
             let mut pending: Vec<f32> = Vec::with_capacity(chunk_threshold * 2);
 
             while stop_flag.load(Ordering::SeqCst) {
@@ -1238,6 +1238,8 @@ async fn stop_recording(
     state: tauri::State<'_, AppState>,
     recordingId: String,
 ) -> Result<(), String> {
+    tracing::info!("stop_recording called for {}", recordingId);
+    
     // Signal the live streaming background task to stop before halting audio capture
     state.recording_stream_stop.store(false, Ordering::SeqCst);
 
@@ -1264,6 +1266,8 @@ async fn stop_recording(
         tracing::warn!("Failed to log audit event: {}", e);
     }
 
+    // Hide the recording overlay immediately - don't wait for transcription
+    hide_overlay_window(&app, RECORDING_OVERLAY_LABEL);
     emit_recording_state(
         &app,
         "transcribing",
@@ -1281,11 +1285,33 @@ async fn stop_recording(
     let settings_manager_clone = Arc::clone(&state.settings_manager);
     let vault_state_clone = Arc::clone(&state.vault_state);
     let ollama_client_clone = Arc::clone(&state.ollama_client);
+    let recording_templates_clone = Arc::clone(&state.recording_templates);
     let recording_id_clone = recordingId.clone();
     let audio_path_clone = audio_path.clone();
 
     tokio::spawn(async move {
+        tracing::info!("Starting transcription task for recording {}", recording_id_clone);
         let path = std::path::PathBuf::from(&audio_path_clone);
+        
+        // Check if file exists and has content
+        if !path.exists() {
+            tracing::error!("Audio file does not exist: {:?}", path);
+            let mut db = db_clone.lock().await;
+            let _ = db.update_recording_status(&recording_id_clone, "error");
+            emit_recording_state(
+                &app_handle,
+                "error",
+                Some(recording_id_clone.as_str()),
+                None,
+                None,
+                Some("Audio file not found"),
+            );
+            return;
+        }
+        
+        let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        tracing::info!("Audio file size: {} bytes", file_size);
+        
         let preview_task = {
             let app = app_handle.clone();
             let recording_id = recording_id_clone.clone();
@@ -1355,6 +1381,7 @@ async fn stop_recording(
                     return;
                 }
                 tracing::info!("Transcription completed for {}", recording_id_clone);
+                tracing::info!("Transcript has {} segments, {} chars", result.segments.len(), result.text.len());
 
                 // Clone values before moving into struct
                 let model_name_clone = result.model_name.clone();
@@ -1402,28 +1429,75 @@ async fn stop_recording(
 
                 let enable_diarization = {
                     let settings_manager = settings_manager_clone.lock().await;
-                    settings_manager.settings().transcription.enable_diarization
+                    let enabled = settings_manager.settings().transcription.enable_diarization;
+                    println!("[NAUTILUS] Diarization enabled in settings: {}", enabled);
+                    enabled
                 };
 
                 let mut diarization_result: Option<diarization::DiarizationResult> = None;
                 if enable_diarization {
-                    match diarization::run_diarization(&path).await {
-                        Ok(result) => {
-                            let engine = diarization::DiarizationEngine::new();
-                            engine.merge_with_transcript(&result, &mut transcript.segments);
-                            diarization_result = Some(result);
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                "Automatic diarization failed for {}: {}",
-                                recording_id_clone,
-                                error
-                            );
+                    let diarization_available = diarization::DiarizationEngine::is_real_available();
+                    println!("[NAUTILUS] Diarization enabled, model available: {}", diarization_available);
+                    
+                    if !diarization_available {
+                        println!(
+                            "[NAUTILUS] WARNING: Diarization is enabled but model is not installed"
+                        );
+                    } else {
+                        println!("[NAUTILUS] Starting diarization for recording {}", recording_id_clone);
+                        match diarization::run_diarization(&path).await {
+                            Ok(result) => {
+                                println!(
+                                    "[NAUTILUS] Diarization completed: {} speakers identified, {} segments",
+                                    result.speakers.len(),
+                                    result.segments.len()
+                                );
+                                let engine = diarization::DiarizationEngine::new();
+                                engine.merge_with_transcript(&result, &mut transcript.segments);
+                                diarization_result = Some(result);
+                            }
+                            Err(error) => {
+                                println!(
+                                    "[NAUTILUS] ERROR: Automatic diarization failed for {}: {}",
+                                    recording_id_clone,
+                                    error
+                                );
+                            }
                         }
                     }
+                } else {
+                    println!("[NAUTILUS] Diarization disabled in settings");
                 }
 
-                let inferred_aliases = infer_speaker_aliases_from_segments(&transcript.segments);
+                let inferred_aliases = if !transcript.full_text.trim().is_empty() {
+                    // Use LLM to identify speaker names from transcript
+                    let ollama_available = ollama_client_clone.is_available().await;
+                    if ollama_available {
+                        // Get the selected AI model from settings
+                        let model = {
+                            let sm = settings_manager_clone.lock().await;
+                            sm.settings().privacy.llm_model_id.clone()
+                                .unwrap_or_else(|| "llama3.2".to_string())
+                        };
+                        
+                        tracing::info!("Using LLM to identify speakers with model '{}'", model);
+                        match ollama_client_clone.identify_speakers(&transcript.full_text, &model).await {
+                            Ok(speakers) => {
+                                tracing::info!("LLM identified {} speakers", speakers.len());
+                                speakers
+                            }
+                            Err(e) => {
+                                tracing::warn!("LLM speaker identification failed: {}", e);
+                                infer_speaker_aliases_from_segments(&transcript.segments)
+                            }
+                        }
+                    } else {
+                        // Fallback to regex-based inference
+                        infer_speaker_aliases_from_segments(&transcript.segments)
+                    }
+                } else {
+                    std::collections::HashMap::new()
+                };
 
                 // Save transcript to database
                 let mut db = db_clone.lock().await;
@@ -1435,29 +1509,57 @@ async fn stop_recording(
                 // Auto-analysis: run summary + action items in background if transcript is non-empty
                 let auto_analyze = {
                     let sm = settings_manager_clone.lock().await;
-                    sm.settings().transcription.enable_auto_analysis
+                    let enabled = sm.settings().transcription.enable_auto_analysis;
+                    tracing::info!("Auto-analysis enabled: {}", enabled);
+                    enabled
                 };
                 if auto_analyze && !transcript.full_text.trim().is_empty() {
-                    let full_text = transcript.full_text.clone();
-                    let app_for_analysis = app_handle.clone();
-                    let rec_id_for_analysis = recording_id_clone.clone();
-                    let ollama = Arc::clone(&ollama_client_clone);
-                    let db_for_analysis = Arc::clone(&db_clone);
+                    // Check if Ollama is available before starting analysis
+                    let ollama_available = ollama_client_clone.is_available().await;
+                    if !ollama_available {
+                        tracing::warn!(
+                            "Ollama not available for auto-analysis. Start Ollama to enable analysis features."
+                        );
+                    } else {
+                        // Get the selected AI provider and model from settings before spawning
+                        let (provider, model) = {
+                            let sm = settings_manager_clone.lock().await;
+                            let settings = sm.settings();
+                            let provider = AnalysisProvider::from_settings_value(&settings.privacy.llm_provider);
+                            let model = settings.privacy.llm_model_id.clone()
+                                .unwrap_or_else(|| provider.default_model().to_string());
+                            (provider, model)
+                        };
+                        
+                        tracing::info!("Starting auto-analysis for recording {} with provider '{}' model '{}'", 
+                            recording_id_clone, provider.as_settings_value(), model);
+                        let full_text = transcript.full_text.clone();
+                        let app_for_analysis = app_handle.clone();
+                        let rec_id_for_analysis = recording_id_clone.clone();
+                        let ollama = Arc::clone(&ollama_client_clone);
+                        let db_for_analysis = Arc::clone(&db_clone);
+                        let template_for_analysis = recording_templates_clone
+                            .lock().ok()
+                            .and_then(|t| t.get(&recording_id_clone).cloned());
 
-                    tokio::spawn(async move {
+                        tokio::spawn(async move {
                         const ANALYSIS_TIMEOUT_MS: u64 = 90_000;
-                        let model = AnalysisProvider::Ollama.default_model();
 
+                        let template_ref = template_for_analysis.as_deref();
                         let summary_fut = tokio::time::timeout(
                             Duration::from_millis(ANALYSIS_TIMEOUT_MS),
-                            ollama.summarize(&full_text, model),
+                            ollama.summarize_with_template(&full_text, &model, template_ref),
                         );
                         let actions_fut = tokio::time::timeout(
                             Duration::from_millis(ANALYSIS_TIMEOUT_MS),
-                            ollama.extract_action_items(&full_text, model),
+                            ollama.extract_action_items(&full_text, &model),
+                        );
+                        let title_fut = tokio::time::timeout(
+                            Duration::from_millis(ANALYSIS_TIMEOUT_MS),
+                            ollama.generate_title(&full_text, &model),
                         );
 
-                        let (summary_res, actions_res) = tokio::join!(summary_fut, actions_fut);
+                        let (summary_res, actions_res, title_res) = tokio::join!(summary_fut, actions_fut, title_fut);
 
                         let summary = match summary_res {
                             Ok(Ok(s)) => Some(s),
@@ -1481,6 +1583,28 @@ async fn stop_recording(
                                 vec![]
                             }
                         };
+
+                        // Auto-generate meeting title
+                        let generated_title = match title_res {
+                            Ok(Ok(t)) if !t.trim().is_empty() => Some(t),
+                            _ => None,
+                        };
+
+                        if let Some(ref title) = generated_title {
+                            let mut db = db_for_analysis.lock().await;
+                            if let Err(e) = db.rename_recording(&rec_id_for_analysis, title) {
+                                tracing::warn!("Failed to save generated title: {}", e);
+                            }
+                            drop(db);
+                            let _ = app_for_analysis.emit(
+                                "recording-title-updated",
+                                serde_json::json!({
+                                    "recordingId": rec_id_for_analysis,
+                                    "status": "ok",
+                                    "newTitle": title,
+                                }),
+                            );
+                        }
 
                         if summary.is_some() || !action_items.is_empty() {
                             // Persist analysis to database
@@ -1506,7 +1630,8 @@ async fn stop_recording(
                                 tracing::warn!("Failed to emit analysis-ready event: {}", e);
                             }
                         }
-                    });
+                        });
+                    }
                 }
 
                 let mut db = db_clone.lock().await;
@@ -2766,6 +2891,19 @@ async fn rename_recording(
 
 #[tauri::command]
 #[allow(non_snake_case)]
+async fn update_transcript_segment(
+    state: tauri::State<'_, AppState>,
+    recordingId: String,
+    segmentId: String,
+    newText: String,
+) -> Result<bool, String> {
+    let mut db = state.db.lock().await;
+    db.update_transcript_segment(&recordingId, &segmentId, &newText)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
 async fn set_recording_source_type(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -3145,7 +3283,7 @@ async fn reset_app_state(
 
     let default_provider =
         asr_provider_from_settings_value(&defaults.transcription.default_provider)
-            .unwrap_or(asr::AsrProviderType::Whisper);
+            .unwrap_or(asr::AsrProviderType::DistilWhisper);
     let provider_model_map = provider_model_map_from_settings(&defaults.transcription);
     state
         .asr_manager
@@ -3248,7 +3386,7 @@ async fn save_settings(
 
         let default_provider =
             asr_provider_from_settings_value(&settings.transcription.default_provider)
-                .unwrap_or(asr::AsrProviderType::Whisper);
+                .unwrap_or(asr::AsrProviderType::DistilWhisper);
         settings.transcription.default_provider =
             asr_provider_to_settings_value(default_provider).to_string();
 
@@ -4613,6 +4751,11 @@ fn emit_recording_state(
     system_audio_active: Option<bool>,
     message: Option<&str>,
 ) {
+    tracing::info!(
+        "emit_recording_state: phase={}, recording_id={:?}, message={:?}",
+        phase, recording_id, message
+    );
+    
     if let Ok(mut state) = app.state::<AppState>().recording_overlay_state.lock() {
         state.phase = phase.to_string();
         state.recording_id = recording_id.map(str::to_string);
@@ -4785,9 +4928,10 @@ pub(crate) fn normalize_provider_secret_name(provider: &str) -> Result<&'static 
         "deepseek" => Ok("deepseek"),
         "ollama-cloud" | "ollama_cloud" | "ollamacloud" => Ok("ollama-cloud"),
         "mistral" => Ok("mistral"),
+        "groq" => Ok("groq"),
         "ollama" => Err("Local Ollama does not require a stored API key".to_string()),
         _ => Err(format!(
-            "Unsupported provider '{}'. Expected one of: openai, elevenlabs, anthropic, gemini, deepseek, ollama-cloud, mistral",
+            "Unsupported provider '{}'. Expected one of: openai, elevenlabs, anthropic, gemini, deepseek, ollama-cloud, mistral, groq",
             provider
         )),
     }
@@ -5911,6 +6055,12 @@ fn runtime_status_to_db_value(status: &RuntimeStatus) -> &'static str {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt::init();
+    
+    // Log diarization feature status at startup
+    #[cfg(feature = "diarization")]
+    println!("[NAUTILUS] Diarization feature is COMPILED IN");
+    #[cfg(not(feature = "diarization"))]
+    println!("[NAUTILUS] Diarization feature is NOT COMPILED IN");
 
     #[cfg(debug_assertions)]
     let db_init_started = std::time::Instant::now();
@@ -5987,6 +6137,7 @@ pub fn run() {
             streaming_transcriber,
             vault_state: Arc::new(Mutex::new(VaultRuntimeState::default())),
             recording_stream_stop: Arc::new(AtomicBool::new(false)),
+            recording_templates: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             #[cfg(desktop)]
             active_shortcut_bindings: Arc::new(StdMutex::new(Vec::new())),
         })
@@ -6205,6 +6356,7 @@ pub fn run() {
             create_project,
             delete_recording,
             rename_recording,
+            update_transcript_segment,
             set_recording_source_type,
             retry_meeting_auto_name,
             delete_project,
@@ -6300,20 +6452,44 @@ fn infer_speaker_aliases_from_segments(
         Regex::new(r"\b(?:this is|i am|i'm|my name is)\s+([a-z][a-z'\-]+(?:\s+[a-z][a-z'\-]+)?)\b")
             .expect("valid intro regex");
     let next_pattern =
-        Regex::new(r"\b(?:next is|up next is)\s+([a-z][a-z'\-]+(?:\s+[a-z][a-z'\-]+)?)\b")
+        Regex::new(r"\b(?:next is|up next is|here is|here's)\s+([a-z][a-z'\-]+(?:\s+[a-z][a-z'\-]+)?)\b")
             .expect("valid next regex");
+    let speaker_pattern =
+        Regex::new(r"\b([a-z][a-z'\-]+)\s+(?:speaking|here|talking)\b")
+            .expect("valid speaker regex");
 
+    // Track which segments belong to which speaker based on text patterns
+    let mut speaker_index = 0;
+    
     for (index, segment) in segments.iter().enumerate() {
-        let Some(current_speaker_id) = segment.speaker_id.as_ref() else {
-            continue;
+        // Get or create a speaker ID for this segment
+        let speaker_id = if let Some(id) = segment.speaker_id.as_ref() {
+            id.clone()
+        } else {
+            // Without diarization, assign speaker IDs based on text patterns
+            speaker_index += 1;
+            format!("speaker_{}", speaker_index)
         };
 
-        if !aliases.contains_key(current_speaker_id) {
+        if !aliases.contains_key(&speaker_id) {
             let lowered = segment.text.to_lowercase();
+            
+            // Check for "This is X" or "I am X" patterns
             if let Some(captured) = intro_pattern.captures(&lowered) {
                 if let Some(name_match) = captured.get(1) {
                     if let Some(name) = normalize_person_name(name_match.as_str()) {
-                        aliases.insert(current_speaker_id.clone(), name);
+                        aliases.insert(speaker_id.clone(), name);
+                        continue;
+                    }
+                }
+            }
+            
+            // Check for "X speaking" or "X here" patterns
+            if let Some(captured) = speaker_pattern.captures(&lowered) {
+                if let Some(name_match) = captured.get(1) {
+                    if let Some(name) = normalize_person_name(name_match.as_str()) {
+                        aliases.insert(speaker_id.clone(), name);
+                        continue;
                     }
                 }
             }
@@ -6323,12 +6499,18 @@ fn infer_speaker_aliases_from_segments(
         if let Some(captured) = next_pattern.captures(&lowered) {
             if let Some(name_match) = captured.get(1) {
                 if let Some(name) = normalize_person_name(name_match.as_str()) {
+                    // Find the next segment with a different speaker
                     let next_speaker_id = segments.iter().skip(index + 1).find_map(|candidate| {
-                        let speaker_id = candidate.speaker_id.as_ref()?;
-                        if speaker_id != current_speaker_id {
-                            Some(speaker_id.clone())
+                        if let Some(id) = candidate.speaker_id.as_ref() {
+                            if id != &speaker_id {
+                                Some(id.clone())
+                            } else {
+                                None
+                            }
                         } else {
-                            None
+                            // Without speaker_id, assign to next speaker
+                            speaker_index += 1;
+                            Some(format!("speaker_{}", speaker_index))
                         }
                     });
                     if let Some(next_speaker_id) = next_speaker_id {
@@ -6375,9 +6557,18 @@ fn normalize_person_name(raw: &str) -> Option<String> {
         .trim_matches(|c: char| !c.is_ascii_alphabetic() && c != '\'' && c != '-' && c != ' ')
         .to_lowercase();
 
+    // Block common words that aren't names
     let blocked_words = [
         "here", "there", "speaking", "next", "up", "and", "with", "from", "the", "a", "an", "you",
-        "they", "we",
+        "they", "we", "going", "to", "be", "talk", "talk about", "start", "begin", "now", "today",
+        "let", "let's", "do", "make", "get", "take", "give", "see", "want", "need", "know",
+        "think", "say", "tell", "ask", "try", "use", "work", "good", "new", "first", "last",
+        "just", "very", "well", "back", "much", "more", "some", "any", "all", "each", "every",
+        "this", "that", "these", "those", "then", "than", "so", "if", "but", "or", "as",
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "yet", "another", "other", "him", "her", "his", "hers", "my", "your", "our", "their",
+        "me", "us", "them", "who", "what", "when", "where", "why", "how", "which", "whose",
+        "test", "audio", "video", "recording", "meeting", "call", "voice", "sound",
     ];
 
     let parts: Vec<&str> = cleaned
@@ -6600,11 +6791,13 @@ mod tests {
 
     #[test]
     fn low_information_suppression_respects_duration_thresholds() {
+        // Low-information outputs like "you" are always suppressed (Whisper hallucinations)
         assert!(should_suppress_low_information_dictation("you", 1.2, true));
         assert!(should_suppress_low_information_dictation("ok", 0.85, true));
         assert!(should_suppress_low_information_dictation("you", 0.6, true));
         assert!(should_suppress_low_information_dictation("you", 0.3, true));
-        assert!(!should_suppress_low_information_dictation("you", 0.2, true));
+        assert!(should_suppress_low_information_dictation("you", 0.2, true));
+        // Valid content is never suppressed
         assert!(!should_suppress_low_information_dictation(
             "please schedule this",
             1.5,
@@ -7636,6 +7829,7 @@ fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static st
         asr::AsrProviderType::Voxtral => "voxtral",
         asr::AsrProviderType::ElevenLabsScribe => "elevenlabs_scribe",
         asr::AsrProviderType::OpenAiCloud => "openai_cloud",
+        asr::AsrProviderType::Groq => "groq",
     }
 }
 
@@ -7649,6 +7843,7 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
         "voxtral" => Some(asr::AsrProviderType::Voxtral),
         "elevenlabs_scribe" => Some(asr::AsrProviderType::ElevenLabsScribe),
         "openai_cloud" => Some(asr::AsrProviderType::OpenAiCloud),
+        "groq" => Some(asr::AsrProviderType::Groq),
         _ => None,
     }
 }

@@ -277,13 +277,65 @@ impl AsrProvider for CanaryProvider {
 
         let start = std::time::Instant::now();
         let model_dir = self.model_dir.clone();
-        let audio_path_owned = audio_path.to_path_buf();
-        let audio_path_for_dur = audio_path_owned.clone();
+        let audio_path_for_dur = audio_path.to_path_buf();
 
-        let text =
+        // VAD pre-filtering: trim silence for faster processing
+        let raw_samples = crate::audio::utils::load_audio_file(audio_path)
+            .context("Failed to load audio for Canary")?;
+
+        let use_trimmed = if raw_samples.len() > 16000 {
+            let trimmed = crate::audio::vad::trim_silence(&raw_samples, 16000, -40.0);
+            if !trimmed.is_empty() && trimmed.len() < raw_samples.len() * 9 / 10 {
+                let saved_ms = (raw_samples.len() - trimmed.len()) as f64 / 16.0;
+                if saved_ms > 100.0 {
+                    tracing::info!(
+                        "Canary: VAD trimmed {:.0}ms of silence, processing {:.0}ms",
+                        saved_ms,
+                        trimmed.len() as f64 / 16.0
+                    );
+                }
+                Some(trimmed)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let text = if let Some(samples) = use_trimmed {
+            // Write trimmed audio to temp file
+            let temp_path =
+                std::env::temp_dir().join(format!("canary_trimmed_{}.wav", uuid::Uuid::new_v4()));
+            {
+                let spec = hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 16000,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                };
+                let mut writer = hound::WavWriter::create(&temp_path, spec)
+                    .context("Failed to create temp WAV for Canary")?;
+                for sample in &samples {
+                    let int_sample = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
+                    writer
+                        .write_sample(int_sample)
+                        .context("Failed to write sample")?;
+                }
+                writer.finalize().context("Failed to finalize temp WAV")?;
+            }
+            let temp_path_for_cleanup = temp_path.clone();
+            let result =
+                tokio::task::spawn_blocking(move || run_canary_candle(&model_dir, &temp_path))
+                    .await
+                    .context("Canary inference task panicked")??;
+            let _ = std::fs::remove_file(&temp_path_for_cleanup);
+            result
+        } else {
+            let audio_path_owned = audio_path.to_path_buf();
             tokio::task::spawn_blocking(move || run_canary_candle(&model_dir, &audio_path_owned))
                 .await
-                .context("Canary inference task panicked")??;
+                .context("Canary inference task panicked")??
+        };
 
         let duration = Self::wav_duration_seconds(&audio_path_for_dur);
         let segment = TranscriptSegment {

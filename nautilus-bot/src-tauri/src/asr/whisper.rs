@@ -65,12 +65,30 @@ impl WhisperProvider {
 
         tracing::info!("Loading Whisper model from {:?}", self.model_path);
 
+        // Enable GPU acceleration on supported platforms
+        let mut params = whisper_rs::WhisperContextParameters::default();
+
+        // On macOS with Metal/CoreML support, use_gpu is automatically enabled
+        // when whisper-rs is compiled with "metal" and "coreml" features
+        #[cfg(target_os = "macos")]
+        {
+            params.use_gpu = true;
+            params.flash_attn = true; // Flash attention for faster decoding
+            tracing::info!(
+                "Whisper: enabling GPU acceleration (Metal/CoreML) with flash attention"
+            );
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            // On non-macOS, GPU requires explicit CUDA/Vulkan setup
+            // Default to CPU for broader compatibility
+            params.use_gpu = false;
+        }
+
         let ctx = Arc::new(
-            whisper_rs::WhisperContext::new_with_params(
-                &self.model_path.to_string_lossy(),
-                whisper_rs::WhisperContextParameters::default(),
-            )
-            .context("Failed to load Whisper model")?,
+            whisper_rs::WhisperContext::new_with_params(&self.model_path.to_string_lossy(), params)
+                .context("Failed to load Whisper model")?,
         );
 
         if let Ok(mut cache) = whisper_context_cache().lock() {
@@ -133,8 +151,29 @@ impl AsrProvider for WhisperProvider {
         tracing::info!("Loading audio file for Whisper: {:?}", audio_path);
 
         // Load and preprocess audio
-        let mut audio_data = crate::audio::utils::load_audio_file(audio_path)
+        let raw_audio_data = crate::audio::utils::load_audio_file(audio_path)
             .context("Failed to load audio file")?;
+
+        // VAD pre-filtering: trim silence to speed up transcription
+        let mut audio_data = if raw_audio_data.len() > 16000 {
+            // Only trim if > 1 second of audio
+            let trimmed = crate::audio::vad::trim_silence(&raw_audio_data, 16000, -40.0);
+            if trimmed.is_empty() {
+                raw_audio_data
+            } else {
+                let saved_ms = (raw_audio_data.len() - trimmed.len()) as f64 / 16.0;
+                if saved_ms > 100.0 {
+                    tracing::info!(
+                        "VAD trimmed {:.0}ms of silence, processing {:.0}ms",
+                        saved_ms,
+                        trimmed.len() as f64 / 16.0
+                    );
+                }
+                trimmed
+            }
+        } else {
+            raw_audio_data
+        };
 
         // Whisper requires > 1000ms of audio; pad with silence to 1.1s if needed
         let min_samples = (16000.0_f32 * 1.1).ceil() as usize;
@@ -167,8 +206,11 @@ impl AsrProvider for WhisperProvider {
             .create_state()
             .context("Failed to create Whisper state")?;
 
-        let mut params =
-            whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+        // Use beam search for better accuracy (5 beams is a good balance)
+        let mut params = whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::BeamSearch {
+            beam_size: 5,
+            patience: 1.0, // Standard patience - higher values search more but slower
+        });
 
         // Speed optimizations
         let num_threads = std::thread::available_parallelism()
@@ -187,6 +229,9 @@ impl AsrProvider for WhisperProvider {
         params.set_no_context(true); // Don't use previous context to prevent loop hallucinations
         params.set_entropy_thold(2.4); // Stricter entropy threshold
         params.set_logprob_thold(-1.0); // Stricter logprob threshold
+
+        // Beam search patience for better accuracy on technical terms
+        params.set_token_timestamps(true); // Enable token-level timestamps for better alignment
 
         // Run transcription
         state

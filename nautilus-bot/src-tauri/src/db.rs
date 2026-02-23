@@ -693,6 +693,43 @@ impl Database {
         Ok(())
     }
 
+    /// Update the text of a single transcript segment (stored as JSON in transcripts.segments)
+    pub fn update_transcript_segment(&mut self, recording_id: &str, segment_id: &str, new_text: &str) -> Result<bool> {
+        let Some(mut transcript) = self.get_transcript(recording_id)? else {
+            return Ok(false);
+        };
+
+        let mut found = false;
+        for seg in &mut transcript.segments {
+            if seg.id == segment_id {
+                seg.text = new_text.to_string();
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            return Ok(false);
+        }
+
+        // Rebuild full_text from updated segments
+        transcript.full_text = transcript.segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+
+        let segments_json = serde_json::to_string(&transcript.segments)?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE transcripts SET segments = ?1, full_text = ?2 WHERE recording_id = ?3",
+            params![segments_json, transcript.full_text, recording_id],
+        )?;
+        // Update FTS
+        let _ = tx.execute(
+            "UPDATE transcript_fts SET text = ?1 WHERE recording_id = ?2 AND segment_id = ?3",
+            params![new_text, recording_id, segment_id],
+        );
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub fn save_asr_benchmark(&mut self, entry: &AsrBenchmarkEntry) -> Result<()> {
         self.conn.execute(
             "INSERT INTO asr_benchmarks (
@@ -1361,6 +1398,8 @@ mod tests {
             source_type: "meeting".to_string(),
             audio_path: format!("/tmp/{}.wav", id),
             status: "recording".to_string(),
+            summary: None,
+            action_items: None,
         }
     }
 

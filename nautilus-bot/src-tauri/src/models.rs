@@ -77,6 +77,8 @@ pub struct RecordingOptions {
     pub mic: bool,
     pub system_audio: bool,
     pub project_id: String,
+    #[serde(default)]
+    pub template: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

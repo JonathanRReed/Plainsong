@@ -320,29 +320,57 @@ impl DownloadManager {
         &self,
         _progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
     ) -> Result<PathBuf> {
+        // Default to ECAPA-TDNN 512
+        self.download_diarization_model_by_id("ecapa_tdnn_speaker", _progress_callback).await
+    }
+
+    /// Download a specific diarization model by ID
+    pub async fn download_diarization_model_by_id(
+        &self,
+        model_id: &str,
+        _progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
+    ) -> Result<PathBuf> {
         let diarization_dir = self.models_dir.join("diarization");
         tokio::fs::create_dir_all(&diarization_dir).await?;
 
-        let destination = diarization_dir.join("ecapa_tdnn_speaker.onnx");
+        let (url, filename) = match model_id {
+            "ecapa_tdnn_speaker" => (
+                "https://huggingface.co/Wespeaker/wespeaker-ecapa-tdnn512-LM/resolve/main/voxceleb_ECAPA512_LM.onnx",
+                "ecapa_tdnn_speaker.onnx",
+            ),
+            "resnet34_speaker" => (
+                "https://huggingface.co/Wespeaker/wespeaker-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx",
+                "resnet34_speaker.onnx",
+            ),
+            "campplus_speaker" => (
+                "https://huggingface.co/Wespeaker/wespeaker-voxceleb-campplus-LM/resolve/main/voxceleb_CAM%2B%2B_LM.onnx",
+                "campplus_speaker.onnx",
+            ),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unknown diarization model: {}. Supported: ecapa_tdnn_speaker, resnet34_speaker, campplus_speaker",
+                    model_id
+                ));
+            }
+        };
+
+        let destination = diarization_dir.join(filename);
 
         if destination.exists() {
-            tracing::info!("Diarization model already exists at {:?}", destination);
+            tracing::info!("Diarization model {} already exists at {:?}", model_id, destination);
             return Ok(destination);
         }
 
-        // Use the Wespeaker ECAPA-TDNN model which is native ONNX and compatible with our runtime
-        let url = "https://huggingface.co/Wespeaker/wespeaker-ecapa-tdnn512-LM/resolve/main/voxceleb_ECAPA512_LM.onnx";
-
-        tracing::info!("Downloading diarization model from {}", url);
+        tracing::info!("Downloading diarization model {} from {}", model_id, url);
         tracing::info!("Starting unverified download of diarization model (HF ETag bypassed)");
 
         // Use unverified download because HF S3 ETag often matches LFS pointer, not content
         self.download_file_unverified(url, &destination, _progress_callback)
             .await?;
 
-        // Verify file size (should be > 10MB)
+        // Verify file size (should be > 5MB)
         let metadata = tokio::fs::metadata(&destination).await?;
-        if metadata.len() < 1024 * 1024 {
+        if metadata.len() < 5 * 1024 * 1024 {
             tokio::fs::remove_file(&destination).await.ok();
             return Err(anyhow::anyhow!(
                 "Downloaded diarization model is too small ({} bytes). Download failed.",
@@ -351,7 +379,8 @@ impl DownloadManager {
         }
 
         tracing::info!(
-            "Diarization model downloaded successfully to {:?}",
+            "Diarization model {} downloaded successfully to {:?}",
+            model_id,
             destination
         );
 

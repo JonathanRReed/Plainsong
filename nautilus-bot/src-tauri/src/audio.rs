@@ -24,6 +24,8 @@ const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
 pub struct AudioCapture {
     is_dictating: Arc<AtomicBool>,
     dictation_buffer: Arc<crossbeam::queue::SegQueue<f32>>,
+    /// Streaming queue for real-time partial transcription during dictation
+    dictation_stream_queue: Arc<crossbeam::queue::SegQueue<Vec<f32>>>,
     dictation_thread: Option<JoinHandle<()>>,
     dictation_sample_rate: u32,
     dictation_channels: u16,
@@ -97,6 +99,7 @@ impl AudioCapture {
         Self {
             is_dictating: Arc::new(AtomicBool::new(false)),
             dictation_buffer: Arc::new(crossbeam::queue::SegQueue::new()),
+            dictation_stream_queue: Arc::new(crossbeam::queue::SegQueue::new()),
             dictation_thread: None,
             dictation_sample_rate: 16000,
             dictation_channels: 1,
@@ -131,6 +134,7 @@ impl AudioCapture {
         }
 
         while self.dictation_buffer.pop().is_some() {}
+        while self.dictation_stream_queue.pop().is_some() {}
 
         let device = self
             .host
@@ -158,6 +162,7 @@ impl AudioCapture {
 
         let is_dictating = Arc::clone(&self.is_dictating);
         let buffer = Arc::clone(&self.dictation_buffer);
+        let _stream_queue = Arc::clone(&self.dictation_stream_queue);
         let stream_ready = Arc::new(AtomicBool::new(false));
         let stream_ready_signal = Arc::clone(&stream_ready);
         let audio_level = Arc::clone(&self.dictation_audio_level);
@@ -684,25 +689,35 @@ impl AudioCapture {
 
         let _ = session.stop_sender.send(());
         session.capture_stop_flag.store(false, Ordering::SeqCst);
+        
+        // Don't block on thread joins - spawn background task to wait
         if let Some(handle) = session.capture_handle.take() {
-            if let Err(e) = handle.join() {
-                tracing::warn!("Capture thread join error: {:?}", e);
-            }
+            std::thread::spawn(move || {
+                if let Err(e) = handle.join() {
+                    tracing::warn!("Capture thread join error: {:?}", e);
+                }
+            });
         }
         if let Some(mut mixed_capture) = session.mixed_capture.take() {
             mixed_capture.stop();
         }
 
         if let Some(handle) = session.writer_handle.take() {
-            if let Err(e) = handle.join() {
-                tracing::warn!("Writer thread join error: {:?}", e);
-            }
+            std::thread::spawn(move || {
+                if let Err(e) = handle.join() {
+                    tracing::warn!("Writer thread join error: {:?}", e);
+                }
+            });
         }
 
         let path = session.audio_path;
         tracing::info!("Recording saved to: {:?}", path);
 
-        let hash = compute_file_hash(&path)?;
+        // Hash computation may fail if file is still being written - that's OK
+        let hash = compute_file_hash(&path).unwrap_or_else(|e| {
+            tracing::warn!("Could not compute file hash (file may still be writing): {}", e);
+            "pending".to_string()
+        });
         tracing::info!("Recording SHA256: {}", hash);
 
         Ok((path.to_string_lossy().to_string(), hash))

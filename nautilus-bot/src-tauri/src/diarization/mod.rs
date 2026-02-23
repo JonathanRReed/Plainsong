@@ -72,10 +72,20 @@ impl DiarizationEngine {
         #[cfg(feature = "diarization")]
         {
             let extractor = embedder::SpeakerEmbeddingExtractor::new();
-            extractor.map(|e| e.is_model_available()).unwrap_or(false)
+            match &extractor {
+                Ok(e) => {
+                    let available = e.is_model_available();
+                    available
+                }
+                Err(err) => {
+                    tracing::warn!("Failed to create embedding extractor: {}", err);
+                    false
+                }
+            }
         }
         #[cfg(not(feature = "diarization"))]
         {
+            tracing::warn!("Diarization feature not compiled in");
             false
         }
     }
@@ -159,18 +169,109 @@ impl DiarizationEngine {
     }
 
     /// Merge diarization results with transcript segments
+    /// Splits transcript segments at diarization boundaries to assign correct speakers
     pub fn merge_with_transcript(
         &self,
         diarization: &DiarizationResult,
-        transcript_segments: &mut [crate::models::TranscriptSegment],
+        transcript_segments: &mut Vec<crate::models::TranscriptSegment>,
     ) {
-        for transcript_seg in transcript_segments.iter_mut() {
-            if let Some(speaker_seg) = diarization.segments.iter().find(|s| {
-                s.start_time <= transcript_seg.end_time && s.end_time >= transcript_seg.start_time
-            }) {
-                transcript_seg.speaker_id = Some(speaker_seg.speaker_id.clone());
-            }
+        println!("[NAUTILUS] Merging {} diarization segments with {} transcript segments", 
+            diarization.segments.len(), transcript_segments.len());
+        
+        if diarization.segments.is_empty() || transcript_segments.is_empty() {
+            return;
         }
+        
+        // Sort diarization segments by start time
+        let mut sorted_diarization = diarization.segments.clone();
+        sorted_diarization.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap_or(std::cmp::Ordering::Equal));
+        
+        // Build new segments list by splitting transcript at diarization boundaries
+        let mut new_segments: Vec<crate::models::TranscriptSegment> = Vec::new();
+        
+        for ts in transcript_segments.iter() {
+            println!("[NAUTILUS] Processing transcript segment {}-{}s", ts.start_time, ts.end_time);
+            
+            // Find all diarization segments that overlap with this transcript segment
+            let mut split_points: Vec<(f64, String)> = Vec::new();
+            
+            for ds in &sorted_diarization {
+                // Check if diarization segment overlaps with transcript segment
+                if ds.start_time < ts.end_time && ds.end_time > ts.start_time {
+                    // Add split point at diarization start (clamped to transcript bounds)
+                    let split_start = ds.start_time.max(ts.start_time);
+                    if split_start > ts.start_time && !split_points.iter().any(|(t, _)| (*t - split_start).abs() < 0.001) {
+                        split_points.push((split_start, ds.speaker_id.clone()));
+                    }
+                    // Add split point at diarization end (clamped to transcript bounds)
+                    let split_end = ds.end_time.min(ts.end_time);
+                    if split_end < ts.end_time && !split_points.iter().any(|(t, _)| (*t - split_end).abs() < 0.001) {
+                        split_points.push((split_end, ds.speaker_id.clone()));
+                    }
+                }
+            }
+            
+            // Sort split points by time
+            split_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            
+            println!("[NAUTILUS] Split points for segment: {:?}", split_points.iter().map(|(t, _)| t).collect::<Vec<_>>());
+            
+            // Split text by word boundaries proportional to time
+            let words: Vec<&str> = ts.text.split_whitespace().collect();
+            let total_duration = ts.end_time - ts.start_time;
+            let mut current_start = ts.start_time;
+            
+            // Build time boundaries list: [(start, end, speaker_id)]
+            let mut boundaries: Vec<(f64, f64, String)> = Vec::new();
+            let mut prev_time = ts.start_time;
+            for (split_time, _) in split_points.iter() {
+                let speaker = sorted_diarization.iter()
+                    .find(|ds| ds.start_time <= prev_time && ds.end_time > prev_time)
+                    .map(|ds| ds.speaker_id.clone())
+                    .unwrap_or_else(|| "S1".to_string());
+                boundaries.push((prev_time, *split_time, speaker));
+                prev_time = *split_time;
+            }
+            // Final boundary
+            let final_speaker = sorted_diarization.iter()
+                .find(|ds| ds.start_time <= prev_time && ds.end_time > prev_time)
+                .map(|ds| ds.speaker_id.clone())
+                .unwrap_or_else(|| "S1".to_string());
+            boundaries.push((prev_time, ts.end_time, final_speaker));
+            
+            // Assign words to boundaries by proportion
+            let total_words = words.len();
+            for (seg_start, seg_end, speaker) in &boundaries {
+                if *seg_end <= *seg_start || total_duration <= 0.0 { continue; }
+                let word_start = ((seg_start - ts.start_time) / total_duration * total_words as f64).round() as usize;
+                let word_end = ((seg_end - ts.start_time) / total_duration * total_words as f64).round() as usize;
+                let word_start = word_start.min(total_words);
+                let word_end = word_end.min(total_words);
+                if word_start >= word_end { continue; }
+                
+                let sub_text = words[word_start..word_end].join(" ");
+                if sub_text.trim().is_empty() { continue; }
+                
+                println!("[NAUTILUS] Creating sub-segment {}-{}s speaker={} text='{}'",
+                    seg_start, seg_end, speaker, &sub_text.chars().take(30).collect::<String>());
+                
+                new_segments.push(crate::models::TranscriptSegment {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    start_time: *seg_start,
+                    end_time: *seg_end,
+                    text: sub_text,
+                    speaker_id: Some(speaker.clone()),
+                    confidence: ts.confidence,
+                });
+                current_start = *seg_end;
+            }
+            let _ = current_start;
+        }
+        
+        // Replace original segments with split segments
+        *transcript_segments = new_segments;
+        
+        println!("[NAUTILUS] Merge complete: {} segments after splitting", transcript_segments.len());
     }
 
     fn create_speaker(&self, id: &str, index: usize) -> Speaker {

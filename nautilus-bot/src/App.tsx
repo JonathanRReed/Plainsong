@@ -13,7 +13,6 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Sidebar } from "@/components/sidebar";
-import { RecordingOverlay } from "@/components/recording-overlay";
 import { RecordingProvider } from "@/hooks/use-recording";
 import { DataCacheProvider } from "@/hooks/data-cache-context";
 import { DictationPopup } from "@/components/popups/dictation-popup";
@@ -317,7 +316,6 @@ function App() {
                       )}
                     </Suspense>
                   </main>
-                  <RecordingOverlay isDictation={activeView === "dictation"} />
                 </div>
 
                 {/* Dismissible nag (no license + trial expired) */}

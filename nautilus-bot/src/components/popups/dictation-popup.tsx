@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { forceStopDictation, getSettings, getDictationAudioLevel } from "@/lib/tauri";
 
+type DisplayMode = "full" | "compact" | "minimal";
 type DictationPhase = "idle" | "recording" | "stopping" | "transcribing" | "done" | "error";
 
 interface DictationStateChangedEvent {
@@ -37,7 +38,7 @@ export function DictationPopup() {
   const [message, setMessage] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<string | null>(null);
-  const [compact, setCompact] = useState(false);
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("full");
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [pushToTalk, setPushToTalk] = useState(true);
   const [audioLevel, setAudioLevel] = useState(0);
@@ -155,11 +156,18 @@ export function DictationPopup() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   }, [elapsed]);
 
-  const toggleCompact = async () => {
-    const next = !compact;
-    setCompact(next);
+  const cycleDisplayMode = async () => {
+    const next: DisplayMode =
+      displayMode === "full" ? "compact" : displayMode === "compact" ? "minimal" : "full";
+    setDisplayMode(next);
     try {
-      await window.setSize(new LogicalSize(next ? 280 : 360, next ? 120 : 160));
+      if (next === "minimal") {
+        await window.setSize(new LogicalSize(130, 44));
+      } else if (next === "compact") {
+        await window.setSize(new LogicalSize(280, 120));
+      } else {
+        await window.setSize(new LogicalSize(360, 160));
+      }
     } catch (error) {
       console.error("Failed to resize dictation popup:", error);
     }
@@ -185,9 +193,51 @@ export function DictationPopup() {
     return <div className="h-screen w-screen bg-transparent" />;
   }
 
+  // ── Minimal pill mode ────────────────────────────────────────────────────
+  if (displayMode === "minimal") {
+    const dotColor =
+      phase === "recording"
+        ? "bg-orange-400"
+        : phase === "transcribing" || phase === "stopping"
+          ? "bg-cyan-400"
+          : phase === "done"
+            ? "bg-emerald-400"
+            : "bg-rose-400";
+
+    return (
+      <div
+        className="h-screen w-screen bg-transparent flex items-center justify-center"
+        onMouseDown={() => void window.startDragging()}
+        onDoubleClick={() => void cycleDisplayMode()}
+        title="Double-click to expand"
+      >
+        <div className="flex items-center gap-[5px] rounded-full bg-[#1a1f2e]/90 px-4 py-[10px] backdrop-blur-md shadow-lg border border-white/10">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <span
+              key={i}
+              className={`block h-[6px] w-[6px] rounded-full ${dotColor}`}
+              style={{
+                animation: `dictation-dot-pulse 1.2s ease-in-out ${i * 0.15}s infinite`,
+                opacity: phase === "done" ? 1 : undefined,
+              }}
+            />
+          ))}
+        </div>
+        <style>{`
+          @keyframes dictation-dot-pulse {
+            0%, 80%, 100% { transform: scale(0.7); opacity: 0.4; }
+            40% { transform: scale(1); opacity: 1; }
+          }
+        `}</style>
+      </div>
+    );
+  }
+
+  const compact = displayMode === "compact";
+
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="rounded-2xl border border-cyan-400/35 bg-gradient-to-br from-slate-950/95 via-slate-900/90 to-cyan-950/55 px-4 py-3 backdrop-blur-md">
+      <div className="rounded-2xl border border-cyan-400/35 bg-linear-to-br from-slate-950/95 via-slate-900/90 to-cyan-950/55 px-4 py-3 backdrop-blur-md">
         <div
           className="mb-2 flex items-center justify-between text-slate-300"
           onMouseDown={() => void window.startDragging()}
@@ -201,7 +251,7 @@ export function DictationPopup() {
               type="button"
               className="inline-flex h-6 w-6 items-center justify-center rounded-md hover:bg-white/10"
               onMouseDown={(event) => event.stopPropagation()}
-              onClick={() => void toggleCompact()}
+              onClick={() => void cycleDisplayMode()}
               aria-label={compact ? "Expand popup" : "Compact popup"}
             >
               {compact ? <PanelsTopLeft className="h-3.5 w-3.5" /> : <Minimize2 className="h-3.5 w-3.5" />}
@@ -238,7 +288,7 @@ export function DictationPopup() {
                 <>
                   <div className="mt-2 h-2 w-full max-w-[220px] rounded-full bg-slate-700/50 overflow-hidden">
                     <div
-                      className="h-full bg-gradient-to-r from-emerald-500 via-orange-400 to-rose-500 transition-all duration-50 rounded-full"
+                      className="h-full bg-linear-to-r from-emerald-500 via-orange-400 to-rose-500 transition-all duration-50 rounded-full"
                       style={{ width: `${Math.min(100, audioLevel * 100)}%` }}
                     />
                   </div>

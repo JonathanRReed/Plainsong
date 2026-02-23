@@ -74,10 +74,19 @@ export function RecordingOverlay({ isDictation }: RecordingOverlayProps) {
   );
 }
 
+const MEETING_TEMPLATES = [
+  { value: "auto", label: "Auto", description: "Let AI decide the best format" },
+  { value: "1on1", label: "1:1 Meeting", description: "Topics, feedback, goals & commitments" },
+  { value: "standup", label: "Standup", description: "Done, planned, blockers" },
+  { value: "sales", label: "Sales Call", description: "Pain points, objections, next steps" },
+  { value: "interview", label: "Interview", description: "Strengths, answers, hiring rec" },
+  { value: "brainstorm", label: "Brainstorm", description: "Ideas, top candidates, decisions" },
+] as const;
+
 interface ConsentDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onStart: (options: { mic: boolean; systemAudio: boolean }) => void;
+  onStart: (options: { mic: boolean; systemAudio: boolean; template?: string }) => Promise<void> | void;
 }
 
 export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProps) {
@@ -85,6 +94,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
     mic: true,
     systemAudio: false,
   });
+  const [template, setTemplate] = useState("auto");
   const [systemAudioAvailable, setSystemAudioAvailable] = useState<boolean | null>(null);
   const [loopbackDevice, setLoopbackDevice] = useState<string | null>(null);
 
@@ -97,7 +107,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent onPointerDownOutside={(e) => e.preventDefault()} onCloseAutoFocus={(e) => e.preventDefault()}>
         <DialogHeader>
           <DialogTitle>Start Recording</DialogTitle>
           <DialogDescription>
@@ -105,7 +115,37 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-4">
+        <form onSubmit={(e) => {
+          e.preventDefault();
+          onStart({ ...options, template: template === "auto" ? undefined : template });
+        }}>
+          <div className="space-y-4 py-4">
+          {/* Meeting template picker */}
+          <div>
+            <p className="text-sm font-medium mb-2">Meeting Type</p>
+            <div className="grid grid-cols-3 gap-1.5">
+              {MEETING_TEMPLATES.map((t) => (
+                <button
+                  key={t.value}
+                  type="button"
+                  onClick={() => setTemplate(t.value)}
+                  className={`px-2 py-1.5 rounded text-xs text-left transition-colors border ${
+                    template === t.value
+                      ? "bg-active text-active-foreground border-active"
+                      : "bg-background border-border hover:bg-muted"
+                  }`}
+                >
+                  <div className="font-medium">{t.label}</div>
+                </button>
+              ))}
+            </div>
+            {template !== "auto" && (
+              <p className="text-xs text-muted-foreground mt-1">
+                {MEETING_TEMPLATES.find(t => t.value === template)?.description}
+              </p>
+            )}
+          </div>
+
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <Mic className="h-5 w-5 text-muted-foreground" />
@@ -153,17 +193,18 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button
-            variant="active"
-            onClick={() => onStart(options)}
+          <button
+            type="submit"
+            className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-active text-active-foreground hover:bg-active/90 h-10 px-4 py-2"
             disabled={!options.mic && !options.systemAudio}
           >
             Start Recording
-          </Button>
+          </button>
         </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );

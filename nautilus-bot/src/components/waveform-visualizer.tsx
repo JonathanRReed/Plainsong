@@ -91,8 +91,8 @@ export function WaveformVisualizer({
       }
       const avgAmplitude = sum / (endIdx - startIdx);
       
-      // Scale amplitude (0-1) to bar height
-      const barHeight = Math.max(2, avgAmplitude * (height - 10));
+      // Scale amplitude (0-1) to bar height with amplification for mic input
+      const barHeight = Math.max(2, Math.min(height - 4, avgAmplitude * (height - 10) * 8));
       
       const x = i * totalBarWidth;
       const y = centerY - barHeight / 2;

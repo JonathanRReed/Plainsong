@@ -3426,6 +3426,7 @@ dependencies = [
  "ringbuf",
  "rubato",
  "rusqlite",
+ "rustfft",
  "serde",
  "serde_json",
  "sha2",

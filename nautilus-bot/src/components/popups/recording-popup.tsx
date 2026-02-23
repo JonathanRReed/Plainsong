@@ -166,7 +166,7 @@ export function RecordingPopup() {
           const slice = samples.slice(i, i + stride);
           const avg =
             slice.reduce((acc, value) => acc + Math.abs(value), 0) / Math.max(1, slice.length);
-          bars.push(Math.min(1, avg * 3));
+          bars.push(Math.min(1, avg * 12));
         }
         setLevels(bars);
       } catch {

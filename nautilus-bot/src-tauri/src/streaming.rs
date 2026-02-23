@@ -118,8 +118,8 @@ impl StreamingTranscriber {
         let (result_tx, result_rx) = mpsc::channel::<StreamingResult>(100);
 
         let normalized_sample_rate = sample_rate.max(8_000);
-        let min_chunk_size = (normalized_sample_rate as usize) * 2; // 2 seconds
-        let overlap_size = (normalized_sample_rate as usize) / 2; // 0.5 second overlap
+        let min_chunk_size = (normalized_sample_rate as usize) / 2; // 0.5 seconds for faster partials
+        let overlap_size = (normalized_sample_rate as usize) / 4; // 0.25 second overlap
         let buffer_capacity = (normalized_sample_rate as usize) * 60 * 5; // 5-minute ring buffer
 
         let session = StreamingSession {

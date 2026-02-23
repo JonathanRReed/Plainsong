@@ -42,6 +42,7 @@ export async function startRecording(options: {
   mic: boolean;
   systemAudio: boolean;
   projectId: string;
+  template?: string;
 }): Promise<string> {
   return await invoke("start_recording", { options });
 }
@@ -80,6 +81,14 @@ export async function deleteRecording(recordingId: string): Promise<void> {
 
 export async function renameRecording(recordingId: string, newTitle: string): Promise<void> {
   await invoke("rename_recording", { recordingId, newTitle });
+}
+
+export async function updateTranscriptSegment(
+  recordingId: string,
+  segmentId: string,
+  newText: string
+): Promise<boolean> {
+  return await invoke("update_transcript_segment", { recordingId, segmentId, newText });
 }
 
 export async function retryMeetingAutoName(recordingId: string): Promise<void> {

@@ -24,8 +24,15 @@ pub struct MelSpectrogram {
 impl MelSpectrogram {
     /// Create with NeMo/Parakeet TDT 0.6B defaults.
     /// Uses natural log (ln) and 1e-5 offset as per NeMo preprocessing.
+    /// Mel filterbank: low_freq=20, high_freq=Nyquist-400 (matches sherpa-onnx).
     pub fn parakeet_defaults() -> Self {
-        Self::new(512, 160, 400, 80, 16000).with_nemo_log()
+        let sample_rate = 16000u32;
+        let high_freq = sample_rate as f32 / 2.0 - 400.0; // Nyquist - 400 Hz (sherpa-onnx convention)
+        let mut mel = Self::new(512, 160, 400, 80, sample_rate)
+            .with_nemo_log();
+        // Override mel filters with correct low/high freq
+        mel.mel_filters = compute_mel_filters(80, 512, sample_rate, 20.0, high_freq);
+        mel
     }
 
     /// Switch to natural-log mode (NeMo/Parakeet/Moonshine style).
@@ -60,14 +67,17 @@ impl MelSpectrogram {
     /// Compute mel spectrogram.
     ///
     /// Returns shape `[n_mels][n_frames]` — matches NeMo `processed_signal` after transposing to [n_mels, T].
+    /// Uses snip_edges=False style frame calculation (centered frames, matches sherpa-onnx).
     pub fn compute(&self, samples: &[f32]) -> Vec<Vec<f32>> {
-        let n_frames = if samples.len() >= self.win_length {
-            (samples.len() - self.win_length) / self.hop_length + 1
+        // snip_edges=False: frames are centered, not snipped at edges
+        // This matches sherpa-onnx/NeMo behavior
+        let n_frames = if samples.len() >= self.hop_length {
+            1 + (samples.len() - 1) / self.hop_length
         } else {
-            0
+            1
         };
 
-        if n_frames == 0 {
+        if samples.is_empty() {
             return vec![vec![]; self.n_mels];
         }
 
@@ -75,14 +85,19 @@ impl MelSpectrogram {
         let mut power_frames: Vec<Vec<f32>> = Vec::with_capacity(n_frames);
 
         for frame_idx in 0..n_frames {
-            let start = frame_idx * self.hop_length;
-            let frame_end = (start + self.win_length).min(samples.len());
+            // Center the frame: start at frame_idx * hop_length - n_fft/2
+            let center = frame_idx * self.hop_length;
+            let start = center.saturating_sub(self.n_fft / 2);
+            let frame_end = (center + self.n_fft / 2 + 1).min(samples.len());
+            
             let mut frame = vec![0.0f32; self.n_fft];
-
-            let segment = &samples[start..frame_end];
-            let actual_len = segment.len().min(self.win_length);
+            let offset = self.n_fft / 2 - (center - start);
+            let actual_len = (frame_end - start).min(self.win_length);
+            
             for i in 0..actual_len {
-                frame[i] = segment[i] * self.window[i];
+                if offset + i < self.n_fft && offset + i < self.win_length {
+                    frame[offset + i] = samples[start + i] * self.window[offset + i];
+                }
             }
 
             let spectrum = rfft(&frame);
@@ -108,6 +123,41 @@ impl MelSpectrogram {
         }
 
         mel_spec
+    }
+
+    /// Compute mel spectrogram with per-feature normalization (sherpa-onnx/NeMo style).
+    /// Normalizes each mel band by its mean and stddev across all frames.
+    pub fn compute_normalized(&self, samples: &[f32]) -> Vec<Vec<f32>> {
+        let mel_spec = self.compute(samples);
+        if mel_spec.is_empty() || mel_spec[0].is_empty() {
+            return mel_spec;
+        }
+
+        let n_mels = mel_spec.len();
+        let n_frames = mel_spec[0].len();
+
+        // Per-feature normalization: mean/std per mel band
+        let mut normalized = vec![vec![0.0f32; n_frames]; n_mels];
+        
+        for mel_idx in 0..n_mels {
+            let band = &mel_spec[mel_idx];
+            
+            // Compute mean
+            let mean: f32 = band.iter().sum::<f32>() / n_frames as f32;
+            
+            // Compute stddev
+            let variance: f32 = band.iter()
+                .map(|v| (v - mean).powi(2))
+                .sum::<f32>() / n_frames as f32;
+            let stddev = variance.sqrt() + 1e-5; // epsilon for numerical stability
+            
+            // Normalize
+            for frame_idx in 0..n_frames {
+                normalized[mel_idx][frame_idx] = (band[frame_idx] - mean) / stddev;
+            }
+        }
+
+        normalized
     }
 
     /// Compute Whisper-style mel spectrogram with max-normalization.
@@ -272,12 +322,13 @@ mod tests {
 
     #[test]
     fn test_mel_spec_produces_correct_shape() {
-        // 1 second of silence at 16kHz → 80 mel bins × ~99 frames
+        // 1 second of silence at 16kHz → 80 mel bins × ~101 frames (snip_edges=False)
         let samples = vec![0.0f32; 16000];
         let mel = MelSpectrogram::parakeet_defaults();
         let spec = mel.compute(&samples);
         assert_eq!(spec.len(), 80);
-        let n_frames = (16000 - 400) / 160 + 1;
+        // snip_edges=False: n_frames = 1 + (n_samples - 1) / hop_length
+        let n_frames = 1 + (16000 - 1) / 160;
         for row in &spec {
             assert_eq!(row.len(), n_frames);
         }

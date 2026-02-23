@@ -1,6 +1,7 @@
 pub mod canary;
 pub mod distil_whisper;
 pub mod elevenlabs_scribe;
+pub mod groq;
 pub mod manager;
 pub mod moonshine;
 pub mod openai_cloud;
@@ -95,6 +96,7 @@ pub enum AsrProviderType {
     Voxtral,
     ElevenLabsScribe,
     OpenAiCloud,
+    Groq,
 }
 
 impl AsrProviderType {
@@ -108,6 +110,7 @@ impl AsrProviderType {
             AsrProviderType::Voxtral,
             AsrProviderType::ElevenLabsScribe,
             AsrProviderType::OpenAiCloud,
+            AsrProviderType::Groq,
         ]
     }
 
@@ -122,6 +125,7 @@ impl AsrProviderType {
             AsrProviderType::Voxtral => "Mistral Voxtral Mini",
             AsrProviderType::ElevenLabsScribe => "ElevenLabs Scribe",
             AsrProviderType::OpenAiCloud => "OpenAI Whisper (Cloud)",
+            AsrProviderType::Groq => "Groq Whisper (Cloud)",
         }
     }
 
@@ -135,6 +139,7 @@ impl AsrProviderType {
             AsrProviderType::Voxtral => "voxtral-local",
             AsrProviderType::ElevenLabsScribe => "scribe_v1",
             AsrProviderType::OpenAiCloud => "whisper-1",
+            AsrProviderType::Groq => "whisper-large-v3-turbo",
         }
     }
 
@@ -226,6 +231,16 @@ impl AsrProviderType {
                     label: "gpt-4o-transcribe".to_string(),
                 },
             ],
+            AsrProviderType::Groq => vec![
+                ModelOption {
+                    id: "whisper-large-v3-turbo".to_string(),
+                    label: "whisper-large-v3-turbo (fast, recommended)".to_string(),
+                },
+                ModelOption {
+                    id: "whisper-large-v3".to_string(),
+                    label: "whisper-large-v3 (best accuracy)".to_string(),
+                },
+            ],
         }
     }
 }
@@ -254,6 +269,7 @@ impl AsrProviderFactory {
             AsrProviderType::OpenAiCloud => Box::new(
                 openai_cloud::OpenAiCloudWhisperProvider::new(selected_model_id),
             ),
+            AsrProviderType::Groq => Box::new(groq::GroqProvider::new(selected_model_id)),
         }
     }
 }

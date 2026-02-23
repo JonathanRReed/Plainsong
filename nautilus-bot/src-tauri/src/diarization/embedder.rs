@@ -15,6 +15,10 @@ use ort::{
     value::{Tensor, ValueType},
 };
 use std::path::{Path, PathBuf};
+#[cfg(feature = "diarization")]
+use rustfft::FftPlanner;
+#[cfg(feature = "diarization")]
+use std::f32::consts::PI;
 
 // Re-export Array1 for use in mod.rs
 
@@ -27,16 +31,30 @@ pub struct SpeakerEmbeddingExtractor {
 
 #[cfg(feature = "diarization")]
 impl SpeakerEmbeddingExtractor {
-    /// Create a new embedding extractor
+    /// Create a new embedding extractor with default model
     pub fn new() -> Result<Self> {
+        Self::with_model("ecapa_tdnn_speaker")
+    }
+
+    /// Create an embedding extractor with a specific model
+    pub fn with_model(model_id: &str) -> Result<Self> {
         let models_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Nautilus")
             .join("models")
             .join("diarization");
 
-        // ECAPA-TDNN based speaker embedding model (lightweight ~14MB)
-        let model_path = models_dir.join("ecapa_tdnn_speaker.onnx");
+        let filename = match model_id {
+            "ecapa_tdnn_speaker" => "ecapa_tdnn_speaker.onnx",
+            "resnet34_speaker" => "resnet34_speaker.onnx",
+            "campplus_speaker" => "campplus_speaker.onnx",
+            _ => "ecapa_tdnn_speaker.onnx", // Default fallback
+        };
+
+        let model_path = models_dir.join(filename);
+        
+        tracing::info!("Diarization model path: {:?}", model_path);
+        tracing::info!("Model exists: {}", model_path.exists());
 
         Ok(Self {
             model_path,
@@ -46,7 +64,9 @@ impl SpeakerEmbeddingExtractor {
 
     /// Check if the embedding model is available
     pub fn is_model_available(&self) -> bool {
-        self.model_path.exists()
+        let exists = self.model_path.exists();
+        tracing::info!("is_model_available: path={:?}, exists={}", self.model_path, exists);
+        exists
     }
 
     /// Extract embeddings from audio segments
@@ -83,9 +103,20 @@ impl SpeakerEmbeddingExtractor {
                 }
 
                 match run_embedding_inference(&mut session, segment_samples) {
-                    Ok(embedding) => embeddings.push((start_sec, end_sec, embedding)),
-                    Err(e) => tracing::warn!(
-                        "Failed to extract embedding for segment {}-{}: {}",
+                    Ok(embedding) => {
+                        // Log embedding stats for debugging
+                        let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        let mean: f32 = embedding.iter().sum::<f32>() / embedding.len() as f32;
+                        let min_val = embedding.iter().cloned().fold(f32::INFINITY, f32::min);
+                        let max_val = embedding.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                        println!(
+                            "[NAUTILUS] Embedding {}-{}s: len={}, norm={:.4}, mean={:.4}, min={:.4}, max={:.4}",
+                            start_sec, end_sec, embedding.len(), norm, mean, min_val, max_val
+                        );
+                        embeddings.push((start_sec, end_sec, embedding))
+                    },
+                    Err(e) => println!(
+                        "[NAUTILUS] WARNING: Failed to extract embedding for segment {}-{}: {}",
                         start_sec,
                         end_sec,
                         e
@@ -109,7 +140,9 @@ fn load_embedding_session(model_path: &Path) -> Result<Session> {
         ));
     }
 
-    Session::builder()
+    println!("[NAUTILUS] Loading diarization model from: {}", model_path.display());
+    
+    let session = Session::builder()
         .context("Failed to create ONNX session builder")?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .context("Failed to configure ONNX optimization level")?
@@ -121,7 +154,19 @@ fn load_embedding_session(model_path: &Path) -> Result<Session> {
                 "Failed to load diarization model from {}",
                 model_path.display()
             )
-        })
+        })?;
+    
+    // Log model input/output info
+    println!("[NAUTILUS] Model loaded. Inputs: {} outputs: {}", 
+        session.inputs().len(), session.outputs().len());
+    for (i, input) in session.inputs().iter().enumerate() {
+        println!("[NAUTILUS] Input {}: name={}, shape={:?}", i, input.name(), input.dtype());
+    }
+    for (i, output) in session.outputs().iter().enumerate() {
+        println!("[NAUTILUS] Output {}: name={}, shape={:?}", i, output.name(), output.dtype());
+    }
+    
+    Ok(session)
 }
 
 #[cfg(feature = "diarization")]
@@ -130,34 +175,195 @@ fn run_embedding_inference(session: &mut Session, samples: &[f32]) -> Result<Arr
         .inputs()
         .first()
         .ok_or_else(|| anyhow!("Diarization model has no input tensors"))?;
-    let input_shape = infer_input_shape(input.dtype(), samples.len())?;
+    
+    // Check if model expects FBank features (shape [..., 80])
+    let ValueType::Tensor { shape, .. } = input.dtype() else {
+        return Err(anyhow!("Diarization model input is not a tensor"));
+    };
+    let dims: Vec<i64> = shape.iter().copied().collect();
+    
+    // Last dimension should be 80 for FBank features
+    let expects_fbank = dims.last().copied().unwrap_or(-1) == 80;
+    
+    if expects_fbank {
+        // Compute FBank features
+        let fbank_features = compute_fbank_features(samples, 16000, 80)?;
+        
+        // Shape: [1, num_frames, 80]
+        let num_frames = fbank_features.len() / 80;
+        let input_shape = vec![1, num_frames, 80];
+        
+        println!("[NAUTILUS] Feeding FBank features: {} frames", num_frames);
+        
+        let input_array = ndarray::Array::from_shape_vec(IxDyn(&input_shape), fbank_features)
+            .context("Failed to shape FBank input tensor")?;
+        
+        let input_tensor = Tensor::from_array(input_array)
+            .context("Failed to create ONNX input tensor for FBank")?;
+        let outputs = session
+            .run(ort::inputs![input_tensor])
+            .context("ONNX diarization model inference failed")?;
+        
+        extract_embedding_from_outputs(&outputs)
+    } else {
+        // Fallback for raw waveform models
+        let input_shape = infer_input_shape(input.dtype(), samples.len())?;
+        let feature_multiplier = input_shape[..input_shape.len() - 1]
+            .iter()
+            .copied()
+            .product::<usize>();
+        if feature_multiplier != 1 {
+            return Err(anyhow!(
+                "Unsupported diarization input shape {:?}; expected raw waveform input",
+                input_shape
+            ));
+        }
 
-    // This implementation supports raw waveform models only (single waveform channel).
-    let feature_multiplier = input_shape[..input_shape.len() - 1]
-        .iter()
-        .copied()
-        .product::<usize>();
-    if feature_multiplier != 1 {
-        return Err(anyhow!(
-            "Unsupported diarization input shape {:?}; expected raw waveform input",
-            input_shape
-        ));
+        let target_samples = *input_shape
+            .last()
+            .ok_or_else(|| anyhow!("Invalid diarization input shape"))?;
+        let prepared = pad_or_trim(samples, target_samples);
+        let input_array = ndarray::Array::from_shape_vec(IxDyn(&input_shape), prepared)
+            .context("Failed to shape diarization input tensor")?;
+
+        let input_tensor = Tensor::from_array(input_array)
+            .context("Failed to create ONNX input tensor for diarization")?;
+        let outputs = session
+            .run(ort::inputs![input_tensor])
+            .context("ONNX diarization model inference failed")?;
+
+        extract_embedding_from_outputs(&outputs)
     }
+}
 
-    let target_samples = *input_shape
-        .last()
-        .ok_or_else(|| anyhow!("Invalid diarization input shape"))?;
-    let prepared = pad_or_trim(samples, target_samples);
-    let input_array = ndarray::Array::from_shape_vec(IxDyn(&input_shape), prepared)
-        .context("Failed to shape diarization input tensor")?;
+/// Compute log Mel filterbank features from audio samples
+#[cfg(feature = "diarization")]
+fn compute_fbank_features(samples: &[f32], sample_rate: u32, num_mel_bins: usize) -> Result<Vec<f32>> {
+    // Parameters for FBank extraction
+    let frame_size = 400; // 25ms at 16kHz
+    let frame_shift = 160; // 10ms at 16kHz
+    let fft_size = 512;
+    
+    // Apply pre-emphasis
+    let pre_emphasis = 0.97;
+    let mut emphasized: Vec<f32> = Vec::with_capacity(samples.len());
+    emphasized.push(samples[0]);
+    for i in 1..samples.len() {
+        emphasized.push(samples[i] - pre_emphasis * samples[i - 1]);
+    }
+    
+    // Compute number of frames
+    let num_frames = if emphasized.len() < frame_size {
+        1
+    } else {
+        (emphasized.len() - frame_size) / frame_shift + 1
+    };
+    
+    // Create Mel filterbank
+    let mel_bank = create_mel_filterbank(fft_size, sample_rate as f32, num_mel_bins);
+    
+    let mut all_features = Vec::with_capacity(num_frames * num_mel_bins);
+    
+    for frame_idx in 0..num_frames {
+        let start = frame_idx * frame_shift;
+        let end = (start + frame_size).min(emphasized.len());
+        
+        // Extract frame and apply Hamming window
+        let mut frame = vec![0.0f64; fft_size];
+        for i in 0..(end - start) {
+            let window = 0.54 - 0.46 * (2.0 * PI * i as f32 / (frame_size - 1) as f32).cos();
+            frame[i] = emphasized[start + i] as f64 * window as f64;
+        }
+        
+        // Compute FFT
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(fft_size);
+        let mut buffer: Vec<rustfft::num_complex::Complex<f64>> = 
+            frame.iter().map(|&x| rustfft::num_complex::Complex::new(x, 0.0)).collect();
+        fft.process(&mut buffer);
+        
+        // Compute power spectrum (magnitude squared)
+        let power_spectrum: Vec<f64> = buffer[..fft_size / 2 + 1]
+            .iter()
+            .map(|c| (c.norm_sqr() / fft_size as f64).max(1e-10))
+            .collect();
+        
+        // Apply Mel filterbank
+        for mel_idx in 0..num_mel_bins {
+            let mut mel_energy = 0.0f64;
+            for (bin_idx, &weight) in mel_bank[mel_idx].iter().enumerate() {
+                if bin_idx < power_spectrum.len() {
+                    mel_energy += power_spectrum[bin_idx] * weight;
+                }
+            }
+            // Log filterbank
+            let log_mel = (mel_energy + 1e-10).ln();
+            all_features.push(log_mel as f32);
+        }
+    }
+    
+    // Apply mean normalization (CMVN)
+    let num_features = all_features.len() / num_mel_bins;
+    if num_features > 0 {
+        let mut means = vec![0.0f32; num_mel_bins];
+        for frame_idx in 0..num_features {
+            for mel_idx in 0..num_mel_bins {
+                means[mel_idx] += all_features[frame_idx * num_mel_bins + mel_idx];
+            }
+        }
+        for mel_idx in 0..num_mel_bins {
+            means[mel_idx] /= num_features as f32;
+        }
+        for frame_idx in 0..num_features {
+            for mel_idx in 0..num_mel_bins {
+                all_features[frame_idx * num_mel_bins + mel_idx] -= means[mel_idx];
+            }
+        }
+    }
+    
+    Ok(all_features)
+}
 
-    let input_tensor = Tensor::from_array(input_array)
-        .context("Failed to create ONNX input tensor for diarization")?;
-    let outputs = session
-        .run(ort::inputs![input_tensor])
-        .context("ONNX diarization model inference failed")?;
-
-    extract_embedding_from_outputs(&outputs)
+/// Create Mel filterbank matrix
+#[cfg(feature = "diarization")]
+fn create_mel_filterbank(fft_size: usize, sample_rate: f32, num_mel_bins: usize) -> Vec<Vec<f64>> {
+    let low_freq = 20.0f32;
+    let high_freq = sample_rate / 2.0;
+    
+    // Convert frequency to Mel scale
+    let hz_to_mel = |hz: f32| 2595.0 * (1.0 + hz / 700.0).ln();
+    let mel_to_hz = |mel: f32| 700.0 * ((mel / 2595.0).exp() - 1.0);
+    
+    let mel_low = hz_to_mel(low_freq);
+    let mel_high = hz_to_mel(high_freq);
+    
+    // Create equally spaced Mel points
+    let mel_points: Vec<f32> = (0..=num_mel_bins + 1)
+        .map(|i| mel_low + (mel_high - mel_low) * i as f32 / (num_mel_bins + 1) as f32)
+        .collect();
+    
+    let hz_points: Vec<f32> = mel_points.iter().map(|m| mel_to_hz(*m)).collect();
+    let bin_points: Vec<f32> = hz_points.iter().map(|hz| (fft_size as f32 + 1.0) * hz / sample_rate).collect();
+    
+    let num_bins = fft_size / 2 + 1;
+    let mut filterbank = vec![vec![0.0f64; num_bins]; num_mel_bins];
+    
+    for mel_idx in 0..num_mel_bins {
+        let left = bin_points[mel_idx];
+        let center = bin_points[mel_idx + 1];
+        let right = bin_points[mel_idx + 2];
+        
+        for bin_idx in 0..num_bins {
+            let bin = bin_idx as f32;
+            if bin >= left && bin < center && center > left {
+                filterbank[mel_idx][bin_idx] = ((bin - left) / (center - left)) as f64;
+            } else if bin >= center && bin <= right && right > center {
+                filterbank[mel_idx][bin_idx] = ((right - bin) / (right - center)) as f64;
+            }
+        }
+    }
+    
+    filterbank
 }
 
 #[cfg(feature = "diarization")]
@@ -302,8 +508,8 @@ pub struct EmbeddingClusterer {
 impl EmbeddingClusterer {
     pub fn new() -> Self {
         Self {
-            threshold: 0.25, // Cosine distance threshold (0.25 = ~97% similarity)
-            min_segment_duration: 1.0,
+            threshold: 0.85, // Cosine distance threshold (0.85 = industry standard)
+            min_segment_duration: 5.0,
         }
     }
 
@@ -325,6 +531,8 @@ impl EmbeddingClusterer {
             return vec![0];
         }
 
+        println!("[NAUTILUS] Clustering {} embeddings with threshold {}", embeddings.len(), self.threshold);
+
         // Compute pairwise distances
         let n = embeddings.len();
         let mut distances = Array2::zeros((n, n));
@@ -336,6 +544,23 @@ impl EmbeddingClusterer {
                 distances[[j, i]] = dist;
             }
         }
+
+        // Log distance statistics
+        let mut min_d = f32::INFINITY;
+        let mut max_d = 0.0f32;
+        let mut sum_d = 0.0f32;
+        let mut count = 0;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let d = distances[[i, j]];
+                min_d = min_d.min(d);
+                max_d = max_d.max(d);
+                sum_d += d;
+                count += 1;
+            }
+        }
+        let avg_d = sum_d / count.max(1) as f32;
+        println!("[NAUTILUS] Distance stats: min={:.4}, max={:.4}, avg={:.4}, threshold={:.4}", min_d, max_d, avg_d, self.threshold);
 
         // Agglomerative clustering
         self.agglomerative_cluster(&distances, n)
@@ -375,6 +600,8 @@ impl EmbeddingClusterer {
 
             // Stop if no pair found or distance exceeds threshold
             if closest_pair.is_none() || min_dist > self.threshold {
+                println!("[NAUTILUS] Clustering stopped: min_dist={:.4}, threshold={:.4}, clusters={}", 
+                    min_dist, self.threshold, cluster_count);
                 break;
             }
 

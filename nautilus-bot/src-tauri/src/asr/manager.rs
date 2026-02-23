@@ -63,8 +63,13 @@ impl AsrManager {
 
         Self {
             silence_skip_enabled: RwLock::new(false),
-            default_provider: RwLock::new(AsrProviderType::Whisper),
-            selected_model_id: RwLock::new(AsrProviderType::Whisper.default_model_id().to_string()),
+            // Distil-Whisper is 6x faster than Whisper for English
+            default_provider: RwLock::new(AsrProviderType::DistilWhisper),
+            selected_model_id: RwLock::new(
+                AsrProviderType::DistilWhisper
+                    .default_model_id()
+                    .to_string(),
+            ),
             provider_model_ids: RwLock::new(provider_model_ids),
             last_runtime_errors: RwLock::new(HashMap::new()),
             models_dir,
@@ -844,6 +849,36 @@ fn runtime_diagnostics_for_provider(
                         None
                     } else {
                         Some("Set OPENAI_API_KEY in Settings -> API Keys.".to_string())
+                    },
+                },
+            }
+        }
+        AsrProviderType::Groq => {
+            let has_key = has_provider_secret_or_env("groq", "GROQ_API_KEY");
+            RuntimeDiagnosticsInternal {
+                runtime_status: if has_key {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingModel
+                },
+                runtime_message: Some(if has_key {
+                    "Groq Whisper cloud API ready. Ultra-fast transcription at 164x real-time."
+                        .to_string()
+                } else {
+                    "Set GROQ_API_KEY to enable Groq Whisper cloud (ultra-fast).".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                    missing_files: if has_key {
+                        Vec::new()
+                    } else {
+                        vec!["GROQ_API_KEY".to_string()]
+                    },
+                    setup_action: if has_key {
+                        None
+                    } else {
+                        Some("Get API key from https://console.groq.com/keys and set in Settings -> API Keys.".to_string())
                     },
                 },
             }

@@ -75,7 +75,8 @@ export type AsrProviderType =
   | "moonshine"
   | "voxtral"
   | "elevenlabs_scribe"
-  | "openai_cloud";
+  | "openai_cloud"
+  | "groq";
 
 // LLM Types
 export interface LlmAnalysisResult {

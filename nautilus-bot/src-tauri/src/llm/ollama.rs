@@ -133,14 +133,42 @@ impl OllamaClient {
         })
     }
 
-    /// Summarize meeting
+    /// Summarize meeting with optional template
     pub async fn summarize(&self, transcript: &str, model: &str) -> Result<String> {
+        self.summarize_with_template(transcript, model, None).await
+    }
+
+    /// Summarize meeting with a specific template style
+    pub async fn summarize_with_template(&self, transcript: &str, model: &str, template: Option<&str>) -> Result<String> {
+        let template_instruction = match template {
+            Some("standup") => "Format as a standup update: What was done, what is planned, and any blockers.",
+            Some("1on1") => "Format as a 1:1 summary: key topics discussed, feedback given, goals and commitments made.",
+            Some("sales") => "Format as a sales call summary: prospect information, pain points, objections, next steps, and deal status.",
+            Some("interview") => "Format as an interview summary: candidate strengths, weaknesses, key answers, and hiring recommendation.",
+            Some("brainstorm") => "Format as a brainstorm summary: ideas generated, top candidates, decisions made, and follow-up actions.",
+            _ => "Format as a meeting summary: key points, decisions made, and important outcomes.",
+        };
+
         let prompt = format!(
-            "Provide a concise summary of the following meeting transcript. \
-            Focus on key points, decisions, and outcomes:\n\n{transcript}\n\nSummary:"
+            "Summarize the following meeting transcript. {template_instruction}\n\nTranscript:\n{transcript}\n\nSummary:"
         );
 
         self.generate(model, &prompt).await
+    }
+
+    /// Generate a short descriptive title for a meeting
+    pub async fn generate_title(&self, transcript: &str, model: &str) -> Result<String> {
+        let snippet = &transcript[..transcript.len().min(1500)];
+        let prompt = format!(
+            "Generate a short, descriptive title (4-8 words) for this meeting or conversation. \
+            Return ONLY the title text, no quotes, no punctuation at the end, no explanation:\n\n{snippet}\n\nTitle:"
+        );
+        let raw = self.generate(model, &prompt).await?;
+        let title = raw.trim().trim_matches('"').trim_matches('\'').trim_matches('.').trim().to_string();
+        if title.is_empty() || title.len() > 120 {
+            return Err(anyhow::anyhow!("Generated title was empty or too long"));
+        }
+        Ok(title)
     }
 
     /// Extract action items
@@ -191,6 +219,55 @@ Action Items:"
             .collect();
 
         Ok(items)
+    }
+
+    /// Identify speaker names from transcript using LLM
+    /// Returns a map of speaker identifiers to their likely names
+    pub async fn identify_speakers(
+        &self,
+        transcript: &str,
+        model: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let prompt = format!(
+            "You are an expert at identifying speaker names from meeting transcripts. \
+Analyze the transcript and identify ALL unique speakers and their names.\n\n\
+Rules:\n\
+1. Look for self-introductions: 'This is [Name]', 'I am [Name]', 'My name is [Name]', '[Name] speaking'\n\
+2. Look for introductions of others: 'Here is [Name]', 'Next is [Name]', 'Now [Name] will speak'\n\
+3. Each DIFFERENT speaker gets a different number (speaker_1, speaker_2, etc.)\n\
+4. Only extract ACTUAL PERSON NAMES - ignore common words, test, audio, meeting, etc.\n\
+5. Names should be properly capitalized (e.g., 'Jonathan', 'Arioc', 'The Prime Time')\n\
+6. If a name is mentioned but not clearly a speaker introduction, don't assign it\n\n\
+Output format - list each speaker you identified:\n\
+speaker_1: [Name of first speaker]\n\
+speaker_2: [Name of second speaker]\n\n\
+If you can only identify one speaker, just output speaker_1.\n\
+If you cannot identify any speakers with confidence, output nothing.\n\n\
+Transcript:\n{transcript}\n\n\
+Speakers identified:"
+        );
+
+        let response = self.generate(model, &prompt).await?;
+        
+        let mut speakers = std::collections::HashMap::new();
+        for line in response.lines() {
+            let line = line.trim();
+            if let Some((speaker_id, name)) = line.split_once(':') {
+                let speaker_id = speaker_id.trim().to_string();
+                let name = name.trim().to_string();
+                // Filter out obvious non-names
+                if !name.is_empty() 
+                    && name.to_lowercase() != "none"
+                    && name.to_lowercase() != "unknown"
+                    && name.to_lowercase() != "speaker"
+                    && name.len() > 1
+                    && name.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+                    speakers.insert(speaker_id, name);
+                }
+            }
+        }
+        
+        Ok(speakers)
     }
 }
 

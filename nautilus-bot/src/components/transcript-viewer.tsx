@@ -14,6 +14,7 @@ interface TranscriptViewerProps {
   currentTime?: number;
   speakerNames?: Record<string, string>;
   onRenameSpeaker?: (speakerId: string, newName: string) => Promise<void> | void;
+  onEditSegment?: (segmentId: string, newText: string) => Promise<void> | void;
 }
 
 interface SpeakerBadgeProps {
@@ -86,9 +87,12 @@ export function TranscriptViewer({
   currentTime,
   speakerNames: externalSpeakerNames,
   onRenameSpeaker,
+  onEditSegment,
 }: TranscriptViewerProps) {
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [isEditingSpeakers, setIsEditingSpeakers] = useState(false);
+  const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
 
   useEffect(() => {
     if (externalSpeakerNames) {
@@ -104,12 +108,18 @@ export function TranscriptViewer({
   };
 
   // Group segments by speaker for better readability
+  // When no speaker IDs exist, create groups based on pauses (>2s gap = new speaker)
   const groupedSegments = useMemo(() => {
     return segments.reduce((acc, segment, index) => {
       const prevSegment = index > 0 ? segments[index - 1] : null;
       
-      if (prevSegment && prevSegment.speakerId === segment.speakerId && 
-          segment.startTime - prevSegment.endTime < 2) {
+      const sameSpeaker = prevSegment && 
+        prevSegment.speakerId === segment.speakerId && 
+        prevSegment.speakerId != null;
+      const closeInTime = prevSegment && segment.startTime - prevSegment.endTime < 2;
+      
+      // Group together if: same speaker with ID, OR no speaker ID but close in time
+      if ((sameSpeaker || (!prevSegment?.speakerId && !segment.speakerId && closeInTime)) && prevSegment) {
         acc[acc.length - 1].push(segment);
       } else {
         acc.push([segment]);
@@ -152,9 +162,11 @@ export function TranscriptViewer({
           ) : (
             groupedSegments.map((group, groupIndex) => {
               const firstSegment = group[0];
-              const speakerId = firstSegment.speakerId || "Unknown";
+              const rawSpeakerId = firstSegment.speakerId;
+              // Generate a unique ID for this speaker group if none exists
+              const speakerId = rawSpeakerId || `speaker-${groupIndex}`;
               const speakerName = speakerNames[speakerId];
-              const canRenameSpeaker = speakerId !== "Unknown";
+              const canRenameSpeaker = true; // Always allow renaming
               
               // Check if this group is currently playing
               const isActive = currentTime !== undefined && 
@@ -186,26 +198,63 @@ export function TranscriptViewer({
 
                   {/* Text */}
                   <div className="flex-1">
-                    <p className="text-sm leading-relaxed">
-                      {group.map((segment, i) => (
-                        <span
-                          key={segment.id}
-                          className={cn(
-                            "transition-colors",
-                            currentTime !== undefined &&
-                            currentTime >= segment.startTime &&
-                            currentTime <= segment.endTime &&
-                            "bg-yellow-200/50 dark:bg-yellow-900/30 rounded px-0.5"
-                          )}
+                    {editingSegmentId === firstSegment.id ? (
+                      <div className="flex flex-col gap-1">
+                        <textarea
+                          autoFocus
+                          value={editingText}
+                          onChange={(e) => setEditingText(e.target.value)}
+                          rows={3}
+                          className="w-full text-sm bg-background border border-active rounded-md px-2 py-1 resize-none focus:outline-none focus:ring-1 focus:ring-active"
+                          onKeyDown={(e) => {
+                            if (e.key === "Escape") { setEditingSegmentId(null); }
+                            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                              void onEditSegment?.(firstSegment.id, editingText);
+                              setEditingSegmentId(null);
+                            }
+                          }}
+                        />
+                        <div className="flex gap-1 justify-end">
+                          <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setEditingSegmentId(null)}>Cancel</Button>
+                          <Button size="sm" className="h-6 text-xs" onClick={() => { void onEditSegment?.(firstSegment.id, editingText); setEditingSegmentId(null); }}><Check className="h-3 w-3 mr-1" />Save</Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="group/text relative">
+                        <p
+                          className="text-sm leading-relaxed"
+                          onClick={(e) => { if (onEditSegment) { e.stopPropagation(); setEditingSegmentId(firstSegment.id); setEditingText(group.map(s => s.text).join(" ")); } }}
                         >
-                          {segment.text}{i < group.length - 1 ? " " : ""}
-                        </span>
-                      ))}
-                    </p>
-                    {firstSegment.confidence < 0.8 && (
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Confidence: {Math.round(firstSegment.confidence * 100)}%
-                      </p>
+                          {group.map((segment, i) => (
+                            <span
+                              key={segment.id}
+                              className={cn(
+                                "transition-colors",
+                                currentTime !== undefined &&
+                                currentTime >= segment.startTime &&
+                                currentTime <= segment.endTime &&
+                                "bg-yellow-200/50 dark:bg-yellow-900/30 rounded px-0.5"
+                              )}
+                            >
+                              {segment.text}{i < group.length - 1 ? " " : ""}
+                            </span>
+                          ))}
+                        </p>
+                        {onEditSegment && (
+                          <button
+                            type="button"
+                            className="absolute top-0 right-0 opacity-0 group-hover/text:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted"
+                            onClick={(e) => { e.stopPropagation(); setEditingSegmentId(firstSegment.id); setEditingText(group.map(s => s.text).join(" ")); }}
+                          >
+                            <Edit2 className="h-3 w-3 text-muted-foreground" />
+                          </button>
+                        )}
+                        {firstSegment.confidence < 0.8 && (
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Confidence: {Math.round(firstSegment.confidence * 100)}%
+                          </p>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>

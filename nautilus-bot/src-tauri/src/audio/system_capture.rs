@@ -276,8 +276,13 @@ impl MixedAudioCapture {
 
     pub fn stop(&mut self) {
         self.is_capturing.store(false, Ordering::SeqCst);
+        // Don't block on join - let the thread clean up in background
+        // The thread will exit when it sees is_capturing is false
         if let Some(handle) = self.capture_thread.take() {
-            let _ = handle.join();
+            // Drop the handle without joining - thread will self-terminate
+            std::thread::spawn(move || {
+                let _ = handle.join();
+            });
         }
         tracing::info!("Mixed audio capture stopped");
     }

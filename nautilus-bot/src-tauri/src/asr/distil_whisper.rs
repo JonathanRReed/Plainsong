@@ -118,16 +118,58 @@ impl AsrProvider for DistilWhisperProvider {
         }
 
         let start = std::time::Instant::now();
+
+        // VAD pre-filtering: trim silence to speed up transcription
+        let raw_samples = crate::audio::utils::load_audio_file(audio_path)
+            .context("Failed to load audio for Distil-Whisper")?;
+
+        let samples = if raw_samples.len() > 16000 {
+            let trimmed = crate::audio::vad::trim_silence(&raw_samples, 16000, -40.0);
+            if !trimmed.is_empty() {
+                let saved_ms = (raw_samples.len() - trimmed.len()) as f64 / 16.0;
+                if saved_ms > 100.0 {
+                    tracing::info!("Distil-Whisper: VAD trimmed {:.0}ms of silence", saved_ms);
+                }
+                trimmed
+            } else {
+                raw_samples
+            }
+        } else {
+            raw_samples
+        };
+
+        // Write trimmed audio to temp file for inference
+        let temp_path =
+            std::env::temp_dir().join(format!("distil_trimmed_{}.wav", uuid::Uuid::new_v4()));
+        {
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: 16000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::create(&temp_path, spec)
+                .context("Failed to create temp WAV for Distil")?;
+            for sample in &samples {
+                let int_sample = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
+                writer
+                    .write_sample(int_sample)
+                    .context("Failed to write sample")?;
+            }
+            writer.finalize().context("Failed to finalize temp WAV")?;
+        }
+
         let model_dir = self.model_dir.clone();
-        let audio_path_owned = audio_path.to_path_buf();
-        let audio_for_dur = audio_path_owned.clone();
+        let audio_for_dur = temp_path.clone();
 
-        let text =
-            tokio::task::spawn_blocking(move || run_distil_candle(&model_dir, &audio_path_owned))
-                .await
-                .context("Distil-Whisper inference task panicked")??;
+        let text = tokio::task::spawn_blocking(move || run_distil_candle(&model_dir, &temp_path))
+            .await
+            .context("Distil-Whisper inference task panicked")??;
 
-        let duration = Self::wav_duration_seconds(&audio_for_dur);
+        // Cleanup temp file
+        let _ = std::fs::remove_file(&audio_for_dur);
+
+        let duration = Self::wav_duration_seconds(audio_path);
         let segment = TranscriptSegment {
             start_time: 0.0,
             end_time: duration,

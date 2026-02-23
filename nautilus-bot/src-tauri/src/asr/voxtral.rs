@@ -140,16 +140,65 @@ impl VoxtralProvider {
         }
 
         let start = std::time::Instant::now();
+
+        // VAD pre-filtering: trim silence for faster processing
+        let raw_samples = crate::audio::utils::load_audio_file(audio_path)
+            .context("Failed to load audio for Voxtral")?;
+
+        let audio_path_to_use: std::path::PathBuf = if raw_samples.len() > 16000 {
+            let trimmed = crate::audio::vad::trim_silence(&raw_samples, 16000, -40.0);
+            if !trimmed.is_empty() && trimmed.len() < raw_samples.len() * 9 / 10 {
+                let saved_ms = (raw_samples.len() - trimmed.len()) as f64 / 16.0;
+                if saved_ms > 100.0 {
+                    tracing::info!(
+                        "Voxtral: VAD trimmed {:.0}ms of silence, processing {:.0}ms",
+                        saved_ms,
+                        trimmed.len() as f64 / 16.0
+                    );
+                }
+                // Write trimmed audio to temp file
+                let temp_path = std::env::temp_dir()
+                    .join(format!("voxtral_trimmed_{}.wav", uuid::Uuid::new_v4()));
+                {
+                    let spec = hound::WavSpec {
+                        channels: 1,
+                        sample_rate: 16000,
+                        bits_per_sample: 16,
+                        sample_format: hound::SampleFormat::Int,
+                    };
+                    let mut writer = hound::WavWriter::create(&temp_path, spec)
+                        .context("Failed to create temp WAV for Voxtral")?;
+                    for sample in &trimmed {
+                        let int_sample = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
+                        writer
+                            .write_sample(int_sample)
+                            .context("Failed to write sample")?;
+                    }
+                    writer.finalize().context("Failed to finalize temp WAV")?;
+                }
+                temp_path
+            } else {
+                audio_path.to_path_buf()
+            }
+        } else {
+            audio_path.to_path_buf()
+        };
+
         let output = python_runtime::run_python_asr_action(
             "voxtral_local",
             "transcribe",
             Some(self.selected_model_id()),
             &self.model_dir,
-            Some(audio_path),
+            Some(&audio_path_to_use),
             900,
         )
         .await
         .context("Voxtral local transcription failed")?;
+
+        // Cleanup temp file if we created one
+        if audio_path_to_use != audio_path {
+            let _ = std::fs::remove_file(&audio_path_to_use);
+        }
 
         let text = output.text.unwrap_or_default().trim().to_string();
         if text.is_empty() {

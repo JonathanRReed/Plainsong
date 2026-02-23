@@ -159,8 +159,9 @@ pub struct TranscriptionSettings {
 impl Default for TranscriptionSettings {
     fn default() -> Self {
         Self {
-            default_provider: "whisper".to_string(),
-            selected_model_id: "base.en".to_string(),
+            // Distil-Whisper is 6x faster than Whisper for English with minimal accuracy loss
+            default_provider: "distil_whisper".to_string(),
+            selected_model_id: "distil-large-v3.5".to_string(),
             provider_model_ids: HashMap::new(),
             auto_transcribe: true,
             enable_diarization: true,
