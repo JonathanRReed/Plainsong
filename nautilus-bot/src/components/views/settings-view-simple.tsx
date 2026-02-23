@@ -2355,6 +2355,91 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   )}
                 </div>
 
+                <div className="space-y-2">
+                  <Label>Meeting audio storage</Label>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={settings.transcription.meetingAudioStorageMode ?? "always"}
+                    onChange={(e: any) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          meetingAudioStorageMode: e.target.value,
+                        },
+                      })
+                    }
+                  >
+                    <option value="always">Always keep audio</option>
+                    <option value="transcript_only">Transcript only (delete audio after transcription)</option>
+                  </select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Auto-delete meeting data</Label>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={settings.transcription.meetingRetentionPreset ?? "never"}
+                    onChange={(e: any) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          meetingRetentionPreset: e.target.value,
+                        },
+                      })
+                    }
+                  >
+                    <option value="1m">After 1 month</option>
+                    <option value="2m">After 2 months</option>
+                    <option value="3m">After 3 months</option>
+                    <option value="never">Never</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                  {(settings.transcription.meetingRetentionPreset ?? "never") === "custom" && (
+                    <div className="space-y-2">
+                      <Label>Custom retention months</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={settings.transcription.meetingRetentionCustomMonths ?? 1}
+                        onBlur={handleSettingsTextBlur}
+                        onKeyDown={handleSettingsTextKeyDown}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                          const nextMonths = Math.max(1, Number(e.target.value) || 1);
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              meetingRetentionCustomMonths: nextMonths,
+                            },
+                          });
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Meeting retention delete mode</Label>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={settings.transcription.meetingRetentionDeleteMode ?? "audio_only"}
+                    onChange={(e: any) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          meetingRetentionDeleteMode: e.target.value,
+                        },
+                      })
+                    }
+                  >
+                    <option value="audio_only">Delete audio only</option>
+                    <option value="audio_and_transcript">Delete audio and transcript</option>
+                  </select>
+                </div>
+
                 <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-3">
                   <div className="space-y-1">
                     <Label className="text-destructive">Reset App Data</Label>
@@ -3231,7 +3316,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           size="sm"
                           title="Refresh model list"
                           onClick={async () => {
-                            console.log(`[DEBUG] Refresh clicked. Key len: ${apiKey.length}. Provider: ${provider}`);
                             if (apiKey.trim()) {
                               // If user typed a key but didn't save, save it now!
                               setSavingApiKey(true);
@@ -3273,7 +3357,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         onChange={(e: ChangeEvent<HTMLInputElement>) => setApiKey(e.target.value)}
                         onKeyDown={async (e) => {
                           if (e.key === "Enter" && apiKey.trim()) {
-                            console.log(`[DEBUG] Enter pressed. Saving key.`);
                             e.preventDefault();
                             if (savingApiKey) return;
 
@@ -3298,7 +3381,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       <Button
                         onClick={async () => {
                           if (!apiKey.trim()) return;
-                          console.log(`[DEBUG] Save Key clicked. Saving key.`);
                           setSavingApiKey(true);
                           setError(null);
                           try {

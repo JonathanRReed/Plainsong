@@ -73,10 +73,7 @@ impl DiarizationEngine {
         {
             let extractor = embedder::SpeakerEmbeddingExtractor::new();
             match &extractor {
-                Ok(e) => {
-                    let available = e.is_model_available();
-                    available
-                }
+                Ok(e) => e.is_model_available(),
                 Err(err) => {
                     tracing::warn!("Failed to create embedding extractor: {}", err);
                     false

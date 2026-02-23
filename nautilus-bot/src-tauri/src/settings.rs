@@ -146,6 +146,14 @@ pub struct TranscriptionSettings {
     pub dictation_retention_preset: String,
     /// Dictation retention custom duration in hours.
     pub dictation_retention_custom_hours: u32,
+    /// Meeting audio storage mode: always or transcript_only.
+    pub meeting_audio_storage_mode: String,
+    /// Meeting retention policy.
+    pub meeting_retention_preset: String,
+    /// Meeting retention custom duration in months.
+    pub meeting_retention_custom_months: u32,
+    /// Meeting retention delete mode: audio_only or audio_and_transcript.
+    pub meeting_retention_delete_mode: String,
     /// Dictation: Silence timeout in seconds before auto-stop (0 = disabled)
     pub dictation_silence_timeout_seconds: f32,
     /// Memory search mode: "fts" (default) or "ollama_embeddings"
@@ -185,6 +193,10 @@ impl Default for TranscriptionSettings {
             dictation_project_id: "inbox".to_string(),
             dictation_retention_preset: "never".to_string(),
             dictation_retention_custom_hours: 24,
+            meeting_audio_storage_mode: "always".to_string(),
+            meeting_retention_preset: "never".to_string(),
+            meeting_retention_custom_months: 1,
+            meeting_retention_delete_mode: "audio_only".to_string(),
             dictation_silence_timeout_seconds: 0.0,
             memory_search_mode: "fts".to_string(),
             embedding_model: "nomic-embed-text".to_string(),

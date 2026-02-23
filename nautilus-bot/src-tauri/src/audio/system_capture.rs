@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::atomic::{AtomicBool, Ordering};
+use crossbeam::channel::TrySendError;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -93,11 +94,15 @@ impl MixedAudioCapture {
         let is_capturing = Arc::clone(&self.is_capturing);
 
         self.capture_thread = Some(std::thread::spawn(move || {
+            const MIXED_BUFFER_CAPACITY: usize = 65_536;
             let host = cpal::default_host();
-            let mic_buffer: Arc<crossbeam::queue::SegQueue<f32>> =
-                Arc::new(crossbeam::queue::SegQueue::new());
-            let system_buffer: Arc<crossbeam::queue::SegQueue<f32>> =
-                Arc::new(crossbeam::queue::SegQueue::new());
+            let mic_buffer: Arc<crossbeam::queue::ArrayQueue<f32>> =
+                Arc::new(crossbeam::queue::ArrayQueue::new(MIXED_BUFFER_CAPACITY));
+            let system_buffer: Arc<crossbeam::queue::ArrayQueue<f32>> =
+                Arc::new(crossbeam::queue::ArrayQueue::new(MIXED_BUFFER_CAPACITY));
+            let dropped_mic_samples = Arc::new(AtomicU64::new(0));
+            let dropped_system_samples = Arc::new(AtomicU64::new(0));
+            let dropped_mixed_chunks = Arc::new(AtomicU64::new(0));
 
             let mut _mic_stream = None;
             let mut _sys_stream = None;
@@ -110,6 +115,8 @@ impl MixedAudioCapture {
                     let config = device.default_input_config()?;
                     let mic_buf = Arc::clone(&mic_buffer);
                     let is_cap = Arc::clone(&is_capturing);
+                    let dropped_samples_f32 = Arc::clone(&dropped_mic_samples);
+                    let dropped_samples_i16 = Arc::clone(&dropped_mic_samples);
 
                     let stream = match config.sample_format() {
                         cpal::SampleFormat::F32 => device.build_input_stream(
@@ -117,7 +124,11 @@ impl MixedAudioCapture {
                             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                                 if is_cap.load(Ordering::SeqCst) {
                                     for &sample in data {
-                                        mic_buf.push(sample);
+                                        if mic_buf.push(sample).is_err() {
+                                            let _ = mic_buf.pop();
+                                            let _ = mic_buf.push(sample);
+                                            dropped_samples_f32.fetch_add(1, Ordering::Relaxed);
+                                        }
                                     }
                                 }
                             },
@@ -129,7 +140,12 @@ impl MixedAudioCapture {
                             move |data: &[i16], _: &cpal::InputCallbackInfo| {
                                 if is_cap.load(Ordering::SeqCst) {
                                     for &sample in data {
-                                        mic_buf.push(sample as f32 / i16::MAX as f32);
+                                        let normalized = sample as f32 / i16::MAX as f32;
+                                        if mic_buf.push(normalized).is_err() {
+                                            let _ = mic_buf.pop();
+                                            let _ = mic_buf.push(normalized);
+                                            dropped_samples_i16.fetch_add(1, Ordering::Relaxed);
+                                        }
                                     }
                                 }
                             },
@@ -163,6 +179,8 @@ impl MixedAudioCapture {
                     let config = loopback_device.default_input_config()?;
                     let sys_buf = Arc::clone(&system_buffer);
                     let is_cap = Arc::clone(&is_capturing);
+                    let dropped_samples_f32 = Arc::clone(&dropped_system_samples);
+                    let dropped_samples_i16 = Arc::clone(&dropped_system_samples);
 
                     let stream = match config.sample_format() {
                         cpal::SampleFormat::F32 => loopback_device.build_input_stream(
@@ -170,7 +188,11 @@ impl MixedAudioCapture {
                             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                                 if is_cap.load(Ordering::SeqCst) {
                                     for &sample in data {
-                                        sys_buf.push(sample);
+                                        if sys_buf.push(sample).is_err() {
+                                            let _ = sys_buf.pop();
+                                            let _ = sys_buf.push(sample);
+                                            dropped_samples_f32.fetch_add(1, Ordering::Relaxed);
+                                        }
                                     }
                                 }
                             },
@@ -182,7 +204,12 @@ impl MixedAudioCapture {
                             move |data: &[i16], _: &cpal::InputCallbackInfo| {
                                 if is_cap.load(Ordering::SeqCst) {
                                     for &sample in data {
-                                        sys_buf.push(sample as f32 / i16::MAX as f32);
+                                        let normalized = sample as f32 / i16::MAX as f32;
+                                        if sys_buf.push(normalized).is_err() {
+                                            let _ = sys_buf.pop();
+                                            let _ = sys_buf.push(normalized);
+                                            dropped_samples_i16.fetch_add(1, Ordering::Relaxed);
+                                        }
                                     }
                                 }
                             },
@@ -225,11 +252,17 @@ impl MixedAudioCapture {
                     }
 
                     if output.len() >= 512 {
-                        if sender.send(output.clone()).is_err() {
-                            is_capturing.store(false, Ordering::SeqCst);
-                            break;
+                        let chunk = std::mem::take(&mut output);
+                        match sender.try_send(chunk) {
+                            Ok(()) => {}
+                            Err(TrySendError::Disconnected(_)) => {
+                                is_capturing.store(false, Ordering::SeqCst);
+                                break;
+                            }
+                            Err(TrySendError::Full(_)) => {
+                                dropped_mixed_chunks.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
-                        output.clear();
                     }
                 }
 
@@ -247,11 +280,17 @@ impl MixedAudioCapture {
                         }
 
                         if output.len() >= 512 {
-                            if sender.send(output.clone()).is_err() {
-                                is_capturing.store(false, Ordering::SeqCst);
-                                break;
+                            let chunk = std::mem::take(&mut output);
+                            match sender.try_send(chunk) {
+                                Ok(()) => {}
+                                Err(TrySendError::Disconnected(_)) => {
+                                    is_capturing.store(false, Ordering::SeqCst);
+                                    break;
+                                }
+                                Err(TrySendError::Full(_)) => {
+                                    dropped_mixed_chunks.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
-                            output.clear();
                         }
                     }
                 }
@@ -262,7 +301,25 @@ impl MixedAudioCapture {
             }
 
             if !output.is_empty() {
-                let _ = sender.send(output);
+                match sender.try_send(output) {
+                    Ok(()) => {}
+                    Err(TrySendError::Disconnected(_)) => {}
+                    Err(TrySendError::Full(_)) => {
+                        dropped_mixed_chunks.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+
+            let dropped_mic = dropped_mic_samples.load(Ordering::Relaxed);
+            let dropped_system = dropped_system_samples.load(Ordering::Relaxed);
+            let dropped_chunks = dropped_mixed_chunks.load(Ordering::Relaxed);
+            if dropped_mic > 0 || dropped_system > 0 || dropped_chunks > 0 {
+                tracing::warn!(
+                    "Mixed audio capture dropped samples/chunks (mic={}, system={}, chunks={})",
+                    dropped_mic,
+                    dropped_system,
+                    dropped_chunks
+                );
             }
         }));
 
@@ -276,13 +333,18 @@ impl MixedAudioCapture {
 
     pub fn stop(&mut self) {
         self.is_capturing.store(false, Ordering::SeqCst);
-        // Don't block on join - let the thread clean up in background
-        // The thread will exit when it sees is_capturing is false
         if let Some(handle) = self.capture_thread.take() {
-            // Drop the handle without joining - thread will self-terminate
+            let (done_tx, done_rx) = crossbeam::channel::bounded::<()>(1);
             std::thread::spawn(move || {
                 let _ = handle.join();
+                let _ = done_tx.send(());
             });
+            if done_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_err()
+            {
+                tracing::warn!("Timed out waiting for mixed capture thread to stop");
+            }
         }
         tracing::info!("Mixed audio capture stopped");
     }

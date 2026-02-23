@@ -316,14 +316,6 @@ impl DownloadManager {
         Ok(())
     }
 
-    pub async fn download_diarization_model(
-        &self,
-        _progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
-    ) -> Result<PathBuf> {
-        // Default to ECAPA-TDNN 512
-        self.download_diarization_model_by_id("ecapa_tdnn_speaker", _progress_callback).await
-    }
-
     /// Download a specific diarization model by ID
     pub async fn download_diarization_model_by_id(
         &self,

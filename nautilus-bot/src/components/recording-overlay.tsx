@@ -1,78 +1,9 @@
 import { useState, useEffect } from "react";
-import { cn } from "@/lib/utils";
-import { useRecording } from "@/hooks/use-recording";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { RecordingWaveform } from "@/components/waveform-visualizer";
-import { Mic, Square, Monitor, Mic2, AlertCircle, CheckCircle } from "lucide-react";
+import { Mic, Monitor, AlertCircle, CheckCircle } from "lucide-react";
 import { checkSystemAudioAvailability, getLoopbackDeviceName } from "@/lib/tauri";
 
-interface RecordingOverlayProps {
-  isDictation?: boolean;
-}
-
-export function RecordingOverlay({ isDictation }: RecordingOverlayProps) {
-  const { isRecording, recordingId, formattedDuration, isSystemAudioActive, stopMeeting, recordingMode } = useRecording();
-
-  // If not recording, or if recording in dictation mode (which has its own dedicated window/popup),
-  // do not show the main window overlay.
-  if (!isRecording || recordingMode === "dictation") return null;
-
-  // Legacy prop check can be ignored or removed since recordingMode is the source of truth.
-  if (isDictation) return null;
-
-  return (
-    <>
-      <div className="fixed inset-0 z-40 pointer-events-none">
-        <div className={cn(
-          "absolute inset-0 border-4 transition-colors",
-          isRecording ? "border-active" : "border-transparent"
-        )} />
-      </div>
-
-      <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 w-[500px]">
-        <div className="bg-active text-active-foreground rounded-xl shadow-2xl overflow-hidden">
-          {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-active-foreground/20">
-            <div className="flex items-center gap-3">
-              <Mic2 className="h-5 w-5" />
-              <span className="font-medium">Recording</span>
-            </div>
-
-            <div className="flex items-center gap-3">
-              {isSystemAudioActive && (
-                <div className="flex items-center gap-1 px-2 py-1 bg-active-foreground/20 rounded text-xs">
-                  <Monitor className="h-3 w-3" />
-                  <span>System Audio</span>
-                </div>
-              )}
-
-              <span className="font-mono text-lg">{formattedDuration}</span>
-
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 text-active-foreground hover:bg-active-foreground/20"
-                onClick={stopMeeting}
-              >
-                <Square className="h-4 w-4 fill-current" />
-              </Button>
-            </div>
-          </div>
-
-          {/* Waveform */}
-          <div className="px-4 py-3 bg-active/50">
-            <RecordingWaveform
-              recordingId={recordingId || "temp"}
-              isRecording={isRecording}
-              height={50}
-            />
-          </div>
-        </div>
-      </div>
-    </>
-  );
-}
 
 const MEETING_TEMPLATES = [
   { value: "auto", label: "Auto", description: "Let AI decide the best format" },

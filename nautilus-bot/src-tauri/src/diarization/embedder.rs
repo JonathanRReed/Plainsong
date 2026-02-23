@@ -2,6 +2,7 @@
 //!
 //! Uses a speaker embedding model (e.g., ResNet, ECAPA-TDNN) via ONNX Runtime
 //! followed by spectral clustering to identify unique speakers.
+#![allow(clippy::needless_range_loop)]
 
 use anyhow::Result;
 #[cfg(feature = "diarization")]

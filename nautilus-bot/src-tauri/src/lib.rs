@@ -11,7 +11,6 @@ mod integrations;
 mod license;
 mod llm;
 mod models;
-mod performance;
 mod secrets;
 mod settings;
 mod streaming;
@@ -1227,6 +1226,7 @@ async fn start_recording(
         Some(options.system_audio),
         None,
     );
+    emit_recording_status(&app, &recording_id, "recording", None, None);
 
     Ok(recording_id)
 }
@@ -1245,14 +1245,33 @@ async fn stop_recording(
 
     let (audio_path, content_hash) = {
         let mut audio = state.audio_capture.lock().await;
-        audio
-            .stop_recording(&recordingId)
-            .map_err(|e| e.to_string())?
+        match audio.stop_recording(&recordingId) {
+            Ok(result) => result,
+            Err(error) => {
+                let message = format!("Failed to finalize recording: {}", error);
+                {
+                    let mut db = state.db.lock().await;
+                    let _ = db.update_recording_status(&recordingId, "error");
+                }
+                emit_recording_status(&app, &recordingId, "error", Some(&message), None);
+                emit_recording_state(
+                    &app,
+                    "error",
+                    Some(recordingId.as_str()),
+                    None,
+                    None,
+                    Some(&message),
+                );
+                return Err(message);
+            }
+        }
     };
 
     let mut db = state.db.lock().await;
     let duration_seconds = compute_wav_duration_seconds(&audio_path);
     db.update_recording_path(&recordingId, &audio_path, duration_seconds)
+        .map_err(|e| e.to_string())?;
+    db.update_recording_status(&recordingId, "processing")
         .map_err(|e| e.to_string())?;
 
     // Log audit event with hash
@@ -1265,6 +1284,7 @@ async fn stop_recording(
     if let Err(e) = db.log_audit_event("recording_stopped", Some(details), "info") {
         tracing::warn!("Failed to log audit event: {}", e);
     }
+    drop(db);
 
     // Hide the recording overlay immediately - don't wait for transcription
     hide_overlay_window(&app, RECORDING_OVERLAY_LABEL);
@@ -1275,6 +1295,13 @@ async fn stop_recording(
         None,
         None,
         Some("Processing transcript"),
+    );
+    emit_recording_status(
+        &app,
+        &recordingId,
+        "processing",
+        Some("Processing transcript"),
+        Some(0.0),
     );
 
     // Trigger transcription in background using ASR manager
@@ -1298,6 +1325,14 @@ async fn stop_recording(
             tracing::error!("Audio file does not exist: {:?}", path);
             let mut db = db_clone.lock().await;
             let _ = db.update_recording_status(&recording_id_clone, "error");
+            drop(db);
+            emit_recording_status(
+                &app_handle,
+                &recording_id_clone,
+                "error",
+                Some("Audio file not found"),
+                None,
+            );
             emit_recording_state(
                 &app_handle,
                 "error",
@@ -1353,21 +1388,30 @@ async fn stop_recording(
                         recording_id_clone
                     );
                     tracing::error!("{}", error);
-                    let mut db = db_clone.lock().await;
-                    if let Err(update_error) =
-                        db.update_recording_status(&recording_id_clone, "error")
                     {
-                        tracing::error!("Failed to update recording status: {}", update_error);
+                        let mut db = db_clone.lock().await;
+                        if let Err(update_error) =
+                            db.update_recording_status(&recording_id_clone, "error")
+                        {
+                            tracing::error!("Failed to update recording status: {}", update_error);
+                        }
+                        let details = serde_json::json!({
+                            "recording_id": &recording_id_clone,
+                            "error": &error
+                        });
+                        if let Err(audit_error) =
+                            db.log_audit_event("transcription_failed", Some(details), "error")
+                        {
+                            tracing::warn!("Failed to log audit event: {}", audit_error);
+                        }
                     }
-                    let details = serde_json::json!({
-                        "recording_id": &recording_id_clone,
-                        "error": &error
-                    });
-                    if let Err(audit_error) =
-                        db.log_audit_event("transcription_failed", Some(details), "error")
-                    {
-                        tracing::warn!("Failed to log audit event: {}", audit_error);
-                    }
+                    emit_recording_status(
+                        &app_handle,
+                        &recording_id_clone,
+                        "error",
+                        Some(&error),
+                        None,
+                    );
                     preview_task.abort();
                     emit_recording_state(
                         &app_handle,
@@ -1681,9 +1725,16 @@ async fn stop_recording(
                 if let Err(e) = db.update_recording_status(&recording_id_clone, "completed") {
                     tracing::error!("Failed to update recording status: {}", e);
                 }
+                drop(db);
+                emit_recording_status(
+                    &app_handle,
+                    &recording_id_clone,
+                    "completed",
+                    None,
+                    Some(1.0),
+                );
 
                 let transcript_for_auto_name = transcript.full_text.clone();
-                drop(db);
 
                 let app_state = app_handle.state::<AppState>();
                 match auto_name_meeting_recording(
@@ -1722,11 +1773,20 @@ async fn stop_recording(
 
                 let mut db = db_clone.lock().await;
 
-                let encrypt_recordings = {
+                let (encrypt_recordings, meeting_audio_storage_mode) = {
                     let settings_manager = settings_manager_clone.lock().await;
-                    settings_manager.settings().privacy.encrypt_recordings
+                    (
+                        settings_manager.settings().privacy.encrypt_recordings,
+                        settings_manager
+                            .settings()
+                            .transcription
+                            .meeting_audio_storage_mode
+                            .clone(),
+                    )
                 };
-                if encrypt_recordings {
+                let meeting_audio_storage_mode =
+                    normalize_meeting_audio_storage_mode(&meeting_audio_storage_mode).to_string();
+                if encrypt_recordings && meeting_audio_storage_mode != "transcript_only" {
                     let recording_key = {
                         let vault_state = vault_state_clone.lock().await;
                         if vault_state.unlocked {
@@ -1783,6 +1843,50 @@ async fn stop_recording(
                     }
                 }
 
+                if meeting_audio_storage_mode == "transcript_only" {
+                    let stored_audio_path = db
+                        .get_recording(&recording_id_clone)
+                        .ok()
+                        .flatten()
+                        .map(|recording| recording.audio_path)
+                        .unwrap_or_default();
+
+                    if !stored_audio_path.trim().is_empty() {
+                        let candidate = Path::new(&stored_audio_path);
+                        if candidate.exists() {
+                            if let Err(error) = std::fs::remove_file(candidate) {
+                                tracing::warn!(
+                                    "Failed to remove meeting audio '{}' for transcript-only storage: {}",
+                                    stored_audio_path,
+                                    error
+                                );
+                            }
+                        }
+                    }
+
+                    if let Err(error) = db.clear_recording_audio_path(&recording_id_clone) {
+                        tracing::warn!(
+                            "Failed to clear audio path for transcript-only meeting '{}': {}",
+                            recording_id_clone,
+                            error
+                        );
+                    } else if let Err(error) = db.log_audit_event(
+                        "meeting_audio_discarded",
+                        Some(serde_json::json!({
+                            "recording_id": &recording_id_clone,
+                            "mode": "transcript_only",
+                            "audio_path": stored_audio_path,
+                        })),
+                        "info",
+                    ) {
+                        tracing::warn!(
+                            "Failed to log transcript-only audio discard for '{}': {}",
+                            recording_id_clone,
+                            error
+                        );
+                    }
+                }
+
                 // Log audit event
                 let details = serde_json::json!({
                     "recording_id": &recording_id_clone,
@@ -1797,22 +1901,42 @@ async fn stop_recording(
                 {
                     tracing::warn!("Failed to log audit event: {}", e);
                 }
+                drop(db);
+
+                let app_state = app_handle.state::<AppState>();
+                let _ = enforce_meeting_retention_policy(
+                    app_state.inner(),
+                    Some(&app_handle),
+                    "meeting-completed",
+                )
+                .await;
             }
             Err(e) => {
                 tracing::error!("Failed to transcribe {}: {}", recording_id_clone, e);
-                let mut db = db_clone.lock().await;
-                if let Err(e) = db.update_recording_status(&recording_id_clone, "error") {
-                    tracing::error!("Failed to update recording status: {}", e);
+                let error_message = e.to_string();
+                {
+                    let mut db = db_clone.lock().await;
+                    if let Err(update_error) = db.update_recording_status(&recording_id_clone, "error")
+                    {
+                        tracing::error!("Failed to update recording status: {}", update_error);
+                    }
+                    let details = serde_json::json!({
+                        "recording_id": &recording_id_clone,
+                        "error": &error_message
+                    });
+                    if let Err(audit_error) =
+                        db.log_audit_event("transcription_failed", Some(details), "error")
+                    {
+                        tracing::warn!("Failed to log audit event: {}", audit_error);
+                    }
                 }
-
-                // Log audit event
-                let details = serde_json::json!({
-                    "recording_id": &recording_id_clone,
-                    "error": e.to_string()
-                });
-                if let Err(e) = db.log_audit_event("transcription_failed", Some(details), "error") {
-                    tracing::warn!("Failed to log audit event: {}", e);
-                }
+                emit_recording_status(
+                    &app_handle,
+                    &recording_id_clone,
+                    "error",
+                    Some(&error_message),
+                    None,
+                );
             }
         }
 
@@ -3441,6 +3565,23 @@ async fn save_settings(
         if settings.transcription.dictation_retention_custom_hours == 0 {
             settings.transcription.dictation_retention_custom_hours = 1;
         }
+        settings.transcription.meeting_audio_storage_mode =
+            normalize_meeting_audio_storage_mode(
+                &settings.transcription.meeting_audio_storage_mode,
+            )
+            .to_string();
+        settings.transcription.meeting_retention_preset = normalize_meeting_retention_preset(
+            &settings.transcription.meeting_retention_preset,
+        )
+        .to_string();
+        if settings.transcription.meeting_retention_custom_months == 0 {
+            settings.transcription.meeting_retention_custom_months = 1;
+        }
+        settings.transcription.meeting_retention_delete_mode =
+            normalize_meeting_retention_delete_mode(
+                &settings.transcription.meeting_retention_delete_mode,
+            )
+            .to_string();
         settings.shortcuts.toggle_dictation_alternates.clear();
         validate_shortcut_settings(&settings.shortcuts)?;
         if settings
@@ -3490,6 +3631,7 @@ async fn save_settings(
 
         let _ =
             enforce_dictation_retention_policy(state.inner(), Some(&app), "settings-save").await;
+        let _ = enforce_meeting_retention_policy(state.inner(), Some(&app), "settings-save").await;
 
         Ok(())
     }
@@ -4780,6 +4922,25 @@ fn emit_recording_state(
         "recording" => show_recording_tray_icon(app),
         "stopped" | "error" | "idle" => hide_recording_tray_icon(app),
         _ => {}
+    }
+}
+
+fn emit_recording_status(
+    app: &AppHandle,
+    recording_id: &str,
+    status: &str,
+    message: Option<&str>,
+    progress: Option<f64>,
+) {
+    let payload = serde_json::json!({
+        "recordingId": recording_id,
+        "status": status,
+        "message": message,
+        "progress": progress,
+        "updatedAt": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Err(error) = app.emit("recording-status-changed", payload) {
+        tracing::warn!("Failed to emit recording status: {}", error);
     }
 }
 
@@ -6288,6 +6449,12 @@ pub fn run() {
                 {
                     tracing::warn!("Startup dictation retention cleanup failed: {}", error);
                 }
+                if let Err(error) =
+                    enforce_meeting_retention_policy(state.inner(), Some(&app_handle), "startup")
+                        .await
+                {
+                    tracing::warn!("Startup meeting retention cleanup failed: {}", error);
+                }
 
                 loop {
                     tokio::time::sleep(Duration::from_secs(1800)).await;
@@ -6299,6 +6466,15 @@ pub fn run() {
                     .await
                     {
                         tracing::warn!("Background dictation retention cleanup failed: {}", error);
+                    }
+                    if let Err(error) = enforce_meeting_retention_policy(
+                        state.inner(),
+                        Some(&app_handle),
+                        "background-interval",
+                    )
+                    .await
+                    {
+                        tracing::warn!("Background meeting retention cleanup failed: {}", error);
                     }
                 }
             });
@@ -6830,6 +7006,49 @@ mod tests {
     }
 
     #[test]
+    fn meeting_retention_normalization_behaves_as_expected() {
+        assert_eq!(normalize_meeting_audio_storage_mode("always"), "always");
+        assert_eq!(
+            normalize_meeting_audio_storage_mode("transcript_only"),
+            "transcript_only"
+        );
+        assert_eq!(normalize_meeting_audio_storage_mode("random"), "always");
+
+        assert_eq!(normalize_meeting_retention_preset("1m"), "1m");
+        assert_eq!(normalize_meeting_retention_preset("2m"), "2m");
+        assert_eq!(normalize_meeting_retention_preset("3m"), "3m");
+        assert_eq!(normalize_meeting_retention_preset("custom"), "custom");
+        assert_eq!(normalize_meeting_retention_preset(""), "never");
+
+        assert_eq!(
+            normalize_meeting_retention_delete_mode("audio_only"),
+            "audio_only"
+        );
+        assert_eq!(
+            normalize_meeting_retention_delete_mode("audio_and_transcript"),
+            "audio_and_transcript"
+        );
+        assert_eq!(
+            normalize_meeting_retention_delete_mode("nope"),
+            "audio_only"
+        );
+    }
+
+    #[test]
+    fn meeting_retention_cutoff_behaves_as_expected() {
+        let now = chrono::Utc::now();
+        assert!(meeting_retention_cutoff("never", 2, now).is_none());
+        assert_eq!(
+            meeting_retention_cutoff("2m", 9, now),
+            Some(now - chrono::Duration::days(60))
+        );
+        assert_eq!(
+            meeting_retention_cutoff("custom", 0, now),
+            Some(now - chrono::Duration::days(30))
+        );
+    }
+
+    #[test]
     fn meeting_placeholder_title_detection_is_strict() {
         assert!(is_meeting_placeholder_title("Meeting - 2026-02-22 11:30"));
         assert!(!is_meeting_placeholder_title("Meeting Notes"));
@@ -6955,6 +7174,30 @@ fn normalize_dictation_retention_preset(value: &str) -> &'static str {
     }
 }
 
+fn normalize_meeting_audio_storage_mode(value: &str) -> &'static str {
+    match value {
+        "transcript_only" => "transcript_only",
+        _ => "always",
+    }
+}
+
+fn normalize_meeting_retention_preset(value: &str) -> &'static str {
+    match value {
+        "1m" => "1m",
+        "2m" => "2m",
+        "3m" => "3m",
+        "custom" => "custom",
+        _ => "never",
+    }
+}
+
+fn normalize_meeting_retention_delete_mode(value: &str) -> &'static str {
+    match value {
+        "audio_and_transcript" => "audio_and_transcript",
+        _ => "audio_only",
+    }
+}
+
 fn dictation_retention_cutoff(
     preset: &str,
     custom_hours: u32,
@@ -6967,6 +7210,22 @@ fn dictation_retention_cutoff(
         "custom" => Some(now - chrono::Duration::hours(i64::from(custom_hours.max(1)))),
         _ => None,
     }
+}
+
+fn meeting_retention_cutoff(
+    preset: &str,
+    custom_months: u32,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let months = match normalize_meeting_retention_preset(preset) {
+        "1m" => 1,
+        "2m" => 2,
+        "3m" => 3,
+        "custom" => custom_months.max(1),
+        _ => return None,
+    };
+
+    Some(now - chrono::Duration::days(i64::from(months) * 30))
 }
 
 async fn enforce_dictation_retention_policy(
@@ -7062,6 +7321,140 @@ async fn enforce_dictation_retention_policy(
                 "preset": normalize_dictation_retention_preset(&preset),
                 "deletedRecordings": deleted_recordings,
                 "deletedAudioFiles": deleted_audio_files,
+            }),
+        );
+    }
+
+    Ok((deleted_recordings, deleted_audio_files))
+}
+
+async fn enforce_meeting_retention_policy(
+    state: &AppState,
+    app: Option<&AppHandle>,
+    reason: &str,
+) -> Result<(usize, usize), String> {
+    let (preset, custom_months, delete_mode) = {
+        let settings_manager = state.settings_manager.lock().await;
+        let transcription = &settings_manager.settings().transcription;
+        (
+            transcription.meeting_retention_preset.clone(),
+            transcription.meeting_retention_custom_months,
+            transcription.meeting_retention_delete_mode.clone(),
+        )
+    };
+
+    let now = chrono::Utc::now();
+    let Some(cutoff) = meeting_retention_cutoff(&preset, custom_months, now) else {
+        return Ok((0, 0));
+    };
+
+    let delete_mode = normalize_meeting_retention_delete_mode(&delete_mode).to_string();
+    let mut db = state.db.lock().await;
+    let recordings = db
+        .get_recordings(None)
+        .map_err(|error| format!("Failed to load recordings for meeting retention cleanup: {}", error))?;
+
+    let mut deleted_recordings = 0usize;
+    let mut deleted_audio_files = 0usize;
+    let mut audio_only_clears = 0usize;
+    let mut audio_paths: Vec<String> = Vec::new();
+
+    for recording in recordings
+        .into_iter()
+        .filter(|recording| recording.source_type == "meeting" && recording.created_at <= cutoff)
+    {
+        if delete_mode == "audio_and_transcript" {
+            match db.delete_recording(&recording.id) {
+                Ok(path) => {
+                    deleted_recordings += 1;
+                    if !path.trim().is_empty() {
+                        audio_paths.push(path);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "Failed to delete meeting '{}' during retention cleanup: {}",
+                        recording.id,
+                        error
+                    );
+                }
+            }
+            continue;
+        }
+
+        if recording.audio_path.trim().is_empty() {
+            continue;
+        }
+
+        let candidate = std::path::Path::new(&recording.audio_path);
+        if candidate.exists() {
+            match std::fs::remove_file(candidate) {
+                Ok(()) => deleted_audio_files += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        "Failed to remove meeting audio '{}' during retention cleanup: {}",
+                        recording.audio_path,
+                        error
+                    );
+                }
+            }
+        }
+        if let Err(error) = db.clear_recording_audio_path(&recording.id) {
+            tracing::warn!(
+                "Failed to clear meeting audio path for '{}' during retention cleanup: {}",
+                recording.id,
+                error
+            );
+        } else {
+            audio_only_clears += 1;
+        }
+    }
+
+    if !audio_paths.is_empty() {
+        for audio_path in audio_paths {
+            let candidate = std::path::Path::new(&audio_path);
+            if candidate.exists() {
+                match std::fs::remove_file(candidate) {
+                    Ok(()) => deleted_audio_files += 1,
+                    Err(error) => {
+                        tracing::warn!(
+                            "Failed to remove meeting audio '{}' during retention cleanup: {}",
+                            audio_path,
+                            error
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if deleted_recordings > 0 || deleted_audio_files > 0 || audio_only_clears > 0 {
+        let details = serde_json::json!({
+            "reason": reason,
+            "preset": normalize_meeting_retention_preset(&preset),
+            "custom_months": custom_months,
+            "delete_mode": delete_mode,
+            "deleted_recordings": deleted_recordings,
+            "deleted_audio_files": deleted_audio_files,
+            "audio_paths_cleared": audio_only_clears,
+        });
+        if let Err(error) = db.log_audit_event("meeting_retention_cleanup", Some(details), "info")
+        {
+            tracing::warn!("Failed to log meeting retention cleanup event: {}", error);
+        }
+    }
+    drop(db);
+
+    if let Some(app_handle) = app {
+        let _ = app_handle.emit(
+            "meeting-retention-cleanup",
+            serde_json::json!({
+                "reason": reason,
+                "preset": normalize_meeting_retention_preset(&preset),
+                "deleteMode": delete_mode,
+                "deletedRecordings": deleted_recordings,
+                "deletedAudioFiles": deleted_audio_files,
+                "audioPathsCleared": audio_only_clears,
             }),
         );
     }
@@ -7307,6 +7700,13 @@ async fn transcribe_recording_in_chunks(
                         "progress": progress,
                     }),
                 );
+                emit_recording_status(
+                    app,
+                    recording_id,
+                    "processing",
+                    Some("Processing transcript"),
+                    Some(progress),
+                );
             }
 
             Ok(result)
@@ -7470,6 +7870,13 @@ async fn transcribe_recording_in_chunks(
             "chunkIndex": chunk_count,
             "progress": 1.0,
         }),
+    );
+    emit_recording_status(
+        app,
+        recording_id,
+        "processing",
+        Some("Processing transcript"),
+        Some(1.0),
     );
 
     Ok(asr::TranscriptionResult {

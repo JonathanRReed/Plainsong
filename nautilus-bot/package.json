@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "node ./scripts/tauri-wrapper.mjs"
+    "tauri": "node ./scripts/tauri-wrapper.mjs",
+    "gate:size": "node scripts/size-gate.mjs --app src-tauri/target/release/bundle/macos/Nautilus.app --max-mb 35"
   },
   "keywords": ["speech-to-text", "transcription", "dictation", "meeting-recorder", "ai", "whisper"],
   "author": "NautilusBot",

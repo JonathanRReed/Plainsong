@@ -14,6 +14,7 @@ import { TranscriptViewer, TranscriptSearch } from "@/components/transcript-view
 import { RecordingWaveform, WaveformVisualizer } from "@/components/waveform-visualizer";
 import { AiAnalysisPanel } from "@/components/ai-analysis-panel";
 import {
+  getRecording,
   getRecordingWaveform,
   openRecordingAudio,
   getSpeakers,
@@ -44,6 +45,34 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
+
+function normalizeTranscriptForViewer(
+  transcript: Transcript | null,
+  recordingId: string
+): Transcript | null {
+  if (!transcript) return null;
+  const normalizedSegments: TranscriptSegment[] = Array.isArray(transcript.segments)
+    ? transcript.segments
+        .filter((segment): segment is TranscriptSegment => {
+          return Boolean(
+            segment &&
+              typeof segment.text === "string" &&
+              Number.isFinite(segment.startTime) &&
+              Number.isFinite(segment.endTime)
+          );
+        })
+        .map((segment, index) => ({
+          id: segment.id || `${transcript.id ?? recordingId}-segment-${index}`,
+          startTime: Number.isFinite(segment.startTime) ? segment.startTime : 0,
+          endTime: Number.isFinite(segment.endTime) ? segment.endTime : 0,
+          text: segment.text ?? "",
+          speakerId: segment.speakerId,
+          confidence: Number.isFinite(segment.confidence) ? segment.confidence : 0,
+        }))
+    : [];
+
+  return { ...transcript, segments: normalizedSegments };
+}
 
 export function RecordingsView() {
   const { recordings, refetch } = useRecordings();
@@ -81,10 +110,19 @@ export function RecordingsView() {
     message: string;
   } | null>(null);
   const [meetingSearch, setMeetingSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "completed" | "recording" | "error">(
+  const [statusFilter, setStatusFilter] = useState<
+    "all" | "completed" | "recording" | "processing" | "error"
+  >(
     "all"
   );
   const [isBulkReclassifying, setIsBulkReclassifying] = useState(false);
+
+  type RecordingStatusChangedEvent = {
+    recordingId: string;
+    status: Recording["status"];
+    message?: string | null;
+    progress?: number | null;
+  };
 
   useEffect(() => {
     if (lastRecordingState.current && !isRecording) {
@@ -175,10 +213,96 @@ export function RecordingsView() {
     };
   }, [refetch]);
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<RecordingStatusChangedEvent>("recording-status-changed", (event) => {
+      const payload = event.payload;
+      if (!payload?.recordingId) return;
+
+      if (selectedRecording?.id === payload.recordingId) {
+        setSelectedRecording((current) =>
+          current ? { ...current, status: payload.status } : current
+        );
+      }
+
+      if (payload.status === "completed" || payload.status === "error") {
+        refetch();
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, [refetch, selectedRecording?.id]);
+
+  useEffect(() => {
+    if (!showRecordingDetail || !selectedRecording) {
+      return;
+    }
+
+    if (selectedRecording.status === "error") {
+      return;
+    }
+
+    const shouldPoll =
+      selectedRecording.status === "processing" ||
+      selectedTranscript == null;
+    if (!shouldPoll) {
+      return;
+    }
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const [latestRecording, latestTranscript] = await Promise.all([
+          getRecording(selectedRecording.id),
+          getTranscript(selectedRecording.id),
+        ]);
+        if (cancelled) return;
+
+        if (latestRecording) {
+          setSelectedRecording((current) =>
+            current?.id === latestRecording.id ? latestRecording : current
+          );
+        }
+        if (latestTranscript) {
+          setSelectedTranscript(
+            normalizeTranscriptForViewer(latestTranscript, selectedRecording.id)
+          );
+        }
+
+        if (
+          latestRecording &&
+          (latestRecording.status === "completed" || latestRecording.status === "error")
+        ) {
+          refetch();
+        }
+      } catch (error) {
+        console.warn("Recording detail auto-refresh failed:", error);
+      }
+    };
+
+    void poll();
+    const id = setInterval(() => {
+      void poll();
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [
+    refetch,
+    selectedRecording,
+    selectedTranscript,
+    showRecordingDetail,
+  ]);
+
   const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean; template?: string }) => {
     try {
       const startedId = await startMeeting({ ...options, projectId: "default" });
-      console.log("startMeeting returned:", startedId);
       if (startedId) {
         refetch();
       }
@@ -213,34 +337,7 @@ export function RecordingsView() {
       let hadAnyFailure = false;
 
       if (transcriptResult.status === "fulfilled") {
-        const transcript = transcriptResult.value;
-        const normalizedSegments: TranscriptSegment[] = Array.isArray(transcript?.segments)
-          ? transcript.segments
-              .filter((segment): segment is TranscriptSegment => {
-                return Boolean(
-                  segment &&
-                    typeof segment.text === "string" &&
-                    Number.isFinite(segment.startTime) &&
-                    Number.isFinite(segment.endTime)
-                );
-              })
-              .map((segment, index) => ({
-                id: segment.id || `${transcript?.id ?? recording.id}-segment-${index}`,
-                startTime: Number.isFinite(segment.startTime) ? segment.startTime : 0,
-                endTime: Number.isFinite(segment.endTime) ? segment.endTime : 0,
-                text: segment.text ?? "",
-                speakerId: segment.speakerId,
-                confidence: Number.isFinite(segment.confidence) ? segment.confidence : 0,
-              }))
-          : [];
-        setSelectedTranscript(
-          transcript
-            ? {
-                ...transcript,
-                segments: normalizedSegments,
-              }
-            : null
-        );
+        setSelectedTranscript(normalizeTranscriptForViewer(transcriptResult.value, recording.id));
       } else {
         hadAnyFailure = true;
         setSelectedTranscript(null);
@@ -602,6 +699,13 @@ export function RecordingsView() {
                     Recording
                   </Button>
                   <Button
+                    variant={statusFilter === "processing" ? "active" : "outline"}
+                    size="sm"
+                    onClick={() => setStatusFilter("processing")}
+                  >
+                    Processing
+                  </Button>
+                  <Button
                     variant={statusFilter === "error" ? "active" : "outline"}
                     size="sm"
                     onClick={() => setStatusFilter("error")}
@@ -706,7 +810,14 @@ export function RecordingsView() {
                           <div className="flex items-center gap-2 text-sm text-muted-foreground">
                             <span>{new Date(recording.createdAt).toLocaleString()}</span>
                             <span>•</span>
-                            <span className="capitalize">{recording.status}</span>
+                            {recording.status === "processing" ? (
+                              <span className="inline-flex items-center gap-1">
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                                Processing
+                              </span>
+                            ) : (
+                              <span className="capitalize">{recording.status}</span>
+                            )}
                             <span>•</span>
                             <span>Meeting</span>
                           </div>
@@ -719,6 +830,7 @@ export function RecordingsView() {
                           variant="ghost"
                           size="icon"
                           className="h-8 w-8"
+                          disabled={!recording.audioPath}
                           onClick={(e) => {
                             e.stopPropagation();
                             handlePlayAudio(recording);
@@ -891,14 +1003,25 @@ export function RecordingsView() {
                         if (!selectedRecording) return;
                         await updateTranscriptSegment(selectedRecording.id, segmentId, newText);
                         const updated = await getTranscript(selectedRecording.id);
-                        if (updated) setSelectedTranscript(updated);
+                        if (updated) {
+                          setSelectedTranscript(
+                            normalizeTranscriptForViewer(updated, selectedRecording.id)
+                          );
+                        }
                       }}
                     />
                   </div>
                 </>
               ) : (
                 <div className="flex-1 flex items-center justify-center text-muted-foreground">
-                  Transcript is not available yet. It will appear after processing completes.
+                  {selectedRecording?.status === "processing" ? (
+                    <span className="inline-flex items-center">
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Processing transcript...
+                    </span>
+                  ) : (
+                    "Transcript is not available yet. It will appear after processing completes."
+                  )}
                 </div>
               )}
             </TabsContent>

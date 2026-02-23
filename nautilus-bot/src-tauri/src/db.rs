@@ -546,8 +546,16 @@ impl Database {
         duration_seconds: i64,
     ) -> Result<()> {
         self.conn.execute(
-            "UPDATE recordings SET audio_path = ?1, duration = ?2, status = 'completed', updated_at = ?3 WHERE id = ?4",
+            "UPDATE recordings SET audio_path = ?1, duration = ?2, updated_at = ?3 WHERE id = ?4",
             params![audio_path, duration_seconds, Utc::now().to_rfc3339(), recording_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_recording_audio_path(&mut self, recording_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE recordings SET audio_path = '', updated_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), recording_id],
         )?;
         Ok(())
     }

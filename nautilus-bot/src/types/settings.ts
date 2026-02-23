@@ -48,6 +48,10 @@ export interface TranscriptionSettings {
   dictationProjectId: string;
   dictationRetentionPreset?: "immediate" | "24h" | "72h" | "never" | "custom";
   dictationRetentionCustomHours?: number;
+  meetingAudioStorageMode?: "always" | "transcript_only";
+  meetingRetentionPreset?: "1m" | "2m" | "3m" | "custom" | "never";
+  meetingRetentionCustomMonths?: number;
+  meetingRetentionDeleteMode?: "audio_only" | "audio_and_transcript";
   dictationSilenceTimeoutSeconds: number;
   memorySearchMode: "fts" | "ollama_embeddings";
   embeddingModel: string;

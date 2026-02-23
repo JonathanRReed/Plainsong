@@ -21,6 +21,7 @@ This checklist tracks remaining release blockers for strict all-provider GA on m
 - [ ] Rust live cloud integration test gate passes (`asr_live_cloud_integration`).
 - [ ] Local ASR performance gate passes (`asr_local_performance_gate`, RTF <= 1.2).
 - [ ] Cold-start gate passes on M1-class baseline (`scripts/cold-start-gate.mjs`, threshold < 2500ms).
+- [ ] Bundle size gate passes (`node scripts/size-gate.mjs --app src-tauri/target/release/bundle/macos/Nautilus.app --max-mb 35`).
 - [ ] Standard build-quality gates remain green (`tsc`, `npm test`, `vite build`, `fmt`, `clippy`, `check`, `test --lib`).
 
 ## D) Packaged QA (Required)
@@ -29,6 +30,8 @@ This checklist tracks remaining release blockers for strict all-provider GA on m
 - [ ] Execute full Windows packaged QA matrix and attach evidence.
 - [ ] Validate updater check/install path on both platforms with signed artifacts.
 - [ ] Validate fresh install and upgrade paths on both platforms.
+- [ ] 3h mic+system meeting soak test passes (record → stop → transcript complete).
+- [ ] Idle CPU baseline in packaged app is < 1% while app window is open and not recording.
 
 ## E) Final Signoff
 

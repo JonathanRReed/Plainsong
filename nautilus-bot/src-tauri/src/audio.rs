@@ -11,10 +11,10 @@ use crate::audio::vad::{VadConfig, VoiceActivityDetector};
 use crate::models::RecordingOptions;
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use crossbeam::channel::{bounded, Receiver, Sender};
+use crossbeam::channel::{bounded, Receiver, Sender, TrySendError};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -63,14 +63,13 @@ pub struct RecordingSession {
 struct ActiveRecordingSession {
     id: String,
     audio_path: PathBuf,
-    stop_sender: Sender<()>,
     writer_handle: Option<JoinHandle<()>>,
     capture_stop_flag: Arc<AtomicBool>,
     capture_handle: Option<JoinHandle<()>>,
     mixed_capture: Option<MixedAudioCapture>,
     waveform_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
     /// Shared queue for streaming preview: capture threads push chunks here
-    pub streaming_queue: Arc<crossbeam::queue::SegQueue<Vec<f32>>>,
+    pub streaming_queue: Arc<crossbeam::queue::ArrayQueue<Vec<f32>>>,
     /// Sample rate used by this recording
     pub sample_rate: u32,
 }
@@ -497,7 +496,6 @@ impl AudioCapture {
 
         let filename = format!("recording_{}_{}.wav", timestamp, &id[..8]);
         let audio_path = self.recordings_dir.join(&filename);
-        let (stop_sender, stop_receiver) = bounded::<()>(1);
         let waveform_buffer = Arc::new(std::sync::Mutex::new(Vec::with_capacity(4410)));
 
         tracing::info!(
@@ -507,8 +505,8 @@ impl AudioCapture {
             options.system_audio
         );
 
-        let streaming_queue: Arc<crossbeam::queue::SegQueue<Vec<f32>>> =
-            Arc::new(crossbeam::queue::SegQueue::new());
+        let streaming_queue: Arc<crossbeam::queue::ArrayQueue<Vec<f32>>> =
+            Arc::new(crossbeam::queue::ArrayQueue::new(256));
 
         // Use MixedAudioCapture if system audio is requested
         if options.system_audio {
@@ -524,7 +522,7 @@ impl AudioCapture {
             // Spawn writer thread for mixed audio
             let audio_path_clone = audio_path.clone();
             let writer_handle = std::thread::spawn(move || {
-                if let Err(e) = write_wav_file(&audio_path_clone, receiver, stop_receiver, 44100) {
+                if let Err(e) = write_wav_file(&audio_path_clone, receiver, 44100) {
                     tracing::error!("Failed to write WAV file: {}", e);
                 }
             });
@@ -532,7 +530,6 @@ impl AudioCapture {
             self.active_recording = Some(ActiveRecordingSession {
                 id: id.clone(),
                 audio_path,
-                stop_sender,
                 writer_handle: Some(writer_handle),
                 capture_stop_flag: Arc::new(AtomicBool::new(false)),
                 capture_handle: None,
@@ -543,11 +540,13 @@ impl AudioCapture {
             });
         } else {
             // Standard microphone-only recording
-            let (samples_sender, samples_receiver) = bounded::<Vec<f32>>(100);
+            let (samples_sender, samples_receiver) = bounded::<Vec<f32>>(256);
             let wf_buffer = Arc::clone(&waveform_buffer);
             let audio_path_clone = audio_path.clone();
             let capture_stop_flag = Arc::new(AtomicBool::new(true));
             let capture_flag = Arc::clone(&capture_stop_flag);
+            let dropped_stream_chunks = Arc::new(AtomicU64::new(0));
+            let dropped_writer_chunks = Arc::new(AtomicU64::new(0));
 
             let stream_queue_clone = Arc::clone(&streaming_queue);
             let capture_handle = std::thread::spawn(move || {
@@ -563,6 +562,10 @@ impl AudioCapture {
 
                 let sq_f32 = Arc::clone(&stream_queue_clone);
                 let sq_i16 = Arc::clone(&stream_queue_clone);
+                let dropped_stream_f32 = Arc::clone(&dropped_stream_chunks);
+                let dropped_stream_i16 = Arc::clone(&dropped_stream_chunks);
+                let dropped_writer_f32 = Arc::clone(&dropped_writer_chunks);
+                let dropped_writer_i16 = Arc::clone(&dropped_writer_chunks);
                 let err_fn = |err| tracing::error!("Stream error: {}", err);
                 let stream_result = match config.sample_format() {
                     cpal::SampleFormat::F32 => device.build_input_stream(
@@ -580,8 +583,19 @@ impl AudioCapture {
                                 }
                             }
 
-                            sq_f32.push(chunk.clone());
-                            let _ = samples_sender.send(chunk);
+                            if sq_f32.push(chunk.clone()).is_err() {
+                                let _ = sq_f32.pop();
+                                let _ = sq_f32.push(chunk.clone());
+                                dropped_stream_f32.fetch_add(1, Ordering::Relaxed);
+                            }
+
+                            match samples_sender.try_send(chunk) {
+                                Ok(()) => {}
+                                Err(TrySendError::Full(_)) => {
+                                    dropped_writer_f32.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(TrySendError::Disconnected(_)) => {}
+                            }
                         },
                         err_fn,
                         None,
@@ -603,8 +617,18 @@ impl AudioCapture {
                                 }
                             }
 
-                            sq_i16.push(chunk.clone());
-                            let _ = samples_sender.send(chunk);
+                            if sq_i16.push(chunk.clone()).is_err() {
+                                let _ = sq_i16.pop();
+                                let _ = sq_i16.push(chunk.clone());
+                                dropped_stream_i16.fetch_add(1, Ordering::Relaxed);
+                            }
+                            match samples_sender.try_send(chunk) {
+                                Ok(()) => {}
+                                Err(TrySendError::Full(_)) => {
+                                    dropped_writer_i16.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(TrySendError::Disconnected(_)) => {}
+                            }
                         },
                         err_fn,
                         None,
@@ -626,6 +650,16 @@ impl AudioCapture {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
 
+                let dropped_stream = dropped_stream_chunks.load(Ordering::Relaxed);
+                let dropped_writer = dropped_writer_chunks.load(Ordering::Relaxed);
+                if dropped_stream > 0 || dropped_writer > 0 {
+                    tracing::warn!(
+                        "Microphone capture dropped stream/writer chunks (stream={}, writer={})",
+                        dropped_stream,
+                        dropped_writer
+                    );
+                }
+
                 drop(stream);
             });
 
@@ -639,12 +673,7 @@ impl AudioCapture {
 
             // Spawn writer thread
             let writer_handle = std::thread::spawn(move || {
-                if let Err(e) = write_wav_file(
-                    &audio_path_clone,
-                    samples_receiver,
-                    stop_receiver,
-                    sample_rate,
-                ) {
+                if let Err(e) = write_wav_file(&audio_path_clone, samples_receiver, sample_rate) {
                     tracing::error!("Failed to write WAV file: {}", e);
                 }
             });
@@ -652,7 +681,6 @@ impl AudioCapture {
             self.active_recording = Some(ActiveRecordingSession {
                 id: id.clone(),
                 audio_path,
-                stop_sender,
                 writer_handle: Some(writer_handle),
                 capture_stop_flag,
                 capture_handle: Some(capture_handle),
@@ -687,27 +715,17 @@ impl AudioCapture {
             ));
         }
 
-        let _ = session.stop_sender.send(());
         session.capture_stop_flag.store(false, Ordering::SeqCst);
-        
-        // Don't block on thread joins - spawn background task to wait
+
         if let Some(handle) = session.capture_handle.take() {
-            std::thread::spawn(move || {
-                if let Err(e) = handle.join() {
-                    tracing::warn!("Capture thread join error: {:?}", e);
-                }
-            });
+            join_thread_with_timeout(handle, Duration::from_secs(5), "capture thread")?;
         }
         if let Some(mut mixed_capture) = session.mixed_capture.take() {
             mixed_capture.stop();
         }
 
         if let Some(handle) = session.writer_handle.take() {
-            std::thread::spawn(move || {
-                if let Err(e) = handle.join() {
-                    tracing::warn!("Writer thread join error: {:?}", e);
-                }
-            });
+            join_thread_with_timeout(handle, Duration::from_secs(20), "wav writer thread")?;
         }
 
         let path = session.audio_path;
@@ -728,7 +746,7 @@ impl AudioCapture {
     pub fn get_streaming_queue(
         &self,
         recording_id: &str,
-    ) -> Option<(Arc<crossbeam::queue::SegQueue<Vec<f32>>>, u32)> {
+    ) -> Option<(Arc<crossbeam::queue::ArrayQueue<Vec<f32>>>, u32)> {
         let session = self.active_recording.as_ref()?;
         if session.id != recording_id {
             return None;
@@ -840,7 +858,6 @@ fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Result<Vec<u8
 fn write_wav_file(
     path: &PathBuf,
     receiver: Receiver<Vec<f32>>,
-    stop_receiver: Receiver<()>,
     sample_rate: u32,
 ) -> Result<()> {
     let spec = hound::WavSpec {
@@ -857,23 +874,11 @@ fn write_wav_file(
     let writer = BufWriter::new(file);
     let mut wav_writer = hound::WavWriter::new(writer, spec)?;
 
-    loop {
-        crossbeam::select! {
-            recv(receiver) -> msg => {
-                match msg {
-                    Ok(samples) => {
-                        let mut samples = samples;
-                        boost_quiet_audio(&mut samples);
-                        for sample in samples {
-                            wav_writer.write_sample((sample.clamp(-1.0, 1.0) * 32767.0) as i16)?;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            recv(stop_receiver) -> _ => {
-                break;
-            }
+    while let Ok(samples) = receiver.recv() {
+        let mut samples = samples;
+        boost_quiet_audio(&mut samples);
+        for sample in samples {
+            wav_writer.write_sample((sample.clamp(-1.0, 1.0) * 32767.0) as i16)?;
         }
     }
 
@@ -881,6 +886,23 @@ fn write_wav_file(
     tracing::info!("WAV file written: {:?}", path);
 
     Ok(())
+}
+
+fn join_thread_with_timeout(
+    handle: JoinHandle<()>,
+    timeout: Duration,
+    label: &str,
+) -> Result<()> {
+    let (done_tx, done_rx) = bounded::<std::thread::Result<()>>(1);
+    std::thread::spawn(move || {
+        let _ = done_tx.send(handle.join());
+    });
+
+    match done_rx.recv_timeout(timeout) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(anyhow::anyhow!("{} panicked", label)),
+        Err(_) => Err(anyhow::anyhow!("Timed out waiting for {}", label)),
+    }
 }
 
 /// Compute SHA256 hash of a file

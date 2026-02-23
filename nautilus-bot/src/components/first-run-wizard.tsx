@@ -75,6 +75,10 @@ export function FirstRunWizard({ onComplete }: Props) {
     const [hotkeyMode, setHotkeyMode] = useState<"hold_to_talk" | "toggle">("hold_to_talk");
     const [hotkeySaving, setHotkeySaving] = useState(false);
     const [hotkeySaveError, setHotkeySaveError] = useState<string | null>(null);
+    const [meetingAudioStorageMode, setMeetingAudioStorageMode] = useState<"always" | "transcript_only">("always");
+    const [meetingRetentionPreset, setMeetingRetentionPreset] = useState<"1m" | "2m" | "3m" | "custom" | "never">("never");
+    const [meetingRetentionCustomMonths, setMeetingRetentionCustomMonths] = useState(1);
+    const [meetingRetentionDeleteMode, setMeetingRetentionDeleteMode] = useState<"audio_only" | "audio_and_transcript">("audio_only");
 
     const steps = track === "power" ? POWER_STEPS : NORMAL_STEPS;
     const stepIdx = steps.indexOf(step);
@@ -92,6 +96,27 @@ export function FirstRunWizard({ onComplete }: Props) {
                 if (!mounted) return;
                 setShortcutValue(settings.shortcuts.toggleDictation || defaultDictationShortcut());
                 setHotkeyMode(settings.transcription.dictationPushToTalk ? "hold_to_talk" : "toggle");
+                setMeetingAudioStorageMode(
+                    settings.transcription.meetingAudioStorageMode === "transcript_only"
+                        ? "transcript_only"
+                        : "always"
+                );
+                setMeetingRetentionPreset(
+                    settings.transcription.meetingRetentionPreset === "1m" ||
+                    settings.transcription.meetingRetentionPreset === "2m" ||
+                    settings.transcription.meetingRetentionPreset === "3m" ||
+                    settings.transcription.meetingRetentionPreset === "custom"
+                        ? settings.transcription.meetingRetentionPreset
+                        : "never"
+                );
+                setMeetingRetentionCustomMonths(
+                    Math.max(1, settings.transcription.meetingRetentionCustomMonths ?? 1)
+                );
+                setMeetingRetentionDeleteMode(
+                    settings.transcription.meetingRetentionDeleteMode === "audio_and_transcript"
+                        ? "audio_and_transcript"
+                        : "audio_only"
+                );
             })
             .catch(() => {
                 // Ignore onboarding prefill errors and continue with defaults.
@@ -149,9 +174,37 @@ export function FirstRunWizard({ onComplete }: Props) {
         }
     }, [hotkeyMode, shortcutValue]);
 
+    const persistPowerPrivacyStep = useCallback(async () => {
+        setHotkeySaving(true);
+        setHotkeySaveError(null);
+        try {
+            const settings = await getSettings();
+            settings.transcription.meetingAudioStorageMode = meetingAudioStorageMode;
+            settings.transcription.meetingRetentionPreset = meetingRetentionPreset;
+            settings.transcription.meetingRetentionCustomMonths = Math.max(1, meetingRetentionCustomMonths);
+            settings.transcription.meetingRetentionDeleteMode = meetingRetentionDeleteMode;
+            await saveSettings(settings);
+            return true;
+        } catch (error) {
+            setHotkeySaveError(error instanceof Error ? error.message : String(error));
+            return false;
+        } finally {
+            setHotkeySaving(false);
+        }
+    }, [
+        meetingAudioStorageMode,
+        meetingRetentionCustomMonths,
+        meetingRetentionDeleteMode,
+        meetingRetentionPreset,
+    ]);
+
     const nextStep = async () => {
         if (step === "hotkey") {
             const saved = await persistHotkeyStep();
+            if (!saved) return;
+        }
+        if (step === "privacy") {
+            const saved = await persistPowerPrivacyStep();
             if (!saved) return;
         }
         const idx = steps.indexOf(step);
@@ -230,7 +283,18 @@ export function FirstRunWizard({ onComplete }: Props) {
                         saveError={hotkeySaveError}
                     />
                 )}
-                {step === "privacy" && <PrivacyStep />}
+                {step === "privacy" && (
+                    <PrivacyStep
+                        meetingAudioStorageMode={meetingAudioStorageMode}
+                        onMeetingAudioStorageModeChange={setMeetingAudioStorageMode}
+                        meetingRetentionPreset={meetingRetentionPreset}
+                        onMeetingRetentionPresetChange={setMeetingRetentionPreset}
+                        meetingRetentionCustomMonths={meetingRetentionCustomMonths}
+                        onMeetingRetentionCustomMonthsChange={setMeetingRetentionCustomMonths}
+                        meetingRetentionDeleteMode={meetingRetentionDeleteMode}
+                        onMeetingRetentionDeleteModeChange={setMeetingRetentionDeleteMode}
+                    />
+                )}
 
                 {/* Navigation */}
                 {step !== "track" && (
@@ -677,7 +741,25 @@ function HotkeyStep({
     );
 }
 
-function PrivacyStep() {
+function PrivacyStep({
+    meetingAudioStorageMode,
+    onMeetingAudioStorageModeChange,
+    meetingRetentionPreset,
+    onMeetingRetentionPresetChange,
+    meetingRetentionCustomMonths,
+    onMeetingRetentionCustomMonthsChange,
+    meetingRetentionDeleteMode,
+    onMeetingRetentionDeleteModeChange,
+}: {
+    meetingAudioStorageMode: "always" | "transcript_only";
+    onMeetingAudioStorageModeChange(value: "always" | "transcript_only"): void;
+    meetingRetentionPreset: "1m" | "2m" | "3m" | "custom" | "never";
+    onMeetingRetentionPresetChange(value: "1m" | "2m" | "3m" | "custom" | "never"): void;
+    meetingRetentionCustomMonths: number;
+    onMeetingRetentionCustomMonthsChange(value: number): void;
+    meetingRetentionDeleteMode: "audio_only" | "audio_and_transcript";
+    onMeetingRetentionDeleteModeChange(value: "audio_only" | "audio_and_transcript"): void;
+}) {
     return (
         <div className="space-y-4">
             <p className="text-sm text-muted-foreground">
@@ -738,6 +820,78 @@ function PrivacyStep() {
                         <Palette className="h-3 w-3 shrink-0" />
                         <span>10+ premium color themes</span>
                     </div>
+                </div>
+            </div>
+
+            <div className="rounded-lg border border-border p-3 space-y-3">
+                <p className="text-xs font-medium">Meeting storage defaults</p>
+                <div className="space-y-2">
+                    <label className="text-xs text-muted-foreground">Meeting audio storage</label>
+                    <select
+                        className="w-full rounded-md border border-border bg-background p-2 text-sm"
+                        value={meetingAudioStorageMode}
+                        onChange={(event) =>
+                            onMeetingAudioStorageModeChange(
+                                event.target.value as "always" | "transcript_only"
+                            )
+                        }
+                    >
+                        <option value="always">Always keep audio</option>
+                        <option value="transcript_only">
+                            Transcript only (delete audio after transcription)
+                        </option>
+                    </select>
+                </div>
+
+                <div className="space-y-2">
+                    <label className="text-xs text-muted-foreground">Meeting retention</label>
+                    <select
+                        className="w-full rounded-md border border-border bg-background p-2 text-sm"
+                        value={meetingRetentionPreset}
+                        onChange={(event) =>
+                            onMeetingRetentionPresetChange(
+                                event.target.value as "1m" | "2m" | "3m" | "custom" | "never"
+                            )
+                        }
+                    >
+                        <option value="1m">After 1 month</option>
+                        <option value="2m">After 2 months</option>
+                        <option value="3m">After 3 months</option>
+                        <option value="never">Never</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                </div>
+
+                {meetingRetentionPreset === "custom" && (
+                    <div className="space-y-2">
+                        <label className="text-xs text-muted-foreground">Custom retention months</label>
+                        <Input
+                            type="number"
+                            min={1}
+                            value={meetingRetentionCustomMonths}
+                            onChange={(event) =>
+                                onMeetingRetentionCustomMonthsChange(
+                                    Math.max(1, Number(event.target.value) || 1)
+                                )
+                            }
+                        />
+                    </div>
+                )}
+
+                <div className="space-y-2">
+                    <label className="text-xs text-muted-foreground">Retention delete mode</label>
+                    <select
+                        className="w-full rounded-md border border-border bg-background p-2 text-sm"
+                        value={meetingRetentionDeleteMode}
+                        onChange={(event) =>
+                            onMeetingRetentionDeleteModeChange(
+                                event.target.value as "audio_only" | "audio_and_transcript"
+                            )
+                        }
+                    >
+                        <option value="audio_only">Delete audio only</option>
+                        <option value="audio_and_transcript">Delete audio and transcript</option>
+                    </select>
                 </div>
             </div>
 
