@@ -119,6 +119,9 @@ impl ElevenLabsScribeProvider {
             model_id: self.model_id.clone(),
             requested_provider: AsrProviderType::ElevenLabsScribe,
             actual_provider: AsrProviderType::ElevenLabsScribe,
+            requested_engine: Some("provider_default".to_string()),
+            actual_engine: Some("provider_default".to_string()),
+            optimization_applied: false,
             fallback_reason: None,
         })
     }

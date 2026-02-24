@@ -162,6 +162,8 @@ pub struct TranscriptionSettings {
     pub embedding_model: String,
     /// Auto-run Nautilus-style summary + action items after recording transcription
     pub enable_auto_analysis: bool,
+    /// Platform-specific ASR optimization policy and engine preferences.
+    pub platform_optimization: PlatformOptimizationSettings,
 }
 
 impl Default for TranscriptionSettings {
@@ -201,6 +203,71 @@ impl Default for TranscriptionSettings {
             memory_search_mode: "fts".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
             enable_auto_analysis: true,
+            platform_optimization: PlatformOptimizationSettings::default(),
+        }
+    }
+}
+
+/// Platform optimization policy for ASR routing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PlatformOptimizationSettings {
+    /// Routing mode: auto or manual.
+    pub mode: String,
+    /// Fallback policy: local_only, allow_cloud, fail_fast.
+    pub fallback_policy: String,
+    /// macOS-specific optimization controls.
+    pub macos: MacosPlatformOptimizationSettings,
+    /// Windows-specific optimization controls.
+    pub windows: WindowsPlatformOptimizationSettings,
+    /// Ordered manual engine priority list.
+    pub manual_engine_priority: Vec<String>,
+}
+
+impl Default for PlatformOptimizationSettings {
+    fn default() -> Self {
+        Self {
+            mode: "auto".to_string(),
+            fallback_policy: "local_only".to_string(),
+            macos: MacosPlatformOptimizationSettings::default(),
+            windows: WindowsPlatformOptimizationSettings::default(),
+            manual_engine_priority: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MacosPlatformOptimizationSettings {
+    /// Enable Apple-native STT engine routing.
+    pub apple_native_enabled: bool,
+    /// Enable MLX sidecar optimization routing.
+    pub mlx_enabled: bool,
+}
+
+impl Default for MacosPlatformOptimizationSettings {
+    fn default() -> Self {
+        Self {
+            apple_native_enabled: false,
+            mlx_enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WindowsPlatformOptimizationSettings {
+    /// Enable Foundry Local optimization routing.
+    pub foundry_enabled: bool,
+    /// Enable Windows SDK dictation route.
+    pub windows_sdk_dictation_enabled: bool,
+}
+
+impl Default for WindowsPlatformOptimizationSettings {
+    fn default() -> Self {
+        Self {
+            foundry_enabled: false,
+            windows_sdk_dictation_enabled: false,
         }
     }
 }
@@ -533,5 +600,31 @@ impl Default for SettingsManager {
             settings: Settings::default(),
             config_path: PathBuf::from("settings.json"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PlatformOptimizationSettings, Settings};
+
+    #[test]
+    fn platform_optimization_defaults_are_stable() {
+        let settings = Settings::default();
+        let optimization = settings.transcription.platform_optimization;
+        assert_eq!(optimization.mode, "auto");
+        assert_eq!(optimization.fallback_policy, "local_only");
+        assert!(!optimization.macos.apple_native_enabled);
+        assert!(optimization.macos.mlx_enabled);
+        assert!(!optimization.windows.foundry_enabled);
+        assert!(!optimization.windows.windows_sdk_dictation_enabled);
+        assert!(optimization.manual_engine_priority.is_empty());
+    }
+
+    #[test]
+    fn platform_optimization_deserializes_missing_fields() {
+        let parsed: PlatformOptimizationSettings =
+            serde_json::from_str("{}").expect("platform optimization should deserialize");
+        assert_eq!(parsed.mode, "auto");
+        assert_eq!(parsed.fallback_policy, "local_only");
     }
 }

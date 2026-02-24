@@ -11,6 +11,7 @@ export interface AsrProviderInfo {
   runtimeStatus: AsrRuntimeStatus;
   runtimeMessage?: string;
   runtimeDetails: AsrRuntimeDetails;
+  engineDiagnostics?: AsrEngineDiagnostics;
 }
 
 export interface AsrModelOption {
@@ -32,6 +33,12 @@ export interface AsrRuntimeDiagnostics {
   runtimeStatus: AsrRuntimeStatus;
   runtimeMessage?: string;
   runtimeDetails: AsrRuntimeDetails;
+}
+
+export interface AsrEngineDiagnostics {
+  activeEngine?: string;
+  availableEngines: string[];
+  notes: string[];
 }
 
 export interface AsrModelInfo {

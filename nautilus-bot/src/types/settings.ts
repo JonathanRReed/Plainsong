@@ -56,6 +56,21 @@ export interface TranscriptionSettings {
   memorySearchMode: "fts" | "ollama_embeddings";
   embeddingModel: string;
   enableAutoAnalysis: boolean;
+  platformOptimization?: PlatformOptimizationSettings;
+}
+
+export interface PlatformOptimizationSettings {
+  mode: "auto" | "manual";
+  fallbackPolicy: "local_only" | "allow_cloud" | "fail_fast";
+  macos: {
+    appleNativeEnabled: boolean;
+    mlxEnabled: boolean;
+  };
+  windows: {
+    foundryEnabled: boolean;
+    windowsSdkDictationEnabled: boolean;
+  };
+  manualEnginePriority: string[];
 }
 
 export interface UiSettings {

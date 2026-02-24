@@ -130,6 +130,9 @@ impl VoxtralProvider {
             model_id: self.selected_model_id().to_string(),
             requested_provider: AsrProviderType::Voxtral,
             actual_provider: AsrProviderType::Voxtral,
+            requested_engine: Some("provider_default".to_string()),
+            actual_engine: Some("provider_default".to_string()),
+            optimization_applied: false,
             fallback_reason: None,
         })
     }
@@ -220,6 +223,9 @@ impl VoxtralProvider {
             model_id: self.selected_model_id().to_string(),
             requested_provider: AsrProviderType::Voxtral,
             actual_provider: AsrProviderType::Voxtral,
+            requested_engine: Some("provider_default".to_string()),
+            actual_engine: Some("provider_default".to_string()),
+            optimization_applied: false,
             fallback_reason: None,
         })
     }

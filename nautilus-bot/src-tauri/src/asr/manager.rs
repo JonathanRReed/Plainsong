@@ -1,4 +1,5 @@
 use super::{
+    platform::{EngineDiagnostics, FallbackPolicy, PlatformEngine},
     AsrProvider, AsrProviderFactory, AsrProviderType, DownloadStatus, ModelInfo,
     TranscriptionResult,
 };
@@ -32,6 +33,7 @@ pub struct AsrManager {
     selected_model_id: RwLock<String>,
     provider_model_ids: RwLock<HashMap<AsrProviderType, String>>,
     silence_skip_enabled: RwLock<bool>,
+    platform_optimization: RwLock<crate::settings::PlatformOptimizationSettings>,
     last_runtime_errors: RwLock<HashMap<AsrProviderType, String>>,
     models_dir: PathBuf,
 }
@@ -63,6 +65,9 @@ impl AsrManager {
 
         Self {
             silence_skip_enabled: RwLock::new(false),
+            platform_optimization: RwLock::new(
+                crate::settings::PlatformOptimizationSettings::default(),
+            ),
             // Distil-Whisper is 6x faster than Whisper for English
             default_provider: RwLock::new(AsrProviderType::DistilWhisper),
             selected_model_id: RwLock::new(
@@ -185,6 +190,17 @@ impl AsrManager {
         *self.silence_skip_enabled.read().await
     }
 
+    pub async fn set_platform_optimization(
+        &self,
+        settings: crate::settings::PlatformOptimizationSettings,
+    ) {
+        *self.platform_optimization.write().await = settings;
+    }
+
+    pub async fn platform_optimization(&self) -> crate::settings::PlatformOptimizationSettings {
+        self.platform_optimization.read().await.clone()
+    }
+
     pub async fn clear_runtime_errors(&self) {
         self.last_runtime_errors.write().await.clear();
     }
@@ -249,12 +265,13 @@ impl AsrManager {
         audio_data: Option<&[u8]>,
         selected_model: Option<&str>,
     ) -> Result<TranscriptionResult> {
+        let requested_provider = provider_type;
         let resolved_model = match selected_model {
             Some(value) => Self::normalize_model_id(provider_type, value),
             None => self.provider_model_id(provider_type).await,
         };
-        let provider = Self::provider_with_model(provider_type, Some(resolved_model.as_str()));
         let skip_silence = self.silence_skip_enabled().await;
+        let optimization = self.platform_optimization().await;
 
         // Pre-process: remove silence from audio bytes if enabled
         let processed_bytes: Option<Vec<u8>> = if skip_silence {
@@ -275,7 +292,168 @@ impl AsrManager {
         };
         let effective_audio_data = processed_bytes.as_deref().or(audio_data);
 
-        let primary_result = match (file_path, effective_audio_data) {
+        let mut attempt_errors: Vec<String> = Vec::new();
+        let fallback_policy = FallbackPolicy::from_settings(&optimization.fallback_policy);
+        let requested_engine = Self::select_requested_engine(requested_provider, &optimization);
+
+        if let Some(engine) = requested_engine {
+            let engine_probe = engine.probe();
+            if engine != PlatformEngine::ProviderDefault {
+                if Self::engine_enabled(engine, &optimization)
+                    && engine_probe.ready
+                    && engine.supports_provider(requested_provider)
+                {
+                    if !Self::engine_runtime_executable(engine) {
+                        attempt_errors.push(format!(
+                            "Engine '{}' unavailable: execution path is not implemented in this build",
+                            engine.id()
+                        ));
+                    } else {
+                        match self
+                            .transcribe_with_platform_engine_attempt(
+                                requested_provider,
+                                resolved_model.as_str(),
+                                file_path,
+                                effective_audio_data,
+                                engine,
+                            )
+                            .await
+                        {
+                            Ok(result) => return Ok(result),
+                            Err(error) => {
+                                attempt_errors.push(format!(
+                                    "Engine '{}' failed: {}",
+                                    engine.id(),
+                                    error
+                                ));
+                            }
+                        }
+                    }
+                } else {
+                    let reason = if !Self::engine_enabled(engine, &optimization) {
+                        "disabled in settings".to_string()
+                    } else if !engine_probe.ready {
+                        engine_probe.notes.join("; ")
+                    } else {
+                        "not supported for selected provider".to_string()
+                    };
+                    attempt_errors.push(format!(
+                        "Engine '{}' unavailable: {}",
+                        engine.id(),
+                        reason
+                    ));
+                }
+
+                if fallback_policy == FallbackPolicy::FailFast {
+                    return Err(anyhow::anyhow!(attempt_errors.join(" | ")));
+                }
+            }
+        }
+
+        match self
+            .transcribe_with_provider_attempt(
+                requested_provider,
+                requested_provider,
+                resolved_model.as_str(),
+                file_path,
+                effective_audio_data,
+                requested_engine.unwrap_or(PlatformEngine::ProviderDefault),
+                PlatformEngine::ProviderDefault,
+                false,
+                None,
+            )
+            .await
+        {
+            Ok(result) => return Ok(result),
+            Err(primary_error) => {
+                attempt_errors.push(format!(
+                    "{} failed: {}",
+                    requested_provider.display_name(),
+                    primary_error
+                ));
+                if fallback_policy == FallbackPolicy::FailFast {
+                    return Err(anyhow::anyhow!(attempt_errors.join(" | ")));
+                }
+            }
+        }
+
+        let mut candidates = Self::local_fallback_candidates()
+            .into_iter()
+            .filter(|candidate| *candidate != requested_provider)
+            .collect::<Vec<_>>();
+        if fallback_policy == FallbackPolicy::AllowCloud {
+            candidates.extend(Self::cloud_fallback_candidates());
+        }
+
+        for candidate in candidates {
+            let model_id = if candidate == AsrProviderType::Voxtral && candidate.is_remote() {
+                "voxtral-cloud".to_string()
+            } else if candidate == AsrProviderType::Voxtral && !candidate.is_remote() {
+                "voxtral-local".to_string()
+            } else {
+                self.provider_model_id(candidate).await
+            };
+
+            match self
+                .transcribe_with_provider_attempt(
+                    requested_provider,
+                    candidate,
+                    model_id.as_str(),
+                    file_path,
+                    effective_audio_data,
+                    requested_engine.unwrap_or(PlatformEngine::ProviderDefault),
+                    PlatformEngine::ProviderDefault,
+                    false,
+                    Some("Fallback provider completed transcription.".to_string()),
+                )
+                .await
+            {
+                Ok(mut result) => {
+                    if result.fallback_reason.is_none() {
+                        result.fallback_reason = Some(
+                            "Requested provider could not complete transcription.".to_string(),
+                        );
+                    }
+                    return Ok(result);
+                }
+                Err(error) => {
+                    attempt_errors.push(format!("{} failed: {}", candidate.display_name(), error));
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(attempt_errors.join(" | ")))
+    }
+
+    async fn transcribe_with_platform_engine_attempt(
+        &self,
+        requested_provider: AsrProviderType,
+        model_id: &str,
+        file_path: Option<&Path>,
+        audio_data: Option<&[u8]>,
+        engine: PlatformEngine,
+    ) -> Result<TranscriptionResult> {
+        let _ = (requested_provider, model_id, file_path, audio_data, engine);
+        Err(anyhow::anyhow!(
+            "Engine '{}' execution path is not implemented in this build",
+            engine.id()
+        ))
+    }
+
+    async fn transcribe_with_provider_attempt(
+        &self,
+        requested_provider: AsrProviderType,
+        actual_provider: AsrProviderType,
+        model_id: &str,
+        file_path: Option<&Path>,
+        audio_data: Option<&[u8]>,
+        requested_engine: PlatformEngine,
+        actual_engine: PlatformEngine,
+        optimization_applied: bool,
+        fallback_reason: Option<String>,
+    ) -> Result<TranscriptionResult> {
+        let provider = Self::provider_with_model(actual_provider, Some(model_id));
+        let primary_result = match (file_path, audio_data) {
             (Some(path), None) => provider.transcribe(path).await,
             (None, Some(bytes)) => provider.transcribe_bytes(bytes).await,
             _ => Err(anyhow::anyhow!("Invalid transcription input")),
@@ -286,25 +464,98 @@ impl AsrManager {
                 self.last_runtime_errors
                     .write()
                     .await
-                    .remove(&provider_type);
-                result.requested_provider = provider_type;
+                    .remove(&actual_provider);
+                result.requested_provider = requested_provider;
+                result.actual_provider = actual_provider;
+                result.requested_engine = Some(requested_engine.id().to_string());
+                result.actual_engine = Some(actual_engine.id().to_string());
+                result.optimization_applied = optimization_applied;
                 if result.model_id.trim().is_empty() {
-                    result.model_id = resolved_model.clone();
+                    result.model_id = model_id.to_string();
+                }
+                if fallback_reason.is_some() {
+                    result.fallback_reason = fallback_reason;
                 }
                 Ok(result)
             }
-            Err(primary_error) => {
+            Err(error) => {
                 self.last_runtime_errors
                     .write()
                     .await
-                    .insert(provider_type, primary_error.to_string());
-                Err(anyhow::anyhow!(
-                    "{} failed: {}",
-                    provider_type.display_name(),
-                    primary_error
-                ))
+                    .insert(actual_provider, error.to_string());
+                Err(error)
             }
         }
+    }
+
+    fn select_requested_engine(
+        provider_type: AsrProviderType,
+        optimization: &crate::settings::PlatformOptimizationSettings,
+    ) -> Option<PlatformEngine> {
+        match optimization.mode.as_str() {
+            "manual" => optimization
+                .manual_engine_priority
+                .iter()
+                .filter_map(|id| PlatformEngine::from_id(id))
+                .find(|engine| {
+                    Self::engine_enabled(*engine, optimization) && engine.supports_provider(provider_type)
+                }),
+            _ => {
+                if !provider_type.is_local() {
+                    return None;
+                }
+
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                if optimization.macos.mlx_enabled {
+                    return Some(PlatformEngine::MacosMlxSidecar);
+                }
+
+                #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+                if optimization.windows.foundry_enabled {
+                    return Some(PlatformEngine::WindowsFoundryLocal);
+                }
+
+                None
+            }
+        }
+    }
+
+    fn engine_enabled(
+        engine: PlatformEngine,
+        optimization: &crate::settings::PlatformOptimizationSettings,
+    ) -> bool {
+        match engine {
+            PlatformEngine::ProviderDefault => true,
+            PlatformEngine::MacosAppleSpeech => optimization.macos.apple_native_enabled,
+            PlatformEngine::MacosMlxSidecar => optimization.macos.mlx_enabled,
+            PlatformEngine::WindowsFoundryLocal => optimization.windows.foundry_enabled,
+            PlatformEngine::WindowsSdkDictation => {
+                optimization.windows.windows_sdk_dictation_enabled
+            }
+        }
+    }
+
+    fn engine_runtime_executable(engine: PlatformEngine) -> bool {
+        matches!(engine, PlatformEngine::ProviderDefault)
+    }
+
+    fn local_fallback_candidates() -> Vec<AsrProviderType> {
+        vec![
+            AsrProviderType::DistilWhisper,
+            AsrProviderType::Whisper,
+            AsrProviderType::Parakeet,
+            AsrProviderType::Canary,
+            AsrProviderType::Moonshine,
+            AsrProviderType::Voxtral,
+        ]
+    }
+
+    fn cloud_fallback_candidates() -> Vec<AsrProviderType> {
+        vec![
+            AsrProviderType::OpenAiCloud,
+            AsrProviderType::ElevenLabsScribe,
+            AsrProviderType::Groq,
+        ]
     }
 
     /// Transcribe using the default provider
@@ -347,6 +598,7 @@ impl AsrManager {
     pub async fn get_all_providers_info(&self) -> Result<Vec<ProviderInfo>, String> {
         let provider_models = self.provider_model_map().await;
         let last_errors = self.last_runtime_errors.read().await.clone();
+        let optimization = self.platform_optimization().await;
 
         let futures = AsrProviderType::all().into_iter().map(|provider_type| {
             let selected_model = provider_models
@@ -354,6 +606,7 @@ impl AsrManager {
                 .cloned()
                 .unwrap_or_else(|| provider_type.default_model_id().to_string());
             let last_error = last_errors.get(&provider_type).cloned();
+            let optimization = optimization.clone();
 
             async move {
                 tokio::task::spawn_blocking(move || {
@@ -379,6 +632,10 @@ impl AsrManager {
                         runtime_status: diagnostics.runtime_status,
                         runtime_message: diagnostics.runtime_message,
                         runtime_details: diagnostics.runtime_details,
+                        engine_diagnostics: Self::engine_diagnostics_for_provider(
+                            provider_type,
+                            &optimization,
+                        ),
                     }
                 })
                 .await
@@ -398,6 +655,53 @@ impl AsrManager {
         }
 
         Ok(infos)
+    }
+
+    fn engine_diagnostics_for_provider(
+        provider_type: AsrProviderType,
+        optimization: &crate::settings::PlatformOptimizationSettings,
+    ) -> EngineDiagnostics {
+        let mut diagnostics = EngineDiagnostics::default();
+        let all_engines = [
+            PlatformEngine::ProviderDefault,
+            PlatformEngine::MacosMlxSidecar,
+            PlatformEngine::MacosAppleSpeech,
+            PlatformEngine::WindowsFoundryLocal,
+            PlatformEngine::WindowsSdkDictation,
+        ];
+
+        for engine in all_engines {
+            if !engine.supports_provider(provider_type) {
+                continue;
+            }
+            if !Self::engine_enabled(engine, optimization)
+                && engine != PlatformEngine::ProviderDefault
+            {
+                continue;
+            }
+            let probe = engine.probe();
+            if probe.ready && Self::engine_runtime_executable(engine) {
+                diagnostics.available_engines.push(engine.id().to_string());
+            } else if probe.ready && engine != PlatformEngine::ProviderDefault {
+                diagnostics.notes.push(format!(
+                    "Engine '{}' is configured but execution path is not implemented in this build.",
+                    engine.id()
+                ));
+            }
+            diagnostics.notes.extend(probe.notes);
+        }
+
+        let active = Self::select_requested_engine(provider_type, optimization)
+            .filter(|engine| {
+                *engine == PlatformEngine::ProviderDefault
+                    || (engine.probe().ready && Self::engine_runtime_executable(*engine))
+            })
+            .map(|engine| engine.id().to_string());
+
+        diagnostics.active_engine =
+            active.or_else(|| Some(PlatformEngine::ProviderDefault.id().to_string()));
+
+        diagnostics
     }
 
     /// Download models for a provider
@@ -469,6 +773,8 @@ pub struct ProviderInfo {
     pub runtime_status: RuntimeStatus,
     pub runtime_message: Option<String>,
     pub runtime_details: RuntimeDetails,
+    #[serde(default)]
+    pub engine_diagnostics: EngineDiagnostics,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1145,7 +1451,11 @@ fn sanitize_whisper_model_id(model_id: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{migrate_legacy_local_artifacts, missing_or_invalid_voxtral_local_files};
+    use super::{
+        migrate_legacy_local_artifacts, missing_or_invalid_voxtral_local_files, AsrManager,
+        AsrProviderType,
+    };
+    use crate::settings::PlatformOptimizationSettings;
     use std::path::PathBuf;
 
     fn temp_models_root() -> PathBuf {
@@ -1236,5 +1546,50 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(models_root);
+    }
+
+    #[tokio::test]
+    async fn auto_mode_selects_runtime_engine_for_local_provider() {
+        let manager = AsrManager::new();
+        let mut optimization = PlatformOptimizationSettings::default();
+        optimization.mode = "auto".to_string();
+        optimization.macos.mlx_enabled = true;
+        manager.set_platform_optimization(optimization).await;
+
+        let providers = manager
+            .get_all_providers_info()
+            .await
+            .expect("providers should load");
+        let distil = providers
+            .iter()
+            .find(|provider| provider.provider_type == AsrProviderType::DistilWhisper)
+            .expect("distil provider should exist");
+        assert!(
+            distil.engine_diagnostics.active_engine.as_deref().is_some(),
+            "expected active engine to be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_mode_honors_engine_priority() {
+        let manager = AsrManager::new();
+        let mut optimization = PlatformOptimizationSettings::default();
+        optimization.mode = "manual".to_string();
+        optimization.macos.apple_native_enabled = true;
+        optimization.manual_engine_priority = vec!["macos_apple_speech".to_string()];
+        manager.set_platform_optimization(optimization).await;
+
+        let providers = manager
+            .get_all_providers_info()
+            .await
+            .expect("providers should load");
+        let whisper = providers
+            .iter()
+            .find(|provider| provider.provider_type == AsrProviderType::Whisper)
+            .expect("whisper provider should exist");
+        assert_eq!(
+            whisper.engine_diagnostics.active_engine.as_deref(),
+            Some("provider_default")
+        );
     }
 }

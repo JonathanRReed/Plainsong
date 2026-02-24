@@ -33,6 +33,9 @@ export interface Transcript {
   modelId?: string | null;
   requestedProvider?: string | null;
   actualProvider?: string | null;
+  requestedEngine?: string | null;
+  actualEngine?: string | null;
+  optimizationApplied?: boolean | null;
   createdAt?: string;
 }
 

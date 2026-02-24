@@ -355,6 +355,9 @@ impl AsrProvider for CanaryProvider {
             model_id: CANARY_MODEL_ID.to_string(),
             requested_provider: AsrProviderType::Canary,
             actual_provider: AsrProviderType::Canary,
+            requested_engine: Some("provider_default".to_string()),
+            actual_engine: Some("provider_default".to_string()),
+            optimization_applied: false,
             fallback_reason: None,
         })
     }

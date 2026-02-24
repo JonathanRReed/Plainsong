@@ -272,6 +272,10 @@ export async function downloadAsrModels(providerType: AsrProviderType): Promise<
   await invoke("download_asr_models", { providerType });
 }
 
+export async function downloadPlatformAssets(engine: string): Promise<string> {
+  return await invoke("download_platform_assets", { engine });
+}
+
 export interface LocalModelRepairReport {
   repairedCount: number;
   removedPaths: string[];

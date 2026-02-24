@@ -12,7 +12,7 @@ mod license;
 mod llm;
 mod models;
 mod secrets;
-mod settings;
+pub mod settings;
 mod streaming;
 mod text;
 mod transcription;
@@ -1239,7 +1239,7 @@ async fn stop_recording(
     recordingId: String,
 ) -> Result<(), String> {
     tracing::info!("stop_recording called for {}", recordingId);
-    
+
     // Signal the live streaming background task to stop before halting audio capture
     state.recording_stream_stop.store(false, Ordering::SeqCst);
 
@@ -1343,9 +1343,12 @@ async fn stop_recording(
     let audio_path_clone = audio_path.clone();
 
     tokio::spawn(async move {
-        tracing::info!("Starting transcription task for recording {}", recording_id_clone);
+        tracing::info!(
+            "Starting transcription task for recording {}",
+            recording_id_clone
+        );
         let path = std::path::PathBuf::from(&audio_path_clone);
-        
+
         // Check if file exists and has content
         if !path.exists() {
             tracing::error!("Audio file does not exist: {:?}", path);
@@ -1369,10 +1372,10 @@ async fn stop_recording(
             );
             return;
         }
-        
+
         let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         tracing::info!("Audio file size: {} bytes", file_size);
-        
+
         let preview_task = {
             let app = app_handle.clone();
             let recording_id = recording_id_clone.clone();
@@ -1451,7 +1454,11 @@ async fn stop_recording(
                     return;
                 }
                 tracing::info!("Transcription completed for {}", recording_id_clone);
-                tracing::info!("Transcript has {} segments, {} chars", result.segments.len(), result.text.len());
+                tracing::info!(
+                    "Transcript has {} segments, {} chars",
+                    result.segments.len(),
+                    result.text.len()
+                );
 
                 // Clone values before moving into struct
                 let model_name_clone = result.model_name.clone();
@@ -1507,14 +1514,20 @@ async fn stop_recording(
                 let mut diarization_result: Option<diarization::DiarizationResult> = None;
                 if enable_diarization {
                     let diarization_available = diarization::DiarizationEngine::is_real_available();
-                    println!("[NAUTILUS] Diarization enabled, model available: {}", diarization_available);
-                    
+                    println!(
+                        "[NAUTILUS] Diarization enabled, model available: {}",
+                        diarization_available
+                    );
+
                     if !diarization_available {
                         println!(
                             "[NAUTILUS] WARNING: Diarization is enabled but model is not installed"
                         );
                     } else {
-                        println!("[NAUTILUS] Starting diarization for recording {}", recording_id_clone);
+                        println!(
+                            "[NAUTILUS] Starting diarization for recording {}",
+                            recording_id_clone
+                        );
                         match diarization::run_diarization(&path).await {
                             Ok(result) => {
                                 println!(
@@ -1529,8 +1542,7 @@ async fn stop_recording(
                             Err(error) => {
                                 println!(
                                     "[NAUTILUS] ERROR: Automatic diarization failed for {}: {}",
-                                    recording_id_clone,
-                                    error
+                                    recording_id_clone, error
                                 );
                             }
                         }
@@ -1546,12 +1558,18 @@ async fn stop_recording(
                         // Get the selected AI model from settings
                         let model = {
                             let sm = settings_manager_clone.lock().await;
-                            sm.settings().privacy.llm_model_id.clone()
+                            sm.settings()
+                                .privacy
+                                .llm_model_id
+                                .clone()
                                 .unwrap_or_else(|| "llama3.2".to_string())
                         };
-                        
+
                         tracing::info!("Using LLM to identify speakers with model '{}'", model);
-                        match ollama_client_clone.identify_speakers(&transcript.full_text, &model).await {
+                        match ollama_client_clone
+                            .identify_speakers(&transcript.full_text, &model)
+                            .await
+                        {
                             Ok(speakers) => {
                                 tracing::info!("LLM identified {} speakers", speakers.len());
                                 speakers
@@ -1595,111 +1613,125 @@ async fn stop_recording(
                         let (provider, model) = {
                             let sm = settings_manager_clone.lock().await;
                             let settings = sm.settings();
-                            let provider = AnalysisProvider::from_settings_value(&settings.privacy.llm_provider);
-                            let model = settings.privacy.llm_model_id.clone()
+                            let provider = AnalysisProvider::from_settings_value(
+                                &settings.privacy.llm_provider,
+                            );
+                            let model = settings
+                                .privacy
+                                .llm_model_id
+                                .clone()
                                 .unwrap_or_else(|| provider.default_model().to_string());
                             (provider, model)
                         };
-                        
-                        tracing::info!("Starting auto-analysis for recording {} with provider '{}' model '{}'", 
-                            recording_id_clone, provider.as_settings_value(), model);
+
+                        tracing::info!(
+                            "Starting auto-analysis for recording {} with provider '{}' model '{}'",
+                            recording_id_clone,
+                            provider.as_settings_value(),
+                            model
+                        );
                         let full_text = transcript.full_text.clone();
                         let app_for_analysis = app_handle.clone();
                         let rec_id_for_analysis = recording_id_clone.clone();
                         let ollama = Arc::clone(&ollama_client_clone);
                         let db_for_analysis = Arc::clone(&db_clone);
                         let template_for_analysis = recording_templates_clone
-                            .lock().ok()
+                            .lock()
+                            .ok()
                             .and_then(|t| t.get(&recording_id_clone).cloned());
 
                         tokio::spawn(async move {
-                        const ANALYSIS_TIMEOUT_MS: u64 = 90_000;
+                            const ANALYSIS_TIMEOUT_MS: u64 = 90_000;
 
-                        let template_ref = template_for_analysis.as_deref();
-                        let summary_fut = tokio::time::timeout(
-                            Duration::from_millis(ANALYSIS_TIMEOUT_MS),
-                            ollama.summarize_with_template(&full_text, &model, template_ref),
-                        );
-                        let actions_fut = tokio::time::timeout(
-                            Duration::from_millis(ANALYSIS_TIMEOUT_MS),
-                            ollama.extract_action_items(&full_text, &model),
-                        );
-                        let title_fut = tokio::time::timeout(
-                            Duration::from_millis(ANALYSIS_TIMEOUT_MS),
-                            ollama.generate_title(&full_text, &model),
-                        );
-
-                        let (summary_res, actions_res, title_res) = tokio::join!(summary_fut, actions_fut, title_fut);
-
-                        let summary = match summary_res {
-                            Ok(Ok(s)) => Some(s),
-                            Ok(Err(e)) => {
-                                tracing::warn!("Auto-summary failed: {}", e);
-                                None
-                            }
-                            Err(_) => {
-                                tracing::warn!("Auto-summary timed out");
-                                None
-                            }
-                        };
-                        let action_items: Vec<String> = match actions_res {
-                            Ok(Ok(items)) => items.into_iter().map(|i| i.task).collect(),
-                            Ok(Err(e)) => {
-                                tracing::warn!("Auto action items failed: {}", e);
-                                vec![]
-                            }
-                            Err(_) => {
-                                tracing::warn!("Auto action items timed out");
-                                vec![]
-                            }
-                        };
-
-                        // Auto-generate meeting title
-                        let generated_title = match title_res {
-                            Ok(Ok(t)) if !t.trim().is_empty() => Some(t),
-                            _ => None,
-                        };
-
-                        if let Some(ref title) = generated_title {
-                            let mut db = db_for_analysis.lock().await;
-                            if let Err(e) = db.rename_recording(&rec_id_for_analysis, title) {
-                                tracing::warn!("Failed to save generated title: {}", e);
-                            }
-                            drop(db);
-                            let _ = app_for_analysis.emit(
-                                "recording-title-updated",
-                                serde_json::json!({
-                                    "recordingId": rec_id_for_analysis,
-                                    "status": "ok",
-                                    "newTitle": title,
-                                }),
+                            let template_ref = template_for_analysis.as_deref();
+                            let summary_fut = tokio::time::timeout(
+                                Duration::from_millis(ANALYSIS_TIMEOUT_MS),
+                                ollama.summarize_with_template(&full_text, &model, template_ref),
                             );
-                        }
+                            let actions_fut = tokio::time::timeout(
+                                Duration::from_millis(ANALYSIS_TIMEOUT_MS),
+                                ollama.extract_action_items(&full_text, &model),
+                            );
+                            let title_fut = tokio::time::timeout(
+                                Duration::from_millis(ANALYSIS_TIMEOUT_MS),
+                                ollama.generate_title(&full_text, &model),
+                            );
 
-                        if summary.is_some() || !action_items.is_empty() {
-                            // Persist analysis to database
-                            {
+                            let (summary_res, actions_res, title_res) =
+                                tokio::join!(summary_fut, actions_fut, title_fut);
+
+                            let summary = match summary_res {
+                                Ok(Ok(s)) => Some(s),
+                                Ok(Err(e)) => {
+                                    tracing::warn!("Auto-summary failed: {}", e);
+                                    None
+                                }
+                                Err(_) => {
+                                    tracing::warn!("Auto-summary timed out");
+                                    None
+                                }
+                            };
+                            let action_items: Vec<String> = match actions_res {
+                                Ok(Ok(items)) => items.into_iter().map(|i| i.task).collect(),
+                                Ok(Err(e)) => {
+                                    tracing::warn!("Auto action items failed: {}", e);
+                                    vec![]
+                                }
+                                Err(_) => {
+                                    tracing::warn!("Auto action items timed out");
+                                    vec![]
+                                }
+                            };
+
+                            // Auto-generate meeting title
+                            let generated_title = match title_res {
+                                Ok(Ok(t)) if !t.trim().is_empty() => Some(t),
+                                _ => None,
+                            };
+
+                            if let Some(ref title) = generated_title {
                                 let mut db = db_for_analysis.lock().await;
-                                if let Err(e) = db.update_recording_analysis(
-                                    &rec_id_for_analysis,
-                                    summary.as_deref(),
-                                    &action_items,
+                                if let Err(e) = db.rename_recording(&rec_id_for_analysis, title) {
+                                    tracing::warn!("Failed to save generated title: {}", e);
+                                }
+                                drop(db);
+                                let _ = app_for_analysis.emit(
+                                    "recording-title-updated",
+                                    serde_json::json!({
+                                        "recordingId": rec_id_for_analysis,
+                                        "status": "ok",
+                                        "newTitle": title,
+                                    }),
+                                );
+                            }
+
+                            if summary.is_some() || !action_items.is_empty() {
+                                // Persist analysis to database
+                                {
+                                    let mut db = db_for_analysis.lock().await;
+                                    if let Err(e) = db.update_recording_analysis(
+                                        &rec_id_for_analysis,
+                                        summary.as_deref(),
+                                        &action_items,
+                                    ) {
+                                        tracing::warn!(
+                                            "Failed to persist analysis to database: {}",
+                                            e
+                                        );
+                                    }
+                                }
+
+                                if let Err(e) = app_for_analysis.emit(
+                                    "recording-analysis-ready",
+                                    serde_json::json!({
+                                        "recordingId": rec_id_for_analysis,
+                                        "summary": summary,
+                                        "actionItems": action_items,
+                                    }),
                                 ) {
-                                    tracing::warn!("Failed to persist analysis to database: {}", e);
+                                    tracing::warn!("Failed to emit analysis-ready event: {}", e);
                                 }
                             }
-
-                            if let Err(e) = app_for_analysis.emit(
-                                "recording-analysis-ready",
-                                serde_json::json!({
-                                    "recordingId": rec_id_for_analysis,
-                                    "summary": summary,
-                                    "actionItems": action_items,
-                                }),
-                            ) {
-                                tracing::warn!("Failed to emit analysis-ready event: {}", e);
-                            }
-                        }
                         });
                     }
                 }
@@ -1937,6 +1969,9 @@ async fn stop_recording(
                     "language": &language_clone,
                     "requested_provider": asr_provider_to_settings_value(requested_provider_clone),
                     "actual_provider": asr_provider_to_settings_value(actual_provider_clone),
+                    "requested_engine": result.requested_engine,
+                    "actual_engine": result.actual_engine,
+                    "optimization_applied": result.optimization_applied,
                     "fallback_reason": fallback_reason_clone,
                 });
                 if let Err(e) = db.log_audit_event("transcription_completed", Some(details), "info")
@@ -1958,7 +1993,8 @@ async fn stop_recording(
                 let error_message = e.to_string();
                 {
                     let mut db = db_clone.lock().await;
-                    if let Err(update_error) = db.update_recording_status(&recording_id_clone, "error")
+                    if let Err(update_error) =
+                        db.update_recording_status(&recording_id_clone, "error")
                     {
                         tracing::error!("Failed to update recording status: {}", update_error);
                     }
@@ -3332,6 +3368,17 @@ async fn download_asr_models(
 
 #[tauri::command]
 #[allow(non_snake_case)]
+async fn download_platform_assets(engine: String) -> Result<String, String> {
+    let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
+    let path = manager
+        .download_platform_assets(engine.as_str())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
 async fn benchmark_asr_providers(
     state: tauri::State<'_, AppState>,
     testAudioPath: String,
@@ -3463,6 +3510,10 @@ async fn reset_app_state(
         .asr_manager
         .set_silence_skip_enabled(defaults.transcription.silence_skip_enabled)
         .await;
+    state
+        .asr_manager
+        .set_platform_optimization(defaults.transcription.platform_optimization.clone())
+        .await;
     state.asr_manager.clear_runtime_errors().await;
     asr::python_runtime::shutdown_python_workers().await;
     asr::python_runtime::clear_runtime_probe_cache();
@@ -3549,6 +3600,7 @@ async fn save_settings(
         settings.audio.silence_timeout_seconds =
             normalize_silence_timeout_seconds(settings.audio.silence_timeout_seconds);
         settings.ui.color_scheme = normalize_color_scheme_value(&settings.ui.color_scheme);
+        normalize_platform_optimization(&mut settings.transcription.platform_optimization);
 
         let default_provider =
             asr_provider_from_settings_value(&settings.transcription.default_provider)
@@ -3576,6 +3628,10 @@ async fn save_settings(
         state
             .asr_manager
             .set_silence_skip_enabled(settings.transcription.silence_skip_enabled)
+            .await;
+        state
+            .asr_manager
+            .set_platform_optimization(settings.transcription.platform_optimization.clone())
             .await;
 
         if settings.transcription.default_provider != previous_default_provider {
@@ -3607,15 +3663,13 @@ async fn save_settings(
         if settings.transcription.dictation_retention_custom_hours == 0 {
             settings.transcription.dictation_retention_custom_hours = 1;
         }
-        settings.transcription.meeting_audio_storage_mode =
-            normalize_meeting_audio_storage_mode(
-                &settings.transcription.meeting_audio_storage_mode,
-            )
-            .to_string();
-        settings.transcription.meeting_retention_preset = normalize_meeting_retention_preset(
-            &settings.transcription.meeting_retention_preset,
+        settings.transcription.meeting_audio_storage_mode = normalize_meeting_audio_storage_mode(
+            &settings.transcription.meeting_audio_storage_mode,
         )
         .to_string();
+        settings.transcription.meeting_retention_preset =
+            normalize_meeting_retention_preset(&settings.transcription.meeting_retention_preset)
+                .to_string();
         if settings.transcription.meeting_retention_custom_months == 0 {
             settings.transcription.meeting_retention_custom_months = 1;
         }
@@ -4515,6 +4569,9 @@ async fn stop_dictation_session_for_session(
             "pasteError": paste_error,
             "requestedProvider": result.requested_provider,
             "actualProvider": result.actual_provider,
+            "requestedEngine": result.requested_engine,
+            "actualEngine": result.actual_engine,
+            "optimizationApplied": result.optimization_applied,
             "fallbackReason": result.fallback_reason,
             "fallbackMessage": fallback_message,
             "modelId": result.model_id,
@@ -4677,6 +4734,9 @@ async fn stop_dictation_session_for_session(
         "language": &result.language,
         "requested_provider": result.requested_provider,
         "actual_provider": result.actual_provider,
+        "requested_engine": result.requested_engine,
+        "actual_engine": result.actual_engine,
+        "optimization_applied": result.optimization_applied,
         "fallback_reason": result.fallback_reason,
         "text_length": result.text.len(),
         "pasted": pasted,
@@ -4937,9 +4997,11 @@ fn emit_recording_state(
 ) {
     tracing::info!(
         "emit_recording_state: phase={}, recording_id={:?}, message={:?}",
-        phase, recording_id, message
+        phase,
+        recording_id,
+        message
     );
-    
+
     if let Ok(mut state) = app.state::<AppState>().recording_overlay_state.lock() {
         state.phase = phase.to_string();
         state.recording_id = recording_id.map(str::to_string);
@@ -6258,7 +6320,7 @@ fn runtime_status_to_db_value(status: &RuntimeStatus) -> &'static str {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt::init();
-    
+
     // Log diarization feature status at startup
     #[cfg(feature = "diarization")]
     println!("[NAUTILUS] Diarization feature is COMPILED IN");
@@ -6348,12 +6410,18 @@ pub fn run() {
             let state = app.state::<AppState>();
             tauri::async_runtime::block_on(async {
                 let mut warnings = migrate_legacy_asr_artifacts();
-                let (configured_provider, silence_skip, mut provider_model_map) = {
+                let (
+                    configured_provider,
+                    silence_skip,
+                    platform_optimization,
+                    mut provider_model_map,
+                ) = {
                     let settings_manager = state.settings_manager.lock().await;
                     let transcription = &settings_manager.settings().transcription;
                     (
                         transcription.default_provider.clone(),
                         transcription.silence_skip_enabled,
+                        transcription.platform_optimization.clone(),
                         provider_model_map_from_settings(transcription),
                     )
                 };
@@ -6366,9 +6434,14 @@ pub fn run() {
                     .asr_manager
                     .set_silence_skip_enabled(silence_skip)
                     .await;
+                state
+                    .asr_manager
+                    .set_platform_optimization(platform_optimization)
+                    .await;
 
                 let configured_type =
-                    asr_provider_from_settings_value(&configured_provider).unwrap_or(asr::AsrProviderType::Whisper);
+                    asr_provider_from_settings_value(&configured_provider)
+                        .unwrap_or(asr::AsrProviderType::DistilWhisper);
                 let configured_model = provider_model_map
                     .get(&configured_type)
                     .cloned()
@@ -6384,10 +6457,10 @@ pub fn run() {
                 let mut resolved_model = configured_model;
                 if !(configured_available && configured_enabled) {
                     let priority = [
+                        asr::AsrProviderType::DistilWhisper,
                         asr::AsrProviderType::Whisper,
                         asr::AsrProviderType::Parakeet,
                         asr::AsrProviderType::Canary,
-                        asr::AsrProviderType::DistilWhisper,
                         asr::AsrProviderType::Moonshine,
                         asr::AsrProviderType::Voxtral,
                     ];
@@ -6590,6 +6663,7 @@ pub fn run() {
             list_openai_asr_models,
             list_elevenlabs_asr_models,
             download_asr_models,
+            download_platform_assets,
             benchmark_asr_providers,
             benchmark_asr_providers_bytes,
             list_asr_benchmarks,
@@ -6669,16 +6743,16 @@ fn infer_speaker_aliases_from_segments(
     let intro_pattern =
         Regex::new(r"\b(?:this is|i am|i'm|my name is)\s+([a-z][a-z'\-]+(?:\s+[a-z][a-z'\-]+)?)\b")
             .expect("valid intro regex");
-    let next_pattern =
-        Regex::new(r"\b(?:next is|up next is|here is|here's)\s+([a-z][a-z'\-]+(?:\s+[a-z][a-z'\-]+)?)\b")
-            .expect("valid next regex");
-    let speaker_pattern =
-        Regex::new(r"\b([a-z][a-z'\-]+)\s+(?:speaking|here|talking)\b")
-            .expect("valid speaker regex");
+    let next_pattern = Regex::new(
+        r"\b(?:next is|up next is|here is|here's)\s+([a-z][a-z'\-]+(?:\s+[a-z][a-z'\-]+)?)\b",
+    )
+    .expect("valid next regex");
+    let speaker_pattern = Regex::new(r"\b([a-z][a-z'\-]+)\s+(?:speaking|here|talking)\b")
+        .expect("valid speaker regex");
 
     // Track which segments belong to which speaker based on text patterns
     let mut speaker_index = 0;
-    
+
     for (index, segment) in segments.iter().enumerate() {
         // Get or create a speaker ID for this segment
         let speaker_id = if let Some(id) = segment.speaker_id.as_ref() {
@@ -6691,7 +6765,7 @@ fn infer_speaker_aliases_from_segments(
 
         if !aliases.contains_key(&speaker_id) {
             let lowered = segment.text.to_lowercase();
-            
+
             // Check for "This is X" or "I am X" patterns
             if let Some(captured) = intro_pattern.captures(&lowered) {
                 if let Some(name_match) = captured.get(1) {
@@ -6701,7 +6775,7 @@ fn infer_speaker_aliases_from_segments(
                     }
                 }
             }
-            
+
             // Check for "X speaking" or "X here" patterns
             if let Some(captured) = speaker_pattern.captures(&lowered) {
                 if let Some(name_match) = captured.get(1) {
@@ -6777,16 +6851,113 @@ fn normalize_person_name(raw: &str) -> Option<String> {
 
     // Block common words that aren't names
     let blocked_words = [
-        "here", "there", "speaking", "next", "up", "and", "with", "from", "the", "a", "an", "you",
-        "they", "we", "going", "to", "be", "talk", "talk about", "start", "begin", "now", "today",
-        "let", "let's", "do", "make", "get", "take", "give", "see", "want", "need", "know",
-        "think", "say", "tell", "ask", "try", "use", "work", "good", "new", "first", "last",
-        "just", "very", "well", "back", "much", "more", "some", "any", "all", "each", "every",
-        "this", "that", "these", "those", "then", "than", "so", "if", "but", "or", "as",
-        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-        "yet", "another", "other", "him", "her", "his", "hers", "my", "your", "our", "their",
-        "me", "us", "them", "who", "what", "when", "where", "why", "how", "which", "whose",
-        "test", "audio", "video", "recording", "meeting", "call", "voice", "sound",
+        "here",
+        "there",
+        "speaking",
+        "next",
+        "up",
+        "and",
+        "with",
+        "from",
+        "the",
+        "a",
+        "an",
+        "you",
+        "they",
+        "we",
+        "going",
+        "to",
+        "be",
+        "talk",
+        "talk about",
+        "start",
+        "begin",
+        "now",
+        "today",
+        "let",
+        "let's",
+        "do",
+        "make",
+        "get",
+        "take",
+        "give",
+        "see",
+        "want",
+        "need",
+        "know",
+        "think",
+        "say",
+        "tell",
+        "ask",
+        "try",
+        "use",
+        "work",
+        "good",
+        "new",
+        "first",
+        "last",
+        "just",
+        "very",
+        "well",
+        "back",
+        "much",
+        "more",
+        "some",
+        "any",
+        "all",
+        "each",
+        "every",
+        "this",
+        "that",
+        "these",
+        "those",
+        "then",
+        "than",
+        "so",
+        "if",
+        "but",
+        "or",
+        "as",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "yet",
+        "another",
+        "other",
+        "him",
+        "her",
+        "his",
+        "hers",
+        "my",
+        "your",
+        "our",
+        "their",
+        "me",
+        "us",
+        "them",
+        "who",
+        "what",
+        "when",
+        "where",
+        "why",
+        "how",
+        "which",
+        "whose",
+        "test",
+        "audio",
+        "video",
+        "recording",
+        "meeting",
+        "call",
+        "voice",
+        "sound",
     ];
 
     let parts: Vec<&str> = cleaned
@@ -7392,9 +7563,12 @@ async fn enforce_meeting_retention_policy(
 
     let delete_mode = normalize_meeting_retention_delete_mode(&delete_mode).to_string();
     let mut db = state.db.lock().await;
-    let recordings = db
-        .get_recordings(None)
-        .map_err(|error| format!("Failed to load recordings for meeting retention cleanup: {}", error))?;
+    let recordings = db.get_recordings(None).map_err(|error| {
+        format!(
+            "Failed to load recordings for meeting retention cleanup: {}",
+            error
+        )
+    })?;
 
     let mut deleted_recordings = 0usize;
     let mut deleted_audio_files = 0usize;
@@ -7485,8 +7659,7 @@ async fn enforce_meeting_retention_policy(
             "deleted_audio_files": deleted_audio_files,
             "audio_paths_cleared": audio_only_clears,
         });
-        if let Err(error) = db.log_audit_event("meeting_retention_cleanup", Some(details), "info")
-        {
+        if let Err(error) = db.log_audit_event("meeting_retention_cleanup", Some(details), "info") {
             tracing::warn!("Failed to log meeting retention cleanup event: {}", error);
         }
     }
@@ -7693,6 +7866,9 @@ async fn transcribe_recording_in_chunks(
     let mut model_name = String::new();
     let mut requested_provider = provider;
     let mut actual_provider = provider;
+    let mut requested_engine: Option<String> = None;
+    let mut actual_engine: Option<String> = None;
+    let mut optimization_applied = false;
     let mut fallback_reason: Option<String> = None;
     let mut weighted_confidence_sum = 0.0_f64;
     let mut weighted_confidence_count = 0.0_f64;
@@ -7802,6 +7978,11 @@ async fn transcribe_recording_in_chunks(
                 }
                 requested_provider = result.requested_provider;
                 actual_provider = result.actual_provider;
+                if requested_engine.is_none() {
+                    requested_engine = result.requested_engine.clone();
+                }
+                actual_engine = result.actual_engine.clone();
+                optimization_applied |= result.optimization_applied;
                 if fallback_reason.is_none() {
                     fallback_reason = result.fallback_reason.clone();
                 }
@@ -7855,6 +8036,11 @@ async fn transcribe_recording_in_chunks(
                 }
                 requested_provider = result.requested_provider;
                 actual_provider = result.actual_provider;
+                if requested_engine.is_none() {
+                    requested_engine = result.requested_engine.clone();
+                }
+                actual_engine = result.actual_engine.clone();
+                optimization_applied |= result.optimization_applied;
                 if fallback_reason.is_none() {
                     fallback_reason = result.fallback_reason.clone();
                 }
@@ -7897,6 +8083,11 @@ async fn transcribe_recording_in_chunks(
         }
         requested_provider = result.requested_provider;
         actual_provider = result.actual_provider;
+        if requested_engine.is_none() {
+            requested_engine = result.requested_engine.clone();
+        }
+        actual_engine = result.actual_engine.clone();
+        optimization_applied |= result.optimization_applied;
         if fallback_reason.is_none() {
             fallback_reason = result.fallback_reason.clone();
         }
@@ -7948,6 +8139,9 @@ async fn transcribe_recording_in_chunks(
         model_id,
         requested_provider,
         actual_provider,
+        requested_engine,
+        actual_engine,
+        optimization_applied,
         fallback_reason,
     })
 }
@@ -8358,6 +8552,44 @@ fn normalize_asr_model_id(provider_type: asr::AsrProviderType, model_id: &str) -
         },
         _ => candidate.to_string(),
     }
+}
+
+fn normalize_platform_mode(value: &str) -> &'static str {
+    match value.trim() {
+        "manual" => "manual",
+        _ => "auto",
+    }
+}
+
+fn normalize_platform_fallback_policy(value: &str) -> &'static str {
+    match value.trim() {
+        "allow_cloud" => "allow_cloud",
+        "fail_fast" => "fail_fast",
+        _ => "local_only",
+    }
+}
+
+fn normalize_platform_engine_id(value: &str) -> Option<&'static str> {
+    match value.trim() {
+        "provider_default" => Some("provider_default"),
+        "macos_apple_speech" => Some("macos_apple_speech"),
+        "macos_mlx_sidecar" => Some("macos_mlx_sidecar"),
+        "windows_foundry_local" => Some("windows_foundry_local"),
+        "windows_sdk_dictation" => Some("windows_sdk_dictation"),
+        _ => None,
+    }
+}
+
+fn normalize_platform_optimization(settings: &mut settings::PlatformOptimizationSettings) {
+    settings.mode = normalize_platform_mode(&settings.mode).to_string();
+    settings.fallback_policy =
+        normalize_platform_fallback_policy(&settings.fallback_policy).to_string();
+    settings.manual_engine_priority = settings
+        .manual_engine_priority
+        .iter()
+        .filter_map(|value| normalize_platform_engine_id(value))
+        .map(ToString::to_string)
+        .collect();
 }
 
 fn provider_model_map_from_settings(

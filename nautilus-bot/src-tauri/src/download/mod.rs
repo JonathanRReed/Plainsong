@@ -349,7 +349,11 @@ impl DownloadManager {
         let destination = diarization_dir.join(filename);
 
         if destination.exists() {
-            tracing::info!("Diarization model {} already exists at {:?}", model_id, destination);
+            tracing::info!(
+                "Diarization model {} already exists at {:?}",
+                model_id,
+                destination
+            );
             return Ok(destination);
         }
 
@@ -475,7 +479,82 @@ impl DownloadManager {
             }
         }
 
+        // Check platform MLX assets
+        let mlx_dir = self.models_dir.join("mlx");
+        if mlx_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&mlx_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let metadata = entry.metadata().await?;
+                if metadata.is_file() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    models.push(DownloadedModel {
+                        name: format!("MLX {}", name),
+                        provider: "platform_mlx".to_string(),
+                        path: entry.path(),
+                        size_bytes: metadata.len(),
+                        downloaded_at: metadata.modified()?,
+                    });
+                }
+            }
+        }
+
+        // Check platform Windows Foundry assets
+        let foundry_dir = self.models_dir.join("windows_foundry");
+        if foundry_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&foundry_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let metadata = entry.metadata().await?;
+                if metadata.is_file() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    models.push(DownloadedModel {
+                        name: format!("Windows Foundry {}", name),
+                        provider: "platform_windows_foundry".to_string(),
+                        path: entry.path(),
+                        size_bytes: metadata.len(),
+                        downloaded_at: metadata.modified()?,
+                    });
+                }
+            }
+        }
+
         Ok(models)
+    }
+
+    pub async fn download_platform_assets(&self, engine: &str) -> Result<PathBuf> {
+        match engine.trim() {
+            "macos_mlx_sidecar" => self.download_mlx_assets().await,
+            "windows_foundry_local" => self.download_windows_foundry_assets().await,
+            _ => Err(anyhow::anyhow!(
+                "Unsupported platform asset bundle '{}'. Supported: macos_mlx_sidecar, windows_foundry_local",
+                engine
+            )),
+        }
+    }
+
+    async fn download_mlx_assets(&self) -> Result<PathBuf> {
+        let mlx_dir = self.models_dir.join("mlx");
+        tokio::fs::create_dir_all(&mlx_dir).await?;
+        let manifest = mlx_dir.join("manifest.json");
+        let payload = serde_json::json!({
+            "engine": "macos_mlx_sidecar",
+            "installedAt": chrono::Utc::now().to_rfc3339(),
+            "note": "Stub MLX sidecar bundle marker. Replace with real sidecar assets in production packaging."
+        });
+        tokio::fs::write(&manifest, serde_json::to_vec_pretty(&payload)?).await?;
+        Ok(manifest)
+    }
+
+    async fn download_windows_foundry_assets(&self) -> Result<PathBuf> {
+        let foundry_dir = self.models_dir.join("windows_foundry");
+        tokio::fs::create_dir_all(&foundry_dir).await?;
+        let manifest = foundry_dir.join("manifest.json");
+        let payload = serde_json::json!({
+            "engine": "windows_foundry_local",
+            "installedAt": chrono::Utc::now().to_rfc3339(),
+            "note": "Foundry runtime marker. Complete Windows Foundry Local install separately; this marker enables readiness diagnostics."
+        });
+        tokio::fs::write(&manifest, serde_json::to_vec_pretty(&payload)?).await?;
+        Ok(manifest)
     }
 
     /// Delete a model (path must be under the managed models directory)

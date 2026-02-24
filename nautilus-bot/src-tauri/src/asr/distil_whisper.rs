@@ -187,6 +187,9 @@ impl AsrProvider for DistilWhisperProvider {
             model_id: DISTIL_MODEL_ID.to_string(),
             requested_provider: AsrProviderType::DistilWhisper,
             actual_provider: AsrProviderType::DistilWhisper,
+            requested_engine: Some("provider_default".to_string()),
+            actual_engine: Some("provider_default".to_string()),
+            optimization_applied: false,
             fallback_reason: None,
         })
     }

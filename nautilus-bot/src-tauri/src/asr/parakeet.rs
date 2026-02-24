@@ -250,13 +250,13 @@ fn run_parakeet_onnx(onnx_path: &Path, vocab_path: &Path, audio_path: &Path) -> 
         .iter()
         .map(|out| out.name().to_string())
         .collect::<Vec<_>>();
-    
+
     tracing::info!(
         "Parakeet ONNX inputs: {:?}, outputs: {:?}",
         input_names,
         output_names
     );
-    
+
     let has_sherpa_names = input_names.iter().any(|name| name == "x");
     let has_processed_names = input_names.iter().any(|name| name == "processed_signal");
     // Note: Some NeMo exports use "audio_signal" as input name but still expect 3D mel spectrograms
@@ -268,7 +268,8 @@ fn run_parakeet_onnx(onnx_path: &Path, vocab_path: &Path, audio_path: &Path) -> 
     let has_raw_audio_names = input_names.iter().any(|name| name == "audio_signal")
         && input_names.iter().any(|name| name == "audio_signal_length");
 
-    let (data, shape) = if has_sherpa_names || has_processed_names || has_mel_with_audio_signal_name {
+    let (data, shape) = if has_sherpa_names || has_processed_names || has_mel_with_audio_signal_name
+    {
         use crate::audio::mel::MelSpectrogram;
 
         // Normalize audio samples (sherpa-onnx normalize_samples=True)
@@ -613,6 +614,9 @@ impl AsrProvider for ParakeetProvider {
             model_id: "parakeet-tdt-ctc-110m".to_string(),
             requested_provider: AsrProviderType::Parakeet,
             actual_provider: AsrProviderType::Parakeet,
+            requested_engine: Some("provider_default".to_string()),
+            actual_engine: Some("provider_default".to_string()),
+            optimization_applied: false,
             fallback_reason: None,
         })
     }

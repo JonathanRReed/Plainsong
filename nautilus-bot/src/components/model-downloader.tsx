@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 import type { AsrProviderType } from "@/types/asr";
+import { downloadPlatformAssets } from "@/lib/tauri";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -42,28 +43,47 @@ const WHISPER_MODELS = [
 ];
 
 const PROVIDER_BUNDLES: Array<{
-  providerType: AsrProviderType;
+  id: string;
+  providerType?: AsrProviderType;
+  platformEngine?: string;
   label: string;
   description: string;
   indicator: string;
 }> = [
   {
+    id: "distil_whisper",
     providerType: "distil_whisper",
     label: "Distil Whisper local",
     description: "Downloads Distil Whisper local runtime artifacts (distil-large-v3.5).",
     indicator: "distil_whisper/model.safetensors",
   },
   {
+    id: "parakeet",
     providerType: "parakeet",
     label: "NVIDIA Parakeet TDT CTC 110M",
     description: "Downloads encoder.onnx + tokens.txt from public CTC ONNX sources (native ONNX, no Python).",
     indicator: "parakeet/encoder.onnx",
   },
   {
+    id: "canary",
     providerType: "canary",
     label: "NVIDIA Canary local",
     description: "Downloads Canary local model assets for on-device transcription.",
     indicator: "model.safetensors",
+  },
+  {
+    id: "macos_mlx_sidecar",
+    platformEngine: "macos_mlx_sidecar",
+    label: "macOS MLX sidecar assets",
+    description: "Bootstraps MLX runtime assets for platform optimization checks.",
+    indicator: "mlx/manifest.json",
+  },
+  {
+    id: "windows_foundry_local",
+    platformEngine: "windows_foundry_local",
+    label: "Windows Foundry runtime marker",
+    description: "Registers Foundry Local readiness marker. Install the full Foundry runtime separately.",
+    indicator: "windows_foundry/manifest.json",
   },
 ];
 
@@ -153,15 +173,23 @@ export function ModelDownloader({ className }: ModelDownloaderProps) {
     }
   };
 
-  const handleProviderBundleDownload = async (providerType: AsrProviderType) => {
-    setDownloadingModel(providerType);
+  const handleProviderBundleDownload = async (
+    bundleId: string,
+    providerType?: AsrProviderType,
+    platformEngine?: string
+  ) => {
+    setDownloadingModel(bundleId);
     setDownloadProgress(0);
     try {
-      await invoke("download_asr_models", { providerType });
+      if (providerType) {
+        await invoke("download_asr_models", { providerType });
+      } else if (platformEngine) {
+        await downloadPlatformAssets(platformEngine);
+      }
       await loadDownloadedModels();
       await loadAvailableSpace();
     } catch (error) {
-      console.error(`Failed to download ${providerType} models:`, error);
+      console.error(`Failed to download ${bundleId} assets:`, error);
     } finally {
       setDownloadingModel(null);
       setDownloadProgress(0);
@@ -235,13 +263,16 @@ export function ModelDownloader({ className }: ModelDownloaderProps) {
           {PROVIDER_BUNDLES.map((bundle) => {
             const downloaded = downloadedModels.some(
               (m) =>
-                m.provider === bundle.providerType ||
+                (bundle.providerType && m.provider === bundle.providerType) ||
+                (bundle.platformEngine === "macos_mlx_sidecar" && m.provider === "platform_mlx") ||
+                (bundle.platformEngine === "windows_foundry_local" &&
+                  m.provider === "platform_windows_foundry") ||
                 m.path.includes(bundle.indicator)
             );
-            const downloading = downloadingModel === bundle.providerType;
+            const downloading = downloadingModel === bundle.id;
             return (
               <div
-                key={bundle.providerType}
+                key={bundle.id}
                 className={cn(
                   "flex items-center justify-between p-4 border rounded-lg",
                   downloaded && "bg-muted/50 border-green-200 dark:border-green-800"
@@ -264,7 +295,13 @@ export function ModelDownloader({ className }: ModelDownloaderProps) {
                 ) : (
                   <Button
                     size="sm"
-                    onClick={() => handleProviderBundleDownload(bundle.providerType)}
+                    onClick={() =>
+                      handleProviderBundleDownload(
+                        bundle.id,
+                        bundle.providerType,
+                        bundle.platformEngine
+                      )
+                    }
                     disabled={Boolean(downloadingModel)}
                   >
                     <Download className="h-4 w-4 mr-2" />

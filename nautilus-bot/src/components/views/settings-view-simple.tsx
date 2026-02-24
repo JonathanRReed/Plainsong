@@ -871,7 +871,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   <CardTitle>Audio & Transcription</CardTitle>
                   <AdvancedToggle checked={advancedTabs.asr} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, asr: c }))} />
                 </div>
-                <CardDescription>Configure ASR models, diarization, and audio capture</CardDescription>
+                <CardDescription>
+                  Configure ASR models, platform optimization routing, diarization, and audio capture
+                </CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
                 <div className="space-y-3">

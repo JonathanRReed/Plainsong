@@ -9,7 +9,7 @@ export interface ProviderSelectionStatus {
 export function getProviderSelectionStatus(
   provider: Pick<
     AsrProviderInfo,
-    "downloadStatus" | "inferenceEnabled" | "isAvailable" | "runtimeStatus"
+    "downloadStatus" | "inferenceEnabled" | "isAvailable" | "runtimeStatus" | "engineDiagnostics"
   >
 ): ProviderSelectionStatus {
   const normalized = normalizeDownloadStatus(provider.downloadStatus);
@@ -20,6 +20,12 @@ export function getProviderSelectionStatus(
     return { selectable: true, reason: "download_required" };
   }
   if (provider.runtimeStatus !== "ready" || !provider.isAvailable) {
+    return { selectable: true, reason: "runtime_unavailable" };
+  }
+  if (
+    provider.engineDiagnostics &&
+    provider.engineDiagnostics.availableEngines.length === 0
+  ) {
     return { selectable: true, reason: "runtime_unavailable" };
   }
   return { selectable: true, reason: null };

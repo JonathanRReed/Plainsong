@@ -6,6 +6,7 @@ pub mod manager;
 pub mod moonshine;
 pub mod openai_cloud;
 pub mod parakeet;
+pub mod platform;
 pub mod python_runtime;
 pub mod voxtral;
 pub mod whisper;
@@ -57,6 +58,12 @@ pub struct TranscriptionResult {
     pub model_id: String,
     pub requested_provider: AsrProviderType,
     pub actual_provider: AsrProviderType,
+    #[serde(default)]
+    pub requested_engine: Option<String>,
+    #[serde(default)]
+    pub actual_engine: Option<String>,
+    #[serde(default)]
+    pub optimization_applied: bool,
     #[serde(default)]
     pub fallback_reason: Option<String>,
 }

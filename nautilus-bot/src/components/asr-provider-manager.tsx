@@ -5,6 +5,8 @@ import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
 import {
   refreshAsrRuntimeProbes,
   repairLocalModelCache,
+  getSettings,
+  saveSettings,
 } from "@/lib/tauri";
 import { invoke } from "@tauri-apps/api/core";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,6 +17,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type {
   AsrBenchmarkEntry,
+  PlatformOptimizationSettings,
   AsrProviderInfo,
   AsrProviderType,
   BenchmarkResult,
@@ -52,12 +55,57 @@ export function AsrProviderManager({
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
   const [repairingCache, setRepairingCache] = useState(false);
   const [repairSummary, setRepairSummary] = useState<string | null>(null);
+  const [platformSettings, setPlatformSettings] = useState<PlatformOptimizationSettings | null>(null);
+  const [platformSaveBusy, setPlatformSaveBusy] = useState(false);
+  const [platformSaveError, setPlatformSaveError] = useState<string | null>(null);
   const benchmarkFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const manualEngineOptions = [
+    { value: "provider_default", label: "Provider default" },
+    { value: "macos_mlx_sidecar", label: "macOS MLX sidecar" },
+    { value: "macos_apple_speech", label: "macOS Apple Speech" },
+    { value: "windows_foundry_local", label: "Windows Foundry Local" },
+    { value: "windows_sdk_dictation", label: "Windows SDK dictation" },
+  ] as const;
+
+  const defaultPlatformSettings = (): PlatformOptimizationSettings => ({
+    mode: "auto",
+    fallbackPolicy: "local_only",
+    macos: {
+      appleNativeEnabled: false,
+      mlxEnabled: true,
+    },
+    windows: {
+      foundryEnabled: false,
+      windowsSdkDictationEnabled: false,
+    },
+    manualEnginePriority: [],
+  });
+
+  const normalizeManualEnginePriority = (priority: string[]): string[] => {
+    const validIds = new Set<string>(manualEngineOptions.map((option) => option.value));
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const id of priority) {
+      if (!validIds.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      normalized.push(id);
+    }
+    return normalized;
+  };
+
+  const withNormalizedManualPriority = (
+    settings: PlatformOptimizationSettings
+  ): PlatformOptimizationSettings => ({
+    ...settings,
+    manualEnginePriority: normalizeManualEnginePriority(settings.manualEnginePriority ?? []),
+  });
 
   useEffect(() => {
     loadProviders();
     loadDefaultProvider();
     loadBenchmarkHistory();
+    loadPlatformSettings();
 
     // Listen for download progress events
     import("@tauri-apps/api/event").then(({ listen }) => {
@@ -72,6 +120,42 @@ export function AsrProviderManager({
       // For now, this is acceptable for a main view component.
     });
   }, []);
+
+  const loadPlatformSettings = async () => {
+    try {
+      const settings = await getSettings();
+      setPlatformSettings(
+        withNormalizedManualPriority(
+          settings.transcription.platformOptimization ?? defaultPlatformSettings()
+        )
+      );
+    } catch (error) {
+      console.error("Failed to load platform optimization settings:", error);
+      setPlatformSettings(defaultPlatformSettings());
+    }
+  };
+
+  const persistPlatformSettings = async (next: PlatformOptimizationSettings) => {
+    const normalizedNext = withNormalizedManualPriority(next);
+    setPlatformSaveBusy(true);
+    setPlatformSaveError(null);
+    try {
+      const settings = await getSettings();
+      await saveSettings({
+        ...settings,
+        transcription: {
+          ...settings.transcription,
+          platformOptimization: normalizedNext,
+        },
+      });
+      setPlatformSettings(normalizedNext);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPlatformSaveError(message);
+    } finally {
+      setPlatformSaveBusy(false);
+    }
+  };
 
   const loadProviders = async () => {
     try {
@@ -338,6 +422,264 @@ export function AsrProviderManager({
         </TabsList>
 
         <TabsContent value="providers" className="space-y-4">
+          {platformSettings ? (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Platform Optimization (Advanced)</CardTitle>
+                <CardDescription>
+                  Keeps your default provider unchanged while enabling optional macOS/Windows runtime optimizations.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="space-y-1 text-sm">
+                    <span className="text-muted-foreground">Mode</span>
+                    <select
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                      value={platformSettings.mode}
+                      disabled={platformSaveBusy}
+                      onChange={(event) => {
+                        const next: PlatformOptimizationSettings = {
+                          ...platformSettings,
+                          mode: event.target.value as "auto" | "manual",
+                        };
+                        void persistPlatformSettings(next);
+                      }}
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="manual">Manual</option>
+                    </select>
+                  </label>
+                  <label className="space-y-1 text-sm">
+                    <span className="text-muted-foreground">Fallback policy</span>
+                    <select
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                      value={platformSettings.fallbackPolicy}
+                      disabled={platformSaveBusy}
+                      onChange={(event) => {
+                        const next: PlatformOptimizationSettings = {
+                          ...platformSettings,
+                          fallbackPolicy: event.target.value as
+                            | "local_only"
+                            | "allow_cloud"
+                            | "fail_fast",
+                        };
+                        void persistPlatformSettings(next);
+                      }}
+                    >
+                      <option value="local_only">Local only</option>
+                      <option value="allow_cloud">Allow cloud</option>
+                      <option value="fail_fast">Fail fast</option>
+                    </select>
+                  </label>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-2">
+                  <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+                    <span>macOS Apple Speech engine</span>
+                    <input
+                      type="checkbox"
+                      checked={platformSettings.macos.appleNativeEnabled}
+                      disabled={platformSaveBusy}
+                      onChange={(event) => {
+                        const next: PlatformOptimizationSettings = {
+                          ...platformSettings,
+                          macos: {
+                            ...platformSettings.macos,
+                            appleNativeEnabled: event.target.checked,
+                          },
+                        };
+                        void persistPlatformSettings(next);
+                      }}
+                    />
+                  </label>
+                  <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+                    <span>macOS MLX sidecar optimization</span>
+                    <input
+                      type="checkbox"
+                      checked={platformSettings.macos.mlxEnabled}
+                      disabled={platformSaveBusy}
+                      onChange={(event) => {
+                        const next: PlatformOptimizationSettings = {
+                          ...platformSettings,
+                          macos: {
+                            ...platformSettings.macos,
+                            mlxEnabled: event.target.checked,
+                          },
+                        };
+                        void persistPlatformSettings(next);
+                      }}
+                    />
+                  </label>
+                  <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+                    <span>Windows Foundry Local</span>
+                    <input
+                      type="checkbox"
+                      checked={platformSettings.windows.foundryEnabled}
+                      disabled={platformSaveBusy}
+                      onChange={(event) => {
+                        const next: PlatformOptimizationSettings = {
+                          ...platformSettings,
+                          windows: {
+                            ...platformSettings.windows,
+                            foundryEnabled: event.target.checked,
+                          },
+                        };
+                        void persistPlatformSettings(next);
+                      }}
+                    />
+                  </label>
+                  <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+                    <span>Windows SDK dictation engine</span>
+                    <input
+                      type="checkbox"
+                      checked={platformSettings.windows.windowsSdkDictationEnabled}
+                      disabled={platformSaveBusy}
+                      onChange={(event) => {
+                        const next: PlatformOptimizationSettings = {
+                          ...platformSettings,
+                          windows: {
+                            ...platformSettings.windows,
+                            windowsSdkDictationEnabled: event.target.checked,
+                          },
+                        };
+                        void persistPlatformSettings(next);
+                      }}
+                    />
+                  </label>
+                </div>
+
+                {platformSettings.mode === "manual" ? (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">
+                      Manual engine priority (top to bottom)
+                    </p>
+                    {platformSettings.manualEnginePriority.length === 0 ? (
+                      <p className="text-xs text-muted-foreground">
+                        No override engines configured yet.
+                      </p>
+                    ) : null}
+                    {platformSettings.manualEnginePriority.map((engineId, index) => (
+                      <div key={`${engineId}-${index}`} className="flex flex-wrap items-center gap-2">
+                        <select
+                          className="min-w-[220px] flex-1 rounded-md border bg-background px-3 py-2 text-sm"
+                          value={engineId}
+                          disabled={platformSaveBusy}
+                          onChange={(event) => {
+                            const nextPriority = [...platformSettings.manualEnginePriority];
+                            nextPriority[index] = event.target.value;
+                            const next: PlatformOptimizationSettings = {
+                              ...platformSettings,
+                              manualEnginePriority: nextPriority,
+                            };
+                            void persistPlatformSettings(next);
+                          }}
+                        >
+                          {manualEngineOptions
+                            .filter(
+                              (option) =>
+                                option.value === engineId ||
+                                !platformSettings.manualEnginePriority.includes(option.value)
+                            )
+                            .map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                        </select>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={platformSaveBusy || index === 0}
+                          onClick={() => {
+                            if (index === 0) return;
+                            const nextPriority = [...platformSettings.manualEnginePriority];
+                            [nextPriority[index - 1], nextPriority[index]] = [
+                              nextPriority[index],
+                              nextPriority[index - 1],
+                            ];
+                            void persistPlatformSettings({
+                              ...platformSettings,
+                              manualEnginePriority: nextPriority,
+                            });
+                          }}
+                        >
+                          Up
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={
+                            platformSaveBusy || index === platformSettings.manualEnginePriority.length - 1
+                          }
+                          onClick={() => {
+                            if (index === platformSettings.manualEnginePriority.length - 1) return;
+                            const nextPriority = [...platformSettings.manualEnginePriority];
+                            [nextPriority[index], nextPriority[index + 1]] = [
+                              nextPriority[index + 1],
+                              nextPriority[index],
+                            ];
+                            void persistPlatformSettings({
+                              ...platformSettings,
+                              manualEnginePriority: nextPriority,
+                            });
+                          }}
+                        >
+                          Down
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={platformSaveBusy}
+                          onClick={() => {
+                            const nextPriority = platformSettings.manualEnginePriority.filter(
+                              (_value, currentIndex) => currentIndex !== index
+                            );
+                            void persistPlatformSettings({
+                              ...platformSettings,
+                              manualEnginePriority: nextPriority,
+                            });
+                          }}
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    ))}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={
+                        platformSaveBusy ||
+                        platformSettings.manualEnginePriority.length >= manualEngineOptions.length
+                      }
+                      onClick={() => {
+                        const nextOption = manualEngineOptions.find(
+                          (option) => !platformSettings.manualEnginePriority.includes(option.value)
+                        );
+                        if (!nextOption) return;
+                        void persistPlatformSettings({
+                          ...platformSettings,
+                          manualEnginePriority: [
+                            ...platformSettings.manualEnginePriority,
+                            nextOption.value,
+                          ],
+                        });
+                      }}
+                    >
+                      Add engine
+                    </Button>
+                    <p className="text-[11px] text-muted-foreground">
+                      Platform-native engines are opt-in and do not change your default provider.
+                    </p>
+                  </div>
+                ) : null}
+
+                {platformSaveError ? (
+                  <p className="text-xs text-destructive">{platformSaveError}</p>
+                ) : null}
+              </CardContent>
+            </Card>
+          ) : null}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base">Local Model Cache Repair</CardTitle>
@@ -483,6 +825,30 @@ export function AsrProviderManager({
                           </div>
                         )}
                       </div>
+
+                      {provider.engineDiagnostics ? (
+                        <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs space-y-1">
+                          <p className="text-muted-foreground">
+                            Active engine:{" "}
+                            <span className="font-mono">
+                              {provider.engineDiagnostics.activeEngine ?? "provider_default"}
+                            </span>
+                          </p>
+                          <p className="text-muted-foreground">
+                            Ready engines:{" "}
+                            <span className="font-mono">
+                              {provider.engineDiagnostics.availableEngines.length > 0
+                                ? provider.engineDiagnostics.availableEngines.join(", ")
+                                : "none"}
+                            </span>
+                          </p>
+                          {provider.engineDiagnostics.notes.slice(0, 2).map((note, index) => (
+                            <p key={`${provider.providerType}-engine-note-${index}`} className="text-muted-foreground">
+                              {note}
+                            </p>
+                          ))}
+                        </div>
+                      ) : null}
 
                       <div className="flex items-center justify-between pt-2">
                         <div className="flex items-center gap-2">
