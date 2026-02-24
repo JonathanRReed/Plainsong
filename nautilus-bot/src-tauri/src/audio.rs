@@ -72,6 +72,19 @@ struct ActiveRecordingSession {
     pub streaming_queue: Arc<crossbeam::queue::ArrayQueue<Vec<f32>>>,
     /// Sample rate used by this recording
     pub sample_rate: u32,
+    /// Dropped chunk counters captured during recording.
+    dropped_stream_chunks: Arc<AtomicU64>,
+    dropped_writer_chunks: Arc<AtomicU64>,
+}
+
+pub struct RecordingStopResult {
+    pub audio_path: String,
+    pub content_hash: String,
+    pub dropped_stream_chunks: u64,
+    pub dropped_writer_chunks: u64,
+    pub dropped_mic_samples: u64,
+    pub dropped_system_samples: u64,
+    pub dropped_mixed_chunks: u64,
 }
 
 #[allow(dead_code)]
@@ -537,6 +550,8 @@ impl AudioCapture {
                 waveform_buffer,
                 streaming_queue,
                 sample_rate: 44100,
+                dropped_stream_chunks: Arc::new(AtomicU64::new(0)),
+                dropped_writer_chunks: Arc::new(AtomicU64::new(0)),
             });
         } else {
             // Standard microphone-only recording
@@ -547,6 +562,8 @@ impl AudioCapture {
             let capture_flag = Arc::clone(&capture_stop_flag);
             let dropped_stream_chunks = Arc::new(AtomicU64::new(0));
             let dropped_writer_chunks = Arc::new(AtomicU64::new(0));
+            let dropped_stream_chunks_for_session = Arc::clone(&dropped_stream_chunks);
+            let dropped_writer_chunks_for_session = Arc::clone(&dropped_writer_chunks);
 
             let stream_queue_clone = Arc::clone(&streaming_queue);
             let capture_handle = std::thread::spawn(move || {
@@ -688,6 +705,8 @@ impl AudioCapture {
                 waveform_buffer,
                 streaming_queue,
                 sample_rate,
+                dropped_stream_chunks: dropped_stream_chunks_for_session,
+                dropped_writer_chunks: dropped_writer_chunks_for_session,
             });
         }
 
@@ -695,7 +714,7 @@ impl AudioCapture {
         Ok(id)
     }
 
-    pub fn stop_recording(&mut self, recording_id: &str) -> Result<(String, String)> {
+    pub fn stop_recording(&mut self, recording_id: &str) -> Result<RecordingStopResult> {
         tracing::info!("Stopping recording: {}", recording_id);
 
         let mut session = self
@@ -720,12 +739,38 @@ impl AudioCapture {
         if let Some(handle) = session.capture_handle.take() {
             join_thread_with_timeout(handle, Duration::from_secs(5), "capture thread")?;
         }
+        let mut dropped_mic_samples = 0_u64;
+        let mut dropped_system_samples = 0_u64;
+        let mut dropped_mixed_chunks = 0_u64;
         if let Some(mut mixed_capture) = session.mixed_capture.take() {
             mixed_capture.stop();
+            let (mic_samples, system_samples, mixed_chunks) = mixed_capture.drop_counts();
+            dropped_mic_samples = mic_samples;
+            dropped_system_samples = system_samples;
+            dropped_mixed_chunks = mixed_chunks;
         }
 
         if let Some(handle) = session.writer_handle.take() {
             join_thread_with_timeout(handle, Duration::from_secs(20), "wav writer thread")?;
+        }
+
+        let dropped_stream_chunks = session.dropped_stream_chunks.load(Ordering::Relaxed);
+        let dropped_writer_chunks = session.dropped_writer_chunks.load(Ordering::Relaxed);
+        if dropped_stream_chunks > 0
+            || dropped_writer_chunks > 0
+            || dropped_mic_samples > 0
+            || dropped_system_samples > 0
+            || dropped_mixed_chunks > 0
+        {
+            tracing::warn!(
+                "Recording '{}' experienced dropped audio data (stream_chunks={}, writer_chunks={}, mic_samples={}, system_samples={}, mixed_chunks={})",
+                recording_id,
+                dropped_stream_chunks,
+                dropped_writer_chunks,
+                dropped_mic_samples,
+                dropped_system_samples,
+                dropped_mixed_chunks
+            );
         }
 
         let path = session.audio_path;
@@ -738,7 +783,15 @@ impl AudioCapture {
         });
         tracing::info!("Recording SHA256: {}", hash);
 
-        Ok((path.to_string_lossy().to_string(), hash))
+        Ok(RecordingStopResult {
+            audio_path: path.to_string_lossy().to_string(),
+            content_hash: hash,
+            dropped_stream_chunks,
+            dropped_writer_chunks,
+            dropped_mic_samples,
+            dropped_system_samples,
+            dropped_mixed_chunks,
+        })
     }
 
     /// Returns the streaming sample queue and sample rate for the active recording.

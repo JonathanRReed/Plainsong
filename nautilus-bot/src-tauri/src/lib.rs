@@ -1243,7 +1243,7 @@ async fn stop_recording(
     // Signal the live streaming background task to stop before halting audio capture
     state.recording_stream_stop.store(false, Ordering::SeqCst);
 
-    let (audio_path, content_hash) = {
+    let stop_result = {
         let mut audio = state.audio_capture.lock().await;
         match audio.stop_recording(&recordingId) {
             Ok(result) => result,
@@ -1266,6 +1266,8 @@ async fn stop_recording(
             }
         }
     };
+    let audio_path = stop_result.audio_path.clone();
+    let content_hash = stop_result.content_hash.clone();
 
     let mut db = state.db.lock().await;
     let duration_seconds = compute_wav_duration_seconds(&audio_path);
@@ -1279,12 +1281,36 @@ async fn stop_recording(
         "recording_id": &recordingId,
         "audio_path": &audio_path,
         "content_hash": &content_hash,
-        "duration_seconds": duration_seconds
+        "duration_seconds": duration_seconds,
+        "dropped_stream_chunks": stop_result.dropped_stream_chunks,
+        "dropped_writer_chunks": stop_result.dropped_writer_chunks,
+        "dropped_mic_samples": stop_result.dropped_mic_samples,
+        "dropped_system_samples": stop_result.dropped_system_samples,
+        "dropped_mixed_chunks": stop_result.dropped_mixed_chunks,
     });
     if let Err(e) = db.log_audit_event("recording_stopped", Some(details), "info") {
         tracing::warn!("Failed to log audit event: {}", e);
     }
     drop(db);
+
+    if stop_result.dropped_stream_chunks > 0
+        || stop_result.dropped_writer_chunks > 0
+        || stop_result.dropped_mic_samples > 0
+        || stop_result.dropped_system_samples > 0
+        || stop_result.dropped_mixed_chunks > 0
+    {
+        let _ = app.emit(
+            "recording-capture-diagnostics",
+            serde_json::json!({
+                "recordingId": &recordingId,
+                "droppedStreamChunks": stop_result.dropped_stream_chunks,
+                "droppedWriterChunks": stop_result.dropped_writer_chunks,
+                "droppedMicSamples": stop_result.dropped_mic_samples,
+                "droppedSystemSamples": stop_result.dropped_system_samples,
+                "droppedMixedChunks": stop_result.dropped_mixed_chunks,
+            }),
+        );
+    }
 
     // Hide the recording overlay immediately - don't wait for transcription
     hide_overlay_window(&app, RECORDING_OVERLAY_LABEL);
@@ -1786,6 +1812,12 @@ async fn stop_recording(
                 };
                 let meeting_audio_storage_mode =
                     normalize_meeting_audio_storage_mode(&meeting_audio_storage_mode).to_string();
+                let duration_seconds_for_recording = db
+                    .get_recording(&recording_id_clone)
+                    .ok()
+                    .flatten()
+                    .map(|recording| recording.duration)
+                    .unwrap_or_else(|| compute_wav_duration_seconds(&audio_path_clone));
                 if encrypt_recordings && meeting_audio_storage_mode != "transcript_only" {
                     let recording_key = {
                         let vault_state = vault_state_clone.lock().await;
@@ -1801,12 +1833,10 @@ async fn stop_recording(
                             Ok(encrypted_path) => {
                                 let encrypted_path_string =
                                     encrypted_path.to_string_lossy().to_string();
-                                let duration_seconds =
-                                    compute_wav_duration_seconds(&audio_path_clone);
                                 if let Err(error) = db.update_recording_path(
                                     &recording_id_clone,
                                     &encrypted_path_string,
-                                    duration_seconds,
+                                    duration_seconds_for_recording,
                                 ) {
                                     tracing::warn!(
                                         "Failed to update encrypted recording path for {}: {}",
@@ -1850,39 +1880,51 @@ async fn stop_recording(
                         .flatten()
                         .map(|recording| recording.audio_path)
                         .unwrap_or_default();
+                    let mut audio_deleted_or_absent = true;
 
                     if !stored_audio_path.trim().is_empty() {
                         let candidate = Path::new(&stored_audio_path);
                         if candidate.exists() {
-                            if let Err(error) = std::fs::remove_file(candidate) {
-                                tracing::warn!(
-                                    "Failed to remove meeting audio '{}' for transcript-only storage: {}",
-                                    stored_audio_path,
-                                    error
-                                );
+                            match std::fs::remove_file(candidate) {
+                                Ok(()) => {}
+                                Err(error) => {
+                                    audio_deleted_or_absent = false;
+                                    tracing::warn!(
+                                        "Failed to remove meeting audio '{}' for transcript-only storage: {}",
+                                        stored_audio_path,
+                                        error
+                                    );
+                                }
                             }
                         }
                     }
 
-                    if let Err(error) = db.clear_recording_audio_path(&recording_id_clone) {
+                    if audio_deleted_or_absent {
+                        if let Err(error) = db.clear_recording_audio_path(&recording_id_clone) {
+                            tracing::warn!(
+                                "Failed to clear audio path for transcript-only meeting '{}': {}",
+                                recording_id_clone,
+                                error
+                            );
+                        } else if let Err(error) = db.log_audit_event(
+                            "meeting_audio_discarded",
+                            Some(serde_json::json!({
+                                "recording_id": &recording_id_clone,
+                                "mode": "transcript_only",
+                                "audio_path": stored_audio_path,
+                            })),
+                            "info",
+                        ) {
+                            tracing::warn!(
+                                "Failed to log transcript-only audio discard for '{}': {}",
+                                recording_id_clone,
+                                error
+                            );
+                        }
+                    } else {
                         tracing::warn!(
-                            "Failed to clear audio path for transcript-only meeting '{}': {}",
-                            recording_id_clone,
-                            error
-                        );
-                    } else if let Err(error) = db.log_audit_event(
-                        "meeting_audio_discarded",
-                        Some(serde_json::json!({
-                            "recording_id": &recording_id_clone,
-                            "mode": "transcript_only",
-                            "audio_path": stored_audio_path,
-                        })),
-                        "info",
-                    ) {
-                        tracing::warn!(
-                            "Failed to log transcript-only audio discard for '{}': {}",
-                            recording_id_clone,
-                            error
+                            "Retaining audio path for meeting '{}' because transcript-only deletion failed",
+                            recording_id_clone
                         );
                     }
                 }
@@ -7387,10 +7429,12 @@ async fn enforce_meeting_retention_policy(
         }
 
         let candidate = std::path::Path::new(&recording.audio_path);
+        let mut audio_deleted_or_absent = true;
         if candidate.exists() {
             match std::fs::remove_file(candidate) {
                 Ok(()) => deleted_audio_files += 1,
                 Err(error) => {
+                    audio_deleted_or_absent = false;
                     tracing::warn!(
                         "Failed to remove meeting audio '{}' during retention cleanup: {}",
                         recording.audio_path,
@@ -7398,6 +7442,9 @@ async fn enforce_meeting_retention_policy(
                     );
                 }
             }
+        }
+        if !audio_deleted_or_absent {
+            continue;
         }
         if let Err(error) = db.clear_recording_audio_path(&recording.id) {
             tracing::warn!(

@@ -6,6 +6,7 @@ use crossbeam::channel::TrySendError;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// System audio capture session helper
 pub struct SystemAudioCapture {
@@ -16,6 +17,9 @@ pub struct SystemAudioCapture {
 pub struct MixedAudioCapture {
     is_capturing: Arc<AtomicBool>,
     capture_thread: Option<JoinHandle<()>>,
+    dropped_mic_samples: Arc<AtomicU64>,
+    dropped_system_samples: Arc<AtomicU64>,
+    dropped_mixed_chunks: Arc<AtomicU64>,
 }
 
 impl SystemAudioCapture {
@@ -71,6 +75,9 @@ impl MixedAudioCapture {
         Self {
             is_capturing: Arc::new(AtomicBool::new(false)),
             capture_thread: None,
+            dropped_mic_samples: Arc::new(AtomicU64::new(0)),
+            dropped_system_samples: Arc::new(AtomicU64::new(0)),
+            dropped_mixed_chunks: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -89,9 +96,16 @@ impl MixedAudioCapture {
         }
 
         self.is_capturing.store(true, Ordering::SeqCst);
+        self.dropped_mic_samples.store(0, Ordering::SeqCst);
+        self.dropped_system_samples.store(0, Ordering::SeqCst);
+        self.dropped_mixed_chunks.store(0, Ordering::SeqCst);
 
         let (sender, receiver) = crossbeam::channel::bounded::<Vec<f32>>(100);
+        let (ready_tx, ready_rx) = crossbeam::channel::bounded::<std::result::Result<(), String>>(1);
         let is_capturing = Arc::clone(&self.is_capturing);
+        let dropped_mic_samples = Arc::clone(&self.dropped_mic_samples);
+        let dropped_system_samples = Arc::clone(&self.dropped_system_samples);
+        let dropped_mixed_chunks = Arc::clone(&self.dropped_mixed_chunks);
 
         self.capture_thread = Some(std::thread::spawn(move || {
             const MIXED_BUFFER_CAPACITY: usize = 65_536;
@@ -100,9 +114,6 @@ impl MixedAudioCapture {
                 Arc::new(crossbeam::queue::ArrayQueue::new(MIXED_BUFFER_CAPACITY));
             let system_buffer: Arc<crossbeam::queue::ArrayQueue<f32>> =
                 Arc::new(crossbeam::queue::ArrayQueue::new(MIXED_BUFFER_CAPACITY));
-            let dropped_mic_samples = Arc::new(AtomicU64::new(0));
-            let dropped_system_samples = Arc::new(AtomicU64::new(0));
-            let dropped_mixed_chunks = Arc::new(AtomicU64::new(0));
 
             let mut _mic_stream = None;
             let mut _sys_stream = None;
@@ -162,7 +173,9 @@ impl MixedAudioCapture {
                 match setup() {
                     Ok(stream) => _mic_stream = Some(stream),
                     Err(e) => {
-                        tracing::error!("Failed to start microphone stream: {}", e);
+                        let message = format!("Failed to start microphone stream: {}", e);
+                        tracing::error!("{}", message);
+                        let _ = ready_tx.send(Err(message));
                         is_capturing.store(false, Ordering::SeqCst);
                         return;
                     }
@@ -226,12 +239,16 @@ impl MixedAudioCapture {
                 match setup() {
                     Ok(stream) => _sys_stream = Some(stream),
                     Err(e) => {
-                        tracing::error!("Failed to start system stream: {}", e);
+                        let message = format!("Failed to start system stream: {}", e);
+                        tracing::error!("{}", message);
+                        let _ = ready_tx.send(Err(message));
                         is_capturing.store(false, Ordering::SeqCst);
                         return;
                     }
                 }
             }
+
+            let _ = ready_tx.send(Ok(()));
 
             let mut output = Vec::with_capacity(512);
             while is_capturing.load(Ordering::SeqCst) {
@@ -323,6 +340,20 @@ impl MixedAudioCapture {
             }
         }));
 
+        match ready_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => {
+                self.stop();
+                return Err(anyhow::anyhow!(message));
+            }
+            Err(_) => {
+                self.stop();
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for audio capture streams to initialize"
+                ));
+            }
+        }
+
         tracing::info!(
             "Mixed audio capture started (mic: {}, system: {})",
             capture_mic,
@@ -347,6 +378,14 @@ impl MixedAudioCapture {
             }
         }
         tracing::info!("Mixed audio capture stopped");
+    }
+
+    pub fn drop_counts(&self) -> (u64, u64, u64) {
+        (
+            self.dropped_mic_samples.load(Ordering::Relaxed),
+            self.dropped_system_samples.load(Ordering::Relaxed),
+            self.dropped_mixed_chunks.load(Ordering::Relaxed),
+        )
     }
 
     #[allow(dead_code)]
