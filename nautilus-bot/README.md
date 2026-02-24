@@ -84,6 +84,7 @@ node ../scripts/live-cloud-asr-smoke.mjs
 
 - `docs/prelaunch-readiness.md`
 - `docs/prelaunch-action-checklist.md`
+- `docs/competitor-parity-gates.md`
 - `docs/release-gate-evidence.md`
 - `docs/packaged-app-qa-matrix.md`
 

@@ -33,7 +33,16 @@ This checklist tracks remaining release blockers for strict all-provider GA on m
 - [ ] 3h mic+system meeting soak test passes (record → stop → transcript complete).
 - [ ] Idle CPU baseline in packaged app is < 1% while app window is open and not recording.
 
-## E) Final Signoff
+## E) Competitor Parity Gates (Required)
+
+- [ ] Complete all `CP-*` launch blockers in `docs/competitor-parity-gates.md` with `PASS` status only.
+- [ ] Confirm meeting processing UX parity (`processing` state, spinner, auto-refresh transcript in detail view).
+- [ ] Confirm transcript-only and retention-delete modes behave exactly as configured.
+- [ ] Confirm onboarding parity for Normal + Power tracks, including persistence behavior.
+- [ ] Confirm licensing parity (tier unlock matrix + 30-day lockout behavior).
+- [ ] Confirm at least one cloud backup provider passes setup + sync + restore.
+
+## F) Final Signoff
 
 - [ ] Engineering signoff.
 - [ ] QA signoff.
