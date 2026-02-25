@@ -31,6 +31,9 @@ Status values: `PASS` / `FAIL` / `BLOCKED` / `PENDING`
 | CP-10 | 30-day lockout | Trial expiration and pro lockout behavior trigger at boundary with expected nags/restrictions. | QA matrix row + timestamped test notes |
 | CP-11 | Signed updates | Updater check/download/install path succeeds on signed macOS and Windows builds. | QA matrix rows + updater logs |
 | CP-12 | Size + efficiency | `Nautilus.app <= 35 MB`; cold start and idle CPU meet release thresholds in prelaunch checklist. | `release-gate-evidence.md` entries |
+| CP-13 | Command mode v1 | Prefix-based commands (`newline`, `paragraph`, `undo last insert`, `delete last sentence`, `bulletize selection`, `rewrite shorter`, `rewrite professional`) execute with >=95% intent success on benchmark set. | Scorecard CSV + command test log |
+| CP-14 | Snippets v1 | Snippet trigger expansion (with app scope support) succeeds >=99% on benchmark set. | Scorecard CSV + snippet fixture list |
+| CP-15 | End-to-end latency | `end_to_end_ms` telemetry emitted and p50 improves >=25% vs baseline in benchmark corpus. | Baseline + follow-up benchmark reports |
 
 ## Required Commands
 
@@ -86,6 +89,19 @@ node scripts/cold-start-gate.mjs --threshold-ms 2500 -- <packaged-launch-command
    - Install prior signed build.
    - Publish signed newer build on channel.
    - Validate check, download, install, restart on macOS and Windows.
+
+9. CP-13 Command mode v1
+   - Enable command mode and run command benchmark utterances.
+   - Validate command telemetry fields (`commandApplied`, `endToEndMs`, `insertionModeUsed`).
+   - Validate no accidental command activation without prefix.
+
+10. CP-14 Snippets v1
+   - Configure at least five snippets (including one app-scoped snippet).
+   - Verify expansion in target apps and verify disabled snippets do not expand.
+
+11. CP-15 End-to-end latency
+   - Run benchmark corpus baseline and follow-up pass.
+   - Confirm p50 `end_to_end_ms` improvement target and record in scorecard.
 
 ## Exit Criteria
 

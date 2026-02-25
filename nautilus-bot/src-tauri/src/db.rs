@@ -207,6 +207,37 @@ impl Database {
             [],
         );
 
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS dictation_snippets (
+                id TEXT PRIMARY KEY,
+                trigger TEXT NOT NULL,
+                expansion TEXT NOT NULL,
+                app_scope TEXT,
+                case_sensitive INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dictation_snippets_trigger
+             ON dictation_snippets(trigger)",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS dictation_command_presets (
+                id TEXT PRIMARY KEY,
+                command_key TEXT NOT NULL UNIQUE,
+                system_prompt TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
         // Use FTS5 for cross-recording transcript retrieval.
         let fts_ready = self
             .conn
@@ -784,6 +815,256 @@ impl Database {
         })?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    pub fn list_dictation_snippets(&self) -> Result<Vec<DictationSnippet>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, trigger, expansion, app_scope, case_sensitive, enabled, created_at, updated_at
+             FROM dictation_snippets
+             ORDER BY trigger ASC, created_at ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(DictationSnippet {
+                id: row.get(0)?,
+                trigger: row.get(1)?,
+                expansion: row.get(2)?,
+                app_scope: row.get(3)?,
+                case_sensitive: row.get::<_, i64>(4)? != 0,
+                enabled: row.get::<_, i64>(5)? != 0,
+                created_at: row
+                    .get::<_, String>(6)?
+                    .parse()
+                    .unwrap_or_else(|_| Utc::now()),
+                updated_at: row
+                    .get::<_, String>(7)?
+                    .parse()
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    pub fn create_dictation_snippet(
+        &mut self,
+        request: &CreateDictationSnippetRequest,
+    ) -> Result<DictationSnippet> {
+        let trigger = request.trigger.trim();
+        if trigger.is_empty() {
+            anyhow::bail!("Snippet trigger cannot be empty");
+        }
+        let expansion = request.expansion.trim();
+        if expansion.is_empty() {
+            anyhow::bail!("Snippet expansion cannot be empty");
+        }
+
+        let now = Utc::now();
+        let snippet = DictationSnippet {
+            id: uuid::Uuid::new_v4().to_string(),
+            trigger: trigger.to_string(),
+            expansion: expansion.to_string(),
+            app_scope: request
+                .app_scope
+                .as_ref()
+                .map(|scope| scope.trim().to_string())
+                .filter(|scope| !scope.is_empty()),
+            case_sensitive: request.case_sensitive,
+            enabled: request.enabled,
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.conn.execute(
+            "INSERT INTO dictation_snippets (
+                id, trigger, expansion, app_scope, case_sensitive, enabled, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                &snippet.id,
+                &snippet.trigger,
+                &snippet.expansion,
+                &snippet.app_scope,
+                if snippet.case_sensitive { 1 } else { 0 },
+                if snippet.enabled { 1 } else { 0 },
+                snippet.created_at.to_rfc3339(),
+                snippet.updated_at.to_rfc3339(),
+            ],
+        )?;
+
+        Ok(snippet)
+    }
+
+    pub fn update_dictation_snippet(
+        &mut self,
+        snippet_id: &str,
+        request: &UpdateDictationSnippetRequest,
+    ) -> Result<DictationSnippet> {
+        let existing = self
+            .list_dictation_snippets()?
+            .into_iter()
+            .find(|snippet| snippet.id == snippet_id)
+            .ok_or_else(|| anyhow::anyhow!("Snippet '{}' not found", snippet_id))?;
+
+        let trigger = request
+            .trigger
+            .as_deref()
+            .unwrap_or(existing.trigger.as_str())
+            .trim()
+            .to_string();
+        if trigger.is_empty() {
+            anyhow::bail!("Snippet trigger cannot be empty");
+        }
+
+        let expansion = request
+            .expansion
+            .as_deref()
+            .unwrap_or(existing.expansion.as_str())
+            .trim()
+            .to_string();
+        if expansion.is_empty() {
+            anyhow::bail!("Snippet expansion cannot be empty");
+        }
+
+        let app_scope = match &request.app_scope {
+            Some(value) => value
+                .as_ref()
+                .map(|scope| scope.trim().to_string())
+                .filter(|scope| !scope.is_empty()),
+            None => existing.app_scope.clone(),
+        };
+        let case_sensitive = request.case_sensitive.unwrap_or(existing.case_sensitive);
+        let enabled = request.enabled.unwrap_or(existing.enabled);
+        let updated_at = Utc::now();
+
+        self.conn.execute(
+            "UPDATE dictation_snippets
+             SET trigger = ?1, expansion = ?2, app_scope = ?3, case_sensitive = ?4, enabled = ?5, updated_at = ?6
+             WHERE id = ?7",
+            params![
+                &trigger,
+                &expansion,
+                &app_scope,
+                if case_sensitive { 1 } else { 0 },
+                if enabled { 1 } else { 0 },
+                updated_at.to_rfc3339(),
+                snippet_id,
+            ],
+        )?;
+
+        Ok(DictationSnippet {
+            id: snippet_id.to_string(),
+            trigger,
+            expansion,
+            app_scope,
+            case_sensitive,
+            enabled,
+            created_at: existing.created_at,
+            updated_at,
+        })
+    }
+
+    pub fn delete_dictation_snippet(&mut self, snippet_id: &str) -> Result<()> {
+        let deleted = self.conn.execute(
+            "DELETE FROM dictation_snippets WHERE id = ?1",
+            params![snippet_id],
+        )?;
+        if deleted == 0 {
+            anyhow::bail!("Snippet '{}' not found", snippet_id);
+        }
+        Ok(())
+    }
+
+    pub fn list_dictation_command_presets(&self) -> Result<Vec<DictationCommandPreset>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, command_key, system_prompt, enabled, created_at, updated_at
+             FROM dictation_command_presets
+             ORDER BY command_key ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(DictationCommandPreset {
+                id: row.get(0)?,
+                command_key: row.get(1)?,
+                system_prompt: row.get(2)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+                created_at: row
+                    .get::<_, String>(4)?
+                    .parse()
+                    .unwrap_or_else(|_| Utc::now()),
+                updated_at: row
+                    .get::<_, String>(5)?
+                    .parse()
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    pub fn upsert_dictation_command_preset(
+        &mut self,
+        request: &UpsertDictationCommandPresetRequest,
+    ) -> Result<DictationCommandPreset> {
+        let command_key = request.command_key.trim().to_ascii_lowercase();
+        if command_key.is_empty() {
+            anyhow::bail!("Command key cannot be empty");
+        }
+        let system_prompt = request.system_prompt.trim();
+        if system_prompt.is_empty() {
+            anyhow::bail!("System prompt cannot be empty");
+        }
+
+        let now = Utc::now();
+        let existing = self
+            .list_dictation_command_presets()?
+            .into_iter()
+            .find(|preset| preset.command_key == command_key);
+        let id = existing
+            .as_ref()
+            .map(|preset| preset.id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let created_at = existing
+            .as_ref()
+            .map(|preset| preset.created_at)
+            .unwrap_or(now);
+
+        self.conn.execute(
+            "INSERT INTO dictation_command_presets (id, command_key, system_prompt, enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(command_key) DO UPDATE SET
+                system_prompt = excluded.system_prompt,
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at",
+            params![
+                &id,
+                &command_key,
+                system_prompt,
+                if request.enabled { 1 } else { 0 },
+                created_at.to_rfc3339(),
+                now.to_rfc3339(),
+            ],
+        )?;
+
+        Ok(DictationCommandPreset {
+            id,
+            command_key,
+            system_prompt: system_prompt.to_string(),
+            enabled: request.enabled,
+            created_at,
+            updated_at: now,
+        })
+    }
+
+    pub fn delete_dictation_command_preset(&mut self, command_key: &str) -> Result<()> {
+        let key = command_key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            anyhow::bail!("Command key cannot be empty");
+        }
+        self.conn.execute(
+            "DELETE FROM dictation_command_presets WHERE command_key = ?1",
+            params![key],
+        )?;
+        Ok(())
     }
 
     pub fn search_transcripts(
@@ -1639,6 +1920,69 @@ mod tests {
         assert_eq!(name2.as_deref(), Some("Bob"));
         assert_eq!(color2.as_deref(), Some("#ff0000")); // color preserved
         assert_eq!(*count2, 100); // count preserved when 0 passed
+    }
+
+    #[test]
+    fn test_dictation_snippet_crud() {
+        let mut db = in_memory_db();
+        let created = db
+            .create_dictation_snippet(&CreateDictationSnippetRequest {
+                trigger: "brb".to_string(),
+                expansion: "be right back".to_string(),
+                app_scope: Some("Slack".to_string()),
+                case_sensitive: false,
+                enabled: true,
+            })
+            .unwrap();
+        assert_eq!(created.trigger, "brb");
+
+        let list = db.list_dictation_snippets().unwrap();
+        assert_eq!(list.len(), 1);
+
+        let updated = db
+            .update_dictation_snippet(
+                &created.id,
+                &UpdateDictationSnippetRequest {
+                    trigger: Some("omw".to_string()),
+                    expansion: Some("on my way".to_string()),
+                    app_scope: Some(None),
+                    case_sensitive: Some(true),
+                    enabled: Some(true),
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.trigger, "omw");
+        assert!(updated.app_scope.is_none());
+        assert!(updated.case_sensitive);
+
+        db.delete_dictation_snippet(&created.id).unwrap();
+        assert!(db.list_dictation_snippets().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_dictation_command_preset_upsert() {
+        let mut db = in_memory_db();
+        let first = db
+            .upsert_dictation_command_preset(&UpsertDictationCommandPresetRequest {
+                command_key: "rewrite_shorter".to_string(),
+                system_prompt: "Rewrite to be concise".to_string(),
+                enabled: true,
+            })
+            .unwrap();
+        assert_eq!(first.command_key, "rewrite_shorter");
+
+        let second = db
+            .upsert_dictation_command_preset(&UpsertDictationCommandPresetRequest {
+                command_key: "rewrite_shorter".to_string(),
+                system_prompt: "Rewrite to be short and direct".to_string(),
+                enabled: true,
+            })
+            .unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.system_prompt, "Rewrite to be short and direct");
+
+        db.delete_dictation_command_preset("rewrite_shorter").unwrap();
+        assert!(db.list_dictation_command_presets().unwrap().is_empty());
     }
 
     #[test]

@@ -161,7 +161,7 @@ impl AsrProvider for WhisperProvider {
             if trimmed.is_empty() {
                 raw_audio_data
             } else {
-                let saved_ms = (raw_audio_data.len() - trimmed.len()) as f64 / 16.0;
+                let saved_ms = raw_audio_data.len().saturating_sub(trimmed.len()) as f64 / 16.0;
                 if saved_ms > 100.0 {
                     tracing::info!(
                         "VAD trimmed {:.0}ms of silence, processing {:.0}ms",

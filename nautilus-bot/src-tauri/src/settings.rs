@@ -126,6 +126,14 @@ pub struct TranscriptionSettings {
     pub dictation_push_to_talk: bool,
     /// Dictation: Smart Format — LLM polishes text before insert
     pub dictation_ai_formatting: bool,
+    /// Dictation: Command mode toggle (e.g. "command newline")
+    pub dictation_command_mode_enabled: bool,
+    /// Dictation: Prefix used to activate command mode
+    pub dictation_command_prefix: String,
+    /// Dictation insertion mode: auto, paste, clipboard_only
+    pub dictation_insertion_mode: String,
+    /// Dictation: snippet expansion toggle
+    pub dictation_snippets_enabled: bool,
     /// Custom system prompt for Smart Format
     pub dictation_custom_prompt: Option<String>,
     /// Custom system prompt for Meeting Summaries
@@ -185,6 +193,10 @@ impl Default for TranscriptionSettings {
             dictation_copy_to_clipboard: true,
             dictation_push_to_talk: true,
             dictation_ai_formatting: false,
+            dictation_command_mode_enabled: true,
+            dictation_command_prefix: "command".to_string(),
+            dictation_insertion_mode: "auto".to_string(),
+            dictation_snippets_enabled: true,
             dictation_custom_prompt: None,
             meeting_custom_prompt: None,
             meeting_auto_name_enabled: true,
@@ -626,5 +638,14 @@ mod tests {
             serde_json::from_str("{}").expect("platform optimization should deserialize");
         assert_eq!(parsed.mode, "auto");
         assert_eq!(parsed.fallback_policy, "local_only");
+    }
+
+    #[test]
+    fn dictation_command_defaults_are_stable() {
+        let settings = Settings::default();
+        assert!(settings.transcription.dictation_command_mode_enabled);
+        assert_eq!(settings.transcription.dictation_command_prefix, "command");
+        assert_eq!(settings.transcription.dictation_insertion_mode, "auto");
+        assert!(settings.transcription.dictation_snippets_enabled);
     }
 }

@@ -38,6 +38,10 @@ export interface TranscriptionSettings {
   dictationCopyToClipboard?: boolean;
   dictationPushToTalk: boolean;
   dictationAiFormatting: boolean;
+  dictationCommandModeEnabled?: boolean;
+  dictationCommandPrefix?: string;
+  dictationInsertionMode?: "auto" | "paste" | "clipboard_only";
+  dictationSnippetsEnabled?: boolean;
   dictationCustomPrompt: string | null;
   meetingCustomPrompt: string | null;
   meetingAutoNameEnabled?: boolean;

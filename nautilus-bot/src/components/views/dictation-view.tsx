@@ -4,7 +4,20 @@ import { cn } from "@/lib/utils";
 import { useRecording } from "@/hooks/use-recording";
 import { useProjects } from "@/hooks/use-projects";
 import { useRecordings } from "@/hooks/use-recordings";
-import { getSettings, saveSettings, getTranscript } from "@/lib/tauri";
+import {
+  getSettings,
+  saveSettings,
+  getTranscript,
+  listDictationSnippets,
+  createDictationSnippet,
+  updateDictationSnippet,
+  deleteDictationSnippet,
+  listDictationCommandPresets,
+  upsertDictationCommandPreset,
+  deleteDictationCommandPreset,
+  type DictationSnippet,
+  type DictationCommandPreset,
+} from "@/lib/tauri";
 import {
   defaultDictationShortcut,
   dictationInstruction,
@@ -30,7 +43,37 @@ interface DictationTextReadyEvent {
   fallbackMessage?: string | null;
   modelId?: string;
   latencyMs?: number;
+  endToEndMs?: number;
+  insertionModeUsed?: "auto" | "paste" | "clipboard_only" | "command_only" | "none";
+  commandApplied?: string | null;
+  snippetAppliedCount?: number;
+  appTarget?: string | null;
 }
+
+const COMMAND_PRESET_FIELDS: Array<{
+  key: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection";
+  label: string;
+  defaultPrompt: string;
+}> = [
+  {
+    key: "rewrite_shorter",
+    label: "Rewrite Shorter",
+    defaultPrompt:
+      "Rewrite the user's text to be shorter while preserving intent. Keep the same language and tone. Return only the rewritten text.",
+  },
+  {
+    key: "rewrite_professional",
+    label: "Rewrite Professional",
+    defaultPrompt:
+      "Rewrite the user's text in a professional tone while preserving meaning. Keep it clear and concise. Return only the rewritten text.",
+  },
+  {
+    key: "bulletize_selection",
+    label: "Bulletize Selection",
+    defaultPrompt:
+      "Convert the user's text into concise bullet points. Use one bullet per idea. Return only the bullet list.",
+  },
+];
 
 export function DictationView() {
   const { isRecording, formattedDuration, startDictation, stopDictation } = useRecording();
@@ -45,12 +88,31 @@ export function DictationView() {
   const [fallbackStatus, setFallbackStatus] = useState<string | null>(null);
   const [pasteStatus, setPasteStatus] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [endToEndMs, setEndToEndMs] = useState<number | null>(null);
+  const [insertionModeUsed, setInsertionModeUsed] = useState<string | null>(null);
+  const [commandApplied, setCommandApplied] = useState<string | null>(null);
+  const [snippetAppliedCount, setSnippetAppliedCount] = useState(0);
+  const [appTarget, setAppTarget] = useState<string | null>(null);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const [saveToInbox, setSaveToInbox] = useState(true);
   const [dictationProfile, setDictationProfile] = useState<"speed" | "accuracy">("speed");
   const [defaultProjectId, setDefaultProjectId] = useState("inbox");
   const [dictationPushToTalk, setDictationPushToTalk] = useState(true);
   const [dictationCopyToClipboard, setDictationCopyToClipboard] = useState(true);
+  const [dictationCommandModeEnabled, setDictationCommandModeEnabled] = useState(true);
+  const [dictationCommandPrefix, setDictationCommandPrefix] = useState("command");
+  const [dictationInsertionMode, setDictationInsertionMode] = useState<
+    "auto" | "paste" | "clipboard_only"
+  >("auto");
+  const [dictationSnippetsEnabled, setDictationSnippetsEnabled] = useState(true);
+  const [dictationSnippets, setDictationSnippets] = useState<DictationSnippet[]>([]);
+  const [dictationCommandPresets, setDictationCommandPresets] = useState<
+    DictationCommandPreset[]
+  >([]);
+  const [newSnippetTrigger, setNewSnippetTrigger] = useState("");
+  const [newSnippetExpansion, setNewSnippetExpansion] = useState("");
+  const [newSnippetAppScope, setNewSnippetAppScope] = useState("");
+  const [newSnippetCaseSensitive, setNewSnippetCaseSensitive] = useState(false);
   const [dictationRetentionPreset, setDictationRetentionPreset] = useState<
     "immediate" | "24h" | "72h" | "never" | "custom"
   >("never");
@@ -111,6 +173,12 @@ export function DictationView() {
         setDefaultProjectId(settings.transcription.dictationProjectId || "inbox");
         setDictationPushToTalk(settings.transcription.dictationPushToTalk);
         setDictationCopyToClipboard(settings.transcription.dictationCopyToClipboard ?? true);
+        setDictationCommandModeEnabled(
+          settings.transcription.dictationCommandModeEnabled ?? true
+        );
+        setDictationCommandPrefix(settings.transcription.dictationCommandPrefix ?? "command");
+        setDictationInsertionMode(settings.transcription.dictationInsertionMode ?? "auto");
+        setDictationSnippetsEnabled(settings.transcription.dictationSnippetsEnabled ?? true);
         setDictationRetentionPreset(settings.transcription.dictationRetentionPreset ?? "never");
         setDictationRetentionCustomHours(settings.transcription.dictationRetentionCustomHours ?? 24);
         const shortcut = settings.shortcuts.toggleDictation || defaultShortcut;
@@ -125,6 +193,38 @@ export function DictationView() {
     };
   }, [defaultShortcut]);
 
+  useEffect(() => {
+    let mounted = true;
+    void listDictationSnippets()
+      .then((snippets) => {
+        if (mounted) {
+          setDictationSnippets(snippets);
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to load dictation snippets:", error);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    void listDictationCommandPresets()
+      .then((presets) => {
+        if (mounted) {
+          setDictationCommandPresets(presets);
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to load dictation command presets:", error);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   const persistDictationPreferences = async (
     updates: Partial<{
       saveToInbox: boolean;
@@ -132,6 +232,10 @@ export function DictationView() {
       projectId: string;
       pushToTalk: boolean;
       copyToClipboard: boolean;
+      commandModeEnabled: boolean;
+      commandPrefix: string;
+      insertionMode: "auto" | "paste" | "clipboard_only";
+      snippetsEnabled: boolean;
       retentionPreset: "immediate" | "24h" | "72h" | "never" | "custom";
       retentionCustomHours: number;
     }>
@@ -144,6 +248,14 @@ export function DictationView() {
       settings.transcription.dictationPushToTalk = updates.pushToTalk ?? dictationPushToTalk;
       settings.transcription.dictationCopyToClipboard =
         updates.copyToClipboard ?? dictationCopyToClipboard;
+      settings.transcription.dictationCommandModeEnabled =
+        updates.commandModeEnabled ?? dictationCommandModeEnabled;
+      settings.transcription.dictationCommandPrefix =
+        updates.commandPrefix ?? dictationCommandPrefix;
+      settings.transcription.dictationInsertionMode =
+        updates.insertionMode ?? dictationInsertionMode;
+      settings.transcription.dictationSnippetsEnabled =
+        updates.snippetsEnabled ?? dictationSnippetsEnabled;
       settings.transcription.dictationRetentionPreset =
         updates.retentionPreset ?? dictationRetentionPreset;
       settings.transcription.dictationRetentionCustomHours =
@@ -214,6 +326,13 @@ export function DictationView() {
         if (payload?.latencyMs !== undefined) {
           setLatencyMs(payload.latencyMs);
         }
+        if (payload?.endToEndMs !== undefined) {
+          setEndToEndMs(payload.endToEndMs);
+        }
+        setInsertionModeUsed(payload?.insertionModeUsed ?? null);
+        setCommandApplied(payload?.commandApplied ?? null);
+        setSnippetAppliedCount(payload?.snippetAppliedCount ?? 0);
+        setAppTarget(payload?.appTarget ?? null);
         if (payload?.pasted) {
           setPasteStatus("Paste command sent (also copied to clipboard)");
         } else if (payload?.copied) {
@@ -239,10 +358,8 @@ export function DictationView() {
           setDictationError(null);
           void refetchDictationHistory();
         } else {
-        setDictationError(
-          "No transcript was produced. Check your selected ASR provider/model and microphone input."
-        );
-      }
+          setDictationError(null);
+        }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setDictationError(message);
@@ -253,6 +370,133 @@ export function DictationView() {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
+
+  const handleAddSnippet = async () => {
+    const trigger = newSnippetTrigger.trim();
+    const expansion = newSnippetExpansion.trim();
+    if (!trigger || !expansion) {
+      return;
+    }
+    try {
+      const created = await createDictationSnippet({
+        trigger,
+        expansion,
+        appScope: newSnippetAppScope.trim() || null,
+        caseSensitive: newSnippetCaseSensitive,
+        enabled: true,
+      });
+      setDictationSnippets((prev) => [...prev, created]);
+      setNewSnippetTrigger("");
+      setNewSnippetExpansion("");
+      setNewSnippetAppScope("");
+      setNewSnippetCaseSensitive(false);
+    } catch (error) {
+      console.warn("Failed to create dictation snippet:", error);
+    }
+  };
+
+  const handleDeleteSnippet = async (snippetId: string) => {
+    try {
+      await deleteDictationSnippet(snippetId);
+      setDictationSnippets((prev) => prev.filter((snippet) => snippet.id !== snippetId));
+    } catch (error) {
+      console.warn("Failed to delete dictation snippet:", error);
+    }
+  };
+
+  const upsertCommandPreset = async (
+    commandKey: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection",
+    systemPrompt: string,
+    enabled: boolean
+  ) => {
+    try {
+      const updated = await upsertDictationCommandPreset({
+        commandKey,
+        systemPrompt,
+        enabled,
+      });
+      setDictationCommandPresets((prev) => {
+        const exists = prev.some((preset) => preset.commandKey === commandKey);
+        if (exists) {
+          return prev.map((preset) => (preset.commandKey === commandKey ? updated : preset));
+        }
+        return [...prev, updated];
+      });
+    } catch (error) {
+      console.warn("Failed to upsert command preset:", error);
+    }
+  };
+
+  const resetCommandPreset = async (
+    commandKey: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection"
+  ) => {
+    try {
+      await deleteDictationCommandPreset(commandKey);
+      setDictationCommandPresets((prev) =>
+        prev.filter((preset) => preset.commandKey !== commandKey)
+      );
+    } catch (error) {
+      console.warn("Failed to reset command preset:", error);
+    }
+  };
+
+  const getCommandPreset = (
+    key: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection"
+  ) => dictationCommandPresets.find((preset) => preset.commandKey === key);
+
+  const setCommandPresetDraft = (
+    commandKey: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection",
+    updates: Partial<Pick<DictationCommandPreset, "systemPrompt" | "enabled">>
+  ) => {
+    setDictationCommandPresets((prev) => {
+      const existing = prev.find((preset) => preset.commandKey === commandKey);
+      if (existing) {
+        return prev.map((preset) =>
+          preset.commandKey === commandKey ? { ...preset, ...updates } : preset
+        );
+      }
+
+      return [
+        ...prev,
+        {
+          id: `draft-${commandKey}`,
+          commandKey,
+          systemPrompt: updates.systemPrompt ?? "",
+          enabled: updates.enabled ?? true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ];
+    });
+  };
+
+  const patchSnippet = async (
+    snippetId: string,
+    updates: Partial<{
+      trigger: string;
+      expansion: string;
+      appScope: string | null;
+      caseSensitive: boolean;
+      enabled: boolean;
+    }>
+  ) => {
+    setDictationSnippets((prev) =>
+      prev.map((snippet) => (snippet.id === snippetId ? { ...snippet, ...updates } : snippet))
+    );
+    try {
+      const updated = await updateDictationSnippet(snippetId, updates);
+      setDictationSnippets((prev) =>
+        prev.map((snippet) => (snippet.id === snippetId ? updated : snippet))
+      );
+    } catch (error) {
+      console.warn("Failed to update dictation snippet:", error);
+      void listDictationSnippets()
+        .then(setDictationSnippets)
+        .catch(() => {
+          // Keep optimistic state if reload fails.
+        });
+    }
   };
 
   return (
@@ -470,7 +714,14 @@ export function DictationView() {
                     {pasteStatus}
                   </div>
                 )}
-                {(lastProvider || lastModelId || latencyMs !== null) && (
+                {(lastProvider ||
+                  lastModelId ||
+                  latencyMs !== null ||
+                  endToEndMs !== null ||
+                  insertionModeUsed ||
+                  commandApplied ||
+                  snippetAppliedCount > 0 ||
+                  appTarget) && (
                   <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                     {latencyMs !== null && (
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-active/10 text-active font-medium">
@@ -480,8 +731,13 @@ export function DictationView() {
                           : `${(latencyMs / 1000).toFixed(1)}s`}
                       </span>
                     )}
+                    {endToEndMs !== null && <span>End-to-end: {endToEndMs}ms</span>}
                     {lastProvider && <span>Provider: {lastProvider}</span>}
                     {lastModelId && <span>Model: {lastModelId}</span>}
+                    {insertionModeUsed && <span>Insert mode: {insertionModeUsed}</span>}
+                    {commandApplied && <span>Command: {commandApplied}</span>}
+                    {snippetAppliedCount > 0 && <span>Snippets: {snippetAppliedCount}</span>}
+                    {appTarget && <span>App: {appTarget}</span>}
                   </div>
                 )}
               </CardContent>
@@ -635,6 +891,271 @@ export function DictationView() {
                     </div>
                   )}
                 </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Insertion mode</label>
+                  <select
+                    className="w-full p-2 border rounded-md bg-background"
+                    value={dictationInsertionMode}
+                    onChange={(event) => {
+                      const mode = event.target.value as "auto" | "paste" | "clipboard_only";
+                      setDictationInsertionMode(mode);
+                      void persistDictationPreferences({ insertionMode: mode });
+                    }}
+                  >
+                    <option value="auto">Auto (best effort)</option>
+                    <option value="paste">Paste at cursor</option>
+                    <option value="clipboard_only">Clipboard only</option>
+                  </select>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Command mode prefix</label>
+                  <input
+                    type="text"
+                    className="w-full p-2 border rounded-md bg-background"
+                    value={dictationCommandPrefix}
+                    onChange={(event) => setDictationCommandPrefix(event.target.value)}
+                    onBlur={() => {
+                      const nextPrefix = dictationCommandPrefix.trim() || "command";
+                      setDictationCommandPrefix(nextPrefix);
+                      void persistDictationPreferences({ commandPrefix: nextPrefix });
+                    }}
+                  />
+                  <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={dictationCommandModeEnabled}
+                      onChange={(event) => {
+                        const next = event.target.checked;
+                        setDictationCommandModeEnabled(next);
+                        void persistDictationPreferences({ commandModeEnabled: next });
+                      }}
+                    />
+                    Enable command mode
+                  </label>
+                </div>
+              </div>
+
+              <div className="mt-5 border-t pt-4 space-y-3">
+                <div>
+                  <p className="text-sm font-medium">Command Presets</p>
+                  <p className="text-xs text-muted-foreground">
+                    Customize prompts used for command rewrite and bulletize actions.
+                  </p>
+                </div>
+                <div className="space-y-3">
+                  {COMMAND_PRESET_FIELDS.map((field) => {
+                    const preset = getCommandPreset(field.key);
+                    const promptValue = preset?.systemPrompt ?? field.defaultPrompt;
+                    const enabledValue = preset?.enabled ?? true;
+                    return (
+                      <div key={field.key} className="rounded-md border p-3 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label className="text-sm font-medium">{field.label}</label>
+                          <div className="flex items-center gap-2">
+                            <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                              <input
+                                type="checkbox"
+                                checked={enabledValue}
+                                onChange={(event) => {
+                                  const next = event.target.checked;
+                                  setCommandPresetDraft(field.key, { enabled: next });
+                                  void upsertCommandPreset(field.key, promptValue, next);
+                                }}
+                              />
+                              Enabled
+                            </label>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => void resetCommandPreset(field.key)}
+                            >
+                              Reset
+                            </Button>
+                          </div>
+                        </div>
+                        <textarea
+                          className="w-full min-h-[84px] p-2 border rounded-md bg-background text-sm"
+                          value={promptValue}
+                          onChange={(event) =>
+                            setCommandPresetDraft(field.key, {
+                              systemPrompt: event.target.value,
+                            })
+                          }
+                          onBlur={(event) => {
+                            const nextPrompt = event.target.value.trim() || field.defaultPrompt;
+                            setCommandPresetDraft(field.key, {
+                              systemPrompt: nextPrompt,
+                            });
+                            void upsertCommandPreset(field.key, nextPrompt, enabledValue);
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="mt-5 border-t pt-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">Snippets</p>
+                    <p className="text-xs text-muted-foreground">
+                      Expand trigger phrases after transcription and before insertion.
+                    </p>
+                  </div>
+                  <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={dictationSnippetsEnabled}
+                      onChange={(event) => {
+                        const next = event.target.checked;
+                        setDictationSnippetsEnabled(next);
+                        void persistDictationPreferences({ snippetsEnabled: next });
+                      }}
+                    />
+                    Enabled
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_1fr_auto] gap-2">
+                  <input
+                    type="text"
+                    className="w-full p-2 border rounded-md bg-background"
+                    placeholder="Trigger (e.g. brb)"
+                    value={newSnippetTrigger}
+                    onChange={(event) => setNewSnippetTrigger(event.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="w-full p-2 border rounded-md bg-background"
+                    placeholder="Expansion (e.g. be right back)"
+                    value={newSnippetExpansion}
+                    onChange={(event) => setNewSnippetExpansion(event.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="w-full p-2 border rounded-md bg-background"
+                    placeholder="App scope (optional)"
+                    value={newSnippetAppScope}
+                    onChange={(event) => setNewSnippetAppScope(event.target.value)}
+                  />
+                  <Button variant="outline" onClick={() => void handleAddSnippet()}>
+                    Add
+                  </Button>
+                </div>
+                <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={newSnippetCaseSensitive}
+                    onChange={(event) => setNewSnippetCaseSensitive(event.target.checked)}
+                  />
+                  Case-sensitive trigger
+                </label>
+
+                {dictationSnippets.length > 0 && (
+                  <div className="space-y-2">
+                    {dictationSnippets.map((snippet) => (
+                      <div
+                        key={snippet.id}
+                        className="rounded-md border p-2 space-y-2"
+                      >
+                        <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_1fr] gap-2">
+                          <input
+                            type="text"
+                            className="w-full p-2 border rounded-md bg-background text-sm font-mono"
+                            value={snippet.trigger}
+                            onChange={(event) =>
+                              setDictationSnippets((prev) =>
+                                prev.map((current) =>
+                                  current.id === snippet.id
+                                    ? { ...current, trigger: event.target.value }
+                                    : current
+                                )
+                              )
+                            }
+                            onBlur={(event) =>
+                              void patchSnippet(snippet.id, { trigger: event.target.value.trim() })
+                            }
+                          />
+                          <input
+                            type="text"
+                            className="w-full p-2 border rounded-md bg-background text-sm"
+                            value={snippet.expansion}
+                            onChange={(event) =>
+                              setDictationSnippets((prev) =>
+                                prev.map((current) =>
+                                  current.id === snippet.id
+                                    ? { ...current, expansion: event.target.value }
+                                    : current
+                                )
+                              )
+                            }
+                            onBlur={(event) =>
+                              void patchSnippet(snippet.id, { expansion: event.target.value.trim() })
+                            }
+                          />
+                          <input
+                            type="text"
+                            className="w-full p-2 border rounded-md bg-background text-sm"
+                            placeholder="App scope"
+                            value={snippet.appScope ?? ""}
+                            onChange={(event) =>
+                              setDictationSnippets((prev) =>
+                                prev.map((current) =>
+                                  current.id === snippet.id
+                                    ? { ...current, appScope: event.target.value }
+                                    : current
+                                )
+                              )
+                            }
+                            onBlur={(event) =>
+                              void patchSnippet(snippet.id, {
+                                appScope: event.target.value.trim() || null,
+                              })
+                            }
+                          />
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={snippet.caseSensitive}
+                                onChange={(event) =>
+                                  void patchSnippet(snippet.id, {
+                                    caseSensitive: event.target.checked,
+                                  })
+                                }
+                              />
+                              Case-sensitive
+                            </label>
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={snippet.enabled}
+                                onChange={(event) =>
+                                  void patchSnippet(snippet.id, {
+                                    enabled: event.target.checked,
+                                  })
+                                }
+                              />
+                              Enabled
+                            </label>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void handleDeleteSnippet(snippet.id)}
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </CardContent>
           </Card>

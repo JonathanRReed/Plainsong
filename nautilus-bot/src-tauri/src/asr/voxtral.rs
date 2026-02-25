@@ -151,7 +151,7 @@ impl VoxtralProvider {
         let audio_path_to_use: std::path::PathBuf = if raw_samples.len() > 16000 {
             let trimmed = crate::audio::vad::trim_silence(&raw_samples, 16000, -40.0);
             if !trimmed.is_empty() && trimmed.len() < raw_samples.len() * 9 / 10 {
-                let saved_ms = (raw_samples.len() - trimmed.len()) as f64 / 16.0;
+                let saved_ms = raw_samples.len().saturating_sub(trimmed.len()) as f64 / 16.0;
                 if saved_ms > 100.0 {
                     tracing::info!(
                         "Voxtral: VAD trimmed {:.0}ms of silence, processing {:.0}ms",

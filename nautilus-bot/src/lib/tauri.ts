@@ -220,6 +220,83 @@ export async function createProject(project: {
   return await invoke("create_project", { project });
 }
 
+export interface DictationSnippet {
+  id: string;
+  trigger: string;
+  expansion: string;
+  appScope: string | null;
+  caseSensitive: boolean;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateDictationSnippetRequest {
+  trigger: string;
+  expansion: string;
+  appScope?: string | null;
+  caseSensitive?: boolean;
+  enabled?: boolean;
+}
+
+export interface UpdateDictationSnippetRequest {
+  trigger?: string;
+  expansion?: string;
+  appScope?: string | null;
+  caseSensitive?: boolean;
+  enabled?: boolean;
+}
+
+export interface DictationCommandPreset {
+  id: string;
+  commandKey: string;
+  systemPrompt: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertDictationCommandPresetRequest {
+  commandKey: string;
+  systemPrompt: string;
+  enabled?: boolean;
+}
+
+export async function listDictationSnippets(): Promise<DictationSnippet[]> {
+  return await invoke("list_dictation_snippets");
+}
+
+export async function createDictationSnippet(
+  request: CreateDictationSnippetRequest
+): Promise<DictationSnippet> {
+  return await invoke("create_dictation_snippet", { request });
+}
+
+export async function updateDictationSnippet(
+  snippetId: string,
+  request: UpdateDictationSnippetRequest
+): Promise<DictationSnippet> {
+  return await invoke("update_dictation_snippet", { snippetId, request });
+}
+
+export async function deleteDictationSnippet(snippetId: string): Promise<void> {
+  await invoke("delete_dictation_snippet", { snippetId });
+}
+
+export async function listDictationCommandPresets(): Promise<DictationCommandPreset[]> {
+  return await invoke("list_dictation_command_presets");
+}
+
+export async function upsertDictationCommandPreset(
+  request: UpsertDictationCommandPresetRequest
+): Promise<DictationCommandPreset> {
+  return await invoke("upsert_dictation_command_preset", { request });
+}
+
+export async function deleteDictationCommandPreset(commandKey: string): Promise<void> {
+  await invoke("delete_dictation_command_preset", { commandKey });
+}
+
 export async function getAuditLog(): Promise<AuditLogEntry[]> {
   return await invoke("get_audit_log");
 }

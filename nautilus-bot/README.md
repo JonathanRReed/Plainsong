@@ -5,6 +5,8 @@ Nautilus is a local-first desktop app for recording, transcribing, and auditing 
 ## Current Production Scope (2026-02-21)
 
 - Dictation capture via global hotkey
+- Dictation command mode (prefix-triggered editing commands)
+- Dictation snippets (trigger phrase expansion with optional app scoping)
 - Meeting recording (microphone, optional system-loopback when available)
 - Multi-provider transcription (Whisper, Parakeet, Canary, Distil-Whisper, Moonshine, Voxtral, OpenAI Cloud, ElevenLabs Scribe)
 - Transcript browsing, speaker labeling, and evidence export/verification

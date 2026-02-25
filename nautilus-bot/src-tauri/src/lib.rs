@@ -68,6 +68,7 @@ const DICTATION_MAX_DURATION_SECONDS: u64 = 120;
 const DICTATION_AI_FORMAT_TIMEOUT_MS: u64 = 1400;
 const DICTATION_AI_FORMAT_MIN_CHARS: usize = 80;
 const DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
+const DICTATION_COMMAND_PREFIX_DEFAULT: &str = "command";
 const STREAMING_PREVIEW_MAX_SECONDS: f64 = 90.0;
 const MIN_SILENCE_TIMEOUT_SECONDS: f32 = 60.0;
 const MAX_SILENCE_TIMEOUT_SECONDS: f32 = 1800.0;
@@ -94,6 +95,41 @@ enum DictationSessionState {
     Transcribing,
     Done,
     Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DictationInsertionMode {
+    Auto,
+    Paste,
+    ClipboardOnly,
+}
+
+impl DictationInsertionMode {
+    fn from_settings_value(value: &str) -> Self {
+        match value {
+            "paste" => Self::Paste,
+            "clipboard_only" => Self::ClipboardOnly,
+            _ => Self::Auto,
+        }
+    }
+
+    fn as_settings_value(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Paste => "paste",
+            Self::ClipboardOnly => "clipboard_only",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum DictationCommandAction {
+    InsertText(String),
+    UndoLastInsert,
+    DeleteLastSentence,
+    RewriteShorter(String),
+    RewriteProfessional(String),
+    Bulletize(String),
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1037,10 +1073,11 @@ async fn stop_dictation(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    let (paste_to_cursor, copy_to_clipboard_enabled) = {
+    let (insertion_mode, copy_to_clipboard_enabled) = {
         let settings = state.settings_manager.lock().await.settings().clone();
         (
-            settings.transcription.dictation_paste_to_cursor,
+            normalize_dictation_insertion_mode(&settings.transcription.dictation_insertion_mode)
+                .to_string(),
             settings.transcription.dictation_copy_to_clipboard,
         )
     };
@@ -1048,7 +1085,7 @@ async fn stop_dictation(
         state.inner(),
         &app,
         "manual",
-        paste_to_cursor,
+        &insertion_mode,
         copy_to_clipboard_enabled,
     )
     .await
@@ -3041,6 +3078,77 @@ async fn create_project(
 }
 
 #[tauri::command]
+async fn list_dictation_snippets(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<models::DictationSnippet>, String> {
+    let db = state.db.lock().await;
+    db.list_dictation_snippets().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_dictation_snippet(
+    state: tauri::State<'_, AppState>,
+    request: models::CreateDictationSnippetRequest,
+) -> Result<models::DictationSnippet, String> {
+    let mut db = state.db.lock().await;
+    db.create_dictation_snippet(&request)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn update_dictation_snippet(
+    state: tauri::State<'_, AppState>,
+    snippetId: String,
+    request: models::UpdateDictationSnippetRequest,
+) -> Result<models::DictationSnippet, String> {
+    let mut db = state.db.lock().await;
+    db.update_dictation_snippet(&snippetId, &request)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn delete_dictation_snippet(
+    state: tauri::State<'_, AppState>,
+    snippetId: String,
+) -> Result<(), String> {
+    let mut db = state.db.lock().await;
+    db.delete_dictation_snippet(&snippetId)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_dictation_command_presets(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<models::DictationCommandPreset>, String> {
+    let db = state.db.lock().await;
+    db.list_dictation_command_presets()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn upsert_dictation_command_preset(
+    state: tauri::State<'_, AppState>,
+    request: models::UpsertDictationCommandPresetRequest,
+) -> Result<models::DictationCommandPreset, String> {
+    let mut db = state.db.lock().await;
+    db.upsert_dictation_command_preset(&request)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn delete_dictation_command_preset(
+    state: tauri::State<'_, AppState>,
+    commandKey: String,
+) -> Result<(), String> {
+    let mut db = state.db.lock().await;
+    db.delete_dictation_command_preset(&commandKey)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 #[allow(non_snake_case)]
 async fn delete_recording(
     state: tauri::State<'_, AppState>,
@@ -3656,6 +3764,14 @@ async fn save_settings(
             &dictation_profile_from_settings_value(&settings.transcription.dictation_profile),
         )
         .to_string();
+        settings.transcription.dictation_command_prefix = normalize_dictation_command_prefix(
+            &settings.transcription.dictation_command_prefix,
+        )
+        .to_string();
+        settings.transcription.dictation_insertion_mode = normalize_dictation_insertion_mode(
+            &settings.transcription.dictation_insertion_mode,
+        )
+        .to_string();
         settings.transcription.dictation_retention_preset = normalize_dictation_retention_preset(
             &settings.transcription.dictation_retention_preset,
         )
@@ -4195,10 +4311,13 @@ async fn start_dictation_session(
         let current_state = *state.dictation_runtime_state.lock().await;
         if current_state == DictationSessionState::Recording {
             tracing::warn!("Dictation watchdog forcing stop after max duration");
-            let (paste_to_cursor, copy_to_clipboard_enabled) = {
+            let (insertion_mode, copy_to_clipboard_enabled) = {
                 let settings = state.settings_manager.lock().await.settings().clone();
                 (
-                    settings.transcription.dictation_paste_to_cursor,
+                    normalize_dictation_insertion_mode(
+                        &settings.transcription.dictation_insertion_mode,
+                    )
+                    .to_string(),
                     settings.transcription.dictation_copy_to_clipboard,
                 )
             };
@@ -4207,7 +4326,7 @@ async fn start_dictation_session(
                 &app_handle,
                 session_id,
                 "watchdog",
-                paste_to_cursor,
+                insertion_mode.as_str(),
                 copy_to_clipboard_enabled,
             )
             .await;
@@ -4241,10 +4360,13 @@ async fn start_dictation_session(
                         "Dictation auto-stop on silence after {:.1}s",
                         silence_timeout_seconds
                     );
-                    let (paste_to_cursor, copy_to_clipboard_enabled) = {
+                    let (insertion_mode, copy_to_clipboard_enabled) = {
                         let settings = state.settings_manager.lock().await.settings().clone();
                         (
-                            settings.transcription.dictation_paste_to_cursor,
+                            normalize_dictation_insertion_mode(
+                                &settings.transcription.dictation_insertion_mode,
+                            )
+                            .to_string(),
                             settings.transcription.dictation_copy_to_clipboard,
                         )
                     };
@@ -4253,7 +4375,7 @@ async fn start_dictation_session(
                         &app_handle_silence,
                         session_id,
                         "silence_timeout",
-                        paste_to_cursor,
+                        insertion_mode.as_str(),
                         copy_to_clipboard_enabled,
                     )
                     .await;
@@ -4270,7 +4392,7 @@ async fn stop_dictation_session(
     state: &AppState,
     app: &AppHandle,
     stop_reason: &str,
-    paste_to_focused_app: bool,
+    insertion_mode: &str,
     copy_to_clipboard_enabled: bool,
 ) -> Result<String, String> {
     let session_id = active_dictation_session_id(state)
@@ -4281,7 +4403,7 @@ async fn stop_dictation_session(
         app,
         session_id,
         stop_reason,
-        paste_to_focused_app,
+        insertion_mode,
         copy_to_clipboard_enabled,
     )
     .await
@@ -4292,9 +4414,10 @@ async fn stop_dictation_session_for_session(
     app: &AppHandle,
     session_id: u64,
     stop_reason: &str,
-    paste_to_focused_app: bool,
+    insertion_mode: &str,
     copy_to_clipboard_enabled: bool,
 ) -> Result<String, String> {
+    let stop_pipeline_started = std::time::Instant::now();
     let active_session = active_dictation_session_id(state).await;
     if active_session != Some(session_id) {
         return Err("Stale dictation stop request".to_string());
@@ -4535,6 +4658,106 @@ async fn stop_dictation_session_for_session(
         return Err(message);
     }
 
+    let settings_snapshot = state.settings_manager.lock().await.settings().clone();
+    let command_mode_enabled = settings_snapshot.transcription.dictation_command_mode_enabled;
+    let command_prefix = normalize_dictation_command_prefix(
+        &settings_snapshot.transcription.dictation_command_prefix,
+    )
+    .to_string();
+    let snippets_enabled = settings_snapshot.transcription.dictation_snippets_enabled;
+    let legacy_paste_to_cursor = settings_snapshot.transcription.dictation_paste_to_cursor;
+
+    let app_target = tauri::async_runtime::spawn_blocking(get_frontmost_app_name)
+        .await
+        .unwrap_or(None);
+
+    let mut command_applied: Option<String> = None;
+    if command_mode_enabled {
+        if let Some((command_key, action)) =
+            parse_dictation_command(&result.text, command_prefix.as_str())
+        {
+            match action {
+                DictationCommandAction::InsertText(text) => result.text = text,
+                DictationCommandAction::RewriteShorter(text) => {
+                    result.text =
+                        match run_dictation_command_with_selected_provider(
+                            state,
+                            "rewrite_shorter",
+                            text.as_str(),
+                        )
+                        .await
+                        {
+                            Ok(output) => output,
+                            Err(error) => {
+                                tracing::warn!(
+                                    "rewrite_shorter command fallback to local transform: {}",
+                                    error
+                                );
+                                rewrite_shorter_text(text.as_str())
+                            }
+                        }
+                }
+                DictationCommandAction::RewriteProfessional(text) => {
+                    result.text =
+                        match run_dictation_command_with_selected_provider(
+                            state,
+                            "rewrite_professional",
+                            text.as_str(),
+                        )
+                        .await
+                        {
+                            Ok(output) => output,
+                            Err(error) => {
+                                tracing::warn!(
+                                    "rewrite_professional command fallback to local transform: {}",
+                                    error
+                                );
+                                rewrite_professional_text(text.as_str())
+                            }
+                        }
+                }
+                DictationCommandAction::Bulletize(text) => {
+                    result.text =
+                        match run_dictation_command_with_selected_provider(
+                            state,
+                            "bulletize_selection",
+                            text.as_str(),
+                        )
+                        .await
+                        {
+                            Ok(output) => output,
+                            Err(error) => {
+                                tracing::warn!(
+                                    "bulletize_selection command fallback to local transform: {}",
+                                    error
+                                );
+                                bulletize_text(text.as_str())
+                            }
+                        }
+                }
+                DictationCommandAction::UndoLastInsert
+                | DictationCommandAction::DeleteLastSentence => {
+                    send_native_undo_key()
+                        .map_err(|e| format!("Command '{}' failed: {}", command_key, e))?;
+                    result.text.clear();
+                }
+            }
+            command_applied = Some(command_key);
+        }
+    }
+
+    let mut snippet_applied_count = 0usize;
+    if snippets_enabled && command_applied.is_none() && !result.text.trim().is_empty() {
+        let snippets = {
+            let db = state.db.lock().await;
+            db.list_dictation_snippets().unwrap_or_default()
+        };
+        let (expanded_text, applied) =
+            apply_dictation_snippets(&result.text, &snippets, app_target.as_deref());
+        result.text = expanded_text;
+        snippet_applied_count = applied;
+    }
+
     let fallback_message = build_provider_fallback_message(
         result.requested_provider,
         result.actual_provider,
@@ -4548,14 +4771,66 @@ async fn stop_dictation_session_for_session(
     let mut pasted = false;
     let mut copied = false;
     let mut paste_error: Option<String> = None;
-    if paste_to_focused_app && !result.text.trim().is_empty() {
-        let outcome = paste_text_systemwide(&result.text, copy_to_clipboard_enabled);
-        pasted = outcome.pasted;
-        copied = outcome.copied;
-        paste_error = outcome.error;
-    } else if copy_to_clipboard_enabled && !result.text.trim().is_empty() {
-        copied = copy_to_clipboard(&result.text).is_ok();
+    let mut insertion_mode_used = if command_applied.is_some() && result.text.trim().is_empty() {
+        "command_only".to_string()
+    } else {
+        "none".to_string()
+    };
+    if !result.text.trim().is_empty() {
+        let configured_mode = DictationInsertionMode::from_settings_value(insertion_mode);
+        match configured_mode {
+            DictationInsertionMode::Auto => {
+                if legacy_paste_to_cursor {
+                    let outcome = paste_text_systemwide(&result.text, copy_to_clipboard_enabled);
+                    pasted = outcome.pasted;
+                    copied = outcome.copied;
+                    paste_error = outcome.error;
+                    insertion_mode_used = if pasted {
+                        "paste".to_string()
+                    } else if copied {
+                        "clipboard_only".to_string()
+                    } else {
+                        "none".to_string()
+                    };
+                } else {
+                    match copy_to_clipboard(&result.text) {
+                        Ok(_) => {
+                            copied = true;
+                            insertion_mode_used = "clipboard_only".to_string();
+                        }
+                        Err(error) => {
+                            paste_error = Some(error);
+                            insertion_mode_used = "none".to_string();
+                        }
+                    }
+                }
+            }
+            DictationInsertionMode::Paste => {
+                let outcome = paste_text_systemwide(&result.text, copy_to_clipboard_enabled);
+                pasted = outcome.pasted;
+                copied = outcome.copied;
+                paste_error = outcome.error;
+                insertion_mode_used = if pasted {
+                    "paste".to_string()
+                } else if copied {
+                    "clipboard_only".to_string()
+                } else {
+                    "none".to_string()
+                };
+            }
+            DictationInsertionMode::ClipboardOnly => match copy_to_clipboard(&result.text) {
+                Ok(_) => {
+                    copied = true;
+                    insertion_mode_used = "clipboard_only".to_string();
+                }
+                Err(error) => {
+                    paste_error = Some(error);
+                    insertion_mode_used = "none".to_string();
+                }
+            },
+        }
     }
+    let end_to_end_ms = stop_pipeline_started.elapsed().as_millis() as u64;
 
     if let Err(error) = app.emit(
         "dictation-text-ready",
@@ -4575,7 +4850,12 @@ async fn stop_dictation_session_for_session(
             "fallbackReason": result.fallback_reason,
             "fallbackMessage": fallback_message,
             "modelId": result.model_id,
-            "latencyMs": transcription_latency_ms
+            "latencyMs": transcription_latency_ms,
+            "endToEndMs": end_to_end_ms,
+            "insertionModeUsed": insertion_mode_used,
+            "commandApplied": command_applied,
+            "snippetAppliedCount": snippet_applied_count,
+            "appTarget": app_target
         }),
     ) {
         tracing::warn!("Failed to emit dictation text event: {}", error);
@@ -4742,7 +5022,14 @@ async fn stop_dictation_session_for_session(
         "pasted": pasted,
         "copied": copied,
         "paste_error": paste_error,
+        "insertion_mode_requested": insertion_mode,
+        "insertion_mode_used": insertion_mode_used,
         "outcome": outcome,
+        "command_applied": command_applied,
+        "snippet_applied_count": snippet_applied_count,
+        "app_target": app_target,
+        "end_to_end_ms": end_to_end_ms,
+        "transcription_latency_ms": transcription_latency_ms,
         "save_to_inbox": dictation_options.save_to_inbox,
         "dictation_persisted": dictation_options.save_to_inbox && persist_dictation_record,
         "dictation_retention_preset": dictation_retention_preset,
@@ -4821,7 +5108,9 @@ async fn handle_global_dictation_toggle(app: AppHandle, is_press: bool) {
     let state = app.state::<AppState>();
     let settings = state.settings_manager.lock().await.settings().clone();
     let is_ptt = settings.transcription.dictation_push_to_talk;
-    let paste_to_cursor = settings.transcription.dictation_paste_to_cursor;
+    let insertion_mode =
+        normalize_dictation_insertion_mode(&settings.transcription.dictation_insertion_mode)
+            .to_string();
     let copy_to_clipboard_enabled = settings.transcription.dictation_copy_to_clipboard;
 
     let current_state = *state.dictation_runtime_state.lock().await;
@@ -4876,7 +5165,7 @@ async fn handle_global_dictation_toggle(app: AppHandle, is_press: bool) {
                 &app,
                 session_id,
                 if is_ptt { "ptt_release" } else { "toggle" },
-                paste_to_cursor,
+                insertion_mode.as_str(),
                 copy_to_clipboard_enabled,
             )
             .await
@@ -5681,6 +5970,267 @@ fn sanitize_dictation_output(candidate: &str, fallback: &str) -> String {
     cleaned
 }
 
+fn command_payload<'a>(raw: &'a str, phrase: &str) -> Option<&'a str> {
+    let head = raw.get(..phrase.len())?;
+    let tail = raw.get(phrase.len()..)?;
+    if !head.eq_ignore_ascii_case(phrase) {
+        return None;
+    }
+    Some(tail.trim_start_matches([' ', ':', ',']).trim())
+}
+
+fn parse_dictation_command(raw_text: &str, prefix: &str) -> Option<(String, DictationCommandAction)> {
+    let text = raw_text.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    let normalized_prefix = normalize_dictation_command_prefix(prefix);
+    let mut words = text.split_whitespace();
+    let first = words.next()?;
+    let first_normalized = first.trim_end_matches([':', ',']);
+    if !first_normalized.eq_ignore_ascii_case(normalized_prefix) {
+        return None;
+    }
+
+    let remainder = words.collect::<Vec<_>>().join(" ");
+    if remainder.is_empty() {
+        return None;
+    }
+
+    if remainder.eq_ignore_ascii_case("newline") {
+        return Some((
+            "newline".to_string(),
+            DictationCommandAction::InsertText("\n".to_string()),
+        ));
+    }
+    if remainder.eq_ignore_ascii_case("paragraph") {
+        return Some((
+            "paragraph".to_string(),
+            DictationCommandAction::InsertText("\n\n".to_string()),
+        ));
+    }
+    if remainder.eq_ignore_ascii_case("undo last insert") {
+        return Some((
+            "undo_last_insert".to_string(),
+            DictationCommandAction::UndoLastInsert,
+        ));
+    }
+    if remainder.eq_ignore_ascii_case("delete last sentence") {
+        return Some((
+            "delete_last_sentence".to_string(),
+            DictationCommandAction::DeleteLastSentence,
+        ));
+    }
+
+    if let Some(payload) = command_payload(&remainder, "rewrite shorter") {
+        if !payload.is_empty() {
+            return Some((
+                "rewrite_shorter".to_string(),
+                DictationCommandAction::RewriteShorter(payload.to_string()),
+            ));
+        }
+    }
+    if let Some(payload) = command_payload(&remainder, "rewrite professional") {
+        if !payload.is_empty() {
+            return Some((
+                "rewrite_professional".to_string(),
+                DictationCommandAction::RewriteProfessional(payload.to_string()),
+            ));
+        }
+    }
+    if let Some(payload) = command_payload(&remainder, "bulletize selection") {
+        if !payload.is_empty() {
+            return Some((
+                "bulletize_selection".to_string(),
+                DictationCommandAction::Bulletize(payload.to_string()),
+            ));
+        }
+    }
+
+    None
+}
+
+fn rewrite_shorter_text(text: &str) -> String {
+    let mut output = text.trim().to_string();
+    if output.is_empty() {
+        return output;
+    }
+    let fillers = [" basically ", " actually ", " literally ", " just ", " really "];
+    output = format!(" {} ", output);
+    for filler in fillers {
+        output = output.replace(filler, " ");
+    }
+    output = output
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+
+    let words: Vec<&str> = output.split_whitespace().collect();
+    if words.len() > 22 {
+        output = words[..22].join(" ");
+        if !output.ends_with('.') {
+            output.push_str("...");
+        }
+    }
+    output
+}
+
+fn rewrite_professional_text(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = normalized.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let mut output = first.to_uppercase().collect::<String>();
+    output.push_str(chars.as_str());
+    if !output.ends_with(['.', '!', '?']) {
+        output.push('.');
+    }
+    output
+}
+
+fn bulletize_text(text: &str) -> String {
+    let mut items: Vec<String> = text
+        .split([',', ';', '\n'])
+        .flat_map(|part| part.split(" and "))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| format!("- {}", part))
+        .collect();
+
+    if items.is_empty() {
+        items.push(format!("- {}", text.trim()));
+    }
+    items.join("\n")
+}
+
+fn replace_case_insensitive_all(haystack: &str, needle: &str, replacement: &str) -> (String, usize) {
+    if needle.is_empty() {
+        return (haystack.to_string(), 0);
+    }
+    let Ok(re) = Regex::new(&format!("(?i){}", regex::escape(needle))) else {
+        return (haystack.to_string(), 0);
+    };
+    let applied = re.find_iter(haystack).count();
+    if applied == 0 {
+        return (haystack.to_string(), 0);
+    }
+    (re.replace_all(haystack, replacement).to_string(), applied)
+}
+
+fn snippet_app_scope_matches(snippet_scope: Option<&str>, app_target: Option<&str>) -> bool {
+    let Some(scope) = snippet_scope.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    let Some(app_name) = app_target else {
+        return false;
+    };
+    app_name.to_lowercase().contains(&scope.to_lowercase())
+}
+
+fn apply_dictation_snippets(
+    input: &str,
+    snippets: &[models::DictationSnippet],
+    app_target: Option<&str>,
+) -> (String, usize) {
+    if input.trim().is_empty() || snippets.is_empty() {
+        return (input.to_string(), 0);
+    }
+
+    let mut output = input.to_string();
+    let mut applied_total = 0usize;
+    let mut ordered = snippets.to_vec();
+    ordered.sort_by(|a, b| b.trigger.len().cmp(&a.trigger.len()));
+
+    for snippet in ordered {
+        if !snippet.enabled {
+            continue;
+        }
+        if !snippet_app_scope_matches(snippet.app_scope.as_deref(), app_target) {
+            continue;
+        }
+        if snippet.trigger.trim().is_empty() {
+            continue;
+        }
+
+        if snippet.case_sensitive {
+            let matches = output.matches(snippet.trigger.as_str()).count();
+            if matches > 0 {
+                output = output.replace(snippet.trigger.as_str(), snippet.expansion.as_str());
+                applied_total += matches;
+            }
+        } else {
+            let (next, applied) = replace_case_insensitive_all(
+                output.as_str(),
+                snippet.trigger.as_str(),
+                snippet.expansion.as_str(),
+            );
+            if applied > 0 {
+                output = next;
+                applied_total += applied;
+            }
+        }
+    }
+
+    (output, applied_total)
+}
+
+fn default_dictation_command_prompt(command_key: &str) -> Option<&'static str> {
+    match command_key {
+        "rewrite_shorter" => Some(
+            "Rewrite the user's text to be shorter while preserving intent. \
+            Keep the same language and tone. Return only the rewritten text.",
+        ),
+        "rewrite_professional" => Some(
+            "Rewrite the user's text in a professional tone while preserving meaning. \
+            Keep it clear and concise. Return only the rewritten text.",
+        ),
+        "bulletize_selection" => Some(
+            "Convert the user's text into concise bullet points. \
+            Use one bullet per idea. Return only the bullet list.",
+        ),
+        _ => None,
+    }
+}
+
+async fn resolve_dictation_command_prompt(state: &AppState, command_key: &str) -> Result<String, String> {
+    let custom_prompt = {
+        let db = state.db.lock().await;
+        match db.list_dictation_command_presets() {
+            Ok(presets) => presets
+                .into_iter()
+                .find(|preset| preset.enabled && preset.command_key == command_key)
+                .map(|preset| preset.system_prompt),
+            Err(error) => {
+                tracing::warn!(
+                    "Failed to load dictation command presets for '{}': {}",
+                    command_key,
+                    error
+                );
+                None
+            }
+        }
+    };
+
+    if let Some(prompt) = custom_prompt {
+        let trimmed = prompt.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    default_dictation_command_prompt(command_key)
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("Unknown command key '{}'", command_key))
+}
+
 fn generate_default_dictation_prompt(active_app: Option<String>) -> String {
     if let Some(app_name) = active_app {
         format!(
@@ -5786,6 +6336,80 @@ async fn run_dictation_formatting_with_selected_provider(
                 .map_err(|e| e.to_string())
         }
     }
+}
+
+async fn run_dictation_command_with_selected_provider(
+    state: &AppState,
+    command_key: &str,
+    payload: &str,
+) -> Result<String, String> {
+    let input = payload.trim();
+    if input.is_empty() {
+        return Err("Command payload cannot be empty".to_string());
+    }
+
+    let system_prompt = resolve_dictation_command_prompt(state, command_key).await?;
+    let (provider, remote_processing_enabled, _, settings_model) =
+        selected_analysis_provider_and_settings(state).await;
+    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
+
+    let selected_model = settings_model
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| provider.default_model());
+
+    let raw_output = match provider {
+        AnalysisProvider::Ollama => state
+            .ollama_client
+            .generate(selected_model, &format!("{}\n\n{}", system_prompt, input))
+            .await
+            .map_err(|e| e.to_string())?,
+        AnalysisProvider::OllamaCloud => {
+            let api_key = provider_secret_for(provider)?;
+            llm::OllamaCloudClient::with_api_key(Some(api_key))
+                .generate(selected_model, &format!("{}\n\n{}", system_prompt, input))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        AnalysisProvider::OpenAi => {
+            let api_key = provider_secret_for(provider)?;
+            llm::OpenAIClient::with_api_key(Some(api_key))
+                .generate(selected_model, input, Some(&system_prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        AnalysisProvider::Anthropic => {
+            let api_key = provider_secret_for(provider)?;
+            llm::AnthropicClient::with_api_key(Some(api_key))
+                .generate(selected_model, input, Some(&system_prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        AnalysisProvider::Gemini => {
+            let api_key = provider_secret_for(provider)?;
+            llm::GeminiClient::with_api_key(Some(api_key))
+                .generate(selected_model, input, Some(&system_prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        AnalysisProvider::DeepSeek => {
+            let api_key = provider_secret_for(provider)?;
+            llm::DeepSeekClient::with_api_key(Some(api_key))
+                .generate(selected_model, input, Some(&system_prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+    };
+
+    let cleaned = sanitize_dictation_output(raw_output.trim(), input);
+    if cleaned.trim().is_empty() {
+        return Err(format!(
+            "Command '{}' returned an empty response",
+            command_key
+        ));
+    }
+
+    Ok(cleaned.trim().to_string())
 }
 
 async fn run_summary_with_selected_provider(
@@ -6645,6 +7269,13 @@ pub fn run() {
             verify_evidence_bundle,
             get_projects,
             create_project,
+            list_dictation_snippets,
+            create_dictation_snippet,
+            update_dictation_snippet,
+            delete_dictation_snippet,
+            list_dictation_command_presets,
+            upsert_dictation_command_preset,
+            delete_dictation_command_preset,
             delete_recording,
             rename_recording,
             update_transcript_segment,
@@ -7208,6 +7839,41 @@ mod tests {
     }
 
     #[test]
+    fn dictation_command_and_insertion_mode_normalization_is_stable() {
+        assert_eq!(normalize_dictation_command_prefix(""), "command");
+        assert_eq!(normalize_dictation_command_prefix(" cmd "), "cmd");
+        assert_eq!(normalize_dictation_insertion_mode("auto"), "auto");
+        assert_eq!(normalize_dictation_insertion_mode("paste"), "paste");
+        assert_eq!(
+            normalize_dictation_insertion_mode("clipboard_only"),
+            "clipboard_only"
+        );
+        assert_eq!(normalize_dictation_insertion_mode("unknown"), "auto");
+    }
+
+    #[test]
+    fn command_parser_detects_prefix_commands() {
+        let newline = parse_dictation_command("command newline", "command")
+            .expect("newline command should parse");
+        assert_eq!(newline.0, "newline");
+
+        let rewrite = parse_dictation_command(
+            "command rewrite professional thanks for the update",
+            "command",
+        )
+        .expect("rewrite command should parse");
+        assert_eq!(rewrite.0, "rewrite_professional");
+    }
+
+    #[test]
+    fn default_command_prompts_cover_v1_rewrite_commands() {
+        assert!(default_dictation_command_prompt("rewrite_shorter").is_some());
+        assert!(default_dictation_command_prompt("rewrite_professional").is_some());
+        assert!(default_dictation_command_prompt("bulletize_selection").is_some());
+        assert!(default_dictation_command_prompt("unknown").is_none());
+    }
+
+    #[test]
     fn dictation_retention_cutoff_behaves_as_expected() {
         let now = chrono::Utc::now();
         assert!(dictation_retention_cutoff("never", 24, now).is_none());
@@ -7375,6 +8041,19 @@ fn dictation_profile_from_settings_value(value: &str) -> models::DictationProfil
         "accuracy" => models::DictationProfile::Accuracy,
         _ => models::DictationProfile::Speed,
     }
+}
+
+fn normalize_dictation_command_prefix(value: &str) -> &str {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        DICTATION_COMMAND_PREFIX_DEFAULT
+    } else {
+        trimmed
+    }
+}
+
+fn normalize_dictation_insertion_mode(value: &str) -> &'static str {
+    DictationInsertionMode::from_settings_value(value).as_settings_value()
 }
 
 fn normalize_dictation_retention_preset(value: &str) -> &'static str {
@@ -9376,6 +10055,39 @@ fn send_native_paste_key() -> Result<(), String> {
         script_error
     );
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_undo_key() -> Result<(), String> {
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to keystroke \"z\" using command down")
+        .output()
+        .map_err(|e| format!("Failed to invoke osascript for undo: {}", e))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(format!("Undo keystroke failed: {}", stderr))
+}
+
+#[cfg(target_os = "windows")]
+fn send_native_undo_key() -> Result<(), String> {
+    let script = "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^z')";
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .status()
+        .map_err(|e| format!("Failed to launch PowerShell for undo: {}", e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("Undo keystroke failed".to_string())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn send_native_undo_key() -> Result<(), String> {
+    Err("Undo command is not supported on this platform.".to_string())
 }
 
 #[cfg(target_os = "macos")]

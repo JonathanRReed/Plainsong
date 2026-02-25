@@ -162,3 +162,63 @@ pub struct TemplateExportResponse {
     pub export_path: Option<String>,
     pub content: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationSnippet {
+    pub id: String,
+    pub trigger: String,
+    pub expansion: String,
+    pub app_scope: Option<String>,
+    pub case_sensitive: bool,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDictationSnippetRequest {
+    pub trigger: String,
+    pub expansion: String,
+    #[serde(default)]
+    pub app_scope: Option<String>,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDictationSnippetRequest {
+    pub trigger: Option<String>,
+    pub expansion: Option<String>,
+    pub app_scope: Option<Option<String>>,
+    pub case_sensitive: Option<bool>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationCommandPreset {
+    pub id: String,
+    pub command_key: String,
+    pub system_prompt: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertDictationCommandPresetRequest {
+    pub command_key: String,
+    pub system_prompt: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
