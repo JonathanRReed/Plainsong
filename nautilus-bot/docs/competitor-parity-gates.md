@@ -33,7 +33,7 @@ Status values: `PASS` / `FAIL` / `BLOCKED` / `PENDING`
 | CP-12 | Size + efficiency | `Nautilus.app <= 35 MB`; cold start and idle CPU meet release thresholds in prelaunch checklist. | `release-gate-evidence.md` entries |
 | CP-13 | Command mode v1 | Prefix-based commands (`newline`, `paragraph`, `undo last insert`, `delete last sentence`, `bulletize selection`, `rewrite shorter`, `rewrite professional`) execute with >=95% intent success on benchmark set. | Scorecard CSV + command test log |
 | CP-14 | Snippets v1 | Snippet trigger expansion (with app scope support) succeeds >=99% on benchmark set. | Scorecard CSV + snippet fixture list |
-| CP-15 | End-to-end latency | `end_to_end_ms` telemetry emitted and p50 improves >=25% vs baseline in benchmark corpus. | Baseline + follow-up benchmark reports |
+| CP-15 | End-to-end latency | `end_to_end_ms` telemetry emitted and p50 improves >=25% vs baseline in benchmark corpus. Provider-integrity fields (`requestedProvider`, `actualProvider`, `isFallback`) are present in benchmark artifacts. | Baseline + follow-up benchmark reports (schema-validated) |
 
 ## Required Commands
 
@@ -102,6 +102,7 @@ node scripts/cold-start-gate.mjs --threshold-ms 2500 -- <packaged-launch-command
 11. CP-15 End-to-end latency
    - Run benchmark corpus baseline and follow-up pass.
    - Confirm p50 `end_to_end_ms` improvement target and record in scorecard.
+   - Validate run artifact against `docs/evals/benchmark-run.schema.json`.
 
 ## Exit Criteria
 

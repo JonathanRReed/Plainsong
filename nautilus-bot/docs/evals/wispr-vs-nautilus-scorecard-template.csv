@@ -1,5 +1,5 @@
-date,build,platform,app_target,provider,model,scenario,expected,actual,outcome,transcription_latency_ms,end_to_end_ms,insertion_mode_used,command_applied,snippet_applied_count,notes
-2026-02-25,nautilus-dev,macOS,Apple Notes,distil_whisper,distil-large-v3.5,basic-dictation,inserted text exactly,pending,PENDING,,,,,,
-2026-02-25,nautilus-dev,macOS,Slack,distil_whisper,distil-large-v3.5,snippet-expansion,trigger expands to phrase,pending,PENDING,,,,,,
-2026-02-25,nautilus-dev,macOS,Google Docs,distil_whisper,distil-large-v3.5,command-newline,newline inserted,pending,PENDING,,,,,,
-2026-02-25,nautilus-dev,Windows,VS Code,distil_whisper,distil-large-v3.5,basic-dictation,inserted text exactly,pending,PENDING,,,,,,
+date,build,platform,app_target,provider,model,requested_provider,actual_provider,is_fallback,fallback_reason,scenario,expected,actual,outcome,transcription_latency_ms,end_to_end_ms,insertion_mode_used,command_applied,snippet_applied_count,notes
+2026-02-25,nautilus-dev,macOS,Apple Notes,distil_whisper,distil-large-v3.5,,,,,basic-dictation,inserted text exactly,pending,PENDING,,,,,,,
+2026-02-25,nautilus-dev,macOS,Slack,distil_whisper,distil-large-v3.5,,,,,snippet-expansion,trigger expands to phrase,pending,PENDING,,,,,,,
+2026-02-25,nautilus-dev,macOS,Google Docs,distil_whisper,distil-large-v3.5,,,,,command-newline,newline inserted,pending,PENDING,,,,,,,
+2026-02-25,nautilus-dev,Windows,VS Code,distil_whisper,distil-large-v3.5,,,,,basic-dictation,inserted text exactly,pending,PENDING,,,,,,,

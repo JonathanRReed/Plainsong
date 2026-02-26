@@ -48,7 +48,7 @@ export interface TranscriptionSettings {
   meetingAutoNameModel?: string | null;
   saveRawTranscript: boolean;
   dictationSaveToInbox: boolean;
-  dictationProfile: "speed" | "accuracy";
+  dictationProfile: "normal_speed" | "power_rewrite";
   dictationProjectId: string;
   dictationRetentionPreset?: "immediate" | "24h" | "72h" | "never" | "custom";
   dictationRetentionCustomHours?: number;

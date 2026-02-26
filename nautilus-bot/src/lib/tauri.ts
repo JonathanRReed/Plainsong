@@ -19,7 +19,7 @@ import type { Settings } from "@/types/settings";
 export interface DictationStartOptions {
   saveToInbox: boolean;
   projectId?: string;
-  profile: "speed" | "accuracy";
+  profile: "normal_speed" | "power_rewrite";
 }
 
 export async function startDictation(options?: DictationStartOptions): Promise<void> {
@@ -43,6 +43,7 @@ export async function startRecording(options: {
   systemAudio: boolean;
   projectId: string;
   template?: string;
+  consentPromptShown?: boolean;
 }): Promise<string> {
   return await invoke("start_recording", { options });
 }

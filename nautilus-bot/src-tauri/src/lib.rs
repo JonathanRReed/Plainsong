@@ -1263,7 +1263,16 @@ async fn start_recording(
         Some(options.system_audio),
         None,
     );
-    emit_recording_status(&app, &recording_id, "recording", None, None);
+    emit_recording_status_with_markers(
+        &app,
+        &recording_id,
+        "recording",
+        None,
+        None,
+        None,
+        None,
+        Some(options.consent_prompt_shown),
+    );
 
     Ok(recording_id)
 }
@@ -1359,12 +1368,16 @@ async fn stop_recording(
         None,
         Some("Processing transcript"),
     );
-    emit_recording_status(
+    let meeting_processing_started_at = chrono::Utc::now().to_rfc3339();
+    emit_recording_status_with_markers(
         &app,
         &recordingId,
         "processing",
         Some("Processing transcript"),
         Some(0.0),
+        Some(meeting_processing_started_at.as_str()),
+        None,
+        None,
     );
 
     // Trigger transcription in background using ASR manager
@@ -1821,12 +1834,16 @@ async fn stop_recording(
                     tracing::error!("Failed to update recording status: {}", e);
                 }
                 drop(db);
-                emit_recording_status(
+                let transcript_first_available_at = chrono::Utc::now().to_rfc3339();
+                emit_recording_status_with_markers(
                     &app_handle,
                     &recording_id_clone,
                     "completed",
                     None,
                     Some(1.0),
+                    None,
+                    Some(transcript_first_available_at.as_str()),
+                    None,
                 );
 
                 let transcript_for_auto_name = transcript.full_text.clone();
@@ -3534,7 +3551,12 @@ async fn get_audit_log(
 #[tauri::command]
 async fn get_settings(state: tauri::State<'_, AppState>) -> Result<settings::Settings, String> {
     let settings_manager = state.settings_manager.lock().await;
-    Ok(settings_manager.settings().clone())
+    let mut settings = settings_manager.settings().clone();
+    settings.transcription.dictation_profile = dictation_profile_to_settings_value(
+        &dictation_profile_from_settings_value(&settings.transcription.dictation_profile),
+    )
+    .to_string();
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -4569,8 +4591,12 @@ async fn stop_dictation_session_for_session(
         .settings()
         .transcription
         .dictation_ai_formatting;
-    let should_run_ai_formatting =
-        ai_formatting_enabled && result.text.chars().count() >= DICTATION_AI_FORMAT_MIN_CHARS;
+    let should_run_ai_formatting = ai_formatting_enabled
+        && matches!(
+            dictation_options.profile,
+            models::DictationProfile::PowerRewrite
+        )
+        && result.text.chars().count() >= DICTATION_AI_FORMAT_MIN_CHARS;
 
     if should_run_ai_formatting && !result.text.trim().is_empty() {
         emit_dictation_state(
@@ -4832,32 +4858,30 @@ async fn stop_dictation_session_for_session(
     }
     let end_to_end_ms = stop_pipeline_started.elapsed().as_millis() as u64;
 
-    if let Err(error) = app.emit(
-        "dictation-text-ready",
-        serde_json::json!({
-            "sessionId": session_id,
-            "stopReason": stop_reason,
-            "outcome": if pasted { "pasted" } else if copied { "copied" } else { "none" },
-            "text": result.text,
-            "pasted": pasted,
-            "copied": copied,
-            "pasteError": paste_error,
-            "requestedProvider": result.requested_provider,
-            "actualProvider": result.actual_provider,
-            "requestedEngine": result.requested_engine,
-            "actualEngine": result.actual_engine,
-            "optimizationApplied": result.optimization_applied,
-            "fallbackReason": result.fallback_reason,
-            "fallbackMessage": fallback_message,
-            "modelId": result.model_id,
-            "latencyMs": transcription_latency_ms,
-            "endToEndMs": end_to_end_ms,
-            "insertionModeUsed": insertion_mode_used,
-            "commandApplied": command_applied,
-            "snippetAppliedCount": snippet_applied_count,
-            "appTarget": app_target
-        }),
-    ) {
+    let payload = build_dictation_text_ready_payload(
+        session_id,
+        stop_reason,
+        if pasted {
+            "pasted"
+        } else if copied {
+            "copied"
+        } else {
+            "none"
+        },
+        &result,
+        pasted,
+        copied,
+        paste_error.as_deref(),
+        fallback_message.as_deref(),
+        transcription_latency_ms,
+        end_to_end_ms,
+        insertion_mode_used.as_str(),
+        command_applied.as_deref(),
+        snippet_applied_count,
+        app_target.as_deref(),
+    );
+
+    if let Err(error) = app.emit("dictation-text-ready", payload) {
         tracing::warn!("Failed to emit dictation text event: {}", error);
     }
 
@@ -5325,12 +5349,29 @@ fn emit_recording_status(
     message: Option<&str>,
     progress: Option<f64>,
 ) {
+    emit_recording_status_with_markers(app, recording_id, status, message, progress, None, None, None);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_recording_status_with_markers(
+    app: &AppHandle,
+    recording_id: &str,
+    status: &str,
+    message: Option<&str>,
+    progress: Option<f64>,
+    meeting_processing_started_at: Option<&str>,
+    transcript_first_available_at: Option<&str>,
+    consent_prompt_shown: Option<bool>,
+) {
     let payload = serde_json::json!({
         "recordingId": recording_id,
         "status": status,
         "message": message,
         "progress": progress,
         "updatedAt": chrono::Utc::now().to_rfc3339(),
+        "meetingProcessingStartedAt": meeting_processing_started_at,
+        "transcriptFirstAvailableAt": transcript_first_available_at,
+        "consentPromptShown": consent_prompt_shown,
     });
     if let Err(error) = app.emit("recording-status-changed", payload) {
         tracing::warn!("Failed to emit recording status: {}", error);
@@ -6180,6 +6221,56 @@ fn apply_dictation_snippets(
     }
 
     (output, applied_total)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_dictation_text_ready_payload(
+    session_id: u64,
+    stop_reason: &str,
+    outcome: &str,
+    result: &asr::TranscriptionResult,
+    pasted: bool,
+    copied: bool,
+    paste_error: Option<&str>,
+    fallback_message: Option<&str>,
+    transcription_latency_ms: u64,
+    end_to_end_ms: u64,
+    insertion_mode_used: &str,
+    command_applied: Option<&str>,
+    snippet_applied_count: usize,
+    app_target: Option<&str>,
+) -> serde_json::Value {
+    let is_fallback = result.requested_provider != result.actual_provider
+        || result
+            .fallback_reason
+            .as_deref()
+            .map(|reason| !reason.trim().is_empty())
+            .unwrap_or(false);
+
+    serde_json::json!({
+        "sessionId": session_id,
+        "stopReason": stop_reason,
+        "outcome": outcome,
+        "text": result.text,
+        "pasted": pasted,
+        "copied": copied,
+        "pasteError": paste_error,
+        "requestedProvider": result.requested_provider,
+        "actualProvider": result.actual_provider,
+        "isFallback": is_fallback,
+        "requestedEngine": result.requested_engine,
+        "actualEngine": result.actual_engine,
+        "optimizationApplied": result.optimization_applied,
+        "fallbackReason": result.fallback_reason,
+        "fallbackMessage": fallback_message,
+        "modelId": result.model_id,
+        "latencyMs": transcription_latency_ms,
+        "endToEndMs": end_to_end_ms,
+        "insertionModeUsed": insertion_mode_used,
+        "commandApplied": command_applied,
+        "snippetAppliedCount": snippet_applied_count,
+        "appTarget": app_target
+    })
 }
 
 fn default_dictation_command_prompt(command_key: &str) -> Option<&'static str> {
@@ -7654,6 +7745,25 @@ mod tests {
         }
     }
 
+    fn snippet(
+        trigger: &str,
+        expansion: &str,
+        app_scope: Option<&str>,
+        case_sensitive: bool,
+    ) -> models::DictationSnippet {
+        let now = chrono::Utc::now();
+        models::DictationSnippet {
+            id: uuid::Uuid::new_v4().to_string(),
+            trigger: trigger.to_string(),
+            expansion: expansion.to_string(),
+            app_scope: app_scope.map(str::to_string),
+            case_sensitive,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     #[test]
     fn infers_speaker_name_from_intro_phrase() {
         let segments = vec![seg("S1", "This is jonathan speaking about the roadmap.")];
@@ -7852,6 +7962,30 @@ mod tests {
     }
 
     #[test]
+    fn dictation_profile_normalization_preserves_backward_compatibility() {
+        assert_eq!(
+            dictation_profile_to_settings_value(&dictation_profile_from_settings_value("speed")),
+            "normal_speed"
+        );
+        assert_eq!(
+            dictation_profile_to_settings_value(&dictation_profile_from_settings_value("accuracy")),
+            "power_rewrite"
+        );
+        assert_eq!(
+            dictation_profile_to_settings_value(&dictation_profile_from_settings_value(
+                "normal_speed"
+            )),
+            "normal_speed"
+        );
+        assert_eq!(
+            dictation_profile_to_settings_value(&dictation_profile_from_settings_value(
+                "power_rewrite"
+            )),
+            "power_rewrite"
+        );
+    }
+
+    #[test]
     fn command_parser_detects_prefix_commands() {
         let newline = parse_dictation_command("command newline", "command")
             .expect("newline command should parse");
@@ -7871,6 +8005,84 @@ mod tests {
         assert!(default_dictation_command_prompt("rewrite_professional").is_some());
         assert!(default_dictation_command_prompt("bulletize_selection").is_some());
         assert!(default_dictation_command_prompt("unknown").is_none());
+    }
+
+    #[test]
+    fn snippets_prefer_longest_trigger_for_deterministic_precedence() {
+        let snippets = vec![
+            snippet("ab", "SHORT", None, false),
+            snippet("abc", "LONG", None, false),
+        ];
+
+        let (output, applied) = apply_dictation_snippets("abc", &snippets, None);
+        assert_eq!(output, "LONG");
+        assert_eq!(applied, 1);
+    }
+
+    #[test]
+    fn snippets_respect_app_scope_matching() {
+        let snippets = vec![snippet("brb", "be right back", Some("slack"), false)];
+
+        let (non_matching, non_matching_count) =
+            apply_dictation_snippets("brb", &snippets, Some("Notion"));
+        assert_eq!(non_matching, "brb");
+        assert_eq!(non_matching_count, 0);
+
+        let (matching, matching_count) = apply_dictation_snippets("brb", &snippets, Some("Slack"));
+        assert_eq!(matching, "be right back");
+        assert_eq!(matching_count, 1);
+    }
+
+    #[test]
+    fn dictation_text_ready_payload_includes_required_telemetry_fields() {
+        let result = asr::TranscriptionResult {
+            text: "hello world".to_string(),
+            segments: Vec::new(),
+            language: "en".to_string(),
+            confidence: 0.95,
+            processing_time_ms: 180,
+            model_name: "distil-whisper".to_string(),
+            model_id: "distil-large-v3.5".to_string(),
+            requested_provider: asr::AsrProviderType::Voxtral,
+            actual_provider: asr::AsrProviderType::DistilWhisper,
+            requested_engine: Some("python".to_string()),
+            actual_engine: Some("native".to_string()),
+            optimization_applied: true,
+            fallback_reason: Some("fallback test".to_string()),
+        };
+
+        let payload = build_dictation_text_ready_payload(
+            7,
+            "manual",
+            "pasted",
+            &result,
+            true,
+            false,
+            None,
+            Some("fallback message"),
+            180,
+            320,
+            "paste",
+            Some("newline"),
+            1,
+            Some("Notes"),
+        );
+
+        for key in [
+            "endToEndMs",
+            "insertionModeUsed",
+            "commandApplied",
+            "snippetAppliedCount",
+            "appTarget",
+            "requestedProvider",
+            "actualProvider",
+            "fallbackReason",
+            "isFallback",
+        ] {
+            assert!(payload.get(key).is_some(), "missing payload field: {}", key);
+        }
+
+        assert_eq!(payload.get("isFallback").and_then(|value| value.as_bool()), Some(true));
     }
 
     #[test]
@@ -8031,15 +8243,15 @@ fn dictation_options_from_settings(settings: &settings::Settings) -> models::Dic
 
 fn dictation_profile_to_settings_value(profile: &models::DictationProfile) -> &'static str {
     match profile {
-        models::DictationProfile::Speed => "speed",
-        models::DictationProfile::Accuracy => "accuracy",
+        models::DictationProfile::NormalSpeed => "normal_speed",
+        models::DictationProfile::PowerRewrite => "power_rewrite",
     }
 }
 
 fn dictation_profile_from_settings_value(value: &str) -> models::DictationProfile {
     match value {
-        "accuracy" => models::DictationProfile::Accuracy,
-        _ => models::DictationProfile::Speed,
+        "power_rewrite" | "accuracy" => models::DictationProfile::PowerRewrite,
+        _ => models::DictationProfile::NormalSpeed,
     }
 }
 

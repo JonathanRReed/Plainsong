@@ -1,4 +1,5 @@
 use nautilus_bot_lib::asr::{AsrManager, AsrProviderType};
+use nautilus_bot_lib::settings::PlatformOptimizationSettings;
 use std::path::PathBuf;
 
 fn perf_fixture_path() -> PathBuf {
@@ -52,6 +53,9 @@ async fn local_asr_rtf_gate_under_1_2x() {
     assert!(duration_seconds >= 29.9, "expected ~30s fixture duration");
 
     let manager = AsrManager::new();
+    let mut optimization = PlatformOptimizationSettings::default();
+    optimization.fallback_policy = "fail_fast".to_string();
+    manager.set_platform_optimization(optimization).await;
     manager
         .set_provider_model_id(AsrProviderType::Voxtral, "voxtral-local".to_string())
         .await;

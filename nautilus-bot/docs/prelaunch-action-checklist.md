@@ -20,6 +20,7 @@ This checklist tracks remaining release blockers for strict all-provider GA on m
 - [ ] Release workflow `prepare` job passes secret validation + cloud smoke gate.
 - [ ] Rust live cloud integration test gate passes (`asr_live_cloud_integration`).
 - [ ] Local ASR performance gate passes (`asr_local_performance_gate`, RTF <= 1.2).
+- [ ] Local ASR performance gate runs with fail-fast provider policy (no hidden fallback passes).
 - [ ] Cold-start gate passes on M1-class baseline (`scripts/cold-start-gate.mjs`, threshold < 2500ms).
 - [ ] Bundle size gate passes (`node scripts/size-gate.mjs --app src-tauri/target/release/bundle/macos/Nautilus.app --max-mb 35`).
 - [ ] Standard build-quality gates remain green (`tsc`, `npm test`, `vite build`, `fmt`, `clippy`, `check`, `test --lib`).
@@ -41,6 +42,8 @@ This checklist tracks remaining release blockers for strict all-provider GA on m
 - [ ] Confirm onboarding parity for Normal + Power tracks, including persistence behavior.
 - [ ] Confirm licensing parity (tier unlock matrix + 30-day lockout behavior).
 - [ ] Confirm at least one cloud backup provider passes setup + sync + restore.
+- [ ] Validate benchmark artifact schema (`docs/evals/benchmark-run.schema.json`) and provider-integrity fields in CP-15 evidence.
+- [ ] Validate meeting status event markers (`meetingProcessingStartedAt`, `transcriptFirstAvailableAt`, `consentPromptShown`) in packaged QA logs.
 
 ## F) Final Signoff
 

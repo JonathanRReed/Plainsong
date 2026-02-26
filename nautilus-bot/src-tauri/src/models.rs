@@ -79,14 +79,18 @@ pub struct RecordingOptions {
     pub project_id: String,
     #[serde(default)]
     pub template: Option<String>,
+    #[serde(default)]
+    pub consent_prompt_shown: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DictationProfile {
     #[default]
-    Speed,
-    Accuracy,
+    #[serde(rename = "normal_speed", alias = "speed")]
+    NormalSpeed,
+    #[serde(rename = "power_rewrite", alias = "accuracy")]
+    PowerRewrite,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +106,7 @@ impl Default for DictationStartOptions {
         Self {
             save_to_inbox: true,
             project_id: Some("inbox".to_string()),
-            profile: DictationProfile::Speed,
+            profile: DictationProfile::NormalSpeed,
         }
     }
 }

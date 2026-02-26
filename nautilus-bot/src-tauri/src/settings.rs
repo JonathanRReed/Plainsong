@@ -146,7 +146,7 @@ pub struct TranscriptionSettings {
     pub save_raw_transcript: bool,
     /// Persist dictation outputs into project storage.
     pub dictation_save_to_inbox: bool,
-    /// Dictation profile preference: speed or accuracy.
+    /// Dictation profile preference: normal_speed or power_rewrite.
     pub dictation_profile: String,
     /// Target project for saved dictations.
     pub dictation_project_id: String,
@@ -203,7 +203,7 @@ impl Default for TranscriptionSettings {
             meeting_auto_name_model: None,
             save_raw_transcript: false,
             dictation_save_to_inbox: true,
-            dictation_profile: "speed".to_string(),
+            dictation_profile: "normal_speed".to_string(),
             dictation_project_id: "inbox".to_string(),
             dictation_retention_preset: "never".to_string(),
             dictation_retention_custom_hours: 24,

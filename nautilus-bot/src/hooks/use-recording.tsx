@@ -47,6 +47,7 @@ interface RecordingContextValue extends RecordingState {
     systemAudio: boolean;
     projectId: string;
     template?: string;
+    consentPromptShown?: boolean;
   }) => Promise<string | null>;
   stopMeeting: () => Promise<void>;
 }
@@ -119,7 +120,13 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   }, [clearTimer]);
 
   const startMeeting = useCallback(
-    async (options: { mic: boolean; systemAudio: boolean; projectId: string; template?: string }) => {
+    async (options: {
+      mic: boolean;
+      systemAudio: boolean;
+      projectId: string;
+      template?: string;
+      consentPromptShown?: boolean;
+    }) => {
       try {
         const recordingId = await tauriStartRecording(options);
         setState({

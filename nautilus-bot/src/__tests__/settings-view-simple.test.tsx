@@ -25,7 +25,7 @@ const baseSettings = {
     numSpeakers: 0,
     saveRawTranscript: false,
     dictationSaveToInbox: true,
-    dictationProfile: "speed" as const,
+    dictationProfile: "normal_speed" as const,
     dictationProjectId: "inbox",
     speakerNamingMethod: "auto" as const,
     silenceSkipEnabled: false,

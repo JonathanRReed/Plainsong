@@ -122,6 +122,9 @@ export function RecordingsView() {
     status: Recording["status"];
     message?: string | null;
     progress?: number | null;
+    meetingProcessingStartedAt?: string | null;
+    transcriptFirstAvailableAt?: string | null;
+    consentPromptShown?: boolean | null;
   };
 
   useEffect(() => {
@@ -302,7 +305,11 @@ export function RecordingsView() {
 
   const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean; template?: string }) => {
     try {
-      const startedId = await startMeeting({ ...options, projectId: "default" });
+      const startedId = await startMeeting({
+        ...options,
+        projectId: "default",
+        consentPromptShown: true,
+      });
       if (startedId) {
         refetch();
       }

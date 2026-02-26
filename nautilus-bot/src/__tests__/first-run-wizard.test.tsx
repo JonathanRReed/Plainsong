@@ -36,7 +36,7 @@ const baseSettings = {
     meetingAutoNameModel: null,
     saveRawTranscript: false,
     dictationSaveToInbox: true,
-    dictationProfile: "speed" as const,
+    dictationProfile: "normal_speed" as const,
     dictationProjectId: "inbox",
     dictationRetentionPreset: "never" as const,
     dictationRetentionCustomHours: 24,

@@ -47,6 +47,7 @@ Owner: Nautilus engineering
 - `insertion_mode_used`: `paste` / `clipboard_only` / `command_only` / `none`.
 - `command_applied`: command id when command mode is triggered.
 - `snippet_applied_count`: number of snippet expansions applied.
+- `requested_provider`, `actual_provider`, `is_fallback`: provider-integrity telemetry.
 
 ## Pass/Fail Targets
 - Supported app insertion success `>= 98%`
@@ -60,7 +61,13 @@ Owner: Nautilus engineering
 - app target
 - command/snippet configuration
 - provider/model
+- requested provider vs actual provider
+- fallback reason + `is_fallback` flag
 - transcription latency
 - end-to-end latency
 - insertion outcome
 - error text (if present)
+
+## Artifact Format
+- Validate benchmark run artifacts against:
+  - `docs/evals/benchmark-run.schema.json`

@@ -39,6 +39,7 @@ interface DictationTextReadyEvent {
   pasteError?: string | null;
   requestedProvider?: string;
   actualProvider?: string;
+  isFallback?: boolean;
   fallbackReason?: string | null;
   fallbackMessage?: string | null;
   modelId?: string;
@@ -95,7 +96,9 @@ export function DictationView() {
   const [appTarget, setAppTarget] = useState<string | null>(null);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const [saveToInbox, setSaveToInbox] = useState(true);
-  const [dictationProfile, setDictationProfile] = useState<"speed" | "accuracy">("speed");
+  const [dictationProfile, setDictationProfile] = useState<"normal_speed" | "power_rewrite">(
+    "normal_speed"
+  );
   const [defaultProjectId, setDefaultProjectId] = useState("inbox");
   const [dictationPushToTalk, setDictationPushToTalk] = useState(true);
   const [dictationCopyToClipboard, setDictationCopyToClipboard] = useState(true);
@@ -228,7 +231,7 @@ export function DictationView() {
   const persistDictationPreferences = async (
     updates: Partial<{
       saveToInbox: boolean;
-      profile: "speed" | "accuracy";
+      profile: "normal_speed" | "power_rewrite";
       projectId: string;
       pushToTalk: boolean;
       copyToClipboard: boolean;
@@ -305,9 +308,10 @@ export function DictationView() {
           setLastProvider(payload.actualProvider);
         }
         const hasProviderFallback =
-          !!payload?.requestedProvider &&
-          !!payload?.actualProvider &&
-          payload.requestedProvider !== payload.actualProvider;
+          payload?.isFallback === true ||
+          (!!payload?.requestedProvider &&
+            !!payload?.actualProvider &&
+            payload.requestedProvider !== payload.actualProvider);
         if (payload?.fallbackMessage) {
           setFallbackStatus(payload.fallbackMessage);
         } else if (hasProviderFallback) {
@@ -805,13 +809,13 @@ export function DictationView() {
                     className="w-full p-2 border rounded-md bg-background"
                     value={dictationProfile}
                     onChange={(event) => {
-                      const profile = event.target.value as "speed" | "accuracy";
+                      const profile = event.target.value as "normal_speed" | "power_rewrite";
                       setDictationProfile(profile);
                       void persistDictationPreferences({ profile });
                     }}
                   >
-                    <option value="speed">Speed</option>
-                    <option value="accuracy">Accuracy</option>
+                    <option value="normal_speed">Normal Speed</option>
+                    <option value="power_rewrite">Power Rewrite</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
                     ASR model selection follows your global default local ASR model in Settings.
