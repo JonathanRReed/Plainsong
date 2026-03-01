@@ -1,0 +1,356 @@
+{
+  "generatedAt": "2026-03-01T01:03:53.172Z",
+  "matrixPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/packaged-app-qa-matrix.md",
+  "summary": {
+    "total": 49,
+    "pass": 0,
+    "fail": 0,
+    "blocked": 0,
+    "pending": 49
+  },
+  "rows": [
+    {
+      "area": "Install",
+      "testCase": "Fresh install from signed DMG",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Install",
+      "testCase": "Upgrade from previous released version",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Security",
+      "testCase": "Gatekeeper assessment accepted",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Security",
+      "testCase": "Notarization ticket validated",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Permissions",
+      "testCase": "Microphone permission flow",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Permissions",
+      "testCase": "Accessibility permission flow",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Onboarding",
+      "testCase": "Normal user onboarding completes and persists baseline settings",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Onboarding",
+      "testCase": "Power user onboarding completes and persists advanced storage/retention settings",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Capture",
+      "testCase": "Dictation hotkey end-to-end",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Capture",
+      "testCase": "Meeting recording mic-only",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Capture",
+      "testCase": "Meeting recording with system audio (where available)",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Capture",
+      "testCase": "Meeting processing UX: immediate `processing` status + spinner + detail auto-refresh",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Capture",
+      "testCase": "3h+ meeting soak (mic + system audio) completes transcript end-to-end",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Retention",
+      "testCase": "Transcript-only storage deletes audio and keeps transcript accessible",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Retention",
+      "testCase": "Meeting retention `audio_only` clears file/path but keeps transcript",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Retention",
+      "testCase": "Meeting retention `audio_and_transcript` deletes full entity",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Transcription",
+      "testCase": "Whisper transcription end-to-end",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "AI",
+      "testCase": "Local analysis (Ollama) flow",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Backup",
+      "testCase": "Create backup / restore backup",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Backup",
+      "testCase": "Cloud provider setup + sync + restore (at least one provider)",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Updates",
+      "testCase": "Stable channel check + install",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Licensing",
+      "testCase": "Trial expiry + nag behavior",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Licensing",
+      "testCase": "License activation/deactivation",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Licensing",
+      "testCase": "License tiers unlock correct features (basic/pro/friends-club)",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Licensing",
+      "testCase": "30-day pro lockout behavior verified",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Install",
+      "testCase": "Fresh install from signed installer",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Install",
+      "testCase": "Upgrade from previous released version",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Security",
+      "testCase": "Authenticode signature valid",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Security",
+      "testCase": "SmartScreen publisher display",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Permissions",
+      "testCase": "Microphone permission flow",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Onboarding",
+      "testCase": "Normal user onboarding completes and persists baseline settings",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Onboarding",
+      "testCase": "Power user onboarding completes and persists advanced storage/retention settings",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Capture",
+      "testCase": "Dictation hotkey end-to-end",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Capture",
+      "testCase": "Meeting recording mic-only",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Capture",
+      "testCase": "Meeting recording with loopback/system audio",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Capture",
+      "testCase": "Meeting processing UX: immediate `processing` status + spinner + detail auto-refresh",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Capture",
+      "testCase": "3h+ meeting soak (mic + system audio) completes transcript end-to-end",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Retention",
+      "testCase": "Transcript-only storage deletes audio and keeps transcript accessible",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Retention",
+      "testCase": "Meeting retention `audio_only` clears file/path but keeps transcript",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Retention",
+      "testCase": "Meeting retention `audio_and_transcript` deletes full entity",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Transcription",
+      "testCase": "Whisper transcription end-to-end",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "AI",
+      "testCase": "Local/remote analysis configured paths",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Backup",
+      "testCase": "Create backup / restore backup",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Backup",
+      "testCase": "Cloud provider setup + sync + restore (at least one provider)",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Updates",
+      "testCase": "Stable channel check + install",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Licensing",
+      "testCase": "Trial expiry + nag behavior",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Licensing",
+      "testCase": "License activation/deactivation",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Licensing",
+      "testCase": "License tiers unlock correct features (basic/pro/friends-club)",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    },
+    {
+      "area": "Licensing",
+      "testCase": "30-day pro lockout behavior verified",
+      "status": "PENDING",
+      "evidence": "",
+      "owner": ""
+    }
+  ]
+}

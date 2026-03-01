@@ -440,6 +440,7 @@ impl AsrManager {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn transcribe_with_provider_attempt(
         &self,
         requested_provider: AsrProviderType,
@@ -498,7 +499,8 @@ impl AsrManager {
                 .iter()
                 .filter_map(|id| PlatformEngine::from_id(id))
                 .find(|engine| {
-                    Self::engine_enabled(*engine, optimization) && engine.supports_provider(provider_type)
+                    Self::engine_enabled(*engine, optimization)
+                        && engine.supports_provider(provider_type)
                 }),
             _ => {
                 if !provider_type.is_local() {
@@ -1551,9 +1553,10 @@ mod tests {
     #[tokio::test]
     async fn auto_mode_selects_runtime_engine_for_local_provider() {
         let manager = AsrManager::new();
-        let mut optimization = PlatformOptimizationSettings::default();
-        optimization.mode = "auto".to_string();
-        optimization.macos.mlx_enabled = true;
+        let optimization = PlatformOptimizationSettings {
+            mode: "auto".to_string(),
+            ..PlatformOptimizationSettings::default()
+        };
         manager.set_platform_optimization(optimization).await;
 
         let providers = manager
@@ -1573,10 +1576,15 @@ mod tests {
     #[tokio::test]
     async fn manual_mode_honors_engine_priority() {
         let manager = AsrManager::new();
-        let mut optimization = PlatformOptimizationSettings::default();
-        optimization.mode = "manual".to_string();
-        optimization.macos.apple_native_enabled = true;
-        optimization.manual_engine_priority = vec!["macos_apple_speech".to_string()];
+        let optimization = PlatformOptimizationSettings {
+            mode: "manual".to_string(),
+            macos: crate::settings::MacosPlatformOptimizationSettings {
+                apple_native_enabled: true,
+                ..crate::settings::MacosPlatformOptimizationSettings::default()
+            },
+            manual_engine_priority: vec!["macos_apple_speech".to_string()],
+            ..PlatformOptimizationSettings::default()
+        };
         manager.set_platform_optimization(optimization).await;
 
         let providers = manager
