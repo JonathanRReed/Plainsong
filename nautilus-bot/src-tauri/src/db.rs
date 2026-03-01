@@ -578,7 +578,12 @@ impl Database {
     ) -> Result<()> {
         self.conn.execute(
             "UPDATE recordings SET audio_path = ?1, duration = ?2, updated_at = ?3 WHERE id = ?4",
-            params![audio_path, duration_seconds, Utc::now().to_rfc3339(), recording_id],
+            params![
+                audio_path,
+                duration_seconds,
+                Utc::now().to_rfc3339(),
+                recording_id
+            ],
         )?;
         Ok(())
     }
@@ -733,7 +738,12 @@ impl Database {
     }
 
     /// Update the text of a single transcript segment (stored as JSON in transcripts.segments)
-    pub fn update_transcript_segment(&mut self, recording_id: &str, segment_id: &str, new_text: &str) -> Result<bool> {
+    pub fn update_transcript_segment(
+        &mut self,
+        recording_id: &str,
+        segment_id: &str,
+        new_text: &str,
+    ) -> Result<bool> {
         let Some(mut transcript) = self.get_transcript(recording_id)? else {
             return Ok(false);
         };
@@ -752,7 +762,12 @@ impl Database {
         }
 
         // Rebuild full_text from updated segments
-        transcript.full_text = transcript.segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join(" ");
+        transcript.full_text = transcript
+            .segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
 
         let segments_json = serde_json::to_string(&transcript.segments)?;
         let tx = self.conn.transaction()?;
@@ -1981,7 +1996,8 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(second.system_prompt, "Rewrite to be short and direct");
 
-        db.delete_dictation_command_preset("rewrite_shorter").unwrap();
+        db.delete_dictation_command_preset("rewrite_shorter")
+            .unwrap();
         assert!(db.list_dictation_command_presets().unwrap().is_empty());
     }
 

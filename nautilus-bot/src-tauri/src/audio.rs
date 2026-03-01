@@ -778,7 +778,10 @@ impl AudioCapture {
 
         // Hash computation may fail if file is still being written - that's OK
         let hash = compute_file_hash(&path).unwrap_or_else(|e| {
-            tracing::warn!("Could not compute file hash (file may still be writing): {}", e);
+            tracing::warn!(
+                "Could not compute file hash (file may still be writing): {}",
+                e
+            );
             "pending".to_string()
         });
         tracing::info!("Recording SHA256: {}", hash);
@@ -908,11 +911,7 @@ fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Result<Vec<u8
     Ok(buffer)
 }
 
-fn write_wav_file(
-    path: &PathBuf,
-    receiver: Receiver<Vec<f32>>,
-    sample_rate: u32,
-) -> Result<()> {
+fn write_wav_file(path: &PathBuf, receiver: Receiver<Vec<f32>>, sample_rate: u32) -> Result<()> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate,
@@ -941,11 +940,7 @@ fn write_wav_file(
     Ok(())
 }
 
-fn join_thread_with_timeout(
-    handle: JoinHandle<()>,
-    timeout: Duration,
-    label: &str,
-) -> Result<()> {
+fn join_thread_with_timeout(handle: JoinHandle<()>, timeout: Duration, label: &str) -> Result<()> {
     let (done_tx, done_rx) = bounded::<std::thread::Result<()>>(1);
     std::thread::spawn(move || {
         let _ = done_tx.send(handle.join());

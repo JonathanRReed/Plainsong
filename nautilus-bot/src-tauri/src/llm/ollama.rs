@@ -139,7 +139,12 @@ impl OllamaClient {
     }
 
     /// Summarize meeting with a specific template style
-    pub async fn summarize_with_template(&self, transcript: &str, model: &str, template: Option<&str>) -> Result<String> {
+    pub async fn summarize_with_template(
+        &self,
+        transcript: &str,
+        model: &str,
+        template: Option<&str>,
+    ) -> Result<String> {
         let template_instruction = match template {
             Some("standup") => "Format as a standup update: What was done, what is planned, and any blockers.",
             Some("1on1") => "Format as a 1:1 summary: key topics discussed, feedback given, goals and commitments made.",
@@ -164,7 +169,13 @@ impl OllamaClient {
             Return ONLY the title text, no quotes, no punctuation at the end, no explanation:\n\n{snippet}\n\nTitle:"
         );
         let raw = self.generate(model, &prompt).await?;
-        let title = raw.trim().trim_matches('"').trim_matches('\'').trim_matches('.').trim().to_string();
+        let title = raw
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim_matches('.')
+            .trim()
+            .to_string();
         if title.is_empty() || title.len() > 120 {
             return Err(anyhow::anyhow!("Generated title was empty or too long"));
         }
@@ -248,7 +259,7 @@ Speakers identified:"
         );
 
         let response = self.generate(model, &prompt).await?;
-        
+
         let mut speakers = std::collections::HashMap::new();
         for line in response.lines() {
             let line = line.trim();
@@ -256,17 +267,22 @@ Speakers identified:"
                 let speaker_id = speaker_id.trim().to_string();
                 let name = name.trim().to_string();
                 // Filter out obvious non-names
-                if !name.is_empty() 
+                if !name.is_empty()
                     && name.to_lowercase() != "none"
                     && name.to_lowercase() != "unknown"
                     && name.to_lowercase() != "speaker"
                     && name.len() > 1
-                    && name.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+                    && name
+                        .chars()
+                        .next()
+                        .map(|c| c.is_alphabetic())
+                        .unwrap_or(false)
+                {
                     speakers.insert(speaker_id, name);
                 }
             }
         }
-        
+
         Ok(speakers)
     }
 }

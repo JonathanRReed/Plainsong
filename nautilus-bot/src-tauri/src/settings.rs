@@ -266,22 +266,13 @@ impl Default for MacosPlatformOptimizationSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WindowsPlatformOptimizationSettings {
     /// Enable Foundry Local optimization routing.
     pub foundry_enabled: bool,
     /// Enable Windows SDK dictation route.
     pub windows_sdk_dictation_enabled: bool,
-}
-
-impl Default for WindowsPlatformOptimizationSettings {
-    fn default() -> Self {
-        Self {
-            foundry_enabled: false,
-            windows_sdk_dictation_enabled: false,
-        }
-    }
 }
 
 /// UI settings

@@ -101,7 +101,8 @@ impl MixedAudioCapture {
         self.dropped_mixed_chunks.store(0, Ordering::SeqCst);
 
         let (sender, receiver) = crossbeam::channel::bounded::<Vec<f32>>(100);
-        let (ready_tx, ready_rx) = crossbeam::channel::bounded::<std::result::Result<(), String>>(1);
+        let (ready_tx, ready_rx) =
+            crossbeam::channel::bounded::<std::result::Result<(), String>>(1);
         let is_capturing = Arc::clone(&self.is_capturing);
         let dropped_mic_samples = Arc::clone(&self.dropped_mic_samples);
         let dropped_system_samples = Arc::clone(&self.dropped_system_samples);

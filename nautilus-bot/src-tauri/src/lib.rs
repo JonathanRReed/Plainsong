@@ -3786,14 +3786,12 @@ async fn save_settings(
             &dictation_profile_from_settings_value(&settings.transcription.dictation_profile),
         )
         .to_string();
-        settings.transcription.dictation_command_prefix = normalize_dictation_command_prefix(
-            &settings.transcription.dictation_command_prefix,
-        )
-        .to_string();
-        settings.transcription.dictation_insertion_mode = normalize_dictation_insertion_mode(
-            &settings.transcription.dictation_insertion_mode,
-        )
-        .to_string();
+        settings.transcription.dictation_command_prefix =
+            normalize_dictation_command_prefix(&settings.transcription.dictation_command_prefix)
+                .to_string();
+        settings.transcription.dictation_insertion_mode =
+            normalize_dictation_insertion_mode(&settings.transcription.dictation_insertion_mode)
+                .to_string();
         settings.transcription.dictation_retention_preset = normalize_dictation_retention_preset(
             &settings.transcription.dictation_retention_preset,
         )
@@ -4685,7 +4683,9 @@ async fn stop_dictation_session_for_session(
     }
 
     let settings_snapshot = state.settings_manager.lock().await.settings().clone();
-    let command_mode_enabled = settings_snapshot.transcription.dictation_command_mode_enabled;
+    let command_mode_enabled = settings_snapshot
+        .transcription
+        .dictation_command_mode_enabled;
     let command_prefix = normalize_dictation_command_prefix(
         &settings_snapshot.transcription.dictation_command_prefix,
     )
@@ -4705,61 +4705,58 @@ async fn stop_dictation_session_for_session(
             match action {
                 DictationCommandAction::InsertText(text) => result.text = text,
                 DictationCommandAction::RewriteShorter(text) => {
-                    result.text =
-                        match run_dictation_command_with_selected_provider(
-                            state,
-                            "rewrite_shorter",
-                            text.as_str(),
-                        )
-                        .await
-                        {
-                            Ok(output) => output,
-                            Err(error) => {
-                                tracing::warn!(
-                                    "rewrite_shorter command fallback to local transform: {}",
-                                    error
-                                );
-                                rewrite_shorter_text(text.as_str())
-                            }
+                    result.text = match run_dictation_command_with_selected_provider(
+                        state,
+                        "rewrite_shorter",
+                        text.as_str(),
+                    )
+                    .await
+                    {
+                        Ok(output) => output,
+                        Err(error) => {
+                            tracing::warn!(
+                                "rewrite_shorter command fallback to local transform: {}",
+                                error
+                            );
+                            rewrite_shorter_text(text.as_str())
                         }
+                    }
                 }
                 DictationCommandAction::RewriteProfessional(text) => {
-                    result.text =
-                        match run_dictation_command_with_selected_provider(
-                            state,
-                            "rewrite_professional",
-                            text.as_str(),
-                        )
-                        .await
-                        {
-                            Ok(output) => output,
-                            Err(error) => {
-                                tracing::warn!(
-                                    "rewrite_professional command fallback to local transform: {}",
-                                    error
-                                );
-                                rewrite_professional_text(text.as_str())
-                            }
+                    result.text = match run_dictation_command_with_selected_provider(
+                        state,
+                        "rewrite_professional",
+                        text.as_str(),
+                    )
+                    .await
+                    {
+                        Ok(output) => output,
+                        Err(error) => {
+                            tracing::warn!(
+                                "rewrite_professional command fallback to local transform: {}",
+                                error
+                            );
+                            rewrite_professional_text(text.as_str())
                         }
+                    }
                 }
                 DictationCommandAction::Bulletize(text) => {
-                    result.text =
-                        match run_dictation_command_with_selected_provider(
-                            state,
-                            "bulletize_selection",
-                            text.as_str(),
-                        )
-                        .await
-                        {
-                            Ok(output) => output,
-                            Err(error) => {
-                                tracing::warn!(
-                                    "bulletize_selection command fallback to local transform: {}",
-                                    error
-                                );
-                                bulletize_text(text.as_str())
-                            }
+                    result.text = match run_dictation_command_with_selected_provider(
+                        state,
+                        "bulletize_selection",
+                        text.as_str(),
+                    )
+                    .await
+                    {
+                        Ok(output) => output,
+                        Err(error) => {
+                            tracing::warn!(
+                                "bulletize_selection command fallback to local transform: {}",
+                                error
+                            );
+                            bulletize_text(text.as_str())
                         }
+                    }
                 }
                 DictationCommandAction::UndoLastInsert
                 | DictationCommandAction::DeleteLastSentence => {
@@ -5349,7 +5346,16 @@ fn emit_recording_status(
     message: Option<&str>,
     progress: Option<f64>,
 ) {
-    emit_recording_status_with_markers(app, recording_id, status, message, progress, None, None, None);
+    emit_recording_status_with_markers(
+        app,
+        recording_id,
+        status,
+        message,
+        progress,
+        None,
+        None,
+        None,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6020,7 +6026,10 @@ fn command_payload<'a>(raw: &'a str, phrase: &str) -> Option<&'a str> {
     Some(tail.trim_start_matches([' ', ':', ',']).trim())
 }
 
-fn parse_dictation_command(raw_text: &str, prefix: &str) -> Option<(String, DictationCommandAction)> {
+fn parse_dictation_command(
+    raw_text: &str,
+    prefix: &str,
+) -> Option<(String, DictationCommandAction)> {
     let text = raw_text.trim();
     if text.is_empty() {
         return None;
@@ -6097,7 +6106,13 @@ fn rewrite_shorter_text(text: &str) -> String {
     if output.is_empty() {
         return output;
     }
-    let fillers = [" basically ", " actually ", " literally ", " just ", " really "];
+    let fillers = [
+        " basically ",
+        " actually ",
+        " literally ",
+        " just ",
+        " really ",
+    ];
     output = format!(" {} ", output);
     for filler in fillers {
         output = output.replace(filler, " ");
@@ -6152,7 +6167,11 @@ fn bulletize_text(text: &str) -> String {
     items.join("\n")
 }
 
-fn replace_case_insensitive_all(haystack: &str, needle: &str, replacement: &str) -> (String, usize) {
+fn replace_case_insensitive_all(
+    haystack: &str,
+    needle: &str,
+    replacement: &str,
+) -> (String, usize) {
     if needle.is_empty() {
         return (haystack.to_string(), 0);
     }
@@ -6167,7 +6186,10 @@ fn replace_case_insensitive_all(haystack: &str, needle: &str, replacement: &str)
 }
 
 fn snippet_app_scope_matches(snippet_scope: Option<&str>, app_target: Option<&str>) -> bool {
-    let Some(scope) = snippet_scope.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(scope) = snippet_scope
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return true;
     };
     let Some(app_name) = app_target else {
@@ -6291,7 +6313,10 @@ fn default_dictation_command_prompt(command_key: &str) -> Option<&'static str> {
     }
 }
 
-async fn resolve_dictation_command_prompt(state: &AppState, command_key: &str) -> Result<String, String> {
+async fn resolve_dictation_command_prompt(
+    state: &AppState,
+    command_key: &str,
+) -> Result<String, String> {
     let custom_prompt = {
         let db = state.db.lock().await;
         match db.list_dictation_command_presets() {
@@ -8082,7 +8107,10 @@ mod tests {
             assert!(payload.get(key).is_some(), "missing payload field: {}", key);
         }
 
-        assert_eq!(payload.get("isFallback").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(
+            payload.get("isFallback").and_then(|value| value.as_bool()),
+            Some(true)
+        );
     }
 
     #[test]

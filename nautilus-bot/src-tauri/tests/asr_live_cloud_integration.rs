@@ -14,20 +14,49 @@ fn fixture_wav() -> Vec<u8> {
         .expect("failed to read fixed WAV fixture scripts/fixtures/live-cloud-smoke.wav")
 }
 
-fn require_env(name: &str) {
+fn env_present(name: &str) -> bool {
     let value = std::env::var(name).unwrap_or_default();
-    assert!(
-        !value.trim().is_empty(),
-        "missing required live cloud ASR secret: {}",
-        name
-    );
+    !value.trim().is_empty()
+}
+
+fn live_cloud_required() -> bool {
+    std::env::var("ASR_LIVE_CLOUD_REQUIRED")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
 }
 
 #[tokio::test]
 async fn live_cloud_asr_providers_pass_and_meet_latency_gate() {
-    require_env("OPENAI_API_KEY");
-    require_env("ELEVENLABS_API_KEY");
-    require_env("MISTRAL_API_KEY");
+    let mut missing = Vec::new();
+    if !env_present("OPENAI_API_KEY") {
+        missing.push("OPENAI_API_KEY");
+    }
+    if !env_present("ELEVENLABS_API_KEY") {
+        missing.push("ELEVENLABS_API_KEY");
+    }
+    if !env_present("MISTRAL_API_KEY") {
+        missing.push("MISTRAL_API_KEY");
+    }
+
+    if !missing.is_empty() {
+        if live_cloud_required() {
+            panic!(
+                "missing required live cloud ASR secret(s): {}",
+                missing.join(", ")
+            );
+        }
+        eprintln!(
+            "[asr_live_cloud_integration] skipped; missing secrets: {}",
+            missing.join(", ")
+        );
+        return;
+    }
 
     let wav = fixture_wav();
 

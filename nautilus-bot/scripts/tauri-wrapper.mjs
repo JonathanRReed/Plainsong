@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, "..");
+const tauriConfigPath = path.join(projectRoot, "src-tauri", "tauri.conf.json");
+const UPDATER_PUBKEY_PLACEHOLDER = "TODO_REPLACE_WITH_OUTPUT_OF_tauri_signer_generate";
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -68,8 +70,39 @@ function archSuffix() {
   return process.arch;
 }
 
+function ensureUpdaterPubkey() {
+  if (!existsSync(tauriConfigPath)) {
+    throw new Error(`Expected Tauri config not found at ${tauriConfigPath}`);
+  }
+
+  const tauriConfig = JSON.parse(readFileSync(tauriConfigPath, "utf8"));
+  const updater = tauriConfig?.plugins?.updater;
+  if (!updater) {
+    throw new Error("plugins.updater config is missing in src-tauri/tauri.conf.json");
+  }
+
+  const currentPubkey = String(updater.pubkey ?? "").trim();
+  const envPubkey = String(process.env.TAURI_SIGNING_PUBLIC_KEY ?? "").trim();
+
+  if (envPubkey) {
+    if (currentPubkey !== envPubkey) {
+      tauriConfig.plugins.updater.pubkey = envPubkey;
+      writeFileSync(tauriConfigPath, `${JSON.stringify(tauriConfig, null, 2)}\n`, "utf8");
+      console.log("Injected updater pubkey from TAURI_SIGNING_PUBLIC_KEY");
+    }
+    return;
+  }
+
+  const ci = String(process.env.CI ?? "").toLowerCase();
+  const runningInCi = ci === "1" || ci === "true" || ci === "yes";
+  if (runningInCi && currentPubkey === UPDATER_PUBKEY_PLACEHOLDER) {
+    throw new Error(
+      "TAURI_SIGNING_PUBLIC_KEY is missing and updater pubkey is still placeholder. Refusing CI build."
+    );
+  }
+}
+
 function buildDmgWithApfs() {
-  const tauriConfigPath = path.join(projectRoot, "src-tauri", "tauri.conf.json");
   const packageJsonPath = path.join(projectRoot, "package.json");
   const tauriConfig = JSON.parse(readFileSync(tauriConfigPath, "utf8"));
   const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
@@ -117,6 +150,10 @@ function buildDmgWithApfs() {
 
 const args = process.argv.slice(2);
 const command = args[0];
+
+if (command === "build") {
+  ensureUpdaterPubkey();
+}
 
 // Forward all non-build commands to the Tauri CLI unchanged.
 if (command !== "build" || process.platform !== "darwin") {
