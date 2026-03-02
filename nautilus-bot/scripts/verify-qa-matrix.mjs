@@ -34,11 +34,17 @@ for (const line of lines) {
   if (normalizedStatus === "PENDING") {
     violations.push(`${key} -> status is still PENDING`);
   }
+  if (!owner) {
+    violations.push(`${key} -> owner cell is empty`);
+  }
   if (!evidence) {
     violations.push(`${key} -> evidence cell is empty`);
   }
-  if (!owner) {
-    violations.push(`${key} -> owner cell is empty`);
+  if (
+    normalizedStatus === "PASS" &&
+    /^(tbd|todo|pending)$/i.test(String(evidence).trim())
+  ) {
+    violations.push(`${key} -> PASS rows must not use placeholder evidence`);
   }
 }
 

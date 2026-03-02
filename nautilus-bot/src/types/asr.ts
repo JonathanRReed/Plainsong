@@ -108,6 +108,23 @@ export interface ActionItem {
   deadline?: string;
 }
 
+export interface GroundedSummaryResult {
+  summary: string;
+  citations: LlmCitation[];
+  model: string;
+  processingTimeMs: number;
+}
+
+export interface GroundedActionItem extends ActionItem {
+  citations: LlmCitation[];
+}
+
+export interface GroundedActionItemsResult {
+  items: GroundedActionItem[];
+  model: string;
+  processingTimeMs: number;
+}
+
 export interface SearchHit {
   recordingId: string;
   recordingTitle: string;

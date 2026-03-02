@@ -308,9 +308,9 @@ jobs:
         run: |
           mkdir -p ../artifacts
           set -o pipefail
-          pkill -f '/Nautilus.app/Contents/MacOS/Nautilus' || true
-          node scripts/cold-start-gate.mjs --threshold-ms 2500 --ready-command "pgrep -f '/Nautilus.app/Contents/MacOS/Nautilus'" -- bash -lc "open \"src-tauri/target/release/bundle/macos/Nautilus.app\"" | tee ../artifacts/cold-start-macos.json
-          pkill -f '/Nautilus.app/Contents/MacOS/Nautilus' || true
+          pkill -f '/Nautilus.app/Contents/MacOS/nautilus-bot' || true
+          node scripts/cold-start-gate.mjs --threshold-ms 2500 --ready-command "pgrep -f '/Nautilus.app/Contents/MacOS/nautilus-bot'" -- bash -lc "open \"src-tauri/target/release/bundle/macos/Nautilus.app\"" | tee ../artifacts/cold-start-macos.json
+          pkill -f '/Nautilus.app/Contents/MacOS/nautilus-bot' || true
 
       - name: Validate cold-start artifact schema
         id: cold_start_artifact
@@ -324,6 +324,25 @@ jobs:
         id: qa_matrix_gate
         working-directory: nautilus-bot
         run: node scripts/verify-qa-matrix.mjs --file docs/packaged-app-qa-matrix.md
+
+      - name: Verify benchmark launch gates (CP-13/CP-14/CP-15)
+        id: benchmark_gate
+        working-directory: nautilus-bot
+        run: |
+          mkdir -p ../artifacts
+          node scripts/verify-benchmark-gates.mjs \
+            --schema docs/evals/benchmark-run.schema.json \
+            --baseline docs/evals/benchmark-run-baseline.json \
+            --candidate docs/evals/benchmark-run-latest-macos.json \
+            --out ../artifacts/benchmark-gates-macos.json
+
+      - name: Validate benchmark gate artifact schema
+        id: benchmark_gate_schema
+        working-directory: nautilus-bot
+        run: |
+          node scripts/validate-gate-artifact.mjs \
+            --schema docs/ci/schemas/benchmark-gate-result.schema.json \
+            --file ../artifacts/benchmark-gates-macos.json
 
       - name: Export packaged QA evidence bundle
         id: qa_evidence_bundle
@@ -362,6 +381,8 @@ jobs:
             echo "| Cold-start gate | ${{ steps.cold_start_gate.outcome }} |"
             echo "| Cold-start artifact schema | ${{ steps.cold_start_artifact.outcome }} |"
             echo "| Packaged QA matrix check | ${{ steps.qa_matrix_gate.outcome }} |"
+            echo "| Benchmark launch gates | ${{ steps.benchmark_gate.outcome }} |"
+            echo "| Benchmark gate artifact schema | ${{ steps.benchmark_gate_schema.outcome }} |"
             echo "| Packaged QA evidence bundle | ${{ steps.qa_evidence_bundle.outcome }} |"
             echo "| Packaged QA evidence schema | ${{ steps.qa_evidence_bundle_schema.outcome }} |"
           } > "$report"
@@ -380,6 +401,7 @@ jobs:
             artifacts/asr-local-perf-gate.log
             artifacts/cold-start-macos.json
             artifacts/release-gates-macos.md
+            artifacts/benchmark-gates-macos.json
             artifacts/packaged-qa-evidence-bundle-macos.json
             nautilus-bot/docs/packaged-app-qa-matrix.md
 
@@ -475,6 +497,27 @@ jobs:
         working-directory: nautilus-bot
         run: node scripts/verify-qa-matrix.mjs --file docs/packaged-app-qa-matrix.md
 
+      - name: Verify benchmark launch gates (CP-13/CP-14/CP-15)
+        id: benchmark_gate
+        working-directory: nautilus-bot
+        shell: bash
+        run: |
+          mkdir -p ../artifacts
+          node scripts/verify-benchmark-gates.mjs \
+            --schema docs/evals/benchmark-run.schema.json \
+            --baseline docs/evals/benchmark-run-baseline.json \
+            --candidate docs/evals/benchmark-run-latest-windows.json \
+            --out ../artifacts/benchmark-gates-windows.json
+
+      - name: Validate benchmark gate artifact schema
+        id: benchmark_gate_schema
+        working-directory: nautilus-bot
+        shell: bash
+        run: |
+          node scripts/validate-gate-artifact.mjs \
+            --schema docs/ci/schemas/benchmark-gate-result.schema.json \
+            --file ../artifacts/benchmark-gates-windows.json
+
       - name: Export packaged QA evidence bundle
         id: qa_evidence_bundle
         working-directory: nautilus-bot
@@ -513,6 +556,8 @@ jobs:
             echo "| Local performance gate | ${{ steps.local_perf_gate.outcome }} |"
             echo "| Build & sign | ${{ steps.tauri_build.outcome }} |"
             echo "| Packaged QA matrix check | ${{ steps.qa_matrix_gate.outcome }} |"
+            echo "| Benchmark launch gates | ${{ steps.benchmark_gate.outcome }} |"
+            echo "| Benchmark gate artifact schema | ${{ steps.benchmark_gate_schema.outcome }} |"
             echo "| Packaged QA evidence bundle | ${{ steps.qa_evidence_bundle.outcome }} |"
             echo "| Packaged QA evidence schema | ${{ steps.qa_evidence_bundle_schema.outcome }} |"
           } > "$report"
@@ -531,6 +576,7 @@ jobs:
             artifacts/asr-local-smoke-gate-windows.log
             artifacts/asr-local-perf-gate-windows.log
             artifacts/release-gates-windows.md
+            artifacts/benchmark-gates-windows.json
             artifacts/packaged-qa-evidence-bundle-windows.json
             nautilus-bot/docs/packaged-app-qa-matrix.md
 

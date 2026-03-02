@@ -23,6 +23,7 @@ This checklist tracks remaining release blockers for strict all-provider GA on m
 - [ ] Local ASR performance gate runs with fail-fast provider policy (no hidden fallback passes).
 - [ ] Cold-start gate passes on M1-class baseline (`scripts/cold-start-gate.mjs`, threshold < 2500ms).
 - [ ] Bundle size gate passes (`node scripts/size-gate.mjs --app src-tauri/target/release/bundle/macos/Nautilus.app --max-mb 35`).
+- [ ] Benchmark launch gates pass via `scripts/verify-benchmark-gates.mjs` for both `benchmark-run-latest-macos.json` and `benchmark-run-latest-windows.json` against baseline.
 - [ ] Standard build-quality gates remain green (`tsc`, `npm test`, `vite build`, `fmt`, `clippy`, `check`, `test --lib`).
 
 ## D) Packaged QA (Required)
