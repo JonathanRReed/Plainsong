@@ -71,9 +71,24 @@ function validateNode(schemaNode, value, ptr, errors) {
     if (typeof schemaNode.minLength === "number" && value.length < schemaNode.minLength) {
       pushError(errors, ptr, `length must be >= ${schemaNode.minLength}`);
     }
+    if (typeof schemaNode.pattern === "string") {
+      try {
+        const regex = new RegExp(schemaNode.pattern);
+        if (!regex.test(value)) {
+          pushError(errors, ptr, `must match pattern ${schemaNode.pattern}`);
+        }
+      } catch {
+        pushError(errors, ptr, `invalid schema pattern ${schemaNode.pattern}`);
+      }
+    }
     if (typeof schemaNode.format === "string" && schemaNode.format === "date") {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
         pushError(errors, ptr, "must match date format YYYY-MM-DD");
+      }
+    }
+    if (typeof schemaNode.format === "string" && schemaNode.format === "date-time") {
+      if (Number.isNaN(Date.parse(value))) {
+        pushError(errors, ptr, "must match date-time format");
       }
     }
   }

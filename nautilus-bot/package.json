@@ -9,7 +9,9 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "node ./scripts/tauri-wrapper.mjs",
-    "gate:size": "node scripts/size-gate.mjs --app src-tauri/target/release/bundle/macos/Nautilus.app --max-mb 35"
+    "gate:size": "node scripts/size-gate.mjs --app src-tauri/target/release/bundle/macos/Nautilus.app --max-mb 35",
+    "gate:benchmark:macos": "node scripts/verify-benchmark-gates.mjs --schema docs/evals/benchmark-run.schema.json --baseline docs/evals/benchmark-run-baseline.json --candidate docs/evals/benchmark-run-latest-macos.json --out artifacts/benchmark-gates-macos.json",
+    "gate:benchmark:windows": "node scripts/verify-benchmark-gates.mjs --schema docs/evals/benchmark-run.schema.json --baseline docs/evals/benchmark-run-baseline.json --candidate docs/evals/benchmark-run-latest-windows.json --out artifacts/benchmark-gates-windows.json"
   },
   "keywords": ["speech-to-text", "transcription", "dictation", "meeting-recorder", "ai", "whisper"],
   "author": "NautilusBot",

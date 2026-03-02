@@ -40,11 +40,21 @@ Status values: `PASS` / `FAIL` / `BLOCKED` / `PENDING`
 Run these before manual packaged QA:
 
 ```bash
-bun test
+npm test
 cargo check
-bun run build
-bun run gate:size
+npm run build
+npm run gate:size
 node scripts/cold-start-gate.mjs --threshold-ms 2500 -- <packaged-launch-command>
+node scripts/verify-benchmark-gates.mjs \
+  --schema docs/evals/benchmark-run.schema.json \
+  --baseline docs/evals/benchmark-run-baseline.json \
+  --candidate docs/evals/benchmark-run-latest-macos.json \
+  --out artifacts/benchmark-gates-macos.json
+node scripts/verify-benchmark-gates.mjs \
+  --schema docs/evals/benchmark-run.schema.json \
+  --baseline docs/evals/benchmark-run-baseline.json \
+  --candidate docs/evals/benchmark-run-latest-windows.json \
+  --out artifacts/benchmark-gates-windows.json
 ```
 
 ## Manual Test Runbook
@@ -103,6 +113,7 @@ node scripts/cold-start-gate.mjs --threshold-ms 2500 -- <packaged-launch-command
    - Run benchmark corpus baseline and follow-up pass.
    - Confirm p50 `end_to_end_ms` improvement target and record in scorecard.
    - Validate run artifact against `docs/evals/benchmark-run.schema.json`.
+   - Enforce command/snippet/provider-integrity/latency launch checks via `scripts/verify-benchmark-gates.mjs`.
 
 ## Exit Criteria
 

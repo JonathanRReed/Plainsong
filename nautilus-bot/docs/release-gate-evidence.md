@@ -1,6 +1,6 @@
 # Release Gate Evidence
 
-This file records release-gate command outcomes after the all-provider GA hardening pass on **2026-02-21**.
+This file records launch-gate outcomes after the March hardening pass on **2026-03-02**.
 
 ## Frontend Gates
 
@@ -9,36 +9,28 @@ This file records release-gate command outcomes after the all-provider GA harden
 | `npx tsc --noEmit` | PASS |
 | `npm test` | PASS |
 | `npm run build` | PASS |
+| `npm audit --audit-level=moderate` | PASS |
 
 ## Rust Gates
 
 | Command | Outcome | Notes |
 | --- | --- | --- |
-| `cargo fmt --check` | PASS | Formatting gate is clean after trailing-whitespace cleanup |
-| `cargo clippy --all-targets -- -D warnings` | PASS | Includes newly added integration/perf test targets |
-| `cargo check --all-targets` | PASS | Compiles all library + test targets |
-| `cargo test --lib` | PASS | 81/81 passing |
-| `cargo test --tests` | FAIL (expected pre-release) | Blocked by required live cloud secrets (`OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `MISTRAL_API_KEY`) |
-| `cargo test --test asr_live_cloud_integration` | FAIL (expected pre-release) | Missing cloud secrets in local env |
-| `cargo test --test asr_local_performance_gate` | FAIL (expected pre-release) | Missing required local model assets (first failure observed: Parakeet) |
-| `node scripts/cold-start-gate.mjs --threshold-ms 2500 -- <cold-start-command>` | PENDING | Gate utility added; requires execution on M1-class macOS baseline |
+| `cargo test --lib` | PASS | 116/116 passing |
+| `cargo test --tests` | PASS | Includes local provider smoke + performance tests in this environment |
+| `cargo clippy --all-targets -- -D warnings` | PASS | No lint failures |
 
-## Cloud Live-Test Gate
+## Packaging + Perf Gates
 
 | Command | Outcome | Notes |
 | --- | --- | --- |
-| `node scripts/live-cloud-asr-smoke.mjs` | FAIL (expected pre-release) | Script now fails fast with explicit missing-secret list |
+| `node scripts/size-gate.mjs --app src-tauri/target/release/bundle/macos/Nautilus.app --max-mb 35` | PASS | 32.37 MB |
+| `node scripts/cold-start-gate.mjs --threshold-ms 2500 --ready-command "pgrep -f '/Nautilus.app/Contents/MacOS/nautilus-bot'" -- <launch-command>` | PASS | 168 ms on local baseline |
 
-## Workflow Enforcement Added
+## Remaining Launch Blockers
 
-- `.github/workflows/release.yml` now includes:
-  - Fail-fast validation of required cloud secrets in `prepare`.
-  - Mandatory live cloud smoke run (`scripts/live-cloud-asr-smoke.mjs`) with artifact upload.
-  - Rust live cloud integration test gate in macOS build.
-  - Rust local ASR performance gate (`RTF <= 1.2`) in macOS build.
-
-## Notes
-
-- Automated gate infrastructure is implemented and wired.
-- Release remains blocked until secrets are provisioned and local model assets are present on gate runners.
-- Manual packaged-app QA is still required before Go/No-Go.
+- Packaged QA matrix is still **49/49 PENDING** and requires owner/evidence completion.
+- CP-13 / CP-14 / CP-15 benchmark artifacts are now required in release workflow:
+  - `docs/evals/benchmark-run-baseline.json`
+  - `docs/evals/benchmark-run-latest-macos.json`
+  - `docs/evals/benchmark-run-latest-windows.json`
+- Signed update/install validation still depends on release secrets and signed artifacts.

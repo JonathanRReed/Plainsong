@@ -11,6 +11,8 @@ import type {
   BenchmarkResult,
   LlmAnalysisResult,
   ActionItem,
+  GroundedSummaryResult,
+  GroundedActionItemsResult,
   SearchHit,
   AsrBenchmarkEntry,
 } from "@/types";
@@ -404,11 +406,25 @@ export async function summarizeRecording(
   return await invoke("summarize_recording", { recordingId, model });
 }
 
+export async function summarizeRecordingGrounded(
+  recordingId: string,
+  model?: string
+): Promise<GroundedSummaryResult> {
+  return await invoke("summarize_recording_grounded", { recordingId, model });
+}
+
 export async function extractActionItems(
   recordingId: string,
   model?: string
 ): Promise<ActionItem[]> {
   return await invoke("extract_action_items", { recordingId, model });
+}
+
+export async function extractActionItemsGrounded(
+  recordingId: string,
+  model?: string
+): Promise<GroundedActionItemsResult> {
+  return await invoke("extract_action_items_grounded", { recordingId, model });
 }
 
 /** Ask a question across all meeting transcripts (AutoRAG Memory). Requires Pro or trial. */
