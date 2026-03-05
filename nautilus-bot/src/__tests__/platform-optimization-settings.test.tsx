@@ -5,6 +5,7 @@ import { AsrProviderManager } from "@/components/asr-provider-manager";
 const invokeMock = vi.fn();
 const getSettingsMock = vi.fn();
 const saveSettingsMock = vi.fn();
+const getPermissionDiagnosticsMock = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
@@ -19,6 +20,9 @@ vi.mock("@/lib/tauri", () => ({
   repairLocalModelCache: vi.fn(async () => ({ repairedCount: 0, removedPaths: [], notes: [] })),
   getSettings: (...args: unknown[]) => getSettingsMock(...args),
   saveSettings: (...args: unknown[]) => saveSettingsMock(...args),
+  getPermissionDiagnostics: (...args: unknown[]) => getPermissionDiagnosticsMock(...args),
+  openPermissionSettings: vi.fn(async () => {}),
+  requestDictationPermissions: vi.fn(async () => ({})),
 }));
 
 const providerFixture = [
@@ -48,6 +52,32 @@ const providerFixture = [
       notes: [],
     },
   },
+  {
+    providerType: "macos_apple_speech",
+    name: "Apple Native Speech",
+    description: "Use macOS native speech recognition.",
+    isAvailable: true,
+    inferenceEnabled: true,
+    modelInfo: {
+      name: "Apple Native",
+      version: "system",
+      sizeMb: 0,
+      parameters: "managed by macOS",
+      languages: ["en"],
+      license: "Apple",
+      sourceUrl: "https://developer.apple.com/documentation/speech",
+    },
+    selectedModelId: "macos_apple_speech",
+    modelOptions: [{ id: "macos_apple_speech", label: "Managed by macOS" }],
+    downloadStatus: "Downloaded",
+    runtimeStatus: "ready",
+    runtimeDetails: {},
+    engineDiagnostics: {
+      activeEngine: "provider_default",
+      availableEngines: ["provider_default", "macos_apple_speech"],
+      notes: [],
+    },
+  },
 ];
 
 describe("Platform optimization settings", () => {
@@ -61,6 +91,13 @@ describe("Platform optimization settings", () => {
     });
     getSettingsMock.mockResolvedValue({
       transcription: {
+        defaultProvider: "distil_whisper",
+        selectedModelId: "distil-large-v3.5",
+        useSharedAsrSelection: true,
+        dictationProvider: "distil_whisper",
+        dictationModelId: "distil-large-v3.5",
+        meetingProvider: "distil_whisper",
+        meetingModelId: "distil-large-v3.5",
         platformOptimization: {
           mode: "auto",
           fallbackPolicy: "local_only",
@@ -71,11 +108,19 @@ describe("Platform optimization settings", () => {
       },
     });
     saveSettingsMock.mockResolvedValue(undefined);
+    getPermissionDiagnosticsMock.mockResolvedValue({
+      microphoneReady: true,
+      speechRecognitionReady: false,
+      accessibilityReady: true,
+      automationReady: false,
+      notes: [],
+    });
   });
 
   it("persists fallback policy changes", async () => {
     render(<AsrProviderManager />);
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show advanced tools" }));
     const fallbackSelect = await screen.findByLabelText("Fallback policy");
     fireEvent.change(fallbackSelect, { target: { value: "fail_fast" } });
 
@@ -91,6 +136,7 @@ describe("Platform optimization settings", () => {
   it("persists ordered manual engine priority", async () => {
     render(<AsrProviderManager />);
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show advanced tools" }));
     const modeSelect = await screen.findByLabelText("Mode");
     fireEvent.change(modeSelect, { target: { value: "manual" } });
 
@@ -122,5 +168,37 @@ describe("Platform optimization settings", () => {
         "provider_default",
       ]);
     });
+  });
+
+  it("keeps Apple Native in the main route flow and out of advanced native toggles", async () => {
+    const appleSettings = {
+      transcription: {
+        defaultProvider: "macos_apple_speech",
+        selectedModelId: "macos_apple_speech",
+        useSharedAsrSelection: true,
+        dictationProvider: "macos_apple_speech",
+        dictationModelId: "macos_apple_speech",
+        meetingProvider: "macos_apple_speech",
+        meetingModelId: "macos_apple_speech",
+        platformOptimization: {
+          mode: "auto",
+          fallbackPolicy: "local_only",
+          macos: { appleNativeEnabled: true, mlxEnabled: true },
+          windows: { foundryEnabled: false, windowsSdkDictationEnabled: false },
+          manualEnginePriority: ["macos_apple_speech"],
+        },
+      },
+    };
+    getSettingsMock.mockResolvedValue(appleSettings);
+
+    render(<AsrProviderManager />);
+
+    expect(await screen.findByText("Apple Native setup")).toBeInTheDocument();
+    expect(screen.getByText("Managed by macOS")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show advanced tools" }));
+
+    expect(screen.queryByText("macOS Apple Speech engine")).not.toBeInTheDocument();
+    expect(screen.queryByText("Windows SDK dictation engine")).not.toBeInTheDocument();
   });
 });
