@@ -104,6 +104,7 @@ vi.mock("@/lib/tauri", () => ({
   })),
   getPermissionDiagnostics: vi.fn(async () => ({
     microphoneReady: true,
+    speechRecognitionReady: true,
     accessibilityReady: true,
     automationReady: true,
     notes: [],
@@ -138,6 +139,13 @@ vi.mock("@/lib/tauri", () => ({
   ]),
   migrateToEncryptedStorage: vi.fn(),
   openPermissionSettings: vi.fn(),
+  requestDictationPermissions: vi.fn(async () => ({
+    microphoneReady: true,
+    speechRecognitionReady: true,
+    accessibilityReady: true,
+    automationReady: true,
+    notes: [],
+  })),
   saveSettings: vi.fn(async () => { }),
   saveBackupConfig: vi.fn(),
   setProviderSecret: vi.fn(async () => { }),

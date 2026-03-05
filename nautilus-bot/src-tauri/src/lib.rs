@@ -227,6 +227,7 @@ impl Default for RecordingOverlayState {
 #[serde(rename_all = "camelCase")]
 struct PermissionDiagnostics {
     microphone_ready: bool,
+    speech_recognition_ready: bool,
     accessibility_ready: bool,
     automation_ready: bool,
     notes: Vec<String>,
@@ -752,49 +753,113 @@ async fn get_loopback_device_name(
 async fn get_permission_diagnostics(
     state: tauri::State<'_, AppState>,
 ) -> Result<PermissionDiagnostics, String> {
+    Ok(collect_permission_diagnostics(state.inner(), Vec::new()).await)
+}
+
+#[tauri::command]
+async fn request_dictation_permissions(
+    state: tauri::State<'_, AppState>,
+) -> Result<PermissionDiagnostics, String> {
+    let mut notes = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(error) = crate::asr::platform::macos_speech::ensure_speech_authorized(true) {
+            notes.push(format!(
+                "Speech recognition permission request result: {}",
+                error
+            ));
+        }
+    }
+
+    Ok(collect_permission_diagnostics(state.inner(), notes).await)
+}
+
+async fn collect_permission_diagnostics(
+    state: &AppState,
+    mut notes: Vec<String>,
+) -> PermissionDiagnostics {
     let microphone_ready = {
         let audio = state.audio_capture.lock().await;
         audio.has_microphone_input()
     };
 
     #[cfg(target_os = "macos")]
-    let (accessibility_ready, automation_ready, notes) = {
-        let mut notes = Vec::new();
+    let speech_recognition_ready = {
+        use crate::asr::platform::macos_speech::SpeechAuthorizationStatus;
+
+        match crate::asr::platform::macos_speech::speech_authorization_status() {
+            SpeechAuthorizationStatus::Authorized => true,
+            SpeechAuthorizationStatus::NotDetermined => {
+                notes.push(
+                    "Speech recognition permission not granted yet. Enable auto-request or grant in Privacy & Security > Speech Recognition.".to_string(),
+                );
+                false
+            }
+            SpeechAuthorizationStatus::Denied => {
+                notes.push(
+                    "Speech recognition permission denied. Enable Nautilus in Privacy & Security > Speech Recognition.".to_string(),
+                );
+                false
+            }
+            SpeechAuthorizationStatus::Restricted => {
+                notes.push(
+                    "Speech recognition permission is restricted by system policy.".to_string(),
+                );
+                false
+            }
+            SpeechAuthorizationStatus::Unavailable => false,
+            SpeechAuthorizationStatus::Unknown(code) => {
+                notes.push(format!(
+                    "Speech recognition authorization status is unknown (code: {}).",
+                    code
+                ));
+                false
+            }
+        }
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let speech_recognition_ready = false;
+
+    #[cfg(target_os = "macos")]
+    let (accessibility_ready, automation_ready) = {
         let probe = std::process::Command::new("osascript")
             .arg("-e")
             .arg("tell application \"System Events\" to get name of first process")
             .output();
         match probe {
-            Ok(output) if output.status.success() => (true, true, notes),
+            Ok(output) if output.status.success() => (true, true),
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 notes.push(format!(
                     "Accessibility probe failed. Grant Nautilus access in Privacy & Security > Accessibility. {}",
                     stderr
                 ));
-                (false, false, notes)
+                (false, false)
             }
             Err(error) => {
                 notes.push(format!("Failed to run macOS permission probe: {}", error));
-                (false, false, notes)
+                (false, false)
             }
         }
     };
 
     #[cfg(not(target_os = "macos"))]
-    let (accessibility_ready, automation_ready, notes) = {
-        let notes = vec![
+    let (accessibility_ready, automation_ready) = {
+        notes.push(
             "Accessibility and automation probes are implemented for macOS first.".to_string(),
-        ];
-        (false, false, notes)
+        );
+        (false, false)
     };
 
-    Ok(PermissionDiagnostics {
+    PermissionDiagnostics {
         microphone_ready,
+        speech_recognition_ready,
         accessibility_ready,
         automation_ready,
         notes,
-    })
+    }
 }
 
 #[tauri::command]
@@ -804,6 +869,12 @@ fn open_permission_settings(section: String) -> Result<(), String> {
         let target = match section.as_str() {
             "microphone" => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+            }
+            "speech" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
+            }
+            "accessibility" => {
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
             }
             "automation" => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
@@ -1143,6 +1214,8 @@ async fn start_recording(
             return Err("Cannot start recording while dictation is active".to_string());
         }
     }
+
+    ensure_default_asr_provider_ready(state.inner(), "meeting transcription").await?;
 
     let mut audio = state.audio_capture.lock().await;
     let recording_id = audio
@@ -3575,6 +3648,34 @@ async fn set_default_asr_provider(
         ));
     }
 
+    let diagnostics = state
+        .asr_manager
+        .get_runtime_diagnostics(providerType)
+        .await;
+    let provider_available = state
+        .asr_manager
+        .get_provider(providerType)
+        .await
+        .is_available();
+    if !matches!(
+        diagnostics.runtime_status,
+        asr::manager::RuntimeStatus::Ready
+    ) || !provider_available
+    {
+        let runtime_message = diagnostics
+            .runtime_message
+            .unwrap_or_else(|| "Runtime is not ready for this provider.".to_string());
+        let setup_action = diagnostics.runtime_details.setup_action.unwrap_or_else(|| {
+            "Open Settings -> ASR Models and complete the required runtime/model setup.".to_string()
+        });
+        return Err(format!(
+            "ASR provider '{}' is not ready to use. {} {}",
+            providerType.display_name(),
+            runtime_message,
+            setup_action
+        ));
+    }
+
     state.asr_manager.set_default_provider(providerType).await;
 
     let mut settings_manager = state.settings_manager.lock().await;
@@ -4424,12 +4525,90 @@ fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
     show_main_window(&app)
 }
 
+async fn ensure_default_asr_provider_ready(state: &AppState, context: &str) -> Result<(), String> {
+    let provider_type = state.asr_manager.get_default_provider().await;
+    let diagnostics = state
+        .asr_manager
+        .get_runtime_diagnostics(provider_type)
+        .await;
+    let provider_available = state
+        .asr_manager
+        .get_provider(provider_type)
+        .await
+        .is_available();
+
+    if matches!(
+        diagnostics.runtime_status,
+        asr::manager::RuntimeStatus::Ready
+    ) && provider_available
+    {
+        return Ok(());
+    }
+
+    let runtime_message = diagnostics
+        .runtime_message
+        .unwrap_or_else(|| "Runtime is not ready for the selected provider.".to_string());
+    let setup_action = diagnostics.runtime_details.setup_action.unwrap_or_else(|| {
+        "Open Settings -> ASR Models and complete the required runtime/model setup.".to_string()
+    });
+    Err(format!(
+        "Default ASR provider '{}' is not ready for {}. {} {}",
+        provider_type.display_name(),
+        context,
+        runtime_message,
+        setup_action
+    ))
+}
+
+fn uses_exclusive_native_dictation_route(
+    optimization: &settings::PlatformOptimizationSettings,
+) -> bool {
+    if optimization.mode == "manual" {
+        if let Some(first) = optimization.manual_engine_priority.first() {
+            return first == "macos_apple_speech" || first == "windows_sdk_dictation";
+        }
+    }
+
+    optimization.macos.apple_native_enabled || optimization.windows.windows_sdk_dictation_enabled
+}
+
 async fn start_dictation_session(
     state: &AppState,
     app: &AppHandle,
     source: &str,
     options: models::DictationStartOptions,
 ) -> Result<u64, String> {
+    let settings_snapshot = {
+        let settings_manager = state.settings_manager.lock().await;
+        settings_manager.settings().clone()
+    };
+
+    if !uses_exclusive_native_dictation_route(
+        &settings_snapshot.transcription.platform_optimization,
+    ) {
+        ensure_default_asr_provider_ready(state, "dictation").await?;
+    }
+
+    #[cfg(target_os = "macos")]
+    if settings_snapshot
+        .transcription
+        .platform_optimization
+        .macos
+        .apple_native_enabled
+    {
+        crate::asr::platform::macos_speech::ensure_speech_authorized(
+            settings_snapshot
+                .transcription
+                .dictation_auto_request_permissions,
+        )
+        .map_err(|error| {
+            format!(
+                "macOS Apple Speech is enabled but speech recognition permission is not ready. {}",
+                error
+            )
+        })?;
+    }
+
     {
         let recording_state = state
             .recording_overlay_state
@@ -4679,7 +4858,36 @@ async fn stop_dictation_session_for_session(
         match audio.stop_dictation() {
             Ok(bytes) => bytes,
             Err(error) => {
-                let message = error.to_string();
+                let mut message = error.to_string();
+                let normalized_message = message.to_ascii_lowercase();
+                let is_short_capture = normalized_message.contains("too short");
+                if normalized_message.contains("no audio was captured")
+                    || normalized_message.contains("no microphone samples")
+                {
+                    let push_to_talk = state
+                        .settings_manager
+                        .lock()
+                        .await
+                        .settings()
+                        .transcription
+                        .dictation_push_to_talk;
+                    let hint = if push_to_talk {
+                        "Hold the dictation hotkey while speaking, then release to transcribe, or switch Hotkey behavior to Toggle in Dictation Settings."
+                    } else {
+                        "Speak for at least a second before stopping dictation, then check microphone privacy permissions."
+                    };
+                    message = format!("{} {}", message, hint);
+                }
+                let outcome = if is_short_capture {
+                    "short_capture"
+                } else {
+                    "provider_error"
+                };
+                let idle_reset_delay = if is_short_capture {
+                    Duration::from_secs(1)
+                } else {
+                    Duration::from_secs(2)
+                };
                 {
                     let mut runtime_state = state.dictation_runtime_state.lock().await;
                     *runtime_state = DictationSessionState::Error;
@@ -4692,14 +4900,14 @@ async fn stop_dictation_session_for_session(
                     None,
                     Some(session_id),
                     Some(stop_reason),
-                    Some("provider_error"),
+                    Some(outcome),
                 );
                 schedule_dictation_idle_reset(
                     app.clone(),
                     session_id,
-                    Duration::from_secs(2),
+                    idle_reset_delay,
                     Some(stop_reason.to_string()),
-                    Some("provider_error".to_string()),
+                    Some(outcome.to_string()),
                 );
                 return Err(message);
             }
@@ -5403,9 +5611,14 @@ async fn handle_global_dictation_toggle(app: AppHandle, is_press: bool) {
             {
                 tracing::warn!("Failed to stop hotkey dictation: {}", error);
                 let normalized = error.to_lowercase();
-                if !normalized.contains("stale")
+                let runtime_state = *state.dictation_runtime_state.lock().await;
+                let should_force_abort = !normalized.contains("stale")
                     && !normalized.contains("no active dictation session")
-                {
+                    && matches!(
+                        runtime_state,
+                        DictationSessionState::Recording | DictationSessionState::Stopping
+                    );
+                if should_force_abort {
                     let _ = force_stop_dictation_session(state.inner(), &app, "forced").await;
                 }
             }
@@ -7403,47 +7616,13 @@ pub fn run() {
                 .is_available();
                 let configured_enabled = asr::AsrManager::is_provider_transcription_enabled(configured_type);
 
-                let mut resolved_provider = configured_type;
-                let mut resolved_model = configured_model;
+                let resolved_provider = configured_type;
+                let resolved_model = configured_model;
                 if !(configured_available && configured_enabled) {
-                    let priority = [
-                        asr::AsrProviderType::DistilWhisper,
-                        asr::AsrProviderType::Whisper,
-                        asr::AsrProviderType::Parakeet,
-                        asr::AsrProviderType::Canary,
-                        asr::AsrProviderType::Moonshine,
-                        asr::AsrProviderType::Voxtral,
-                    ];
-
-                    for candidate in priority {
-                        if !asr::AsrManager::is_provider_transcription_enabled(candidate) {
-                            continue;
-                        }
-                        let candidate_model = if candidate == asr::AsrProviderType::Voxtral {
-                            "voxtral-local".to_string()
-                        } else {
-                            provider_model_map
-                                .get(&candidate)
-                                .cloned()
-                                .unwrap_or_else(|| candidate.default_model_id().to_string())
-                        };
-
-                        let provider =
-                            asr::AsrProviderFactory::create_with_model(candidate, Some(candidate_model.as_str()));
-                        if provider.is_available() {
-                            resolved_provider = candidate;
-                            resolved_model = candidate_model;
-                            break;
-                        }
-                    }
-
-                    if resolved_provider != configured_type {
-                        warnings.push(format!(
-                            "Default ASR provider '{}' was unavailable. Switched to '{}'.",
-                            configured_type.display_name(),
-                            resolved_provider.display_name()
-                        ));
-                    }
+                    warnings.push(format!(
+                        "Default ASR provider '{}' is unavailable. Keeping your selected provider; transcription will fail until it is ready.",
+                        configured_type.display_name()
+                    ));
                 }
 
                 provider_model_map.insert(resolved_provider, resolved_model.clone());
@@ -7637,6 +7816,7 @@ pub fn run() {
             check_system_audio_availability,
             get_loopback_device_name,
             get_permission_diagnostics,
+            request_dictation_permissions,
             open_permission_settings,
             run_diarization,
             get_speakers,
@@ -10527,7 +10707,13 @@ fn read_clipboard_text() -> Result<String, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn send_native_paste_key() -> Result<(), String> {
+enum PasteDispatchStatus {
+    Confirmed,
+    UnverifiedFallback,
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_paste_key() -> Result<PasteDispatchStatus, String> {
     use std::process::Command;
 
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
@@ -10542,7 +10728,7 @@ fn send_native_paste_key() -> Result<(), String> {
         .map_err(|e| format!("Failed to invoke osascript for paste: {}", e))?;
     if apple_script.status.success() {
         tracing::info!("Cmd+V posted via System Events");
-        return Ok(());
+        return Ok(PasteDispatchStatus::Confirmed);
     }
 
     let script_error = String::from_utf8_lossy(&apple_script.stderr)
@@ -10569,7 +10755,7 @@ fn send_native_paste_key() -> Result<(), String> {
         "Cmd+V fallback posted via CoreGraphics after System Events failure: {}",
         script_error
     );
-    Ok(())
+    Ok(PasteDispatchStatus::UnverifiedFallback)
 }
 
 #[cfg(target_os = "macos")]
@@ -10673,16 +10859,33 @@ fn paste_text_systemwide(text: &str, keep_text_in_clipboard: bool) -> PasteOutco
                 .map_err(|retry_error| format!("{} (retry failed: {})", first_error, retry_error))
         });
 
-        if let Err(error) = paste_result {
-            tracing::error!("Paste key simulation failed: {}", error);
-            let remediation = format!(
-                "Copied to clipboard. macOS blocked keystroke paste ({}). Grant Accessibility in System Settings > Privacy & Security > Accessibility.",
-                error
+        let paste_dispatch = match paste_result {
+            Ok(status) => status,
+            Err(error) => {
+                tracing::error!("Paste key simulation failed: {}", error);
+                let remediation = format!(
+                    "Copied to clipboard. macOS blocked keystroke paste ({}). Grant Accessibility in System Settings > Privacy & Security > Accessibility.",
+                    error
+                );
+                return PasteOutcome {
+                    pasted: false,
+                    copied: true,
+                    error: Some(remediation),
+                };
+            }
+        };
+
+        if matches!(paste_dispatch, PasteDispatchStatus::UnverifiedFallback) {
+            tracing::warn!(
+                "Paste dispatched via unverified CoreGraphics fallback; preserving clipboard text"
             );
             return PasteOutcome {
                 pasted: false,
                 copied: true,
-                error: Some(remediation),
+                error: Some(
+                    "Copied to clipboard. Nautilus could not confirm cursor paste in this app; press Cmd+V to insert text."
+                        .to_string(),
+                ),
             };
         }
 

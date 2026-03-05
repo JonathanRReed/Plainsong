@@ -103,6 +103,14 @@ const baseSettings = {
 vi.mock("@/lib/tauri", () => ({
   getPermissionDiagnostics: vi.fn(async () => ({
     microphoneReady: true,
+    speechRecognitionReady: true,
+    accessibilityReady: true,
+    automationReady: true,
+    notes: [],
+  })),
+  requestDictationPermissions: vi.fn(async () => ({
+    microphoneReady: true,
+    speechRecognitionReady: true,
     accessibilityReady: true,
     automationReady: true,
     notes: [],

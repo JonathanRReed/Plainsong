@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
@@ -100,6 +100,91 @@ export function AsrProviderManager({
     ...settings,
     manualEnginePriority: normalizeManualEnginePriority(settings.manualEnginePriority ?? []),
   });
+
+  const withExclusiveNativeEngine = (
+    settings: PlatformOptimizationSettings,
+    engineId: "macos_apple_speech" | "windows_sdk_dictation"
+  ): PlatformOptimizationSettings => ({
+    ...settings,
+    mode: "manual",
+    fallbackPolicy: "fail_fast",
+    manualEnginePriority: [engineId],
+  });
+
+  const activeExclusiveNativeEngineId = platformSettings
+    ? platformSettings.macos.appleNativeEnabled
+      ? "macos_apple_speech"
+      : platformSettings.windows.windowsSdkDictationEnabled
+        ? "windows_sdk_dictation"
+        : null
+    : null;
+
+  const activeExclusiveNativeEngineLabel =
+    activeExclusiveNativeEngineId === "macos_apple_speech"
+      ? "macOS Apple Speech"
+      : activeExclusiveNativeEngineId === "windows_sdk_dictation"
+        ? "Windows SDK dictation"
+        : null;
+
+  const readyEngineIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const provider of providers) {
+      for (const engineId of provider.engineDiagnostics?.availableEngines ?? []) {
+        ids.add(engineId);
+      }
+    }
+    return ids;
+  }, [providers]);
+  const appleNativeEngineReady = readyEngineIds.has("macos_apple_speech");
+  const windowsSdkEngineReady = readyEngineIds.has("windows_sdk_dictation");
+
+  useEffect(() => {
+    if (!platformSettings || providers.length === 0) return;
+
+    let next = platformSettings;
+    let changed = false;
+
+    if (next.macos.appleNativeEnabled && !appleNativeEngineReady) {
+      const nextPriority = next.manualEnginePriority.filter((engine) => engine !== "macos_apple_speech");
+      next = {
+        ...next,
+        macos: {
+          ...next.macos,
+          appleNativeEnabled: false,
+        },
+        mode: nextPriority.length === 0 ? "auto" : next.mode,
+        fallbackPolicy: nextPriority.length === 0 ? "local_only" : next.fallbackPolicy,
+        manualEnginePriority: nextPriority,
+      };
+      changed = true;
+    }
+
+    if (next.windows.windowsSdkDictationEnabled && !windowsSdkEngineReady) {
+      const nextPriority = next.manualEnginePriority.filter(
+        (engine) => engine !== "windows_sdk_dictation"
+      );
+      next = {
+        ...next,
+        windows: {
+          ...next.windows,
+          windowsSdkDictationEnabled: false,
+        },
+        mode: nextPriority.length === 0 ? "auto" : next.mode,
+        fallbackPolicy: nextPriority.length === 0 ? "local_only" : next.fallbackPolicy,
+        manualEnginePriority: nextPriority,
+      };
+      changed = true;
+    }
+
+    if (changed) {
+      void persistPlatformSettings(next);
+    }
+  }, [
+    appleNativeEngineReady,
+    windowsSdkEngineReady,
+    platformSettings,
+    providers.length,
+  ]);
 
   useEffect(() => {
     loadProviders();
@@ -427,7 +512,8 @@ export function AsrProviderManager({
               <CardHeader className="pb-3">
                 <CardTitle className="text-base">Platform Optimization (Advanced)</CardTitle>
                 <CardDescription>
-                  Keeps your default provider unchanged while enabling optional macOS/Windows runtime optimizations.
+                  Optional macOS/Windows runtime optimizations. Apple/Windows native toggles enforce an
+                  exclusive engine route.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -480,15 +566,36 @@ export function AsrProviderManager({
                     <input
                       type="checkbox"
                       checked={platformSettings.macos.appleNativeEnabled}
-                      disabled={platformSaveBusy}
+                      disabled={
+                        platformSaveBusy || (!platformSettings.macos.appleNativeEnabled && !appleNativeEngineReady)
+                      }
                       onChange={(event) => {
-                        const next: PlatformOptimizationSettings = {
+                        let next: PlatformOptimizationSettings = {
                           ...platformSettings,
                           macos: {
                             ...platformSettings.macos,
                             appleNativeEnabled: event.target.checked,
                           },
                         };
+                        if (event.target.checked) {
+                          if (!appleNativeEngineReady) {
+                            setPlatformSaveError(
+                              "macOS Apple Speech native transcription is not available in this build yet."
+                            );
+                            return;
+                          }
+                          next = withExclusiveNativeEngine(next, "macos_apple_speech");
+                        } else {
+                          const nextPriority = next.manualEnginePriority.filter(
+                            (engine) => engine !== "macos_apple_speech"
+                          );
+                          next = {
+                            ...next,
+                            mode: nextPriority.length === 0 ? "auto" : next.mode,
+                            fallbackPolicy: nextPriority.length === 0 ? "local_only" : next.fallbackPolicy,
+                            manualEnginePriority: nextPriority,
+                          };
+                        }
                         void persistPlatformSettings(next);
                       }}
                     />
@@ -534,20 +641,52 @@ export function AsrProviderManager({
                     <input
                       type="checkbox"
                       checked={platformSettings.windows.windowsSdkDictationEnabled}
-                      disabled={platformSaveBusy}
+                      disabled={
+                        platformSaveBusy ||
+                        (!platformSettings.windows.windowsSdkDictationEnabled && !windowsSdkEngineReady)
+                      }
                       onChange={(event) => {
-                        const next: PlatformOptimizationSettings = {
+                        let next: PlatformOptimizationSettings = {
                           ...platformSettings,
                           windows: {
                             ...platformSettings.windows,
                             windowsSdkDictationEnabled: event.target.checked,
                           },
                         };
+                        if (event.target.checked) {
+                          if (!windowsSdkEngineReady) {
+                            setPlatformSaveError(
+                              "Windows SDK dictation native transcription is not available in this build yet."
+                            );
+                            return;
+                          }
+                          next = withExclusiveNativeEngine(next, "windows_sdk_dictation");
+                        } else {
+                          const nextPriority = next.manualEnginePriority.filter(
+                            (engine) => engine !== "windows_sdk_dictation"
+                          );
+                          next = {
+                            ...next,
+                            mode: nextPriority.length === 0 ? "auto" : next.mode,
+                            fallbackPolicy: nextPriority.length === 0 ? "local_only" : next.fallbackPolicy,
+                            manualEnginePriority: nextPriority,
+                          };
+                        }
                         void persistPlatformSettings(next);
                       }}
                     />
                   </label>
                 </div>
+                {platformSettings.macos.appleNativeEnabled && !appleNativeEngineReady ? (
+                  <p className="text-xs text-amber-300">
+                    macOS Apple Speech native path is unavailable in this build and has been disabled.
+                  </p>
+                ) : null}
+                {platformSettings.windows.windowsSdkDictationEnabled && !windowsSdkEngineReady ? (
+                  <p className="text-xs text-amber-300">
+                    Windows SDK dictation native path is unavailable in this build and has been disabled.
+                  </p>
+                ) : null}
 
                 {platformSettings.mode === "manual" ? (
                   <div className="space-y-2">
@@ -669,13 +808,19 @@ export function AsrProviderManager({
                       Add engine
                     </Button>
                     <p className="text-[11px] text-muted-foreground">
-                      Platform-native engines are opt-in and do not change your default provider.
+                      Apple/Windows native engine toggles enforce an exclusive manual engine route.
                     </p>
                   </div>
                 ) : null}
 
                 {platformSaveError ? (
                   <p className="text-xs text-destructive">{platformSaveError}</p>
+                ) : null}
+                {activeExclusiveNativeEngineLabel ? (
+                  <p className="text-xs text-amber-300">
+                    Exclusive route active: {activeExclusiveNativeEngineLabel}. Default provider selection is
+                    temporarily overridden.
+                  </p>
                 ) : null}
               </CardContent>
             </Card>
@@ -721,12 +866,15 @@ export function AsrProviderManager({
                 const providerError = providerErrors[provider.providerType];
                 const modelOptions = provider.modelOptions ?? [];
                 const selectedModelId = provider.selectedModelId || modelOptions[0]?.id || "";
+                const providerSelectionOverridden = Boolean(activeExclusiveNativeEngineId);
                 return (
                   <Card
                     key={provider.providerType}
                     className={cn(
                       "transition-all",
-                      defaultProvider === provider.providerType && "border-trusted ring-1 ring-trusted"
+                      !providerSelectionOverridden &&
+                        defaultProvider === provider.providerType &&
+                        "border-trusted ring-1 ring-trusted"
                     )}
                   >
                     <CardHeader className="pb-3">
@@ -738,11 +886,15 @@ export function AsrProviderManager({
                           <div>
                             <div className="flex items-center gap-2">
                               <CardTitle className="text-lg">{provider.name}</CardTitle>
-                              {defaultProvider === provider.providerType && (
+                              {providerSelectionOverridden ? (
+                                <Badge variant="secondary" className="text-xs">
+                                  Overridden
+                                </Badge>
+                              ) : defaultProvider === provider.providerType ? (
                                 <Badge variant="outline" className="text-xs">
                                   Default
                                 </Badge>
-                              )}
+                              ) : null}
                             </div>
                             <CardDescription className="line-clamp-2 mt-1">
                               {provider.description}
@@ -804,11 +956,16 @@ export function AsrProviderManager({
                       )}
 
                       <div className="space-y-2">
-                        <p className="text-xs text-muted-foreground">Model</p>
+                        <p className="text-xs text-muted-foreground">
+                          {providerSelectionOverridden
+                            ? "Model (inactive while native override is enabled)"
+                            : "Model"}
+                        </p>
                         {modelOptions.length > 1 ? (
                           <select
                             className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                             value={selectedModelId}
+                            disabled={providerSelectionOverridden}
                             onChange={(event) => {
                               void handleModelChange(provider.providerType, event.target.value);
                             }}
@@ -886,9 +1043,14 @@ export function AsrProviderManager({
                               <Button
                                 variant={defaultProvider === provider.providerType ? "default" : "outline"}
                                 size="sm"
+                                disabled={Boolean(activeExclusiveNativeEngineId)}
                                 onClick={() => handleSetDefault(provider.providerType)}
                               >
-                                {defaultProvider === provider.providerType ? "Default" : "Set Default"}
+                                {activeExclusiveNativeEngineId
+                                  ? "Overridden"
+                                  : defaultProvider === provider.providerType
+                                    ? "Default"
+                                    : "Set Default"}
                               </Button>
                               {selection.reason === "download_required" &&
                               isNotDownloaded(provider.downloadStatus) ? (

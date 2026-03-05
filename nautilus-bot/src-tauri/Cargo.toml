@@ -91,6 +91,8 @@ base64 = { version = "0.21", optional = true }
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.24"
+block2 = "0.6.2"
+objc2-speech = "0.3.2"
 
 [features]
 default = ["custom-protocol", "asr-all", "sqlcipher", "whisper-gpu"]
