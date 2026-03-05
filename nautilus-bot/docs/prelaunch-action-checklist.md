@@ -2,38 +2,40 @@
 
 This checklist tracks remaining release blockers for strict all-provider GA on macOS + Windows.
 
+Current blocker register: `docs/strict-release-blocker-register.md`.
+
 ## A) Required Secrets
 
 - [ ] Confirm updater/signing secrets are set: `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PUBLIC_KEY`.
-- [ ] Confirm macOS signing/notarization secrets are set (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`, `KEYCHAIN_PASSWORD`).
-- [ ] Confirm Windows signing secrets are set (`WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`).
-- [ ] Confirm cloud ASR live-test secrets are set (`OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `MISTRAL_API_KEY`).
+- [ ] Confirm macOS signing/notarization secrets are set (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`, `KEYCHAIN_PASSWORD`) — BLOCKED (Apple setup unavailable in this cycle).
+- [ ] Confirm Windows signing secrets are set (`WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`) — BLOCKED (Windows cert unavailable in this cycle).
+- [ ] Confirm cloud ASR live-test secrets are set (`OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `MISTRAL_API_KEY`) — BLOCKED (`scripts/live-cloud-asr-smoke.mjs` fails without these).
 - [ ] Optional but recommended for deterministic preflight provisioning: set `NAUTILUS_ASR_ASSET_BUNDLE_URL` to a tar/zip bundle that expands into `Nautilus/models/*`.
 
 ## B) Provider Runtime Prerequisites
 
-- [ ] Ensure local model assets are available for local-provider CI/perf gates (Whisper, Parakeet, Canary, Distil-Whisper, Moonshine, Voxtral-local).
-- [ ] Ensure Python runtime dependencies are available where local Python-bridge providers are exercised (`torch`, `transformers`, `librosa`, `soundfile`, `huggingface_hub`).
+- [x] Ensure local model assets are available for local-provider CI/perf gates (Whisper, Parakeet, Canary, Distil-Whisper, Moonshine, Voxtral-local). (`artifacts/asr-preflight-macos.json`)
+- [x] Ensure Python runtime dependencies are available where local Python-bridge providers are exercised (`torch`, `transformers`, `librosa`, `soundfile`, `huggingface_hub`). (`artifacts/asr-preflight-macos.json`)
 
 ## C) Automated Gates
 
-- [ ] Release workflow `prepare` job passes secret validation + cloud smoke gate.
-- [ ] Rust live cloud integration test gate passes (`asr_live_cloud_integration`).
-- [ ] Local ASR performance gate passes (`asr_local_performance_gate`, RTF <= 1.2).
-- [ ] Local ASR performance gate runs with fail-fast provider policy (no hidden fallback passes).
-- [ ] Cold-start gate passes on M1-class baseline (`scripts/cold-start-gate.mjs`, threshold < 2500ms).
-- [ ] Bundle size gate passes (`node scripts/size-gate.mjs --app src-tauri/target/release/bundle/macos/Nautilus.app --max-mb 35`).
-- [ ] Benchmark launch gates pass via `scripts/verify-benchmark-gates.mjs` for both `benchmark-run-latest-macos.json` and `benchmark-run-latest-windows.json` against baseline.
-- [ ] Standard build-quality gates remain green (`tsc`, `npm test`, `vite build`, `fmt`, `clippy`, `check`, `test --lib`).
+- [ ] Release workflow `prepare` job passes secret validation + cloud smoke gate. — BLOCKED (missing cloud secrets).
+- [x] Rust live cloud integration test gate passes (`asr_live_cloud_integration`).
+- [x] Local ASR performance gate passes (`asr_local_performance_gate`, RTF <= 1.2).
+- [x] Local ASR performance gate runs with fail-fast provider policy (no hidden fallback passes).
+- [x] Cold-start gate passes on M1-class baseline (`scripts/cold-start-gate.mjs`, threshold < 2500ms). (historical evidence in `docs/release-gate-evidence.md`)
+- [x] Bundle size gate passes (`node scripts/size-gate.mjs --app src-tauri/target/release/bundle/macos/Nautilus.app --max-mb 35`).
+- [ ] Benchmark launch gates pass via `scripts/verify-benchmark-gates.mjs` for both `benchmark-run-latest-macos.json` and `benchmark-run-latest-windows.json` against baseline. — BLOCKED (benchmark JSON files missing).
+- [x] Standard build-quality gates remain green (`tsc`, `npm test`, `vite build`, `fmt`, `clippy`, `check`, `test --lib`).
 
 ## D) Packaged QA (Required)
 
-- [ ] Execute full macOS packaged QA matrix and attach evidence.
-- [ ] Execute full Windows packaged QA matrix and attach evidence.
-- [ ] Validate updater check/install path on both platforms with signed artifacts.
-- [ ] Validate fresh install and upgrade paths on both platforms.
-- [ ] 3h mic+system meeting soak test passes (record → stop → transcript complete).
-- [ ] Idle CPU baseline in packaged app is < 1% while app window is open and not recording.
+- [ ] Execute full macOS packaged QA matrix and attach evidence. — BLOCKED (rows currently BLOCKED pending credentials/execution).
+- [ ] Execute full Windows packaged QA matrix and attach evidence. — BLOCKED (rows currently BLOCKED pending cert/execution).
+- [ ] Validate updater check/install path on both platforms with signed artifacts. — BLOCKED (signing prerequisites unavailable).
+- [ ] Validate fresh install and upgrade paths on both platforms. — BLOCKED (requires signed packaged artifacts for strict flow).
+- [ ] 3h mic+system meeting soak test passes (record → stop → transcript complete). — BLOCKED (not executed in this cycle).
+- [ ] Idle CPU baseline in packaged app is < 1% while app window is open and not recording. — BLOCKED (not executed in this cycle).
 
 ## E) Competitor Parity Gates (Required)
 
