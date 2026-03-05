@@ -1022,6 +1022,60 @@ fn runtime_diagnostics_for_provider(
                 last_error,
             )
         }
+        AsrProviderType::MacosAppleSpeech => {
+            let probe = PlatformEngine::MacosAppleSpeech.probe();
+            let authorization =
+                crate::asr::platform::macos_speech::speech_authorization_status();
+            let (runtime_status, runtime_message) = match authorization {
+                crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Authorized => (
+                    if provider_available && probe.ready {
+                        RuntimeStatus::Ready
+                    } else {
+                        RuntimeStatus::MissingRuntime
+                    },
+                    "Apple native speech runtime ready.".to_string(),
+                ),
+                crate::asr::platform::macos_speech::SpeechAuthorizationStatus::NotDetermined => (
+                    RuntimeStatus::Error,
+                    "Apple native speech permission has not been granted yet.".to_string(),
+                ),
+                crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Denied => (
+                    RuntimeStatus::Error,
+                    "Apple native speech permission is denied. Enable Nautilus in System Settings > Privacy & Security > Speech Recognition.".to_string(),
+                ),
+                crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Restricted => (
+                    RuntimeStatus::Error,
+                    "Apple native speech permission is restricted by system policy.".to_string(),
+                ),
+                crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Unavailable => (
+                    RuntimeStatus::MissingRuntime,
+                    "Apple native speech is unavailable in this build.".to_string(),
+                ),
+                crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Unknown(status) => (
+                    RuntimeStatus::Error,
+                    format!(
+                        "Apple native speech returned an unknown authorization status: {}.",
+                        status
+                    ),
+                ),
+            };
+
+            RuntimeDiagnosticsInternal {
+                runtime_status,
+                runtime_message: Some(runtime_message),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                    missing_files: Vec::new(),
+                    setup_action: Some(if probe.ready {
+                        "Grant Speech Recognition permission in macOS System Settings, or choose another ASR provider."
+                            .to_string()
+                    } else {
+                        probe.notes.join(" ")
+                    }),
+                },
+            }
+        }
         AsrProviderType::Moonshine => {
             let model_dir = models_root.join("moonshine");
             let model_ready = is_valid_onnx_artifact(&model_dir.join("encoder_model.onnx"))
@@ -1134,6 +1188,32 @@ fn runtime_diagnostics_for_provider(
                     python_path: detected_python,
                     missing_files: Vec::new(),
                     setup_action: None,
+                },
+            }
+        }
+        AsrProviderType::WindowsSdkDictation => {
+            let probe = PlatformEngine::WindowsSdkDictation.probe();
+            RuntimeDiagnosticsInternal {
+                runtime_status: if provider_available && probe.ready {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingRuntime
+                },
+                runtime_message: Some(if provider_available && probe.ready {
+                    "Windows native speech runtime ready.".to_string()
+                } else if !probe.notes.is_empty() {
+                    probe.notes.join(" ")
+                } else {
+                    "Windows native speech is unavailable in this build.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                    missing_files: Vec::new(),
+                    setup_action: Some(
+                        "Use a supported Windows x86_64 build with native speech components installed, or choose another ASR provider."
+                            .to_string(),
+                    ),
                 },
             }
         }

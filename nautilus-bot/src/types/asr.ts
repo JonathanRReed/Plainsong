@@ -79,8 +79,10 @@ export type AsrProviderType =
   | "parakeet"
   | "canary"
   | "distil_whisper"
+  | "macos_apple_speech"
   | "moonshine"
   | "voxtral"
+  | "windows_sdk_dictation"
   | "elevenlabs_scribe"
   | "openai_cloud"
   | "groq";

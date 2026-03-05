@@ -1215,7 +1215,14 @@ async fn start_recording(
         }
     }
 
-    ensure_default_asr_provider_ready(state.inner(), "meeting transcription").await?;
+    let meeting_selection = {
+        let settings = state.settings_manager.lock().await.settings().clone();
+        resolve_transcription_provider_and_model(
+            &settings.transcription,
+            TranscriptionScope::Meeting,
+        )
+    };
+    ensure_asr_provider_ready(state.inner(), meeting_selection.0, "meeting transcription").await?;
 
     let mut audio = state.audio_capture.lock().await;
     let recording_id = audio
@@ -1270,13 +1277,18 @@ async fn start_recording(
         state.recording_stream_stop.store(true, Ordering::SeqCst);
         let stop_flag = Arc::clone(&state.recording_stream_stop);
         let streaming_transcriber = Arc::clone(&state.streaming_transcriber);
-        let asr_manager = Arc::clone(&state.asr_manager);
+        let meeting_selection = {
+            let settings = state.settings_manager.lock().await.settings().clone();
+            resolve_transcription_provider_and_model(
+                &settings.transcription,
+                TranscriptionScope::Meeting,
+            )
+        };
         let app_handle = app.clone();
         let rec_id = recording_id.clone();
 
         tauri::async_runtime::spawn(async move {
-            let provider = asr_manager.get_default_provider().await;
-            let model_id = asr_manager.selected_model_id().await;
+            let (provider, model_id) = meeting_selection;
             let session_result = streaming_transcriber
                 .start_session(provider, sample_rate, model_id)
                 .await;
@@ -1524,20 +1536,29 @@ async fn stop_recording(
 
         let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         tracing::info!("Audio file size: {} bytes", file_size);
+        let meeting_selection = {
+            let settings = settings_manager_clone.lock().await.settings().clone();
+            resolve_transcription_provider_and_model(
+                &settings.transcription,
+                TranscriptionScope::Meeting,
+            )
+        };
+        let (meeting_provider, meeting_model_id) = meeting_selection;
 
         let preview_task = {
             let app = app_handle.clone();
             let recording_id = recording_id_clone.clone();
             let path = path.clone();
             let streaming_transcriber = Arc::clone(&streaming_transcriber);
-            let asr_manager = Arc::clone(&asr_manager);
+            let selected_model_id = meeting_model_id.clone();
             tokio::spawn(async move {
                 if let Err(error) = emit_streaming_transcription_previews(
                     &app,
                     streaming_transcriber,
-                    asr_manager,
                     &recording_id,
                     &path,
+                    meeting_provider,
+                    selected_model_id,
                 )
                 .await
                 {
@@ -1555,6 +1576,8 @@ async fn stop_recording(
             Arc::clone(&asr_manager),
             &recording_id_clone,
             &path,
+            meeting_provider,
+            meeting_model_id.clone(),
         )
         .await
         {
@@ -3693,7 +3716,17 @@ async fn set_default_asr_provider(
         .settings_mut()
         .transcription
         .provider_model_ids
-        .insert(provider_key, selected_model);
+        .insert(provider_key.clone(), selected_model.clone());
+    if settings_manager
+        .settings()
+        .transcription
+        .use_shared_asr_selection
+    {
+        settings_manager.settings_mut().transcription.dictation_provider = provider_key.clone();
+        settings_manager.settings_mut().transcription.dictation_model_id = selected_model.clone();
+        settings_manager.settings_mut().transcription.meeting_provider = provider_key;
+        settings_manager.settings_mut().transcription.meeting_model_id = selected_model.clone();
+    }
     settings_manager.save().map_err(|e| e.to_string())?;
 
     Ok(())
@@ -3727,7 +3760,7 @@ async fn set_asr_provider_model(
         .settings_mut()
         .transcription
         .provider_model_ids
-        .insert(provider_key, normalized_model_id.clone());
+        .insert(provider_key.clone(), normalized_model_id.clone());
 
     if let Some(default_provider) = asr_provider_from_settings_value(
         &settings_manager.settings().transcription.default_provider,
@@ -3736,7 +3769,22 @@ async fn set_asr_provider_model(
             settings_manager
                 .settings_mut()
                 .transcription
-                .selected_model_id = normalized_model_id;
+                .selected_model_id = normalized_model_id.clone();
+        }
+    }
+
+    if settings_manager
+        .settings()
+        .transcription
+        .use_shared_asr_selection
+    {
+        if settings_manager.settings().transcription.dictation_provider == provider_key {
+            settings_manager.settings_mut().transcription.dictation_model_id =
+                normalized_model_id.clone();
+        }
+        if settings_manager.settings().transcription.meeting_provider == provider_key {
+            settings_manager.settings_mut().transcription.meeting_model_id =
+                normalized_model_id.clone();
         }
     }
 
@@ -3863,6 +3911,7 @@ async fn get_audit_log(
 async fn get_settings(state: tauri::State<'_, AppState>) -> Result<settings::Settings, String> {
     let settings_manager = state.settings_manager.lock().await;
     let mut settings = settings_manager.settings().clone();
+    normalize_contextual_asr_settings(&mut settings.transcription);
     settings.transcription.dictation_profile = dictation_profile_to_settings_value(
         &dictation_profile_from_settings_value(&settings.transcription.dictation_profile),
     )
@@ -4042,6 +4091,7 @@ async fn save_settings(
             normalize_silence_timeout_seconds(settings.audio.silence_timeout_seconds);
         settings.ui.color_scheme = normalize_color_scheme_value(&settings.ui.color_scheme);
         normalize_platform_optimization(&mut settings.transcription.platform_optimization);
+        normalize_contextual_asr_settings(&mut settings.transcription);
 
         let default_provider =
             asr_provider_from_settings_value(&settings.transcription.default_provider)
@@ -4525,8 +4575,11 @@ fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
     show_main_window(&app)
 }
 
-async fn ensure_default_asr_provider_ready(state: &AppState, context: &str) -> Result<(), String> {
-    let provider_type = state.asr_manager.get_default_provider().await;
+async fn ensure_asr_provider_ready(
+    state: &AppState,
+    provider_type: asr::AsrProviderType,
+    context: &str,
+) -> Result<(), String> {
     let diagnostics = state
         .asr_manager
         .get_runtime_diagnostics(provider_type)
@@ -4552,24 +4605,12 @@ async fn ensure_default_asr_provider_ready(state: &AppState, context: &str) -> R
         "Open Settings -> ASR Models and complete the required runtime/model setup.".to_string()
     });
     Err(format!(
-        "Default ASR provider '{}' is not ready for {}. {} {}",
+        "ASR provider '{}' is not ready for {}. {} {}",
         provider_type.display_name(),
         context,
         runtime_message,
         setup_action
     ))
-}
-
-fn uses_exclusive_native_dictation_route(
-    optimization: &settings::PlatformOptimizationSettings,
-) -> bool {
-    if optimization.mode == "manual" {
-        if let Some(first) = optimization.manual_engine_priority.first() {
-            return first == "macos_apple_speech" || first == "windows_sdk_dictation";
-        }
-    }
-
-    optimization.macos.apple_native_enabled || optimization.windows.windows_sdk_dictation_enabled
 }
 
 async fn start_dictation_session(
@@ -4583,11 +4624,11 @@ async fn start_dictation_session(
         settings_manager.settings().clone()
     };
 
-    if !uses_exclusive_native_dictation_route(
-        &settings_snapshot.transcription.platform_optimization,
-    ) {
-        ensure_default_asr_provider_ready(state, "dictation").await?;
-    }
+    let dictation_selection = resolve_transcription_provider_and_model(
+        &settings_snapshot.transcription,
+        TranscriptionScope::Dictation,
+    );
+    ensure_asr_provider_ready(state, dictation_selection.0, "dictation").await?;
 
     #[cfg(target_os = "macos")]
     if settings_snapshot
@@ -4930,13 +4971,25 @@ async fn stop_dictation_session_for_session(
     );
 
     let dictation_options = state.dictation_start_options.lock().await.clone();
-    let dictation_model_id = state.asr_manager.selected_model_id().await;
+    let settings_snapshot = state.settings_manager.lock().await.settings().clone();
+    let (dictation_provider, dictation_model_id) = resolve_transcription_provider_and_model(
+        &settings_snapshot.transcription,
+        TranscriptionScope::Dictation,
+    );
 
     let raw_has_audio = wav_has_non_silent_audio(&audio_data, 0.01);
     let raw_duration_seconds = compute_wav_duration_seconds_from_bytes(&audio_data) as f64;
 
     let transcription_start = std::time::Instant::now();
-    let mut result = match state.asr_manager.transcribe_bytes(&audio_data).await {
+    let mut result = match state
+        .asr_manager
+        .transcribe_bytes_with_provider(
+            dictation_provider,
+            &audio_data,
+            Some(dictation_model_id.as_str()),
+        )
+        .await
+    {
         Ok(result) => result,
         Err(error) => {
             let message = error.to_string();
@@ -4980,7 +5033,15 @@ async fn stop_dictation_session_for_session(
                 tracing::info!(
                     "Retrying dictation transcription on silence-trimmed audio due to low-information primary transcript"
                 );
-                match state.asr_manager.transcribe_bytes(&trimmed_audio).await {
+                match state
+                    .asr_manager
+                    .transcribe_bytes_with_provider(
+                        dictation_provider,
+                        &trimmed_audio,
+                        Some(dictation_model_id.as_str()),
+                    )
+                    .await
+                {
                     Ok(retry_result) => {
                         if should_replace_with_retry_transcript(&result.text, &retry_result.text) {
                             result = retry_result;
@@ -5100,7 +5161,6 @@ async fn stop_dictation_session_for_session(
         return Err(message);
     }
 
-    let settings_snapshot = state.settings_manager.lock().await.settings().clone();
     let command_mode_enabled = settings_snapshot
         .transcription
         .dictation_command_mode_enabled;
@@ -9177,6 +9237,8 @@ async fn transcribe_recording_in_chunks(
     asr_manager: Arc<asr::AsrManager>,
     recording_id: &str,
     audio_path: &Path,
+    provider: asr::AsrProviderType,
+    model_id: String,
 ) -> Result<asr::TranscriptionResult, String> {
     let mut reader = hound::WavReader::open(audio_path).map_err(|error| {
         format!(
@@ -9190,8 +9252,6 @@ async fn transcribe_recording_in_chunks(
         return Err("Chunked transcription requires a valid WAV sample rate/channels".to_string());
     }
 
-    let provider = asr_manager.get_default_provider().await;
-    let model_id = asr_manager.provider_model_id(provider).await;
     let chunk_size_frames = (spec.sample_rate as usize * 90).max(spec.sample_rate as usize);
     let total_duration_seconds =
         compute_wav_duration_seconds(audio_path.to_string_lossy().as_ref()).max(0) as f64;
@@ -9492,9 +9552,10 @@ async fn transcribe_recording_in_chunks(
 async fn emit_streaming_transcription_previews(
     app: &AppHandle,
     streaming_transcriber: Arc<streaming::StreamingTranscriber>,
-    asr_manager: Arc<asr::AsrManager>,
     recording_id: &str,
     audio_path: &Path,
+    provider: asr::AsrProviderType,
+    selected_model_id: String,
 ) -> Result<(), String> {
     let mut reader = hound::WavReader::open(audio_path).map_err(|e| {
         format!(
@@ -9511,8 +9572,6 @@ async fn emit_streaming_transcription_previews(
         return Err("Streaming preview requires at least one channel".to_string());
     }
 
-    let provider = asr_manager.get_default_provider().await;
-    let selected_model_id = asr_manager.selected_model_id().await;
     let (session_id, mut result_rx) = streaming_transcriber
         .start_session(provider, spec.sample_rate, selected_model_id)
         .await
@@ -9847,8 +9906,10 @@ fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static st
         asr::AsrProviderType::Parakeet => "parakeet",
         asr::AsrProviderType::Canary => "canary",
         asr::AsrProviderType::DistilWhisper => "distil_whisper",
+        asr::AsrProviderType::MacosAppleSpeech => "macos_apple_speech",
         asr::AsrProviderType::Moonshine => "moonshine",
         asr::AsrProviderType::Voxtral => "voxtral",
+        asr::AsrProviderType::WindowsSdkDictation => "windows_sdk_dictation",
         asr::AsrProviderType::ElevenLabsScribe => "elevenlabs_scribe",
         asr::AsrProviderType::OpenAiCloud => "openai_cloud",
         asr::AsrProviderType::Groq => "groq",
@@ -9861,13 +9922,89 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
         "parakeet" => Some(asr::AsrProviderType::Parakeet),
         "canary" => Some(asr::AsrProviderType::Canary),
         "distil_whisper" => Some(asr::AsrProviderType::DistilWhisper),
+        "macos_apple_speech" => Some(asr::AsrProviderType::MacosAppleSpeech),
         "moonshine" => Some(asr::AsrProviderType::Moonshine),
         "voxtral" => Some(asr::AsrProviderType::Voxtral),
+        "windows_sdk_dictation" => Some(asr::AsrProviderType::WindowsSdkDictation),
         "elevenlabs_scribe" => Some(asr::AsrProviderType::ElevenLabsScribe),
         "openai_cloud" => Some(asr::AsrProviderType::OpenAiCloud),
         "groq" => Some(asr::AsrProviderType::Groq),
         _ => None,
     }
+}
+
+#[derive(Clone, Copy)]
+enum TranscriptionScope {
+    Dictation,
+    Meeting,
+}
+
+fn normalize_contextual_asr_settings(transcription: &mut settings::TranscriptionSettings) {
+    let default_provider = asr_provider_from_settings_value(&transcription.default_provider)
+        .unwrap_or(asr::AsrProviderType::DistilWhisper);
+    transcription.default_provider = asr_provider_to_settings_value(default_provider).to_string();
+    transcription.selected_model_id =
+        normalize_asr_model_id(default_provider, &transcription.selected_model_id);
+
+    let dictation_provider = asr_provider_from_settings_value(&transcription.dictation_provider)
+        .unwrap_or(default_provider);
+    transcription.dictation_provider =
+        asr_provider_to_settings_value(dictation_provider).to_string();
+    transcription.dictation_model_id = normalize_asr_model_id(
+        dictation_provider,
+        if transcription.dictation_model_id.trim().is_empty() {
+            &transcription.selected_model_id
+        } else {
+            &transcription.dictation_model_id
+        },
+    );
+
+    let meeting_provider = asr_provider_from_settings_value(&transcription.meeting_provider)
+        .unwrap_or(default_provider);
+    transcription.meeting_provider = asr_provider_to_settings_value(meeting_provider).to_string();
+    transcription.meeting_model_id = normalize_asr_model_id(
+        meeting_provider,
+        if transcription.meeting_model_id.trim().is_empty() {
+            &transcription.selected_model_id
+        } else {
+            &transcription.meeting_model_id
+        },
+    );
+
+    if transcription.use_shared_asr_selection {
+        transcription.dictation_provider = transcription.default_provider.clone();
+        transcription.dictation_model_id = transcription.selected_model_id.clone();
+        transcription.meeting_provider = transcription.default_provider.clone();
+        transcription.meeting_model_id = transcription.selected_model_id.clone();
+    }
+}
+
+fn resolve_transcription_provider_and_model(
+    transcription: &settings::TranscriptionSettings,
+    scope: TranscriptionScope,
+) -> (asr::AsrProviderType, String) {
+    let (provider_value, model_value) = if transcription.use_shared_asr_selection {
+        (
+            transcription.default_provider.as_str(),
+            transcription.selected_model_id.as_str(),
+        )
+    } else {
+        match scope {
+            TranscriptionScope::Dictation => (
+                transcription.dictation_provider.as_str(),
+                transcription.dictation_model_id.as_str(),
+            ),
+            TranscriptionScope::Meeting => (
+                transcription.meeting_provider.as_str(),
+                transcription.meeting_model_id.as_str(),
+            ),
+        }
+    };
+
+    let provider =
+        asr_provider_from_settings_value(provider_value).unwrap_or(asr::AsrProviderType::DistilWhisper);
+    let model_id = normalize_asr_model_id(provider, model_value);
+    (provider, model_id)
 }
 
 fn build_provider_fallback_message(
@@ -9924,6 +10061,8 @@ fn normalize_asr_model_id(provider_type: asr::AsrProviderType, model_id: &str) -
             "voxtral-local" | "voxtral-cloud" => candidate.to_string(),
             _ => "voxtral-local".to_string(),
         },
+        asr::AsrProviderType::MacosAppleSpeech => "macos_apple_speech".to_string(),
+        asr::AsrProviderType::WindowsSdkDictation => "windows_sdk_dictation".to_string(),
         _ => candidate.to_string(),
     }
 }
@@ -9986,6 +10125,20 @@ fn provider_model_map_from_settings(
     {
         let normalized = normalize_asr_model_id(default_provider, &transcription.selected_model_id);
         map.insert(default_provider, normalized);
+    }
+
+    if let Some(dictation_provider) =
+        asr_provider_from_settings_value(&transcription.dictation_provider)
+    {
+        let normalized =
+            normalize_asr_model_id(dictation_provider, &transcription.dictation_model_id);
+        map.insert(dictation_provider, normalized);
+    }
+
+    if let Some(meeting_provider) = asr_provider_from_settings_value(&transcription.meeting_provider)
+    {
+        let normalized = normalize_asr_model_id(meeting_provider, &transcription.meeting_model_id);
+        map.insert(meeting_provider, normalized);
     }
 
     map
