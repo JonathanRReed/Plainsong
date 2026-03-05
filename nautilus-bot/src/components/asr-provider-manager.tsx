@@ -46,6 +46,12 @@ export function AsrProviderManager({
 }: AsrProviderManagerProps) {
   const [providers, setProviders] = useState<AsrProviderInfo[]>([]);
   const [defaultProvider, setDefaultProvider] = useState<AsrProviderType>("whisper");
+  const [defaultModelId, setDefaultModelId] = useState("distil-large-v3.5");
+  const [useSharedAsrSelection, setUseSharedAsrSelection] = useState(true);
+  const [dictationProvider, setDictationProvider] = useState<AsrProviderType>("distil_whisper");
+  const [dictationModelId, setDictationModelId] = useState("distil-large-v3.5");
+  const [meetingProvider, setMeetingProvider] = useState<AsrProviderType>("distil_whisper");
+  const [meetingModelId, setMeetingModelId] = useState("distil-large-v3.5");
   const [isLoading, setIsLoading] = useState(false);
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResult[]>([]);
   const [benchmarkHistory, setBenchmarkHistory] = useState<AsrBenchmarkEntry[]>([]);
@@ -188,7 +194,7 @@ export function AsrProviderManager({
 
   useEffect(() => {
     loadProviders();
-    loadDefaultProvider();
+    loadSelectionSettings();
     loadBenchmarkHistory();
     loadPlatformSettings();
 
@@ -252,14 +258,84 @@ export function AsrProviderManager({
     }
   };
 
-  const loadDefaultProvider = async () => {
+  const loadSelectionSettings = async () => {
     try {
-      const provider = await invoke<AsrProviderType>("get_default_asr_provider");
-      setDefaultProvider(provider);
+      const settings = await getSettings();
+      setDefaultProvider((settings.transcription.defaultProvider as AsrProviderType) ?? "distil_whisper");
+      setDefaultModelId(settings.transcription.selectedModelId ?? "distil-large-v3.5");
+      setUseSharedAsrSelection(settings.transcription.useSharedAsrSelection ?? true);
+      setDictationProvider(
+        (settings.transcription.dictationProvider as AsrProviderType) ??
+          (settings.transcription.defaultProvider as AsrProviderType) ??
+          "distil_whisper"
+      );
+      setDictationModelId(
+        settings.transcription.dictationModelId ??
+          settings.transcription.selectedModelId ??
+          "distil-large-v3.5"
+      );
+      setMeetingProvider(
+        (settings.transcription.meetingProvider as AsrProviderType) ??
+          (settings.transcription.defaultProvider as AsrProviderType) ??
+          "distil_whisper"
+      );
+      setMeetingModelId(
+        settings.transcription.meetingModelId ??
+          settings.transcription.selectedModelId ??
+          "distil-large-v3.5"
+      );
     } catch (error) {
-      console.error("Failed to load default provider:", error);
+      console.error("Failed to load ASR selection settings:", error);
     }
   };
+
+  const persistSelectionSettings = async (updates: {
+    useSharedAsrSelection?: boolean;
+    defaultProvider?: AsrProviderType;
+    selectedModelId?: string;
+    dictationProvider?: AsrProviderType;
+    dictationModelId?: string;
+    meetingProvider?: AsrProviderType;
+    meetingModelId?: string;
+  }) => {
+    const settings = await getSettings();
+    const nextUseShared = updates.useSharedAsrSelection ?? useSharedAsrSelection;
+    const nextDefaultProvider = updates.defaultProvider ?? defaultProvider;
+    const nextSelectedModelId = updates.selectedModelId ?? defaultModelId;
+    const nextDictationProvider = updates.dictationProvider ?? dictationProvider;
+    const nextDictationModelId = updates.dictationModelId ?? dictationModelId;
+    const nextMeetingProvider = updates.meetingProvider ?? meetingProvider;
+    const nextMeetingModelId = updates.meetingModelId ?? meetingModelId;
+
+    await saveSettings({
+      ...settings,
+      transcription: {
+        ...settings.transcription,
+        useSharedAsrSelection: nextUseShared,
+        defaultProvider: nextDefaultProvider,
+        selectedModelId: nextSelectedModelId,
+        dictationProvider: nextUseShared ? nextDefaultProvider : nextDictationProvider,
+        dictationModelId: nextUseShared ? nextSelectedModelId : nextDictationModelId,
+        meetingProvider: nextUseShared ? nextDefaultProvider : nextMeetingProvider,
+        meetingModelId: nextUseShared ? nextSelectedModelId : nextMeetingModelId,
+      },
+    });
+
+    setUseSharedAsrSelection(nextUseShared);
+    setDefaultProvider(nextDefaultProvider);
+    setDefaultModelId(nextSelectedModelId);
+    setDictationProvider(nextUseShared ? nextDefaultProvider : nextDictationProvider);
+    setDictationModelId(nextUseShared ? nextSelectedModelId : nextDictationModelId);
+    setMeetingProvider(nextUseShared ? nextDefaultProvider : nextMeetingProvider);
+    setMeetingModelId(nextUseShared ? nextSelectedModelId : nextMeetingModelId);
+    await loadProviders();
+  };
+
+  const providerByType = (providerType: AsrProviderType) =>
+    providers.find((provider) => provider.providerType === providerType);
+
+  const modelOptionsForProvider = (providerType: AsrProviderType) =>
+    providerByType(providerType)?.modelOptions ?? [];
 
   const handleSetDefault = async (providerType: AsrProviderType) => {
     const selected = providers.find((provider) => provider.providerType === providerType);
@@ -271,6 +347,7 @@ export function AsrProviderManager({
     try {
       await invoke("set_default_asr_provider", { providerType });
       setDefaultProvider(providerType);
+      setDefaultModelId(selected?.selectedModelId ?? providerType);
       setProviderErrors((previous) => {
         const next = { ...previous };
         delete next[providerType];
@@ -329,6 +406,15 @@ export function AsrProviderManager({
             : provider
         )
       );
+      if (defaultProvider === providerType) {
+        setDefaultModelId(modelId);
+      }
+      if (dictationProvider === providerType) {
+        setDictationModelId(modelId);
+      }
+      if (meetingProvider === providerType) {
+        setMeetingModelId(modelId);
+      }
       await loadProviders();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -381,9 +467,13 @@ export function AsrProviderManager({
         return <Globe className="h-5 w-5" />;
       case "distil_whisper":
         return <Zap className="h-5 w-5" />;
+      case "macos_apple_speech":
+        return <Mic className="h-5 w-5" />;
       case "moonshine":
         return <Moon className="h-5 w-5" />;
       case "voxtral":
+        return <Mic className="h-5 w-5" />;
+      case "windows_sdk_dictation":
         return <Mic className="h-5 w-5" />;
       case "openai_cloud":
       case "elevenlabs_scribe":
@@ -456,10 +546,14 @@ export function AsrProviderManager({
         return "Use the Download button to fetch the Whisper Large V3 Turbo model (no Python needed)";
       case "distil_whisper":
         return "Use the Download button to fetch the Distil-Whisper Large v3.5 model (no Python needed)";
+      case "macos_apple_speech":
+        return "Grant Nautilus Speech Recognition access in macOS System Settings > Privacy & Security > Speech Recognition";
       case "moonshine":
         return "Use the Download button to fetch the Moonshine ONNX model (no Python needed)";
       case "voxtral":
         return "Choose Voxtral local/cloud mode. Local mode requires Python (torch, transformers, librosa, soundfile) plus downloaded model assets. Cloud mode requires MISTRAL_API_KEY.";
+      case "windows_sdk_dictation":
+        return "Use a Windows x86_64 build with Windows speech recognition components available, or pick another ASR provider";
       case "elevenlabs_scribe":
         return "Add an ElevenLabs API key in Settings → API Keys";
       case "openai_cloud":
@@ -498,6 +592,25 @@ export function AsrProviderManager({
     }
   };
 
+  const renderRouteStatus = (label: string, providerType: AsrProviderType) => {
+    const provider = providerByType(providerType);
+    if (!provider) return null;
+    const selection = getProviderSelectionStatus(provider);
+    if (selection.reason === null) {
+      return (
+        <p className="text-xs text-muted-foreground">
+          {label}: {provider.name} is ready.
+        </p>
+      );
+    }
+    return (
+      <p className="text-xs text-amber-300">
+        {label}: {provider.runtimeMessage ?? `${provider.name} is not ready yet.`}{" "}
+        {provider.runtimeDetails.setupAction ?? "Choose another provider if you need to keep working."}
+      </p>
+    );
+  };
+
   return (
     <div className={cn("space-y-6", className)}>
       <Tabs defaultValue="providers" className="space-y-4">
@@ -507,6 +620,150 @@ export function AsrProviderManager({
         </TabsList>
 
         <TabsContent value="providers" className="space-y-4">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Transcription Route</CardTitle>
+              <CardDescription>
+                Choose one ASR for everything, or split dictation and meeting transcription.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+                <span>Use the same ASR for dictation and meetings</span>
+                <input
+                  type="checkbox"
+                  checked={useSharedAsrSelection}
+                  onChange={(event) => {
+                    void persistSelectionSettings({
+                      useSharedAsrSelection: event.target.checked,
+                    }).catch((error) => {
+                      console.error("Failed to update shared ASR selection:", error);
+                    });
+                  }}
+                />
+              </label>
+
+              <div className={cn("grid gap-4", useSharedAsrSelection ? "md:grid-cols-2" : "md:grid-cols-4")}>
+                <label className="space-y-1 text-sm">
+                  <span className="text-muted-foreground">
+                    {useSharedAsrSelection ? "Shared provider" : "Dictation provider"}
+                  </span>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={useSharedAsrSelection ? defaultProvider : dictationProvider}
+                    onChange={(event) => {
+                      const providerType = event.target.value as AsrProviderType;
+                      const nextModelId =
+                        modelOptionsForProvider(providerType)[0]?.id ?? providerType;
+                      const update = useSharedAsrSelection
+                        ? {
+                            defaultProvider: providerType,
+                            selectedModelId: nextModelId,
+                          }
+                        : {
+                            dictationProvider: providerType,
+                            dictationModelId: nextModelId,
+                          };
+                      void persistSelectionSettings(update).catch((error) => {
+                        console.error("Failed to update ASR provider selection:", error);
+                      });
+                    }}
+                  >
+                    {providers.map((provider) => (
+                      <option key={`shared-${provider.providerType}`} value={provider.providerType}>
+                        {provider.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="space-y-1 text-sm">
+                  <span className="text-muted-foreground">
+                    {useSharedAsrSelection ? "Shared model" : "Dictation model"}
+                  </span>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={useSharedAsrSelection ? defaultModelId : dictationModelId}
+                    onChange={(event) => {
+                      const modelId = event.target.value;
+                      const update = useSharedAsrSelection
+                        ? {
+                            selectedModelId: modelId,
+                          }
+                        : {
+                            dictationModelId: modelId,
+                          };
+                      void persistSelectionSettings(update).catch((error) => {
+                        console.error("Failed to update ASR model selection:", error);
+                      });
+                    }}
+                  >
+                    {(modelOptionsForProvider(
+                      useSharedAsrSelection ? defaultProvider : dictationProvider
+                    )).map((option) => (
+                      <option key={`model-${option.id}`} value={option.id}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {!useSharedAsrSelection ? (
+                  <label className="space-y-1 text-sm">
+                    <span className="text-muted-foreground">Meeting provider</span>
+                    <select
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                      value={meetingProvider}
+                      onChange={(event) => {
+                        const providerType = event.target.value as AsrProviderType;
+                        const nextModelId =
+                          modelOptionsForProvider(providerType)[0]?.id ?? providerType;
+                        void persistSelectionSettings({
+                          meetingProvider: providerType,
+                          meetingModelId: nextModelId,
+                        }).catch((error) => {
+                          console.error("Failed to update meeting ASR provider:", error);
+                        });
+                      }}
+                    >
+                      {providers.map((provider) => (
+                        <option key={`meeting-${provider.providerType}`} value={provider.providerType}>
+                          {provider.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                {!useSharedAsrSelection ? (
+                  <label className="space-y-1 text-sm">
+                    <span className="text-muted-foreground">Meeting model</span>
+                    <select
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                      value={meetingModelId}
+                      onChange={(event) => {
+                        void persistSelectionSettings({
+                          meetingModelId: event.target.value,
+                        }).catch((error) => {
+                          console.error("Failed to update meeting ASR model:", error);
+                        });
+                      }}
+                    >
+                      {modelOptionsForProvider(meetingProvider).map((option) => (
+                        <option key={`meeting-model-${option.id}`} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+              </div>
+
+              <div className="space-y-1">
+                {useSharedAsrSelection
+                  ? renderRouteStatus("Shared route", defaultProvider)
+                  : renderRouteStatus("Dictation route", dictationProvider)}
+                {!useSharedAsrSelection ? renderRouteStatus("Meeting route", meetingProvider) : null}
+              </div>
+            </CardContent>
+          </Card>
           {platformSettings ? (
             <Card>
               <CardHeader className="pb-3">

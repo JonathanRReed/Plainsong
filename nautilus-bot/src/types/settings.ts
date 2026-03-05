@@ -25,6 +25,11 @@ export interface AudioSettings {
 export interface TranscriptionSettings {
   defaultProvider: string;
   selectedModelId: string;
+  useSharedAsrSelection?: boolean;
+  dictationProvider?: string;
+  dictationModelId?: string;
+  meetingProvider?: string;
+  meetingModelId?: string;
   providerModelIds?: Record<string, string>;
   autoTranscribe: boolean;
   enableDiarization: boolean;

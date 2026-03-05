@@ -100,6 +100,16 @@ pub struct TranscriptionSettings {
     pub default_provider: String,
     /// Selected model identifier for local model backends
     pub selected_model_id: String,
+    /// Whether dictation and meeting transcription should share the same ASR selection.
+    pub use_shared_asr_selection: bool,
+    /// Dedicated ASR provider for dictation when shared selection is disabled.
+    pub dictation_provider: String,
+    /// Dedicated model identifier for dictation when shared selection is disabled.
+    pub dictation_model_id: String,
+    /// Dedicated ASR provider for meetings when shared selection is disabled.
+    pub meeting_provider: String,
+    /// Dedicated model identifier for meetings when shared selection is disabled.
+    pub meeting_model_id: String,
     /// Provider-specific model identifiers (keyed by provider value, e.g. "whisper")
     pub provider_model_ids: HashMap<String, String>,
     /// Auto-transcribe after recording
@@ -182,6 +192,11 @@ impl Default for TranscriptionSettings {
             // Distil-Whisper is 6x faster than Whisper for English with minimal accuracy loss
             default_provider: "distil_whisper".to_string(),
             selected_model_id: "distil-large-v3.5".to_string(),
+            use_shared_asr_selection: true,
+            dictation_provider: "distil_whisper".to_string(),
+            dictation_model_id: "distil-large-v3.5".to_string(),
+            meeting_provider: "distil_whisper".to_string(),
+            meeting_model_id: "distil-large-v3.5".to_string(),
             provider_model_ids: HashMap::new(),
             auto_transcribe: true,
             enable_diarization: true,
@@ -638,6 +653,9 @@ mod tests {
     #[test]
     fn dictation_command_defaults_are_stable() {
         let settings = Settings::default();
+        assert!(settings.transcription.use_shared_asr_selection);
+        assert_eq!(settings.transcription.dictation_provider, "distil_whisper");
+        assert_eq!(settings.transcription.meeting_provider, "distil_whisper");
         assert!(settings.transcription.dictation_command_mode_enabled);
         assert_eq!(settings.transcription.dictation_command_prefix, "command");
         assert_eq!(settings.transcription.dictation_insertion_mode, "auto");

@@ -101,8 +101,7 @@ describe("Platform optimization settings", () => {
       expect(saveSettingsMock).toHaveBeenCalled();
     });
 
-    const manualSelects = screen.getAllByRole("combobox");
-    const firstPrioritySelect = manualSelects[2];
+    const firstPrioritySelect = screen.getByDisplayValue("Provider default");
     fireEvent.change(firstPrioritySelect, { target: { value: "windows_foundry_local" } });
 
     await waitFor(() => {
