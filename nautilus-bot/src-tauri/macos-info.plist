@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Nautilus sends paste and undo commands to the active app so dictation can insert text at the cursor.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Nautilus requires microphone access for dictation and meeting capture.</string>
   <key>NSSpeechRecognitionUsageDescription</key>

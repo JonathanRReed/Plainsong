@@ -286,14 +286,14 @@ impl AsrProviderFactory {
             AsrProviderType::DistilWhisper => Box::new(distil_whisper::DistilWhisperProvider::new(
                 selected_model_id,
             )),
-            AsrProviderType::MacosAppleSpeech => Box::new(
-                macos_apple_speech_provider::MacosAppleSpeechProvider::new(),
-            ),
+            AsrProviderType::MacosAppleSpeech => {
+                Box::new(macos_apple_speech_provider::MacosAppleSpeechProvider::new())
+            }
             AsrProviderType::Moonshine => Box::new(moonshine::MoonshineProvider::new()),
             AsrProviderType::Voxtral => Box::new(voxtral::VoxtralProvider::new(selected_model_id)),
-            AsrProviderType::WindowsSdkDictation => Box::new(
-                windows_sdk_dictation_provider::WindowsSdkDictationProvider::new(),
-            ),
+            AsrProviderType::WindowsSdkDictation => {
+                Box::new(windows_sdk_dictation_provider::WindowsSdkDictationProvider::new())
+            }
             AsrProviderType::ElevenLabsScribe => Box::new(
                 elevenlabs_scribe::ElevenLabsScribeProvider::new(selected_model_id),
             ),

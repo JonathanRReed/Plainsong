@@ -7,8 +7,13 @@ import {
   repairLocalModelCache,
   getSettings,
   saveSettings,
+  getPermissionDiagnostics,
+  openPermissionSettings,
+  requestDictationPermissions,
+  type PermissionDiagnostics,
 } from "@/lib/tauri";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -64,14 +69,16 @@ export function AsrProviderManager({
   const [platformSettings, setPlatformSettings] = useState<PlatformOptimizationSettings | null>(null);
   const [platformSaveBusy, setPlatformSaveBusy] = useState(false);
   const [platformSaveError, setPlatformSaveError] = useState<string | null>(null);
+  const [showAdvancedTools, setShowAdvancedTools] = useState(false);
+  const [permissionActionBusy, setPermissionActionBusy] = useState(false);
+  const [permissionDiagnostics, setPermissionDiagnostics] = useState<PermissionDiagnostics | null>(null);
   const benchmarkFileInputRef = useRef<HTMLInputElement | null>(null);
+  const autoPromptedNativePermissionRef = useRef<string | null>(null);
 
   const manualEngineOptions = [
     { value: "provider_default", label: "Provider default" },
     { value: "macos_mlx_sidecar", label: "macOS MLX sidecar" },
-    { value: "macos_apple_speech", label: "macOS Apple Speech" },
     { value: "windows_foundry_local", label: "Windows Foundry Local" },
-    { value: "windows_sdk_dictation", label: "Windows SDK dictation" },
   ] as const;
 
   const defaultPlatformSettings = (): PlatformOptimizationSettings => ({
@@ -107,30 +114,32 @@ export function AsrProviderManager({
     manualEnginePriority: normalizeManualEnginePriority(settings.manualEnginePriority ?? []),
   });
 
-  const withExclusiveNativeEngine = (
-    settings: PlatformOptimizationSettings,
-    engineId: "macos_apple_speech" | "windows_sdk_dictation"
-  ): PlatformOptimizationSettings => ({
-    ...settings,
-    mode: "manual",
-    fallbackPolicy: "fail_fast",
-    manualEnginePriority: [engineId],
-  });
+  const withoutNativeRouteOverrides = (
+    settings: PlatformOptimizationSettings
+  ): PlatformOptimizationSettings => {
+    const nextPriority = settings.manualEnginePriority.filter(
+      (engine) => engine !== "macos_apple_speech" && engine !== "windows_sdk_dictation"
+    );
 
-  const activeExclusiveNativeEngineId = platformSettings
-    ? platformSettings.macos.appleNativeEnabled
-      ? "macos_apple_speech"
-      : platformSettings.windows.windowsSdkDictationEnabled
-        ? "windows_sdk_dictation"
-        : null
-    : null;
-
-  const activeExclusiveNativeEngineLabel =
-    activeExclusiveNativeEngineId === "macos_apple_speech"
-      ? "macOS Apple Speech"
-      : activeExclusiveNativeEngineId === "windows_sdk_dictation"
-        ? "Windows SDK dictation"
-        : null;
+    return {
+      ...settings,
+      mode:
+        settings.mode === "manual" && nextPriority.length === 0
+          ? "auto"
+          : settings.mode,
+      fallbackPolicy:
+        nextPriority.length === 0 ? "local_only" : settings.fallbackPolicy,
+      macos: {
+        ...settings.macos,
+        appleNativeEnabled: false,
+      },
+      windows: {
+        ...settings.windows,
+        windowsSdkDictationEnabled: false,
+      },
+      manualEnginePriority: nextPriority,
+    };
+  };
 
   const readyEngineIds = useMemo(() => {
     const ids = new Set<string>();
@@ -197,29 +206,54 @@ export function AsrProviderManager({
     loadSelectionSettings();
     loadBenchmarkHistory();
     loadPlatformSettings();
+    void refreshPermissionDiagnostics();
 
     // Listen for download progress events
-    import("@tauri-apps/api/event").then(({ listen }) => {
-      const unlisten = listen<[AsrProviderType, number]>("asr-download-progress", (event) => {
-        const [providerType, progress] = event.payload;
-        setDownloadProgress((prev) => ({ ...prev, [providerType]: progress }));
-      });
-      return unlisten;
+    void listen<[AsrProviderType, number]>("asr-download-progress", (event) => {
+      const [providerType, progress] = event.payload;
+      setDownloadProgress((prev) => ({ ...prev, [providerType]: progress }));
     }).then(() => {
       // Cleanup if component unmounts - simpler to just let it leak in this top-level component 
       // or store unlisten function in a ref if strictly needed. 
       // For now, this is acceptable for a main view component.
+    }).catch((error) => {
+      console.warn("Failed to subscribe to ASR download progress:", error);
     });
   }, []);
+
+  const refreshPermissionDiagnostics = async () => {
+    try {
+      const diagnostics = await getPermissionDiagnostics();
+      setPermissionDiagnostics(diagnostics);
+      return diagnostics;
+    } catch (error) {
+      console.error("Failed to load permission diagnostics:", error);
+      return null;
+    }
+  };
 
   const loadPlatformSettings = async () => {
     try {
       const settings = await getSettings();
-      setPlatformSettings(
-        withNormalizedManualPriority(
+      const normalized = withNormalizedManualPriority(
+        withoutNativeRouteOverrides(
           settings.transcription.platformOptimization ?? defaultPlatformSettings()
         )
       );
+      setPlatformSettings(normalized);
+
+      if (
+        JSON.stringify(normalized) !==
+        JSON.stringify(settings.transcription.platformOptimization ?? defaultPlatformSettings())
+      ) {
+        await saveSettings({
+          ...settings,
+          transcription: {
+            ...settings.transcription,
+            platformOptimization: normalized,
+          },
+        });
+      }
     } catch (error) {
       console.error("Failed to load platform optimization settings:", error);
       setPlatformSettings(defaultPlatformSettings());
@@ -336,6 +370,16 @@ export function AsrProviderManager({
 
   const modelOptionsForProvider = (providerType: AsrProviderType) =>
     providerByType(providerType)?.modelOptions ?? [];
+
+  const providerUsesManagedModel = (providerType: AsrProviderType) =>
+    providerType === "macos_apple_speech" || providerType === "windows_sdk_dictation";
+
+  const managedModelLabel = (providerType: AsrProviderType) =>
+    providerType === "macos_apple_speech"
+      ? "Managed by macOS"
+      : providerType === "windows_sdk_dictation"
+        ? "Managed by Windows"
+        : "Managed by system";
 
   const handleSetDefault = async (providerType: AsrProviderType) => {
     const selected = providers.find((provider) => provider.providerType === providerType);
@@ -603,11 +647,269 @@ export function AsrProviderManager({
         </p>
       );
     }
+    const canRequestSpeechPermission = providerType === "macos_apple_speech";
     return (
-      <p className="text-xs text-amber-300">
-        {label}: {provider.runtimeMessage ?? `${provider.name} is not ready yet.`}{" "}
-        {provider.runtimeDetails.setupAction ?? "Choose another provider if you need to keep working."}
-      </p>
+      <div className="space-y-2">
+        <p className="text-xs text-amber-300">
+          {label}: {provider.runtimeMessage ?? `${provider.name} is not ready yet.`}{" "}
+          {provider.runtimeDetails.setupAction ?? "Choose another provider if you need to keep working."}
+        </p>
+        {canRequestSpeechPermission ? (
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={permissionActionBusy}
+              onClick={async () => {
+                setPermissionActionBusy(true);
+                try {
+                  await requestDictationPermissions();
+                  await refreshPermissionDiagnostics();
+                  await loadProviders();
+                  await loadSelectionSettings();
+                } catch (error) {
+                  console.error("Failed to request dictation permissions:", error);
+                } finally {
+                  setPermissionActionBusy(false);
+                }
+              }}
+            >
+              Request permission
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={permissionActionBusy}
+              onClick={async () => {
+                try {
+                  await openPermissionSettings("speech");
+                } catch (error) {
+                  console.error("Failed to open speech permission settings:", error);
+                }
+              }}
+            >
+              Open Speech Settings
+            </Button>
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
+  const selectedRouteUsesAppleNative = useSharedAsrSelection
+    ? defaultProvider === "macos_apple_speech"
+    : dictationProvider === "macos_apple_speech" || meetingProvider === "macos_apple_speech";
+
+  const appleNativeUsedForDictation = useSharedAsrSelection
+    ? defaultProvider === "macos_apple_speech"
+    : dictationProvider === "macos_apple_speech";
+
+  useEffect(() => {
+    if (!selectedRouteUsesAppleNative || permissionActionBusy) {
+      return;
+    }
+
+    if (permissionDiagnostics?.speechRecognitionReady) {
+      autoPromptedNativePermissionRef.current = null;
+      return;
+    }
+
+    const promptKey = useSharedAsrSelection ? "shared" : `${dictationProvider}:${meetingProvider}`;
+    if (autoPromptedNativePermissionRef.current === promptKey) {
+      return;
+    }
+
+    autoPromptedNativePermissionRef.current = promptKey;
+    setPermissionActionBusy(true);
+    void (async () => {
+      try {
+        await requestDictationPermissions();
+        await Promise.all([
+          refreshPermissionDiagnostics(),
+          loadProviders(),
+          loadSelectionSettings(),
+        ]);
+      } catch (error) {
+        console.error("Failed to auto-request Apple native permissions:", error);
+      } finally {
+        setPermissionActionBusy(false);
+      }
+    })();
+  }, [
+    defaultProvider,
+    dictationProvider,
+    meetingProvider,
+    permissionActionBusy,
+    permissionDiagnostics?.speechRecognitionReady,
+    selectedRouteUsesAppleNative,
+    useSharedAsrSelection,
+  ]);
+
+  const renderModelControl = (
+    label: string,
+    providerType: AsrProviderType,
+    value: string,
+    onChange: (modelId: string) => void
+  ) => {
+    if (providerUsesManagedModel(providerType)) {
+      return (
+        <label className="space-y-1 text-sm">
+          <span className="text-muted-foreground">{label}</span>
+          <div className="w-full rounded-md border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+            {managedModelLabel(providerType)}
+          </div>
+        </label>
+      );
+    }
+
+    return (
+      <label className="space-y-1 text-sm">
+        <span className="text-muted-foreground">{label}</span>
+        <select
+          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          {modelOptionsForProvider(providerType).map((option) => (
+            <option key={`${label}-${option.id}`} value={option.id}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  };
+
+  const appleNativePermissionRows = [
+    {
+      key: "speech",
+      label: "Speech Recognition",
+      ready: permissionDiagnostics?.speechRecognitionReady ?? false,
+      action: "Open Speech Settings",
+      onClick: () => void openPermissionSettings("speech"),
+      detail: "Required for Apple Native transcription.",
+    },
+    {
+      key: "accessibility",
+      label: "Accessibility",
+      ready: permissionDiagnostics?.accessibilityReady ?? false,
+      action: "Open Accessibility",
+      onClick: () => void openPermissionSettings("accessibility"),
+      detail: appleNativeUsedForDictation
+        ? "Required to insert dictation at the cursor."
+        : "Needed when you later use Apple Native for dictation insertion.",
+    },
+    {
+      key: "automation",
+      label: "Automation",
+      ready: permissionDiagnostics?.automationReady ?? false,
+      action: "Open Automation",
+      onClick: () => void openPermissionSettings("automation"),
+      detail: appleNativeUsedForDictation
+        ? "Required so Nautilus can send paste to the frontmost app."
+        : "Needed when you later use Apple Native for dictation insertion.",
+    },
+  ];
+
+  const appleNativeReadyForDictation =
+    !!permissionDiagnostics?.speechRecognitionReady &&
+    !!permissionDiagnostics?.accessibilityReady &&
+    !!permissionDiagnostics?.automationReady;
+
+  const appleNativeReadyForMeetings = !!permissionDiagnostics?.speechRecognitionReady;
+
+  const renderAppleNativeSetupCard = () => {
+    if (!selectedRouteUsesAppleNative) {
+      return null;
+    }
+
+    const routeSummary = useSharedAsrSelection
+      ? "Apple Native is selected for both dictation and meetings."
+      : appleNativeUsedForDictation && meetingProvider === "macos_apple_speech"
+        ? "Apple Native is selected for dictation and meetings."
+        : appleNativeUsedForDictation
+          ? "Apple Native is selected for dictation."
+          : "Apple Native is selected for meetings.";
+
+    const overallReady = appleNativeUsedForDictation
+      ? appleNativeReadyForDictation
+      : appleNativeReadyForMeetings;
+
+    return (
+      <div className="rounded-lg border border-border bg-muted/10 p-4 space-y-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Badge variant={overallReady ? "default" : "secondary"} className={overallReady ? "bg-green-600" : ""}>
+              {overallReady ? "Ready" : "Setup required"}
+            </Badge>
+            <span className="text-sm font-medium">Apple Native setup</span>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {routeSummary} Nautilus will request speech access automatically, but macOS cursor insertion also needs Accessibility and Automation.
+          </p>
+        </div>
+
+        <div className="grid gap-3 md:grid-cols-3">
+          {appleNativePermissionRows.map((row) => (
+            <div key={row.key} className="rounded-md border bg-background/60 p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-medium">{row.label}</p>
+                <Badge variant={row.ready ? "default" : "secondary"} className={row.ready ? "bg-green-600" : ""}>
+                  {row.ready ? "Ready" : "Needs grant"}
+                </Badge>
+              </div>
+              <p className="text-xs text-muted-foreground">{row.detail}</p>
+              {!row.ready ? (
+                <Button size="sm" variant="outline" onClick={row.onClick}>
+                  {row.action}
+                </Button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={permissionActionBusy}
+            onClick={async () => {
+              setPermissionActionBusy(true);
+              try {
+                await requestDictationPermissions();
+                await Promise.all([
+                  refreshPermissionDiagnostics(),
+                  loadProviders(),
+                  loadSelectionSettings(),
+                ]);
+              } catch (error) {
+                console.error("Failed to request Apple native permissions:", error);
+              } finally {
+                setPermissionActionBusy(false);
+              }
+            }}
+          >
+            {permissionActionBusy ? "Requesting..." : "Request Apple permissions"}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void refreshPermissionDiagnostics()}
+          >
+            Re-check readiness
+          </Button>
+        </div>
+
+        {permissionDiagnostics?.notes?.length ? (
+          <div className="space-y-1">
+            {permissionDiagnostics.notes.map((note) => (
+              <p key={note} className="text-xs text-amber-300">
+                {note}
+              </p>
+            ))}
+          </div>
+        ) : null}
+      </div>
     );
   };
 
@@ -664,9 +966,18 @@ export function AsrProviderManager({
                             dictationProvider: providerType,
                             dictationModelId: nextModelId,
                           };
-                      void persistSelectionSettings(update).catch((error) => {
-                        console.error("Failed to update ASR provider selection:", error);
-                      });
+                      void (async () => {
+                        try {
+                          await persistSelectionSettings(update);
+                          if (providerType === "macos_apple_speech") {
+                            await requestDictationPermissions();
+                            await loadProviders();
+                            await loadSelectionSettings();
+                          }
+                        } catch (error) {
+                          console.error("Failed to update ASR provider selection:", error);
+                        }
+                      })();
                     }}
                   >
                     {providers.map((provider) => (
@@ -676,36 +987,23 @@ export function AsrProviderManager({
                     ))}
                   </select>
                 </label>
-                <label className="space-y-1 text-sm">
-                  <span className="text-muted-foreground">
-                    {useSharedAsrSelection ? "Shared model" : "Dictation model"}
-                  </span>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={useSharedAsrSelection ? defaultModelId : dictationModelId}
-                    onChange={(event) => {
-                      const modelId = event.target.value;
-                      const update = useSharedAsrSelection
-                        ? {
-                            selectedModelId: modelId,
-                          }
-                        : {
-                            dictationModelId: modelId,
-                          };
-                      void persistSelectionSettings(update).catch((error) => {
-                        console.error("Failed to update ASR model selection:", error);
-                      });
-                    }}
-                  >
-                    {(modelOptionsForProvider(
-                      useSharedAsrSelection ? defaultProvider : dictationProvider
-                    )).map((option) => (
-                      <option key={`model-${option.id}`} value={option.id}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                {renderModelControl(
+                  useSharedAsrSelection ? "Shared model" : "Dictation model",
+                  useSharedAsrSelection ? defaultProvider : dictationProvider,
+                  useSharedAsrSelection ? defaultModelId : dictationModelId,
+                  (modelId) => {
+                    const update = useSharedAsrSelection
+                      ? {
+                          selectedModelId: modelId,
+                        }
+                      : {
+                          dictationModelId: modelId,
+                        };
+                    void persistSelectionSettings(update).catch((error) => {
+                      console.error("Failed to update ASR model selection:", error);
+                    });
+                  }
+                )}
                 {!useSharedAsrSelection ? (
                   <label className="space-y-1 text-sm">
                     <span className="text-muted-foreground">Meeting provider</span>
@@ -716,12 +1014,21 @@ export function AsrProviderManager({
                         const providerType = event.target.value as AsrProviderType;
                         const nextModelId =
                           modelOptionsForProvider(providerType)[0]?.id ?? providerType;
-                        void persistSelectionSettings({
-                          meetingProvider: providerType,
-                          meetingModelId: nextModelId,
-                        }).catch((error) => {
-                          console.error("Failed to update meeting ASR provider:", error);
-                        });
+                        void (async () => {
+                          try {
+                            await persistSelectionSettings({
+                              meetingProvider: providerType,
+                              meetingModelId: nextModelId,
+                            });
+                            if (providerType === "macos_apple_speech") {
+                              await requestDictationPermissions();
+                              await loadProviders();
+                              await loadSelectionSettings();
+                            }
+                          } catch (error) {
+                            console.error("Failed to update meeting ASR provider:", error);
+                          }
+                        })();
                       }}
                     >
                       {providers.map((provider) => (
@@ -732,29 +1039,18 @@ export function AsrProviderManager({
                     </select>
                   </label>
                 ) : null}
-                {!useSharedAsrSelection ? (
-                  <label className="space-y-1 text-sm">
-                    <span className="text-muted-foreground">Meeting model</span>
-                    <select
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                      value={meetingModelId}
-                      onChange={(event) => {
-                        void persistSelectionSettings({
-                          meetingModelId: event.target.value,
-                        }).catch((error) => {
-                          console.error("Failed to update meeting ASR model:", error);
-                        });
-                      }}
-                    >
-                      {modelOptionsForProvider(meetingProvider).map((option) => (
-                        <option key={`meeting-model-${option.id}`} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
+                {!useSharedAsrSelection
+                  ? renderModelControl("Meeting model", meetingProvider, meetingModelId, (modelId) => {
+                      void persistSelectionSettings({
+                        meetingModelId: modelId,
+                      }).catch((error) => {
+                        console.error("Failed to update meeting ASR model:", error);
+                      });
+                    })
+                  : null}
               </div>
+
+              {renderAppleNativeSetupCard()}
 
               <div className="space-y-1">
                 {useSharedAsrSelection
@@ -764,7 +1060,24 @@ export function AsrProviderManager({
               </div>
             </CardContent>
           </Card>
-          {platformSettings ? (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Advanced Tools</CardTitle>
+              <CardDescription>
+                Runtime routing, model diagnostics, downloads, and repair tools for power users.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="pt-0">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowAdvancedTools((value) => !value)}
+              >
+                {showAdvancedTools ? "Hide advanced tools" : "Show advanced tools"}
+              </Button>
+            </CardContent>
+          </Card>
+          {showAdvancedTools && platformSettings ? (
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle className="text-base">Platform Optimization (Advanced)</CardTitle>
@@ -819,45 +1132,6 @@ export function AsrProviderManager({
 
                 <div className="grid gap-3 md:grid-cols-2">
                   <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
-                    <span>macOS Apple Speech engine</span>
-                    <input
-                      type="checkbox"
-                      checked={platformSettings.macos.appleNativeEnabled}
-                      disabled={
-                        platformSaveBusy || (!platformSettings.macos.appleNativeEnabled && !appleNativeEngineReady)
-                      }
-                      onChange={(event) => {
-                        let next: PlatformOptimizationSettings = {
-                          ...platformSettings,
-                          macos: {
-                            ...platformSettings.macos,
-                            appleNativeEnabled: event.target.checked,
-                          },
-                        };
-                        if (event.target.checked) {
-                          if (!appleNativeEngineReady) {
-                            setPlatformSaveError(
-                              "macOS Apple Speech native transcription is not available in this build yet."
-                            );
-                            return;
-                          }
-                          next = withExclusiveNativeEngine(next, "macos_apple_speech");
-                        } else {
-                          const nextPriority = next.manualEnginePriority.filter(
-                            (engine) => engine !== "macos_apple_speech"
-                          );
-                          next = {
-                            ...next,
-                            mode: nextPriority.length === 0 ? "auto" : next.mode,
-                            fallbackPolicy: nextPriority.length === 0 ? "local_only" : next.fallbackPolicy,
-                            manualEnginePriority: nextPriority,
-                          };
-                        }
-                        void persistPlatformSettings(next);
-                      }}
-                    />
-                  </label>
-                  <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
                     <span>macOS MLX sidecar optimization</span>
                     <input
                       type="checkbox"
@@ -893,57 +1167,7 @@ export function AsrProviderManager({
                       }}
                     />
                   </label>
-                  <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
-                    <span>Windows SDK dictation engine</span>
-                    <input
-                      type="checkbox"
-                      checked={platformSettings.windows.windowsSdkDictationEnabled}
-                      disabled={
-                        platformSaveBusy ||
-                        (!platformSettings.windows.windowsSdkDictationEnabled && !windowsSdkEngineReady)
-                      }
-                      onChange={(event) => {
-                        let next: PlatformOptimizationSettings = {
-                          ...platformSettings,
-                          windows: {
-                            ...platformSettings.windows,
-                            windowsSdkDictationEnabled: event.target.checked,
-                          },
-                        };
-                        if (event.target.checked) {
-                          if (!windowsSdkEngineReady) {
-                            setPlatformSaveError(
-                              "Windows SDK dictation native transcription is not available in this build yet."
-                            );
-                            return;
-                          }
-                          next = withExclusiveNativeEngine(next, "windows_sdk_dictation");
-                        } else {
-                          const nextPriority = next.manualEnginePriority.filter(
-                            (engine) => engine !== "windows_sdk_dictation"
-                          );
-                          next = {
-                            ...next,
-                            mode: nextPriority.length === 0 ? "auto" : next.mode,
-                            fallbackPolicy: nextPriority.length === 0 ? "local_only" : next.fallbackPolicy,
-                            manualEnginePriority: nextPriority,
-                          };
-                        }
-                        void persistPlatformSettings(next);
-                      }}
-                    />
-                  </label>
                 </div>
-                {platformSettings.macos.appleNativeEnabled && !appleNativeEngineReady ? (
-                  <p className="text-xs text-amber-300">
-                    macOS Apple Speech native path is unavailable in this build and has been disabled.
-                  </p>
-                ) : null}
-                {platformSettings.windows.windowsSdkDictationEnabled && !windowsSdkEngineReady ? (
-                  <p className="text-xs text-amber-300">
-                    Windows SDK dictation native path is unavailable in this build and has been disabled.
-                  </p>
-                ) : null}
 
                 {platformSettings.mode === "manual" ? (
                   <div className="space-y-2">
@@ -1065,7 +1289,7 @@ export function AsrProviderManager({
                       Add engine
                     </Button>
                     <p className="text-[11px] text-muted-foreground">
-                      Apple/Windows native engine toggles enforce an exclusive manual engine route.
+                      Advanced routing is for runtime tuning only. Native Apple and Windows speech are selected in the main route picker above.
                     </p>
                   </div>
                 ) : null}
@@ -1073,15 +1297,10 @@ export function AsrProviderManager({
                 {platformSaveError ? (
                   <p className="text-xs text-destructive">{platformSaveError}</p>
                 ) : null}
-                {activeExclusiveNativeEngineLabel ? (
-                  <p className="text-xs text-amber-300">
-                    Exclusive route active: {activeExclusiveNativeEngineLabel}. Default provider selection is
-                    temporarily overridden.
-                  </p>
-                ) : null}
               </CardContent>
             </Card>
           ) : null}
+          {showAdvancedTools ? (
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base">Local Model Cache Repair</CardTitle>
@@ -1103,6 +1322,8 @@ export function AsrProviderManager({
               ) : null}
             </CardContent>
           </Card>
+          ) : null}
+          {showAdvancedTools ? (
           <div className="grid gap-4">
             {providers.length === 0 ? (
               <Card>
@@ -1123,15 +1344,12 @@ export function AsrProviderManager({
                 const providerError = providerErrors[provider.providerType];
                 const modelOptions = provider.modelOptions ?? [];
                 const selectedModelId = provider.selectedModelId || modelOptions[0]?.id || "";
-                const providerSelectionOverridden = Boolean(activeExclusiveNativeEngineId);
                 return (
                   <Card
                     key={provider.providerType}
                     className={cn(
                       "transition-all",
-                      !providerSelectionOverridden &&
-                        defaultProvider === provider.providerType &&
-                        "border-trusted ring-1 ring-trusted"
+                      defaultProvider === provider.providerType && "border-trusted ring-1 ring-trusted"
                     )}
                   >
                     <CardHeader className="pb-3">
@@ -1143,11 +1361,7 @@ export function AsrProviderManager({
                           <div>
                             <div className="flex items-center gap-2">
                               <CardTitle className="text-lg">{provider.name}</CardTitle>
-                              {providerSelectionOverridden ? (
-                                <Badge variant="secondary" className="text-xs">
-                                  Overridden
-                                </Badge>
-                              ) : defaultProvider === provider.providerType ? (
+                              {defaultProvider === provider.providerType ? (
                                 <Badge variant="outline" className="text-xs">
                                   Default
                                 </Badge>
@@ -1213,16 +1427,11 @@ export function AsrProviderManager({
                       )}
 
                       <div className="space-y-2">
-                        <p className="text-xs text-muted-foreground">
-                          {providerSelectionOverridden
-                            ? "Model (inactive while native override is enabled)"
-                            : "Model"}
-                        </p>
+                        <p className="text-xs text-muted-foreground">Model</p>
                         {modelOptions.length > 1 ? (
                           <select
                             className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                             value={selectedModelId}
-                            disabled={providerSelectionOverridden}
                             onChange={(event) => {
                               void handleModelChange(provider.providerType, event.target.value);
                             }}
@@ -1300,14 +1509,9 @@ export function AsrProviderManager({
                               <Button
                                 variant={defaultProvider === provider.providerType ? "default" : "outline"}
                                 size="sm"
-                                disabled={Boolean(activeExclusiveNativeEngineId)}
                                 onClick={() => handleSetDefault(provider.providerType)}
                               >
-                                {activeExclusiveNativeEngineId
-                                  ? "Overridden"
-                                  : defaultProvider === provider.providerType
-                                    ? "Default"
-                                    : "Set Default"}
+                                {defaultProvider === provider.providerType ? "Default" : "Set Default"}
                               </Button>
                               {selection.reason === "download_required" &&
                               isNotDownloaded(provider.downloadStatus) ? (
@@ -1404,6 +1608,7 @@ export function AsrProviderManager({
               })
             )}
           </div>
+          ) : null}
         </TabsContent>
 
         <TabsContent value="benchmark" className="space-y-4">

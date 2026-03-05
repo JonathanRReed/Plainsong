@@ -74,8 +74,11 @@ Add a `Transcription Route` card above the provider grid with:
 - shared provider/model selectors when enabled
 - separate dictation and meeting provider/model selectors when disabled
 - inline readiness/help text for the currently selected route(s)
+- direct permission actions for Apple native speech when macOS Speech Recognition is not ready
 
-Keep the existing provider cards for:
+Hide the existing low-level tooling behind an `Advanced Tools` disclosure by default.
+
+Keep the existing provider cards for power users:
 
 - runtime inspection
 - downloads

@@ -1024,8 +1024,7 @@ fn runtime_diagnostics_for_provider(
         }
         AsrProviderType::MacosAppleSpeech => {
             let probe = PlatformEngine::MacosAppleSpeech.probe();
-            let authorization =
-                crate::asr::platform::macos_speech::speech_authorization_status();
+            let authorization = crate::asr::platform::macos_speech::speech_authorization_status();
             let (runtime_status, runtime_message) = match authorization {
                 crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Authorized => (
                     if provider_available && probe.ready {

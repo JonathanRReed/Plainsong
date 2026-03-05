@@ -824,25 +824,26 @@ async fn collect_permission_diagnostics(
 
     #[cfg(target_os = "macos")]
     let (accessibility_ready, automation_ready) = {
-        let probe = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg("tell application \"System Events\" to get name of first process")
-            .output();
-        match probe {
-            Ok(output) if output.status.success() => (true, true),
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                notes.push(format!(
-                    "Accessibility probe failed. Grant Nautilus access in Privacy & Security > Accessibility. {}",
-                    stderr
-                ));
-                (false, false)
-            }
-            Err(error) => {
-                notes.push(format!("Failed to run macOS permission probe: {}", error));
-                (false, false)
-            }
+        let accessibility_ready = check_accessibility_permission();
+        if !accessibility_ready {
+            notes.push(
+                "Accessibility permission not granted yet. Enable Nautilus in Privacy & Security > Accessibility for cursor insertion."
+                    .to_string(),
+            );
         }
+
+        let automation_ready = match check_automation_permission() {
+            Ok(()) => true,
+            Err(error) => {
+                notes.push(format!(
+                    "Automation permission not granted yet. Enable Nautilus under Privacy & Security > Automation so it can control System Events. {}",
+                    error
+                ));
+                false
+            }
+        };
+
+        (accessibility_ready, automation_ready)
     };
 
     #[cfg(not(target_os = "macos"))]
@@ -3722,10 +3723,22 @@ async fn set_default_asr_provider(
         .transcription
         .use_shared_asr_selection
     {
-        settings_manager.settings_mut().transcription.dictation_provider = provider_key.clone();
-        settings_manager.settings_mut().transcription.dictation_model_id = selected_model.clone();
-        settings_manager.settings_mut().transcription.meeting_provider = provider_key;
-        settings_manager.settings_mut().transcription.meeting_model_id = selected_model.clone();
+        settings_manager
+            .settings_mut()
+            .transcription
+            .dictation_provider = provider_key.clone();
+        settings_manager
+            .settings_mut()
+            .transcription
+            .dictation_model_id = selected_model.clone();
+        settings_manager
+            .settings_mut()
+            .transcription
+            .meeting_provider = provider_key;
+        settings_manager
+            .settings_mut()
+            .transcription
+            .meeting_model_id = selected_model.clone();
     }
     settings_manager.save().map_err(|e| e.to_string())?;
 
@@ -3779,12 +3792,16 @@ async fn set_asr_provider_model(
         .use_shared_asr_selection
     {
         if settings_manager.settings().transcription.dictation_provider == provider_key {
-            settings_manager.settings_mut().transcription.dictation_model_id =
-                normalized_model_id.clone();
+            settings_manager
+                .settings_mut()
+                .transcription
+                .dictation_model_id = normalized_model_id.clone();
         }
         if settings_manager.settings().transcription.meeting_provider == provider_key {
-            settings_manager.settings_mut().transcription.meeting_model_id =
-                normalized_model_id.clone();
+            settings_manager
+                .settings_mut()
+                .transcription
+                .meeting_model_id = normalized_model_id.clone();
         }
     }
 
@@ -4628,15 +4645,9 @@ async fn start_dictation_session(
         &settings_snapshot.transcription,
         TranscriptionScope::Dictation,
     );
-    ensure_asr_provider_ready(state, dictation_selection.0, "dictation").await?;
 
     #[cfg(target_os = "macos")]
-    if settings_snapshot
-        .transcription
-        .platform_optimization
-        .macos
-        .apple_native_enabled
-    {
+    if dictation_selection.0 == asr::AsrProviderType::MacosAppleSpeech {
         crate::asr::platform::macos_speech::ensure_speech_authorized(
             settings_snapshot
                 .transcription
@@ -4644,11 +4655,13 @@ async fn start_dictation_session(
         )
         .map_err(|error| {
             format!(
-                "macOS Apple Speech is enabled but speech recognition permission is not ready. {}",
+                "Apple Native Speech is selected for dictation, but speech recognition permission is not ready. {}",
                 error
             )
         })?;
     }
+
+    ensure_asr_provider_ready(state, dictation_selection.0, "dictation").await?;
 
     {
         let recording_state = state
@@ -5282,7 +5295,11 @@ async fn stop_dictation_session_for_session(
         match configured_mode {
             DictationInsertionMode::Auto => {
                 if legacy_paste_to_cursor {
-                    let outcome = paste_text_systemwide(&result.text, copy_to_clipboard_enabled);
+                    let outcome = paste_text_systemwide(
+                        &result.text,
+                        copy_to_clipboard_enabled,
+                        app_target.as_deref(),
+                    );
                     pasted = outcome.pasted;
                     copied = outcome.copied;
                     paste_error = outcome.error;
@@ -5307,7 +5324,11 @@ async fn stop_dictation_session_for_session(
                 }
             }
             DictationInsertionMode::Paste => {
-                let outcome = paste_text_systemwide(&result.text, copy_to_clipboard_enabled);
+                let outcome = paste_text_systemwide(
+                    &result.text,
+                    copy_to_clipboard_enabled,
+                    app_target.as_deref(),
+                );
                 pasted = outcome.pasted;
                 copied = outcome.copied;
                 paste_error = outcome.error;
@@ -10001,8 +10022,8 @@ fn resolve_transcription_provider_and_model(
         }
     };
 
-    let provider =
-        asr_provider_from_settings_value(provider_value).unwrap_or(asr::AsrProviderType::DistilWhisper);
+    let provider = asr_provider_from_settings_value(provider_value)
+        .unwrap_or(asr::AsrProviderType::DistilWhisper);
     let model_id = normalize_asr_model_id(provider, model_value);
     (provider, model_id)
 }
@@ -10135,7 +10156,8 @@ fn provider_model_map_from_settings(
         map.insert(dictation_provider, normalized);
     }
 
-    if let Some(meeting_provider) = asr_provider_from_settings_value(&transcription.meeting_provider)
+    if let Some(meeting_provider) =
+        asr_provider_from_settings_value(&transcription.meeting_provider)
     {
         let normalized = normalize_asr_model_id(meeting_provider, &transcription.meeting_model_id);
         map.insert(meeting_provider, normalized);
@@ -10776,21 +10798,56 @@ struct PasteOutcome {
 }
 
 #[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXIsProcessTrusted() -> u8;
+}
+
+#[cfg(target_os = "macos")]
 fn check_accessibility_permission() -> bool {
-    let output = match std::process::Command::new("osascript")
+    unsafe { AXIsProcessTrusted() != 0 }
+}
+
+#[cfg(target_os = "macos")]
+fn check_automation_permission() -> Result<(), String> {
+    let output = std::process::Command::new("osascript")
         .arg("-e")
-        .arg("tell application \"System Events\" to get UI elements enabled")
+        .arg("tell application \"System Events\" to get name of first process")
         .output()
-    {
-        Ok(output) => output,
-        Err(_) => return false,
-    };
-    if !output.status.success() {
-        return false;
+        .map_err(|error| format!("Failed to invoke automation probe: {}", error))?;
+
+    if output.status.success() {
+        return Ok(());
     }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .eq_ignore_ascii_case("true")
+
+    Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn is_automation_permission_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("not authorized to send apple events")
+        || normalized.contains("1743")
+        || normalized.contains("automation")
+}
+
+#[cfg(target_os = "macos")]
+fn reactivate_target_application(app_name: &str) -> Result<(), String> {
+    let trimmed = app_name.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    let status = std::process::Command::new("open")
+        .args(["-a", trimmed])
+        .status()
+        .map_err(|error| format!("Failed to activate '{}': {}", trimmed, error))?;
+    if !status.success() {
+        return Err(format!("macOS could not activate '{}'", trimmed));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    Ok(())
 }
 
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
@@ -10862,16 +10919,61 @@ fn read_clipboard_text() -> Result<String, String> {
 #[cfg(target_os = "macos")]
 enum PasteDispatchStatus {
     Confirmed,
-    UnverifiedFallback,
+    FallbackDispatched,
 }
 
 #[cfg(target_os = "macos")]
-fn send_native_paste_key() -> Result<PasteDispatchStatus, String> {
-    use std::process::Command;
-
+fn dispatch_command_keystroke(keycode: u16) -> Result<(), String> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        .map_err(|_| "Failed to create event source".to_string())?;
+
+    let command_keycode: CGKeyCode = 55;
+    let target_keycode: CGKeyCode = keycode;
+
+    let command_down = CGEvent::new_keyboard_event(source.clone(), command_keycode, true)
+        .map_err(|_| "Failed to create command key down event".to_string())?;
+    command_down.set_flags(CGEventFlags::CGEventFlagCommand);
+    command_down.post(CGEventTapLocation::HID);
+
+    std::thread::sleep(std::time::Duration::from_millis(12));
+
+    let key_down = CGEvent::new_keyboard_event(source.clone(), target_keycode, true)
+        .map_err(|_| "Failed to create target key down event".to_string())?;
+    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+    key_down.post(CGEventTapLocation::HID);
+
+    std::thread::sleep(std::time::Duration::from_millis(12));
+
+    let key_up = CGEvent::new_keyboard_event(source.clone(), target_keycode, false)
+        .map_err(|_| "Failed to create target key up event".to_string())?;
+    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+    key_up.post(CGEventTapLocation::HID);
+
+    std::thread::sleep(std::time::Duration::from_millis(12));
+
+    let command_up = CGEvent::new_keyboard_event(source, command_keycode, false)
+        .map_err(|_| "Failed to create command key up event".to_string())?;
+    command_up.post(CGEventTapLocation::HID);
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_paste_key(target_app: Option<&str>) -> Result<PasteDispatchStatus, String> {
+    use std::process::Command;
+
+    if let Some(app_name) = target_app {
+        if let Err(error) = reactivate_target_application(app_name) {
+            tracing::warn!(
+                "Failed to reactivate paste target '{}': {}",
+                app_name,
+                error
+            );
+        }
+    }
     std::thread::sleep(std::time::Duration::from_millis(50));
 
     let apple_script = Command::new("osascript")
@@ -10888,27 +10990,14 @@ fn send_native_paste_key() -> Result<PasteDispatchStatus, String> {
         .trim()
         .to_string();
 
-    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
-        .map_err(|_| "Failed to create event source for paste".to_string())?;
-
-    let keycode_v: CGKeyCode = 9;
-    let key_down = CGEvent::new_keyboard_event(source.clone(), keycode_v, true)
-        .map_err(|_| "Failed to create key down event".to_string())?;
-    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
-    key_down.post(CGEventTapLocation::HID);
-
-    std::thread::sleep(std::time::Duration::from_millis(20));
-
-    let key_up = CGEvent::new_keyboard_event(source, keycode_v, false)
-        .map_err(|_| "Failed to create key up event".to_string())?;
-    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
-    key_up.post(CGEventTapLocation::HID);
+    dispatch_command_keystroke(9)
+        .map_err(|error| format!("{} (CoreGraphics fallback failed: {})", script_error, error))?;
 
     tracing::warn!(
         "Cmd+V fallback posted via CoreGraphics after System Events failure: {}",
         script_error
     );
-    Ok(PasteDispatchStatus::UnverifiedFallback)
+    Ok(PasteDispatchStatus::FallbackDispatched)
 }
 
 #[cfg(target_os = "macos")]
@@ -10922,7 +11011,8 @@ fn send_native_undo_key() -> Result<(), String> {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(format!("Undo keystroke failed: {}", stderr))
+    dispatch_command_keystroke(6)
+        .map_err(|fallback_error| format!("Undo keystroke failed: {} ({})", stderr, fallback_error))
 }
 
 #[cfg(target_os = "windows")]
@@ -10971,7 +11061,11 @@ fn schedule_clipboard_restore(previous: String, inserted_text: String) {
     });
 }
 
-fn paste_text_systemwide(text: &str, keep_text_in_clipboard: bool) -> PasteOutcome {
+fn paste_text_systemwide(
+    text: &str,
+    keep_text_in_clipboard: bool,
+    target_app: Option<&str>,
+) -> PasteOutcome {
     tracing::info!("paste_text_systemwide called with {} chars", text.len());
 
     let original_clipboard = {
@@ -11006,9 +11100,9 @@ fn paste_text_systemwide(text: &str, keep_text_in_clipboard: bool) -> PasteOutco
             };
         }
 
-        let paste_result = send_native_paste_key().or_else(|first_error| {
+        let paste_result = send_native_paste_key(target_app).or_else(|first_error| {
             std::thread::sleep(std::time::Duration::from_millis(45));
-            send_native_paste_key()
+            send_native_paste_key(target_app)
                 .map_err(|retry_error| format!("{} (retry failed: {})", first_error, retry_error))
         });
 
@@ -11016,10 +11110,17 @@ fn paste_text_systemwide(text: &str, keep_text_in_clipboard: bool) -> PasteOutco
             Ok(status) => status,
             Err(error) => {
                 tracing::error!("Paste key simulation failed: {}", error);
-                let remediation = format!(
-                    "Copied to clipboard. macOS blocked keystroke paste ({}). Grant Accessibility in System Settings > Privacy & Security > Accessibility.",
-                    error
-                );
+                let remediation = if is_automation_permission_error(&error) {
+                    format!(
+                        "Copied to clipboard. macOS blocked Automation for System Events ({}). Enable Nautilus under System Settings > Privacy & Security > Automation, or paste manually with Cmd+V.",
+                        error
+                    )
+                } else {
+                    format!(
+                        "Copied to clipboard. macOS blocked keystroke paste ({}). Grant Accessibility in System Settings > Privacy & Security > Accessibility.",
+                        error
+                    )
+                };
                 return PasteOutcome {
                     pasted: false,
                     copied: true,
@@ -11028,27 +11129,19 @@ fn paste_text_systemwide(text: &str, keep_text_in_clipboard: bool) -> PasteOutco
             }
         };
 
-        if matches!(paste_dispatch, PasteDispatchStatus::UnverifiedFallback) {
-            tracing::warn!(
-                "Paste dispatched via unverified CoreGraphics fallback; preserving clipboard text"
-            );
-            return PasteOutcome {
-                pasted: false,
-                copied: true,
-                error: Some(
-                    "Copied to clipboard. Nautilus could not confirm cursor paste in this app; press Cmd+V to insert text."
-                        .to_string(),
-                ),
-            };
-        }
-
-        if !keep_text_in_clipboard {
+        if !keep_text_in_clipboard && matches!(paste_dispatch, PasteDispatchStatus::Confirmed) {
             if let Some(previous) = original_clipboard {
                 schedule_clipboard_restore(previous, text.to_string());
             }
         }
 
-        tracing::info!("Paste successful - text inserted at cursor");
+        if matches!(paste_dispatch, PasteDispatchStatus::FallbackDispatched) {
+            tracing::warn!(
+                "Paste dispatched via CoreGraphics fallback; preserving clipboard text for safety"
+            );
+        } else {
+            tracing::info!("Paste successful - text inserted at cursor");
+        }
         PasteOutcome {
             pasted: true,
             copied: true,
