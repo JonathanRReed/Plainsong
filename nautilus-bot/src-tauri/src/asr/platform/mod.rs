@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod macos_speech;
 pub mod mlx_sidecar;
+pub mod transcription;
 pub mod windows_foundry;
 pub mod windows_sdk_dictation;
 

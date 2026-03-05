@@ -20,6 +20,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
+const DICTATION_MIN_CAPTURE_SECONDS: f32 = 0.35;
+const DICTATION_SHORT_CAPTURE_PEAK_THRESHOLD: f32 = 0.008;
+const DICTATION_SHORT_CAPTURE_RMS_THRESHOLD: f32 = 0.002;
 
 pub struct AudioCapture {
     is_dictating: Arc<AtomicBool>,
@@ -42,6 +45,8 @@ pub struct AudioCapture {
     noise_suppression_enabled: bool,
     /// Current audio level (0.0 to 1.0) for visualization
     dictation_audio_level: Arc<std::sync::atomic::AtomicU32>,
+    /// Number of callback invocations observed for the active dictation stream
+    dictation_callback_count: Arc<AtomicU64>,
     /// Last speech detection timestamp (milliseconds since start) for auto-stop
     last_speech_ms: Arc<std::sync::atomic::AtomicU64>,
     /// Dictation start instant for timing
@@ -123,6 +128,7 @@ impl AudioCapture {
             vad_enabled: true,
             noise_suppression_enabled: true,
             dictation_audio_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            dictation_callback_count: Arc::new(AtomicU64::new(0)),
             last_speech_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             dictation_start: Arc::new(std::sync::Mutex::new(None)),
         }
@@ -167,6 +173,7 @@ impl AudioCapture {
         );
 
         self.is_dictating.store(true, Ordering::SeqCst);
+        self.dictation_callback_count.store(0, Ordering::SeqCst);
 
         // Reset speech tracking
         self.last_speech_ms.store(0, Ordering::SeqCst);
@@ -175,8 +182,8 @@ impl AudioCapture {
         let is_dictating = Arc::clone(&self.is_dictating);
         let buffer = Arc::clone(&self.dictation_buffer);
         let _stream_queue = Arc::clone(&self.dictation_stream_queue);
-        let stream_ready = Arc::new(AtomicBool::new(false));
-        let stream_ready_signal = Arc::clone(&stream_ready);
+        let callback_count = Arc::clone(&self.dictation_callback_count);
+        let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
         let audio_level = Arc::clone(&self.dictation_audio_level);
         let last_speech_ms = Arc::clone(&self.last_speech_ms);
         let dictation_start = Arc::clone(&self.dictation_start);
@@ -187,6 +194,9 @@ impl AudioCapture {
             let device = match host.default_input_device() {
                 Some(device) => device,
                 None => {
+                    let _ = startup_tx.send(Err(
+                        "No input device available for dictation capture".to_string()
+                    ));
                     tracing::error!("No input device available for dictation capture thread");
                     return;
                 }
@@ -194,6 +204,10 @@ impl AudioCapture {
             let config = match device.default_input_config() {
                 Ok(config) => config,
                 Err(e) => {
+                    let _ = startup_tx.send(Err(format!(
+                        "Failed to fetch dictation input config: {}",
+                        e
+                    )));
                     tracing::error!("Failed to fetch dictation input config: {}", e);
                     return;
                 }
@@ -219,6 +233,7 @@ impl AudioCapture {
                     &config.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         if is_dictating_f32.load(Ordering::SeqCst) {
+                            callback_count.fetch_add(1, Ordering::Relaxed);
                             let mut sum_sq: f64 = 0.0;
                             if num_channels == 1 {
                                 for &sample in data {
@@ -250,6 +265,7 @@ impl AudioCapture {
                     &config.into(),
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
                         if is_dictating_i16.load(Ordering::SeqCst) {
+                            callback_count.fetch_add(1, Ordering::Relaxed);
                             let mut sum_sq: f64 = 0.0;
                             if num_channels == 1 {
                                 for &sample in data {
@@ -286,6 +302,7 @@ impl AudioCapture {
                     &config.into(),
                     move |data: &[u8], _: &cpal::InputCallbackInfo| {
                         if is_dictating_u8.load(Ordering::SeqCst) {
+                            callback_count.fetch_add(1, Ordering::Relaxed);
                             let mut sum_sq: f64 = 0.0;
                             if num_channels == 1 {
                                 for &sample in data {
@@ -319,23 +336,34 @@ impl AudioCapture {
                     None,
                 ),
                 format => {
+                    let _ = startup_tx.send(Err(format!(
+                        "Unsupported sample format for dictation: {:?}",
+                        format
+                    )));
                     tracing::error!("Unsupported sample format for dictation: {:?}", format);
                     return;
                 }
             };
 
             let Ok(stream) = stream_result else {
+                let _ = startup_tx.send(Err(
+                    "Failed to build dictation microphone input stream".to_string()
+                ));
                 tracing::error!("Failed to build dictation stream");
                 return;
             };
 
             if let Err(e) = stream.play() {
+                let _ = startup_tx.send(Err(format!(
+                    "Failed to start dictation microphone stream: {}",
+                    e
+                )));
                 tracing::error!("Failed to start dictation stream: {}", e);
                 return;
             }
 
             // Signal that the audio stream is now live
-            stream_ready_signal.store(true, Ordering::SeqCst);
+            let _ = startup_tx.send(Ok(()));
             tracing::info!("Dictation audio stream started successfully");
 
             while capture_flag.load(Ordering::SeqCst) {
@@ -348,14 +376,26 @@ impl AudioCapture {
         self.dictation_thread = Some(capture_handle);
 
         // Wait for the audio stream to actually start (up to 500ms)
-        let deadline = Instant::now() + Duration::from_millis(500);
-        while !stream_ready.load(Ordering::SeqCst) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        if stream_ready.load(Ordering::SeqCst) {
-            tracing::info!("Dictation started (stream confirmed live)");
-        } else {
-            tracing::warn!("Dictation started but stream-ready signal timed out after 500ms");
+        match startup_rx.recv_timeout(Duration::from_millis(1500)) {
+            Ok(Ok(())) => {
+                tracing::info!("Dictation started (stream confirmed live)");
+            }
+            Ok(Err(error)) => {
+                self.is_dictating.store(false, Ordering::SeqCst);
+                if let Some(handle) = self.dictation_thread.take() {
+                    let _ = handle.join();
+                }
+                return Err(anyhow::anyhow!(error));
+            }
+            Err(_) => {
+                self.is_dictating.store(false, Ordering::SeqCst);
+                if let Some(handle) = self.dictation_thread.take() {
+                    let _ = handle.join();
+                }
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for dictation microphone stream to start"
+                ));
+            }
         }
 
         Ok(())
@@ -397,7 +437,13 @@ impl AudioCapture {
         );
 
         if samples.is_empty() {
+            let callback_count = self.dictation_callback_count.load(Ordering::Relaxed);
             tracing::warn!("No audio samples captured during dictation!");
+            if callback_count == 0 {
+                return Err(anyhow::anyhow!(
+                    "No microphone samples were received. Check microphone privacy permissions and the active input device."
+                ));
+            }
             return Err(anyhow::anyhow!(
                 "No audio was captured. Please check microphone permissions."
             ));
@@ -413,6 +459,19 @@ impl AudioCapture {
             (samples.len() as f64 / self.dictation_sample_rate as f64 * 1000.0) as i64
         );
 
+        let capture_duration_seconds = if self.dictation_sample_rate == 0 {
+            0.0
+        } else {
+            samples.len() as f32 / self.dictation_sample_rate as f32
+        };
+        let has_speech_energy = peak >= DICTATION_SHORT_CAPTURE_PEAK_THRESHOLD
+            || rms >= DICTATION_SHORT_CAPTURE_RMS_THRESHOLD;
+        if capture_duration_seconds < DICTATION_MIN_CAPTURE_SECONDS && !has_speech_energy {
+            return Err(anyhow::anyhow!(
+                "Dictation capture was too short to transcribe. Hold the hotkey slightly longer and speak before release."
+            ));
+        }
+
         // Apply noise suppression before encoding if enabled
         if self.noise_suppression_enabled {
             if let Some(preprocessor) = &mut self.preprocessor {
@@ -424,7 +483,7 @@ impl AudioCapture {
         }
 
         boost_quiet_audio(&mut samples);
-        ensure_min_duration(&mut samples, self.dictation_sample_rate, 1.1);
+        ensure_min_duration(&mut samples, self.dictation_sample_rate, 0.7);
 
         tracing::info!(
             "Dictation stopped: {} mono samples at {} Hz (after processing)",
@@ -564,15 +623,21 @@ impl AudioCapture {
             let dropped_writer_chunks = Arc::new(AtomicU64::new(0));
             let dropped_stream_chunks_for_session = Arc::clone(&dropped_stream_chunks);
             let dropped_writer_chunks_for_session = Arc::clone(&dropped_writer_chunks);
+            let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
 
             let stream_queue_clone = Arc::clone(&streaming_queue);
             let capture_handle = std::thread::spawn(move || {
                 let host = cpal::default_host();
                 let Some(device) = host.default_input_device() else {
+                    let _ =
+                        startup_tx.send(Err("No microphone input device available".to_string()));
                     tracing::error!("No input device available");
                     return;
                 };
                 let Ok(config) = device.default_input_config() else {
+                    let _ = startup_tx.send(Err(
+                        "Failed to read microphone input configuration".to_string()
+                    ));
                     tracing::error!("Failed to read input config");
                     return;
                 };
@@ -654,14 +719,19 @@ impl AudioCapture {
                 };
 
                 let Ok(stream) = stream_result else {
+                    let _ =
+                        startup_tx.send(Err("Failed to build microphone input stream".to_string()));
                     tracing::error!("Failed to build microphone input stream");
                     return;
                 };
 
                 if let Err(e) = stream.play() {
+                    let _ =
+                        startup_tx.send(Err(format!("Failed to start microphone stream: {}", e)));
                     tracing::error!("Failed to play microphone stream: {}", e);
                     return;
                 }
+                let _ = startup_tx.send(Ok(()));
 
                 while capture_flag.load(Ordering::SeqCst) {
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -679,6 +749,22 @@ impl AudioCapture {
 
                 drop(stream);
             });
+
+            match startup_rx.recv_timeout(Duration::from_millis(1500)) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    capture_stop_flag.store(false, Ordering::SeqCst);
+                    let _ = capture_handle.join();
+                    return Err(anyhow::anyhow!(error));
+                }
+                Err(_) => {
+                    capture_stop_flag.store(false, Ordering::SeqCst);
+                    let _ = capture_handle.join();
+                    return Err(anyhow::anyhow!(
+                        "Timed out waiting for microphone stream to start"
+                    ));
+                }
+            }
 
             let sample_rate = self
                 .host

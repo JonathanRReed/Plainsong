@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import {
     getPermissionDiagnostics,
+    requestDictationPermissions,
     openPermissionSettings,
     downloadWhisperModel,
     getSettings,
@@ -73,6 +74,9 @@ export function FirstRunWizard({ onComplete }: Props) {
     const [hotkeyDemoActive, setHotkeyDemoActive] = useState(false);
     const [shortcutValue, setShortcutValue] = useState(defaultDictationShortcut());
     const [hotkeyMode, setHotkeyMode] = useState<"hold_to_talk" | "toggle">("hold_to_talk");
+    const [autoRequestPermissions, setAutoRequestPermissions] = useState(true);
+    const [permissionRequestBusy, setPermissionRequestBusy] = useState(false);
+    const [permissionRequestError, setPermissionRequestError] = useState<string | null>(null);
     const [hotkeySaving, setHotkeySaving] = useState(false);
     const [hotkeySaveError, setHotkeySaveError] = useState<string | null>(null);
     const [meetingAudioStorageMode, setMeetingAudioStorageMode] = useState<"always" | "transcript_only">("always");
@@ -87,6 +91,23 @@ export function FirstRunWizard({ onComplete }: Props) {
     useEffect(() => {
         if (step === "permissions") void refreshPerms();
     }, [step]);
+
+    useEffect(() => {
+        let mounted = true;
+        void getSettings()
+            .then((settings) => {
+                if (!mounted) return;
+                setAutoRequestPermissions(
+                    settings.transcription.dictationAutoRequestPermissions ?? true
+                );
+            })
+            .catch(() => {
+                // Keep defaults.
+            });
+        return () => {
+            mounted = false;
+        };
+    }, []);
 
     useEffect(() => {
         let mounted = true;
@@ -164,6 +185,7 @@ export function FirstRunWizard({ onComplete }: Props) {
             settings.shortcuts.toggleDictation = normalizeShortcut(shortcutValue);
             settings.shortcuts.toggleDictationAlternates = [];
             settings.transcription.dictationPushToTalk = hotkeyMode === "hold_to_talk";
+            settings.transcription.dictationAutoRequestPermissions = autoRequestPermissions;
             await saveSettings(settings);
             return true;
         } catch (error) {
@@ -172,7 +194,20 @@ export function FirstRunWizard({ onComplete }: Props) {
         } finally {
             setHotkeySaving(false);
         }
-    }, [hotkeyMode, shortcutValue]);
+    }, [autoRequestPermissions, hotkeyMode, shortcutValue]);
+
+    const requestPermissionsNow = useCallback(async () => {
+        setPermissionRequestBusy(true);
+        setPermissionRequestError(null);
+        try {
+            const diagnostics = await requestDictationPermissions();
+            setPerms(diagnostics);
+        } catch (error) {
+            setPermissionRequestError(error instanceof Error ? error.message : String(error));
+        } finally {
+            setPermissionRequestBusy(false);
+        }
+    }, []);
 
     const persistPowerPrivacyStep = useCallback(async () => {
         setHotkeySaving(true);
@@ -254,6 +289,11 @@ export function FirstRunWizard({ onComplete }: Props) {
                         perms={perms}
                         loading={permsLoading}
                         onRefresh={() => void refreshPerms()}
+                        autoRequestPermissions={autoRequestPermissions}
+                        onAutoRequestPermissionsChange={setAutoRequestPermissions}
+                        requestBusy={permissionRequestBusy}
+                        requestError={permissionRequestError}
+                        onRequestNow={() => void requestPermissionsNow()}
                     />
                 )}
                 {step === "model" && (
@@ -373,10 +413,20 @@ function PermissionsStep({
     perms,
     loading,
     onRefresh,
+    autoRequestPermissions,
+    onAutoRequestPermissionsChange,
+    requestBusy,
+    requestError,
+    onRequestNow,
 }: {
     perms: PermissionDiagnostics | null;
     loading: boolean;
     onRefresh(): void;
+    autoRequestPermissions: boolean;
+    onAutoRequestPermissionsChange(next: boolean): void;
+    requestBusy: boolean;
+    requestError: string | null;
+    onRequestNow(): void;
 }) {
     return (
         <div className="space-y-4">
@@ -393,15 +443,48 @@ function PermissionsStep({
                     onFix={() => void openPermissionSettings("microphone")}
                 />
                 <PermRow
+                    label="Speech recognition (Apple native STT)"
+                    icon={<Brain className="h-4 w-4" />}
+                    ready={perms?.speechRecognitionReady}
+                    loading={loading || requestBusy}
+                    onFix={() => void openPermissionSettings("speech")}
+                />
+                <PermRow
                     label="Accessibility (text injection)"
                     icon={<ShieldCheck className="h-4 w-4" />}
                     ready={perms?.accessibilityReady}
-                    loading={loading}
+                    loading={loading || requestBusy}
                     onFix={() => void openPermissionSettings("accessibility")}
                 />
             </div>
 
-            <Button variant="outline" size="sm" onClick={onRefresh} disabled={loading}>
+            <div className="rounded-lg border border-border p-3 space-y-3">
+                <label className="flex items-center justify-between gap-3">
+                    <div>
+                        <p className="text-sm font-medium">Auto-request permissions before dictation</p>
+                        <p className="text-xs text-muted-foreground">
+                            Prompts for native speech/mic access as soon as needed, instead of failing silently.
+                        </p>
+                    </div>
+                    <input
+                        type="checkbox"
+                        checked={autoRequestPermissions}
+                        onChange={(event) => onAutoRequestPermissionsChange(event.target.checked)}
+                    />
+                </label>
+                <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={onRequestNow}
+                    disabled={requestBusy}
+                >
+                    {requestBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                    Request permissions now
+                </Button>
+                {requestError ? <p className="text-xs text-destructive">{requestError}</p> : null}
+            </div>
+
+            <Button variant="outline" size="sm" onClick={onRefresh} disabled={loading || requestBusy}>
                 {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                 Re-check permissions
             </Button>

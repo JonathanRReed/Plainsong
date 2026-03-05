@@ -11,7 +11,9 @@
     "targets": "all",
     "category": "Productivity",
     "copyright": "© 2026 NautilusBot. All rights reserved.",
-    "externalBin": [],
+    "externalBin": [
+      "binaries/nautilus-macos-speech-helper"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -23,6 +25,7 @@
       "entitlements": "../src-tauri/Entitlements.plist",
       "exceptionDomain": "",
       "frameworks": [],
+      "infoPlist": "../src-tauri/macos-info.plist",
       "providerShortName": null,
       "signingIdentity": null
     },

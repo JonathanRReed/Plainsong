@@ -36,6 +36,7 @@ export interface TranscriptionSettings {
   silenceSkipEnabled: boolean;
   dictationPasteToCursor: boolean;
   dictationCopyToClipboard?: boolean;
+  dictationAutoRequestPermissions?: boolean;
   dictationPushToTalk: boolean;
   dictationAiFormatting: boolean;
   dictationCommandModeEnabled?: boolean;

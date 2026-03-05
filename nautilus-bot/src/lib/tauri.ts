@@ -482,6 +482,7 @@ export async function getLoopbackDeviceName(): Promise<string | null> {
 
 export interface PermissionDiagnostics {
   microphoneReady: boolean;
+  speechRecognitionReady?: boolean;
   accessibilityReady: boolean;
   automationReady: boolean;
   notes: string[];
@@ -492,9 +493,13 @@ export async function getPermissionDiagnostics(): Promise<PermissionDiagnostics>
 }
 
 export async function openPermissionSettings(
-  section: "microphone" | "accessibility" | "automation"
+  section: "microphone" | "speech" | "accessibility" | "automation"
 ): Promise<void> {
   await invoke("open_permission_settings", { section });
+}
+
+export async function requestDictationPermissions(): Promise<PermissionDiagnostics> {
+  return await invoke("request_dictation_permissions");
 }
 
 // Model Download APIs

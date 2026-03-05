@@ -122,6 +122,8 @@ pub struct TranscriptionSettings {
     pub dictation_paste_to_cursor: bool,
     /// Dictation: Keep latest dictation result in clipboard
     pub dictation_copy_to_clipboard: bool,
+    /// Dictation: auto-request runtime permissions before capture/transcription.
+    pub dictation_auto_request_permissions: bool,
     /// Dictation: Use Push-to-Talk (start on press, stop on release)
     pub dictation_push_to_talk: bool,
     /// Dictation: Smart Format — LLM polishes text before insert
@@ -191,7 +193,9 @@ impl Default for TranscriptionSettings {
             silence_skip_enabled: false,
             dictation_paste_to_cursor: true,
             dictation_copy_to_clipboard: true,
-            dictation_push_to_talk: true,
+            dictation_auto_request_permissions: true,
+            // Toggle mode is safer for new users and avoids silent hold-to-talk confusion.
+            dictation_push_to_talk: false,
             dictation_ai_formatting: false,
             dictation_command_mode_enabled: true,
             dictation_command_prefix: "command".to_string(),

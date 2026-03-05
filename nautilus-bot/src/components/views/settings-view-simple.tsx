@@ -37,6 +37,7 @@ import {
   listDownloadedModels,
   migrateToEncryptedStorage,
   openPermissionSettings,
+  requestDictationPermissions,
   saveSettings,
   saveBackupConfig,
   setProviderSecret,
@@ -1999,28 +2000,60 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         }
                       />
                     </div>
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Auto-request dictation permissions</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Prompt for speech/mic permissions before dictation instead of failing silently
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationAutoRequestPermissions ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationAutoRequestPermissions: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
                     
                     <div className="space-y-3">
                       <div className="flex items-center justify-between">
                         <div>
                           <Label>Permission diagnostics</Label>
                           <p className="text-sm text-muted-foreground">
-                            Validate microphone, accessibility, and automation permissions
+                            Validate microphone, speech recognition, accessibility, and automation permissions
                           </p>
                         </div>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={async () => {
-                            const diagnostics = await getPermissionDiagnostics();
-                            setPermissionDiagnostics(diagnostics);
-                          }}
-                        >
-                          Refresh
-                        </Button>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={async () => {
+                              const diagnostics = await getPermissionDiagnostics();
+                              setPermissionDiagnostics(diagnostics);
+                            }}
+                          >
+                            Refresh
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={async () => {
+                              const diagnostics = await requestDictationPermissions();
+                              setPermissionDiagnostics(diagnostics);
+                            }}
+                          >
+                            Request now
+                          </Button>
+                        </div>
                       </div>
                       {permissionDiagnostics && (
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-sm">
+                        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 text-sm">
                           <div className="p-2 rounded border bg-muted/20">
                             <p className="font-medium">Microphone</p>
                             <p className={permissionDiagnostics.microphoneReady ? "text-green-500" : "text-amber-500"}>
@@ -2031,6 +2064,26 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                               size="sm"
                               className="mt-1 px-0 h-auto font-normal text-xs text-muted-foreground hover:text-foreground"
                               onClick={() => void openPermissionSettings("microphone")}
+                            >
+                              Open settings
+                            </Button>
+                          </div>
+                          <div className="p-2 rounded border bg-muted/20">
+                            <p className="font-medium">Speech recognition</p>
+                            <p
+                              className={
+                                permissionDiagnostics.speechRecognitionReady
+                                  ? "text-green-500"
+                                  : "text-amber-500"
+                              }
+                            >
+                              {permissionDiagnostics.speechRecognitionReady ? "Ready" : "Needs grant"}
+                            </p>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="mt-1 px-0 h-auto font-normal text-xs text-muted-foreground hover:text-foreground"
+                              onClick={() => void openPermissionSettings("speech")}
                             >
                               Open settings
                             </Button>
