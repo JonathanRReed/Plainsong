@@ -26,6 +26,22 @@ This report summarizes launch-readiness status for the strict GA scope: **all AS
 - Filled packaged QA matrix owners and evidence paths to support execution tracking.
 - Resolved frontend dependency advisory (`rollup`) and restored `npm audit` clean state.
 
+## What Was Executed (2026-03-05 blocked-first run)
+
+- Re-ran strict automated build/test gates (`tsc`, `npm test`, `npm run build`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo test --lib`, `cargo test --tests`) and confirmed pass.
+- Ran strict ASR preflight artifact generation and schema validation:
+  - `artifacts/asr-preflight-macos.json` (schema-valid; strict run fails due missing cloud secrets).
+- Converted packaged QA matrix from `PENDING` to explicit `BLOCKED` rows with evidence stubs:
+  - `docs/packaged-app-qa-matrix.md` now `49 BLOCKED / 0 PENDING`.
+  - Generated 49 evidence files under `artifacts/qa/macos/*` and `artifacts/qa/windows/*`.
+- Re-generated and schema-validated packaged QA evidence bundle:
+  - `artifacts/packaged-qa-evidence-bundle.json`.
+- Captured strict gate blocker outputs:
+  - `artifacts/cloud-asr-smoke.blocked.md`
+  - `artifacts/benchmark-gates-macos.blocked.md`
+  - `artifacts/benchmark-gates-windows.blocked.md`
+  - `artifacts/release-blockers.json`
+
 ## Release Gate Status
 
 See `docs/release-gate-evidence.md` for command-level results.
@@ -34,29 +50,39 @@ Current status:
 
 - Frontend compile/test/build: ✅ PASS
 - Rust format/clippy/check/lib/tests: ✅ PASS
-- Local packaging perf gates (size + cold start): ✅ PASS
-- Packaged QA matrix execution: ❌ NOT STARTED (rows still PENDING)
-- Benchmark parity artifacts (CP-13/CP-14/CP-15): ❌ NOT PRODUCED
+- Local packaging perf gates (size + cold start): ✅ PASS (cold-start currently historical evidence)
+- Packaged QA matrix execution: ⚠️ BLOCKED (49/49 blocked; no rows pending, no rows passed)
+- Benchmark parity artifacts (CP-13/CP-14/CP-15): ❌ NOT PRODUCED (gate fails on missing files)
+- Cloud ASR smoke gate: ❌ BLOCKED (missing required cloud API secrets)
+
+See `docs/strict-release-blocker-register.md` for blocker ownership and unblock actions.
 
 ## Current Blockers
 
-1. Packaged app QA matrix remains pending for macOS and Windows (0/49 PASS).
+1. Required cloud ASR secrets are missing:
+   - `OPENAI_API_KEY`
+   - `ELEVENLABS_API_KEY`
+   - `MISTRAL_API_KEY`
 2. Benchmark run artifacts for CP-13/CP-14/CP-15 are required but not yet committed:
    - `docs/evals/benchmark-run-baseline.json`
    - `docs/evals/benchmark-run-latest-macos.json`
    - `docs/evals/benchmark-run-latest-windows.json`
-3. Final release still depends on configured signing + distribution secrets in CI.
+3. Apple paid signing/notarization setup is unavailable, blocking signed DMG + notarization evidence.
+4. Windows code-signing certificate is unavailable, blocking signed installer security evidence.
+5. Packaged QA rows are marked BLOCKED, but strict release requires PASS evidence across scope.
 
 ## Residual Preconditions
 
-- Release signing + notarization secrets must be configured (`TAURI_SIGNING_*`, `APPLE_*`, `WINDOWS_CERTIFICATE*`).
+- Release signing + notarization secrets must be configured (`TAURI_SIGNING_*`, `APPLE_*`, `WINDOWS_CERTIFICATE*`) and accessible in the release environment.
 - Gate runners must have access to required local ASR model assets if local RTF gate remains enforced in CI.
+- Benchmark baseline/candidate JSON artifacts must exist and pass schema + threshold validation.
 - Final Go/No-Go still requires QA + engineering signoff.
 
 ## Launch Recommendation
 
 - **Current recommendation: NO-GO**.
 - Move to **GO** only after:
-  1. packaged QA matrix is completed and signed off,
-  2. CP benchmark artifacts pass schema + launch-threshold checks,
-  3. signed update/install flows are validated on macOS + Windows packaged builds.
+  1. cloud smoke prerequisites are met and gate passes,
+  2. CP benchmark artifacts exist and pass schema + launch-threshold checks,
+  3. blocked QA rows are replaced with executed PASS evidence where required,
+  4. signed update/install flows are validated on macOS + Windows packaged builds.

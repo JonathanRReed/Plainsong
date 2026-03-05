@@ -1,0 +1,21 @@
+{
+  "generatedAt": "2026-03-05T04:23:01.088Z",
+  "strictReady": false,
+  "blockers": [
+    {
+      "gate": "cloud-asr-smoke",
+      "exitCode": 1,
+      "evidence": "artifacts/cloud-asr-smoke.blocked.md"
+    },
+    {
+      "gate": "benchmark-gates-macos",
+      "exitCode": 1,
+      "evidence": "artifacts/benchmark-gates-macos.blocked.md"
+    },
+    {
+      "gate": "benchmark-gates-windows",
+      "exitCode": 1,
+      "evidence": "artifacts/benchmark-gates-windows.blocked.md"
+    }
+  ]
+}
