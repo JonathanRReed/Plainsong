@@ -5,6 +5,7 @@ use crate::secrets;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
+use serde_json::Value;
 use std::path::Path;
 
 const OPENAI_TRANSCRIPTION_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
@@ -17,6 +18,7 @@ pub struct OpenAiCloudWhisperProvider {
 struct OpenAiTranscriptionResponse {
     text: String,
     segments: Option<Vec<OpenAiSegment>>,
+    language: Option<String>,
 }
 
 fn sanitize_openai_asr_model_id(model_id: &str) -> &'static str {
@@ -60,6 +62,10 @@ impl OpenAiCloudWhisperProvider {
         }
     }
 
+    fn uses_verbose_json(&self) -> bool {
+        self.model_id == "whisper-1"
+    }
+
     async fn transcribe_impl(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let api_key = Self::api_key().context("OPENAI_API_KEY environment variable not set")?;
 
@@ -68,11 +74,17 @@ impl OpenAiCloudWhisperProvider {
         let part = reqwest::multipart::Part::bytes(audio_data.to_vec())
             .file_name("audio.wav")
             .mime_str("audio/wav")?;
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .part("file", part)
-            .text("model", self.model_id.clone())
-            .text("response_format", "verbose_json")
-            .text("timestamp_granularities[]", "segment");
+            .text("model", self.model_id.clone());
+
+        if self.uses_verbose_json() {
+            form = form
+                .text("response_format", "verbose_json")
+                .text("timestamp_granularities[]", "segment");
+        } else {
+            form = form.text("response_format", "json");
+        }
 
         let client = reqwest::Client::new();
         let response = client
@@ -89,10 +101,13 @@ impl OpenAiCloudWhisperProvider {
             anyhow::bail!("OpenAI Whisper API error {}: {}", status, body);
         }
 
-        let result = response
-            .json::<OpenAiTranscriptionResponse>()
+        let payload = response
+            .json::<Value>()
             .await
             .context("Failed to parse OpenAI Whisper response")?;
+
+        let result: OpenAiTranscriptionResponse = serde_json::from_value(payload.clone())
+            .context("Failed to decode OpenAI transcription payload")?;
 
         let segments: Vec<TranscriptSegment> = result
             .segments
@@ -109,11 +124,20 @@ impl OpenAiCloudWhisperProvider {
             .unwrap_or_default();
 
         let elapsed = start.elapsed().as_millis() as u64;
+        let language = result
+            .language
+            .or_else(|| {
+                payload
+                    .get("language")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "auto".to_string());
 
         Ok(TranscriptionResult {
             text: result.text,
             segments,
-            language: "en".to_string(),
+            language,
             confidence: 0.92,
             processing_time_ms: elapsed,
             model_name: format!("OpenAI ASR ({})", self.model_id),
@@ -173,5 +197,21 @@ impl AsrProvider for OpenAiCloudWhisperProvider {
 
     async fn download_models(&self, _progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpenAiCloudWhisperProvider;
+
+    #[test]
+    fn openai_asr_response_format_matches_selected_model() {
+        assert!(OpenAiCloudWhisperProvider::new(Some("whisper-1")).uses_verbose_json());
+        assert!(
+            !OpenAiCloudWhisperProvider::new(Some("gpt-4o-transcribe")).uses_verbose_json()
+        );
+        assert!(
+            !OpenAiCloudWhisperProvider::new(Some("gpt-4o-mini-transcribe")).uses_verbose_json()
+        );
     }
 }

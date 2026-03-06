@@ -46,6 +46,12 @@ impl GeminiClient {
             .await
             .context("Failed to connect to Gemini API")?;
 
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Gemini model list error {}: {}", status, body);
+        }
+
         let data: serde_json::Value = response
             .json()
             .await
@@ -107,6 +113,12 @@ impl GeminiClient {
             .send()
             .await
             .context("Failed to send request to Gemini")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Gemini completion error {}: {}", status, body);
+        }
 
         let data: serde_json::Value = response
             .json()

@@ -20,10 +20,24 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import { forceStopDictation, getSettings, getDictationAudioLevel } from "@/lib/tauri";
+import {
+  getSettings,
+  getDictationAudioLevel,
+  saveSettings,
+  startDictation,
+  stopDictation,
+} from "@/lib/tauri";
+import type { DictationCustomMode, Settings } from "@/types/settings";
 
 type DisplayMode = "full" | "compact" | "minimal";
-type DictationPhase = "idle" | "recording" | "stopping" | "transcribing" | "done" | "error";
+type DictationPhase =
+  | "idle"
+  | "starting"
+  | "recording"
+  | "stopping"
+  | "transcribing"
+  | "done"
+  | "error";
 
 interface DictationStateChangedEvent {
   phase: DictationPhase;
@@ -43,7 +57,13 @@ type DictationModePreset =
   | "meeting_follow_up"
   | "custom";
 
-type DictationContextSource = "none" | "clipboard" | "selected_text";
+type DictationContextSource = "none" | "clipboard" | "selected_text" | "application_context";
+type DictationModeOption = {
+  id: string;
+  label: string;
+  preset: DictationModePreset;
+  customModeId?: string;
+};
 
 const MODE_META: Record<
   DictationModePreset,
@@ -69,7 +89,142 @@ const CONTEXT_META: Record<DictationContextSource, { label: string; detail: stri
   none: { label: "No context", detail: "Fresh dictation" },
   clipboard: { label: "Clipboard", detail: "Using copied text" },
   selected_text: { label: "Selected text", detail: "Using current selection" },
+  application_context: { label: "App context", detail: "Using the frontmost app and window" },
 };
+
+function popupModeOptions(customModes: DictationCustomMode[]): DictationModeOption[] {
+  return [
+    { id: "voice", label: "Voice", preset: "voice" },
+    { id: "messages", label: "Messages", preset: "messages" },
+    { id: "email", label: "Email", preset: "email" },
+    { id: "notes", label: "Notes", preset: "notes" },
+    { id: "meeting_follow_up", label: "Meeting Follow-up", preset: "meeting_follow_up" },
+    ...customModes.map((mode) => ({
+      id: `custom:${mode.id}`,
+      label: mode.name,
+      preset: "custom" as const,
+      customModeId: mode.id,
+    })),
+  ];
+}
+
+function applyModeToSettings(
+  settings: Settings,
+  preset: DictationModePreset,
+  customModeId?: string
+): Settings {
+  const next = structuredClone(settings);
+  const transcription = next.transcription;
+
+  const applyBase = (mode: DictationCustomMode | null, fallback?: Partial<DictationCustomMode>) => {
+    if (mode) {
+      transcription.dictationProfile = mode.profile;
+      transcription.dictationInsertionMode = mode.insertionMode;
+      transcription.dictationContextSource = mode.contextSource;
+      transcription.dictationSaveToInbox = mode.saveToInbox;
+      transcription.dictationCopyToClipboard = mode.copyToClipboard;
+      transcription.dictationCommandModeEnabled = mode.commandModeEnabled;
+      if (mode.dictationProvider) transcription.dictationProvider = mode.dictationProvider;
+      if (mode.dictationModelId) transcription.dictationModelId = mode.dictationModelId;
+      if (mode.aiProvider) next.privacy.llmProvider = mode.aiProvider;
+      next.privacy.llmModelId = mode.aiModelId ?? next.privacy.llmModelId ?? null;
+      return;
+    }
+    if (!fallback) return;
+    if (fallback.profile) transcription.dictationProfile = fallback.profile;
+    if (fallback.insertionMode) transcription.dictationInsertionMode = fallback.insertionMode;
+    if (fallback.contextSource) transcription.dictationContextSource = fallback.contextSource;
+    if (typeof fallback.saveToInbox === "boolean") {
+      transcription.dictationSaveToInbox = fallback.saveToInbox;
+    }
+    if (typeof fallback.copyToClipboard === "boolean") {
+      transcription.dictationCopyToClipboard = fallback.copyToClipboard;
+    }
+    if (typeof fallback.commandModeEnabled === "boolean") {
+      transcription.dictationCommandModeEnabled = fallback.commandModeEnabled;
+    }
+  };
+
+  transcription.dictationModePreset = preset;
+  transcription.dictationSelectedCustomModeId = preset === "custom" ? customModeId ?? null : null;
+
+  if (preset === "custom") {
+    const customMode =
+      transcription.dictationCustomModes?.find((mode) => mode.id === customModeId) ?? null;
+    applyBase(customMode);
+    return next;
+  }
+
+  const presetMode: Partial<DictationCustomMode> = {
+    voice: {
+      profile: "normal_speed" as const,
+      insertionMode: "auto" as const,
+      contextSource: "none" as const,
+      saveToInbox: true,
+      copyToClipboard: true,
+      commandModeEnabled: true,
+    },
+    messages: {
+      profile: "normal_speed" as const,
+      insertionMode: "paste" as const,
+      contextSource: "none" as const,
+      saveToInbox: false,
+      copyToClipboard: true,
+      commandModeEnabled: false,
+    },
+    email: {
+      profile: "power_rewrite" as const,
+      insertionMode: "auto" as const,
+      contextSource: "selected_text" as const,
+      saveToInbox: true,
+      copyToClipboard: true,
+      commandModeEnabled: true,
+    },
+    notes: {
+      profile: "normal_speed" as const,
+      insertionMode: "inline" as const,
+      contextSource: "none" as const,
+      saveToInbox: true,
+      copyToClipboard: true,
+      commandModeEnabled: true,
+    },
+    meeting_follow_up: {
+      profile: "power_rewrite" as const,
+      insertionMode: "clipboard_only" as const,
+      contextSource: "clipboard" as const,
+      saveToInbox: true,
+      copyToClipboard: true,
+      commandModeEnabled: true,
+    },
+    custom: {},
+  }[preset];
+  applyBase(null, presetMode);
+  return next;
+}
+
+function getPopupSize(displayMode: DisplayMode, phase: DictationPhase, message: string | null) {
+  if (displayMode === "minimal") {
+    return { width: 130, height: 44 };
+  }
+
+  if (displayMode === "compact") {
+    return { width: 320, height: phase === "idle" ? 158 : phase === "error" ? 148 : 132 };
+  }
+
+  if (phase === "idle") {
+    return { width: 440, height: 270 };
+  }
+
+  if (phase === "error") {
+    return { width: 440, height: message && message.length > 110 ? 264 : 246 };
+  }
+
+  if (phase === "recording") {
+    return { width: 440, height: 224 };
+  }
+
+  return { width: 440, height: 198 };
+}
 
 export function DictationPopup() {
   const window = getCurrentWindow();
@@ -85,6 +240,73 @@ export function DictationPopup() {
   const [audioLevel, setAudioLevel] = useState(0);
   const [modePreset, setModePreset] = useState<DictationModePreset>("voice");
   const [contextSource, setContextSource] = useState<DictationContextSource>("none");
+  const [selectedCustomModeId, setSelectedCustomModeId] = useState<string | null>(null);
+  const [customModes, setCustomModes] = useState<DictationCustomMode[]>([]);
+  const [saveToInbox, setSaveToInbox] = useState(true);
+  const [projectId, setProjectId] = useState<string>("inbox");
+  const [dictationProfile, setDictationProfile] = useState<"normal_speed" | "power_rewrite">(
+    "normal_speed"
+  );
+  const [isBusyAction, setIsBusyAction] = useState(false);
+
+  const refreshPopupSettings = async () => {
+    const settings = await getSettings();
+    setPushToTalk(Boolean(settings.transcription.dictationPushToTalk));
+    setModePreset((settings.transcription.dictationModePreset ?? "voice") as DictationModePreset);
+    setSelectedCustomModeId(settings.transcription.dictationSelectedCustomModeId ?? null);
+    setCustomModes(settings.transcription.dictationCustomModes ?? []);
+    setContextSource(
+      (settings.transcription.dictationContextSource ?? "none") as DictationContextSource
+    );
+    setSaveToInbox(Boolean(settings.transcription.dictationSaveToInbox));
+    setProjectId(settings.transcription.dictationProjectId || "inbox");
+    setDictationProfile(
+      (settings.transcription.dictationProfile ?? "normal_speed") as
+        | "normal_speed"
+        | "power_rewrite"
+    );
+  };
+
+  const handleModeChange = async (modeId: string) => {
+    try {
+      const settings = await getSettings();
+      const [preset, customId] = modeId.startsWith("custom:")
+        ? (["custom", modeId.slice("custom:".length)] as const)
+        : ([modeId as DictationModePreset, undefined] as const);
+      const next = applyModeToSettings(settings, preset, customId);
+      await saveSettings(next);
+      await refreshPopupSettings();
+    } catch (error) {
+      console.error("Failed to switch dictation mode from popup:", error);
+    }
+  };
+
+  const handleStartFromPopup = async () => {
+    try {
+      setIsBusyAction(true);
+      await startDictation({
+        saveToInbox,
+        projectId,
+        profile: dictationProfile,
+        contextSource,
+      });
+    } catch (error) {
+      console.error("Failed to start dictation from popup:", error);
+    } finally {
+      setIsBusyAction(false);
+    }
+  };
+
+  const handleStopFromPopup = async () => {
+    try {
+      setIsBusyAction(true);
+      await stopDictation();
+    } catch (error) {
+      console.error("Failed to stop dictation from popup:", error);
+    } finally {
+      setIsBusyAction(false);
+    }
+  };
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -93,12 +315,7 @@ export function DictationPopup() {
       try {
         const initialState = await invoke<DictationStateChangedEvent>("get_dictation_overlay_state");
         try {
-          const settings = await getSettings();
-          setPushToTalk(Boolean(settings.transcription.dictationPushToTalk));
-          setModePreset((settings.transcription.dictationModePreset ?? "voice") as DictationModePreset);
-          setContextSource(
-            (settings.transcription.dictationContextSource ?? "none") as DictationContextSource
-          );
+          await refreshPopupSettings();
         } catch {
           // Keep default mode if settings are temporarily unavailable.
         }
@@ -134,6 +351,18 @@ export function DictationPopup() {
     void setup();
     return () => unlisten?.();
   }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (phase === "idle") {
+        void refreshPopupSettings().catch(() => {
+          // Ignore intermittent settings fetch issues while idle.
+        });
+      }
+    }, 2500);
+
+    return () => clearInterval(id);
+  }, [phase]);
 
   useEffect(() => {
     if (phase !== "recording") {
@@ -203,6 +432,9 @@ export function DictationPopup() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   }, [elapsed]);
 
+  const modeOptions = useMemo(() => popupModeOptions(customModes), [customModes]);
+  const selectedModeOptionId =
+    modePreset === "custom" && selectedCustomModeId ? `custom:${selectedCustomModeId}` : modePreset;
   const modeMeta = MODE_META[modePreset] ?? MODE_META.voice;
   const contextMeta = CONTEXT_META[contextSource] ?? CONTEXT_META.none;
 
@@ -210,18 +442,14 @@ export function DictationPopup() {
     const next: DisplayMode =
       displayMode === "full" ? "compact" : displayMode === "compact" ? "minimal" : "full";
     setDisplayMode(next);
-    try {
-      if (next === "minimal") {
-        await window.setSize(new LogicalSize(130, 44));
-      } else if (next === "compact") {
-        await window.setSize(new LogicalSize(280, 120));
-      } else {
-        await window.setSize(new LogicalSize(360, 160));
-      }
-    } catch (error) {
-      console.error("Failed to resize dictation popup:", error);
-    }
   };
+
+  useEffect(() => {
+    const { width, height } = getPopupSize(displayMode, phase, message);
+    void window.setSize(new LogicalSize(width, height)).catch((error) => {
+      console.error("Failed to resize dictation popup:", error);
+    });
+  }, [displayMode, message, phase, window]);
 
   const openMainApp = async () => {
     try {
@@ -239,16 +467,12 @@ export function DictationPopup() {
     }
   };
 
-  if (phase === "idle") {
-    return <div className="h-screen w-screen bg-transparent" />;
-  }
-
   // ── Minimal pill mode ────────────────────────────────────────────────────
   if (displayMode === "minimal") {
     const dotColor =
       phase === "recording"
         ? "bg-orange-400"
-        : phase === "transcribing" || phase === "stopping"
+        : phase === "starting" || phase === "transcribing" || phase === "stopping"
           ? "bg-cyan-400"
           : phase === "done"
             ? "bg-emerald-400"
@@ -343,6 +567,66 @@ export function DictationPopup() {
           </div>
         )}
 
+        {phase === "idle" && (
+          <div className="space-y-3 text-white">
+            <div className="space-y-1">
+              <p className="text-sm font-semibold">Dictation ready</p>
+              <p className="text-xs text-slate-300">
+                Start from here, switch modes, or jump back into Nautilus.
+              </p>
+            </div>
+            <div className="grid gap-3">
+              <label className="space-y-1 text-xs text-slate-300">
+                <span className="block uppercase tracking-wide text-slate-400">Mode</span>
+                <select
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none"
+                  value={selectedModeOptionId}
+                  onChange={(event) => void handleModeChange(event.target.value)}
+                >
+                  {modeOptions.map((option) => (
+                    <option key={option.id} value={option.id} className="text-slate-950">
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300">
+                {contextMeta.detail}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="inline-flex flex-1 items-center justify-center rounded-xl bg-cyan-400/90 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={() => void handleStartFromPopup()}
+                disabled={isBusyAction}
+              >
+                <Mic className="mr-2 h-4 w-4" />
+                {isBusyAction ? "Starting…" : "Start dictation"}
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white hover:bg-white/10"
+                onClick={() => void openMainApp()}
+              >
+                Open app
+              </button>
+            </div>
+          </div>
+        )}
+
+        {phase === "starting" && (
+          <div className="flex items-center gap-3 text-white">
+            <Loader2 className="h-5 w-5 animate-spin text-cyan-300" />
+            <div>
+              <p className="text-sm font-semibold">Starting dictation</p>
+              <p className="text-xs text-slate-300">
+                Warming the microphone and Apple Speech session…
+              </p>
+            </div>
+          </div>
+        )}
+
         {phase === "recording" && (
           <div className="flex items-center gap-3 text-white">
             <div className="relative rounded-full bg-orange-500/15 p-3 ring-1 ring-orange-300/25">
@@ -372,7 +656,7 @@ export function DictationPopup() {
             <button
               type="button"
               className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-rose-500/90 text-white hover:bg-rose-500"
-              onClick={() => void forceStopDictation()}
+              onClick={() => void handleStopFromPopup()}
               aria-label="Stop dictation"
             >
               <Square className="h-4 w-4 fill-current" />
@@ -381,7 +665,7 @@ export function DictationPopup() {
               <button
                 type="button"
                 className="text-xs text-rose-300 underline underline-offset-2"
-                onClick={() => void forceStopDictation()}
+                onClick={() => void handleStopFromPopup()}
               >
                 Stop now
               </button>

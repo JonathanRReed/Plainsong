@@ -144,7 +144,7 @@ pub struct TranscriptionSettings {
     pub dictation_selected_custom_mode_id: Option<String>,
     /// Saved reusable custom dictation modes.
     pub dictation_custom_modes: Vec<DictationCustomMode>,
-    /// Dictation context source: none, clipboard, selected_text
+    /// Dictation context source: none, clipboard, selected_text, application_context
     pub dictation_context_source: String,
     /// Dictation: Command mode toggle (e.g. "command newline")
     pub dictation_command_mode_enabled: bool,
@@ -206,6 +206,11 @@ pub struct DictationCustomMode {
     pub save_to_inbox: bool,
     pub copy_to_clipboard: bool,
     pub command_mode_enabled: bool,
+    pub dictation_provider: Option<String>,
+    pub dictation_model_id: Option<String>,
+    pub ai_provider: Option<String>,
+    pub ai_model_id: Option<String>,
+    pub activation_app_matcher: Option<String>,
 }
 
 impl Default for TranscriptionSettings {

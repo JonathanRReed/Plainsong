@@ -114,7 +114,8 @@ impl AsrManager {
             | AsrProviderType::DistilWhisper
             | AsrProviderType::Voxtral
             | AsrProviderType::ElevenLabsScribe
-            | AsrProviderType::OpenAiCloud => {
+            | AsrProviderType::OpenAiCloud
+            | AsrProviderType::Groq => {
                 AsrProviderFactory::create_with_model(provider_type, selected_model_id)
             }
             _ => AsrProviderFactory::create(provider_type),
@@ -1749,5 +1750,21 @@ mod tests {
                 "macOS Apple Speech should be reported as available even before the toggle is enabled"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn groq_provider_honors_selected_model_id() {
+        let manager = AsrManager::new();
+        manager
+            .set_provider_model_id(
+                AsrProviderType::Groq,
+                "whisper-large-v3".to_string(),
+            )
+            .await;
+
+        let provider = manager.get_provider(AsrProviderType::Groq).await;
+        let model = provider.model_info();
+
+        assert_eq!(model.version, "whisper-large-v3");
     }
 }

@@ -47,6 +47,12 @@ impl DeepSeekClient {
             .await
             .context("Failed to fetch DeepSeek models")?;
 
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("DeepSeek model list error {}: {}", status, body);
+        }
+
         let data: serde_json::Value = response
             .json()
             .await
@@ -103,6 +109,12 @@ impl DeepSeekClient {
             .send()
             .await
             .context("Failed to send request to DeepSeek")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("DeepSeek completion error {}: {}", status, body);
+        }
 
         let data: serde_json::Value = response
             .json()
