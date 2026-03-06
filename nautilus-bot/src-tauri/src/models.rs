@@ -17,6 +17,12 @@ pub struct Recording {
     pub summary: Option<String>,
     #[serde(default)]
     pub action_items: Option<Vec<String>>,
+    #[serde(default)]
+    pub meeting_notes: Option<String>,
+    #[serde(default)]
+    pub meeting_template_id: Option<String>,
+    #[serde(default)]
+    pub notes_updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +86,8 @@ pub struct RecordingOptions {
     #[serde(default)]
     pub template: Option<String>,
     #[serde(default)]
+    pub meeting_notes: Option<String>,
+    #[serde(default)]
     pub consent_prompt_shown: bool,
 }
 
@@ -105,6 +113,8 @@ pub struct DictationStartOptions {
     pub captured_context_text: Option<String>,
     #[serde(default)]
     pub context_app_name: Option<String>,
+    #[serde(default)]
+    pub context_app_bundle_id: Option<String>,
 }
 
 impl Default for DictationStartOptions {
@@ -116,6 +126,7 @@ impl Default for DictationStartOptions {
             context_source: "none".to_string(),
             captured_context_text: None,
             context_app_name: None,
+            context_app_bundle_id: None,
         }
     }
 }
@@ -134,6 +145,7 @@ pub struct DictationHistoryDetails {
     pub requested_provider: Option<String>,
     pub actual_provider: Option<String>,
     pub model_id: Option<String>,
+    pub startup_latency_ms: Option<u64>,
     pub transcription_latency_ms: Option<u64>,
     pub insert_latency_ms: Option<u64>,
     pub end_to_end_ms: Option<u64>,

@@ -4,7 +4,7 @@ import { formatTimeWithMs } from "@/lib/format-time";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Edit2, Check, User } from "lucide-react";
+import { Edit2, Check, Trash2, User } from "lucide-react";
 import type { TranscriptSegment } from "@/types";
 
 interface TranscriptViewerProps {
@@ -15,6 +15,7 @@ interface TranscriptViewerProps {
   speakerNames?: Record<string, string>;
   onRenameSpeaker?: (speakerId: string, newName: string) => Promise<void> | void;
   onEditSegment?: (segmentId: string, newText: string) => Promise<void> | void;
+  onDeleteSegments?: (segmentIds: string[]) => Promise<void> | void;
 }
 
 interface SpeakerBadgeProps {
@@ -88,6 +89,7 @@ export function TranscriptViewer({
   speakerNames: externalSpeakerNames,
   onRenameSpeaker,
   onEditSegment,
+  onDeleteSegments,
 }: TranscriptViewerProps) {
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [isEditingSpeakers, setIsEditingSpeakers] = useState(false);
@@ -241,13 +243,31 @@ export function TranscriptViewer({
                           ))}
                         </p>
                         {onEditSegment && (
-                          <button
-                            type="button"
-                            className="absolute top-0 right-0 opacity-0 group-hover/text:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted"
-                            onClick={(e) => { e.stopPropagation(); setEditingSegmentId(firstSegment.id); setEditingText(group.map(s => s.text).join(" ")); }}
-                          >
-                            <Edit2 className="h-3 w-3 text-muted-foreground" />
-                          </button>
+                          <div className="absolute top-0 right-0 flex items-center gap-1 opacity-0 group-hover/text:opacity-100 transition-opacity">
+                            <button
+                              type="button"
+                              className="p-0.5 rounded hover:bg-muted"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingSegmentId(firstSegment.id);
+                                setEditingText(group.map(s => s.text).join(" "));
+                              }}
+                            >
+                              <Edit2 className="h-3 w-3 text-muted-foreground" />
+                            </button>
+                            {onDeleteSegments && (
+                              <button
+                                type="button"
+                                className="p-0.5 rounded hover:bg-destructive/10"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void onDeleteSegments(group.map((segment) => segment.id));
+                                }}
+                              >
+                                <Trash2 className="h-3 w-3 text-destructive" />
+                              </button>
+                            )}
+                          </div>
                         )}
                         {firstSegment.confidence < 0.8 && (
                           <p className="text-xs text-muted-foreground mt-1">

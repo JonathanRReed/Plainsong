@@ -12,6 +12,9 @@ export interface Recording {
   status: "recording" | "processing" | "completed" | "error";
   summary?: string;
   actionItems?: string[];
+  meetingNotes?: string | null;
+  meetingTemplateId?: string | null;
+  notesUpdatedAt?: string | null;
 }
 
 export interface RecordingMetadata {

@@ -812,12 +812,10 @@ export function AsrProviderManager({
     },
   ];
 
-  const appleNativeReadyForDictation =
-    !!permissionDiagnostics?.speechRecognitionReady &&
-    !!permissionDiagnostics?.accessibilityReady &&
-    !!permissionDiagnostics?.automationReady;
-
   const appleNativeReadyForMeetings = !!permissionDiagnostics?.speechRecognitionReady;
+  const appleNativeTranscriptionReady = appleNativeReadyForMeetings;
+  const appleNativeCursorInsertionReady =
+    !!permissionDiagnostics?.accessibilityReady && !!permissionDiagnostics?.automationReady;
 
   const renderAppleNativeSetupCard = () => {
     if (!selectedRouteUsesAppleNative) {
@@ -832,16 +830,14 @@ export function AsrProviderManager({
           ? "Apple Native is selected for dictation."
           : "Apple Native is selected for meetings.";
 
-    const overallReady = appleNativeUsedForDictation
-      ? appleNativeReadyForDictation
-      : appleNativeReadyForMeetings;
+    const overallReady = appleNativeTranscriptionReady;
 
     return (
       <div className="rounded-lg border border-border bg-muted/10 p-4 space-y-4">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <Badge variant={overallReady ? "default" : "secondary"} className={overallReady ? "bg-green-600" : ""}>
-              {overallReady ? "Ready" : "Setup required"}
+              {overallReady ? "Ready for transcription" : "Setup required"}
             </Badge>
             <span className="text-sm font-medium">Apple Native setup</span>
           </div>
@@ -849,6 +845,17 @@ export function AsrProviderManager({
             {routeSummary} Nautilus will request speech access automatically, but macOS cursor insertion also needs Accessibility and Automation.
           </p>
         </div>
+
+        {appleNativeTranscriptionReady && appleNativeUsedForDictation && !appleNativeCursorInsertionReady ? (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+            <p className="text-sm font-medium text-amber-200">
+              Apple Native transcription is ready.
+            </p>
+            <p className="text-xs text-amber-100/90">
+              Cursor insertion still depends on Accessibility and Automation. If dictation is already inserting correctly, this readiness check may be stale.
+            </p>
+          </div>
+        ) : null}
 
         {permissionDiagnostics?.runningFromDiskImage ? (
           <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 space-y-2">
@@ -877,7 +884,13 @@ export function AsrProviderManager({
               <div className="flex items-center justify-between gap-2">
                 <p className="text-sm font-medium">{row.label}</p>
                 <Badge variant={row.ready ? "default" : "secondary"} className={row.ready ? "bg-green-600" : ""}>
-                  {row.ready ? "Ready" : "Needs grant"}
+                  {row.ready
+                    ? "Ready"
+                    : row.key === "speech"
+                      ? "Needs grant"
+                      : appleNativeUsedForDictation
+                        ? "Needed for insert"
+                        : "Optional"}
                 </Badge>
               </div>
               <p className="text-xs text-muted-foreground">{row.detail}</p>

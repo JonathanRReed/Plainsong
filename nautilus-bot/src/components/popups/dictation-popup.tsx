@@ -23,11 +23,9 @@ import {
 import {
   getSettings,
   getDictationAudioLevel,
-  saveSettings,
-  startDictation,
   stopDictation,
 } from "@/lib/tauri";
-import type { DictationCustomMode, Settings } from "@/types/settings";
+import type { DictationCustomMode } from "@/types/settings";
 
 type DisplayMode = "full" | "compact" | "minimal";
 type DictationPhase =
@@ -58,13 +56,7 @@ type DictationModePreset =
   | "custom";
 
 type DictationContextSource = "none" | "clipboard" | "selected_text" | "application_context";
-type DictationModeOption = {
-  id: string;
-  label: string;
-  preset: DictationModePreset;
-  customModeId?: string;
-};
-
+type DictationInsertionMode = "auto" | "paste" | "inline" | "clipboard_only";
 const MODE_META: Record<
   DictationModePreset,
   { label: string; icon: typeof Mic; accent: string }
@@ -92,138 +84,89 @@ const CONTEXT_META: Record<DictationContextSource, { label: string; detail: stri
   application_context: { label: "App context", detail: "Using the frontmost app and window" },
 };
 
-function popupModeOptions(customModes: DictationCustomMode[]): DictationModeOption[] {
-  return [
-    { id: "voice", label: "Voice", preset: "voice" },
-    { id: "messages", label: "Messages", preset: "messages" },
-    { id: "email", label: "Email", preset: "email" },
-    { id: "notes", label: "Notes", preset: "notes" },
-    { id: "meeting_follow_up", label: "Meeting Follow-up", preset: "meeting_follow_up" },
-    ...customModes.map((mode) => ({
-      id: `custom:${mode.id}`,
-      label: mode.name,
-      preset: "custom" as const,
-      customModeId: mode.id,
-    })),
-  ];
+const INSERTION_META: Record<DictationInsertionMode, { label: string; detail: string }> = {
+  auto: { label: "Recommended", detail: "Best available insert path" },
+  paste: { label: "Paste at cursor", detail: "Paste into the frontmost app" },
+  inline: { label: "Insert on release", detail: "Single insert after you stop speaking" },
+  clipboard_only: { label: "Clipboard only", detail: "Do not try to insert automatically" },
+};
+
+function formatRouteLabel(provider: string | null, modelId: string | null) {
+  if (!provider && !modelId) {
+    return "Current transcription route";
+  }
+  if (provider && modelId) {
+    return `${provider} · ${modelId}`;
+  }
+  return provider || modelId || "Current transcription route";
 }
 
-function applyModeToSettings(
-  settings: Settings,
-  preset: DictationModePreset,
-  customModeId?: string
-): Settings {
-  const next = structuredClone(settings);
-  const transcription = next.transcription;
-
-  const applyBase = (mode: DictationCustomMode | null, fallback?: Partial<DictationCustomMode>) => {
-    if (mode) {
-      transcription.dictationProfile = mode.profile;
-      transcription.dictationInsertionMode = mode.insertionMode;
-      transcription.dictationContextSource = mode.contextSource;
-      transcription.dictationSaveToInbox = mode.saveToInbox;
-      transcription.dictationCopyToClipboard = mode.copyToClipboard;
-      transcription.dictationCommandModeEnabled = mode.commandModeEnabled;
-      if (mode.dictationProvider) transcription.dictationProvider = mode.dictationProvider;
-      if (mode.dictationModelId) transcription.dictationModelId = mode.dictationModelId;
-      if (mode.aiProvider) next.privacy.llmProvider = mode.aiProvider;
-      next.privacy.llmModelId = mode.aiModelId ?? next.privacy.llmModelId ?? null;
-      return;
-    }
-    if (!fallback) return;
-    if (fallback.profile) transcription.dictationProfile = fallback.profile;
-    if (fallback.insertionMode) transcription.dictationInsertionMode = fallback.insertionMode;
-    if (fallback.contextSource) transcription.dictationContextSource = fallback.contextSource;
-    if (typeof fallback.saveToInbox === "boolean") {
-      transcription.dictationSaveToInbox = fallback.saveToInbox;
-    }
-    if (typeof fallback.copyToClipboard === "boolean") {
-      transcription.dictationCopyToClipboard = fallback.copyToClipboard;
-    }
-    if (typeof fallback.commandModeEnabled === "boolean") {
-      transcription.dictationCommandModeEnabled = fallback.commandModeEnabled;
-    }
-  };
-
-  transcription.dictationModePreset = preset;
-  transcription.dictationSelectedCustomModeId = preset === "custom" ? customModeId ?? null : null;
-
-  if (preset === "custom") {
-    const customMode =
-      transcription.dictationCustomModes?.find((mode) => mode.id === customModeId) ?? null;
-    applyBase(customMode);
-    return next;
+function estimatePopupTextLines(value: string | null, charsPerLine: number) {
+  if (!value) {
+    return 0;
   }
 
-  const presetMode: Partial<DictationCustomMode> = {
-    voice: {
-      profile: "normal_speed" as const,
-      insertionMode: "auto" as const,
-      contextSource: "none" as const,
-      saveToInbox: true,
-      copyToClipboard: true,
-      commandModeEnabled: true,
-    },
-    messages: {
-      profile: "normal_speed" as const,
-      insertionMode: "paste" as const,
-      contextSource: "none" as const,
-      saveToInbox: false,
-      copyToClipboard: true,
-      commandModeEnabled: false,
-    },
-    email: {
-      profile: "power_rewrite" as const,
-      insertionMode: "auto" as const,
-      contextSource: "selected_text" as const,
-      saveToInbox: true,
-      copyToClipboard: true,
-      commandModeEnabled: true,
-    },
-    notes: {
-      profile: "normal_speed" as const,
-      insertionMode: "inline" as const,
-      contextSource: "none" as const,
-      saveToInbox: true,
-      copyToClipboard: true,
-      commandModeEnabled: true,
-    },
-    meeting_follow_up: {
-      profile: "power_rewrite" as const,
-      insertionMode: "clipboard_only" as const,
-      contextSource: "clipboard" as const,
-      saveToInbox: true,
-      copyToClipboard: true,
-      commandModeEnabled: true,
-    },
-    custom: {},
-  }[preset];
-  applyBase(null, presetMode);
-  return next;
+  return value
+    .split("\n")
+    .reduce((total, line) => total + Math.max(1, Math.ceil(line.length / charsPerLine)), 0);
 }
 
-function getPopupSize(displayMode: DisplayMode, phase: DictationPhase, message: string | null) {
+function getPopupSize(
+  displayMode: DisplayMode,
+  phase: DictationPhase,
+  message: string | null,
+  preview: string | null
+) {
   if (displayMode === "minimal") {
-    return { width: 130, height: 44 };
+    return { width: 180, height: 48 };
   }
 
   if (displayMode === "compact") {
-    return { width: 320, height: phase === "idle" ? 158 : phase === "error" ? 148 : 132 };
+    const compactMessageLines = estimatePopupTextLines(message, 32);
+    const compactPreviewLines = estimatePopupTextLines(preview, 32);
+    return {
+      width: 360,
+      height:
+        phase === "idle"
+          ? 212
+          : phase === "error"
+            ? Math.max(212, 168 + compactMessageLines * 20)
+            : phase === "done"
+              ? Math.max(196, 154 + Math.max(compactMessageLines, compactPreviewLines) * 18)
+              : phase === "recording"
+                ? Math.max(182, 148 + compactPreviewLines * 16)
+                : 164,
+    };
   }
 
   if (phase === "idle") {
-    return { width: 440, height: 270 };
+    return { width: 480, height: 336 };
   }
 
   if (phase === "error") {
-    return { width: 440, height: message && message.length > 110 ? 264 : 246 };
+    const messageLines = estimatePopupTextLines(message, 48);
+    return { width: 480, height: Math.max(320, 248 + messageLines * 22) };
   }
 
   if (phase === "recording") {
-    return { width: 440, height: 224 };
+    const previewLines = estimatePopupTextLines(preview, 48);
+    return { width: 480, height: Math.max(272, 224 + previewLines * 20) };
   }
 
-  return { width: 440, height: 198 };
+  if (phase === "done") {
+    const contentLines = Math.max(
+      estimatePopupTextLines(message, 48),
+      estimatePopupTextLines(preview, 48)
+    );
+    return { width: 480, height: Math.max(264, 214 + contentLines * 20) };
+  }
+
+  const previewLines = estimatePopupTextLines(preview, 48);
+  const messageLines = estimatePopupTextLines(message, 48);
+  return {
+    width: 480,
+    height: Math.max(236, 194 + Math.max(previewLines, messageLines) * 18),
+  };
 }
 
 export function DictationPopup() {
@@ -242,12 +185,10 @@ export function DictationPopup() {
   const [contextSource, setContextSource] = useState<DictationContextSource>("none");
   const [selectedCustomModeId, setSelectedCustomModeId] = useState<string | null>(null);
   const [customModes, setCustomModes] = useState<DictationCustomMode[]>([]);
-  const [saveToInbox, setSaveToInbox] = useState(true);
-  const [projectId, setProjectId] = useState<string>("inbox");
-  const [dictationProfile, setDictationProfile] = useState<"normal_speed" | "power_rewrite">(
-    "normal_speed"
-  );
-  const [isBusyAction, setIsBusyAction] = useState(false);
+  const [dictationProvider, setDictationProvider] = useState<string | null>(null);
+  const [dictationModelId, setDictationModelId] = useState<string | null>(null);
+  const [dictationInsertionMode, setDictationInsertionMode] =
+    useState<DictationInsertionMode>("auto");
 
   const refreshPopupSettings = async () => {
     const settings = await getSettings();
@@ -258,53 +199,18 @@ export function DictationPopup() {
     setContextSource(
       (settings.transcription.dictationContextSource ?? "none") as DictationContextSource
     );
-    setSaveToInbox(Boolean(settings.transcription.dictationSaveToInbox));
-    setProjectId(settings.transcription.dictationProjectId || "inbox");
-    setDictationProfile(
-      (settings.transcription.dictationProfile ?? "normal_speed") as
-        | "normal_speed"
-        | "power_rewrite"
+    setDictationProvider(settings.transcription.dictationProvider ?? null);
+    setDictationModelId(settings.transcription.dictationModelId ?? null);
+    setDictationInsertionMode(
+      (settings.transcription.dictationInsertionMode ?? "auto") as DictationInsertionMode
     );
-  };
-
-  const handleModeChange = async (modeId: string) => {
-    try {
-      const settings = await getSettings();
-      const [preset, customId] = modeId.startsWith("custom:")
-        ? (["custom", modeId.slice("custom:".length)] as const)
-        : ([modeId as DictationModePreset, undefined] as const);
-      const next = applyModeToSettings(settings, preset, customId);
-      await saveSettings(next);
-      await refreshPopupSettings();
-    } catch (error) {
-      console.error("Failed to switch dictation mode from popup:", error);
-    }
-  };
-
-  const handleStartFromPopup = async () => {
-    try {
-      setIsBusyAction(true);
-      await startDictation({
-        saveToInbox,
-        projectId,
-        profile: dictationProfile,
-        contextSource,
-      });
-    } catch (error) {
-      console.error("Failed to start dictation from popup:", error);
-    } finally {
-      setIsBusyAction(false);
-    }
   };
 
   const handleStopFromPopup = async () => {
     try {
-      setIsBusyAction(true);
       await stopDictation();
     } catch (error) {
       console.error("Failed to stop dictation from popup:", error);
-    } finally {
-      setIsBusyAction(false);
     }
   };
 
@@ -340,10 +246,8 @@ export function DictationPopup() {
         setPreview(payload.preview ?? null);
         setOutcome(payload.outcome ?? null);
         setSessionId(typeof payload.sessionId === "number" ? payload.sessionId : null);
-        if (payload.phase === "recording") {
-          const startMs =
-            typeof payload.startedAtMs === "number" ? payload.startedAtMs : Date.now();
-          setStartedAtMs(startMs);
+        if (payload.phase === "recording" && typeof payload.startedAtMs === "number") {
+          setStartedAtMs(payload.startedAtMs);
         }
       });
     };
@@ -411,10 +315,8 @@ export function DictationPopup() {
             setPreview(state.preview ?? null);
             setOutcome(state.outcome ?? null);
             setSessionId(snapshotSessionId);
-            if (state.phase === "recording") {
-              setStartedAtMs(
-                typeof state.startedAtMs === "number" ? state.startedAtMs : Date.now()
-              );
+            if (state.phase === "recording" && typeof state.startedAtMs === "number") {
+              setStartedAtMs(state.startedAtMs);
             }
           }
         })
@@ -432,11 +334,14 @@ export function DictationPopup() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   }, [elapsed]);
 
-  const modeOptions = useMemo(() => popupModeOptions(customModes), [customModes]);
-  const selectedModeOptionId =
-    modePreset === "custom" && selectedCustomModeId ? `custom:${selectedCustomModeId}` : modePreset;
   const modeMeta = MODE_META[modePreset] ?? MODE_META.voice;
+  const selectedModeLabel =
+    modePreset === "custom"
+      ? customModes.find((option) => option.id === selectedCustomModeId)?.name ?? modeMeta.label
+      : modeMeta.label;
   const contextMeta = CONTEXT_META[contextSource] ?? CONTEXT_META.none;
+  const insertionMeta = INSERTION_META[dictationInsertionMode] ?? INSERTION_META.auto;
+  const routeLabel = formatRouteLabel(dictationProvider, dictationModelId);
 
   const cycleDisplayMode = async () => {
     const next: DisplayMode =
@@ -445,15 +350,29 @@ export function DictationPopup() {
   };
 
   useEffect(() => {
-    const { width, height } = getPopupSize(displayMode, phase, message);
+    const { width, height } = getPopupSize(displayMode, phase, message, preview);
     void window.setSize(new LogicalSize(width, height)).catch((error) => {
       console.error("Failed to resize dictation popup:", error);
     });
-  }, [displayMode, message, phase, window]);
+  }, [displayMode, message, phase, preview, window]);
 
-  const openMainApp = async () => {
+  useEffect(() => {
+    if (phase !== "idle") {
+      return;
+    }
+
+    void window.hide().catch((error) => {
+      console.error("Failed to hide dictation popup while idle:", error);
+    });
+  }, [phase, window]);
+
+  const openMainApp = async (view?: "dictation" | "settings" | "recordings") => {
     try {
-      await invoke("open_main_window");
+      if (view) {
+        await invoke("open_main_window_to", { view });
+      } else {
+        await invoke("open_main_window");
+      }
     } catch (error) {
       console.error("Failed to open main window:", error);
     }
@@ -485,17 +404,28 @@ export function DictationPopup() {
         onDoubleClick={() => void cycleDisplayMode()}
         title="Double-click to expand"
       >
-        <div className="flex items-center gap-[5px] rounded-full bg-[#1a1f2e]/90 px-4 py-[10px] backdrop-blur-md shadow-lg border border-white/10">
-          {[0, 1, 2, 3, 4].map((i) => (
-            <span
-              key={i}
-              className={`block h-[6px] w-[6px] rounded-full ${dotColor}`}
-              style={{
-                animation: `dictation-dot-pulse 1.2s ease-in-out ${i * 0.15}s infinite`,
-                opacity: phase === "done" ? 1 : undefined,
-              }}
-            />
-          ))}
+        <div className="flex items-center gap-2 rounded-full bg-[#1a1f2e]/90 px-3 py-[10px] backdrop-blur-md shadow-lg border border-white/10">
+          <div className="flex items-center gap-[5px]">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <span
+                key={i}
+                className={`block h-[6px] w-[6px] rounded-full ${dotColor}`}
+                style={{
+                  animation: `dictation-dot-pulse 1.2s ease-in-out ${i * 0.15}s infinite`,
+                  opacity: phase === "done" ? 1 : undefined,
+                }}
+              />
+            ))}
+          </div>
+          <button
+            type="button"
+            className="inline-flex h-6 w-6 items-center justify-center rounded-full text-slate-300 hover:bg-white/10 hover:text-white"
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={() => void hidePopup()}
+            aria-label="Hide popup"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
         <style>{`
           @keyframes dictation-dot-pulse {
@@ -509,9 +439,13 @@ export function DictationPopup() {
 
   const compact = displayMode === "compact";
 
+  if (phase === "idle") {
+    return <div className="h-screen w-screen bg-transparent" />;
+  }
+
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="rounded-[24px] border border-cyan-400/35 bg-linear-to-br from-slate-950/95 via-slate-900/92 to-cyan-950/55 px-4 py-3 backdrop-blur-xl shadow-[0_18px_80px_rgba(8,15,28,0.55)]">
+      <div className="rounded-[24px] border border-cyan-400/35 bg-linear-to-br from-slate-950/95 via-slate-900/92 to-cyan-950/55 px-4 py-3 backdrop-blur-xl shadow-[0_18px_80px_rgba(8,15,28,0.55)] overflow-hidden">
         <div
           className="mb-2 flex items-center justify-between text-slate-300"
           onMouseDown={() => void window.startDragging()}
@@ -567,61 +501,13 @@ export function DictationPopup() {
           </div>
         )}
 
-        {phase === "idle" && (
-          <div className="space-y-3 text-white">
-            <div className="space-y-1">
-              <p className="text-sm font-semibold">Dictation ready</p>
-              <p className="text-xs text-slate-300">
-                Start from here, switch modes, or jump back into Nautilus.
-              </p>
-            </div>
-            <div className="grid gap-3">
-              <label className="space-y-1 text-xs text-slate-300">
-                <span className="block uppercase tracking-wide text-slate-400">Mode</span>
-                <select
-                  className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none"
-                  value={selectedModeOptionId}
-                  onChange={(event) => void handleModeChange(event.target.value)}
-                >
-                  {modeOptions.map((option) => (
-                    <option key={option.id} value={option.id} className="text-slate-950">
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-slate-300">
-                {contextMeta.detail}
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                className="inline-flex flex-1 items-center justify-center rounded-xl bg-cyan-400/90 px-3 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={() => void handleStartFromPopup()}
-                disabled={isBusyAction}
-              >
-                <Mic className="mr-2 h-4 w-4" />
-                {isBusyAction ? "Starting…" : "Start dictation"}
-              </button>
-              <button
-                type="button"
-                className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white hover:bg-white/10"
-                onClick={() => void openMainApp()}
-              >
-                Open app
-              </button>
-            </div>
-          </div>
-        )}
-
         {phase === "starting" && (
           <div className="flex items-center gap-3 text-white">
             <Loader2 className="h-5 w-5 animate-spin text-cyan-300" />
             <div>
               <p className="text-sm font-semibold">Starting dictation</p>
               <p className="text-xs text-slate-300">
-                Warming the microphone and Apple Speech session…
+                Warming the microphone and preparing {routeLabel.toLowerCase()}…
               </p>
             </div>
           </div>
@@ -637,7 +523,9 @@ export function DictationPopup() {
               <p className="text-sm font-semibold">Listening</p>
               {!compact && (
                 <>
-                  <p className="mt-1 text-xs text-slate-300">{contextMeta.detail}</p>
+                  <p className="mt-1 text-xs text-slate-300">
+                    {selectedModeLabel} · {contextMeta.detail} · {insertionMeta.label}
+                  </p>
                   <div className="mt-2 h-2.5 w-full max-w-[220px] rounded-full bg-slate-700/50 overflow-hidden">
                     <div
                       className="h-full bg-linear-to-r from-emerald-500 via-orange-400 to-rose-500 transition-all duration-50 rounded-full"
@@ -646,8 +534,8 @@ export function DictationPopup() {
                   </div>
                   <p className="text-xs text-slate-300 mt-1.5">
                     {pushToTalk
-                      ? "Release hotkey to transcribe + paste"
-                      : "Press the hotkey again to transcribe + paste"}
+                      ? `Release hotkey to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`
+                      : `Press the hotkey again to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`}
                   </p>
                 </>
               )}
@@ -689,7 +577,7 @@ export function DictationPopup() {
             <div>
               <p className="text-sm font-semibold">Transcribing</p>
               <p className="text-xs text-slate-300">
-                {modeMeta.label} mode is shaping the result for insert or clipboard.
+                {selectedModeLabel} is shaping the result for {insertionMeta.label.toLowerCase()}.
               </p>
             </div>
           </div>
@@ -707,15 +595,35 @@ export function DictationPopup() {
                     : "Transcription ready"}
               </p>
               {!compact && message && (
-                <p className="text-xs text-slate-300 max-w-[280px]">{message}</p>
+                <p className="max-w-[330px] text-xs leading-relaxed text-slate-300">{message}</p>
               )}
               {!compact && !message && preview && (
-                <p className="text-xs text-slate-300 truncate max-w-[260px]">{preview}</p>
+                <p className="max-w-[330px] text-xs leading-relaxed text-slate-300 line-clamp-3">
+                  {preview}
+                </p>
               )}
               {!compact && !message && !preview && (
                 <p className="text-xs text-slate-300">
-                  Ready in {modeMeta.label.toLowerCase()} mode.
+                  Ready in {selectedModeLabel.toLowerCase()} mode.
                 </p>
+              )}
+              {!compact && (
+                <div className="mt-2 flex items-center gap-2 text-xs text-slate-300">
+                  <button
+                    type="button"
+                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
+                    onClick={() => void openMainApp("dictation")}
+                  >
+                    History
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
+                    onClick={() => void openMainApp("settings")}
+                  >
+                    Settings
+                  </button>
+                </div>
               )}
             </div>
           </div>
@@ -726,11 +634,31 @@ export function DictationPopup() {
             <TriangleAlert className="h-5 w-5 text-rose-300" />
             <div>
               <p className="text-sm font-semibold">Dictation failed</p>
-              {!compact && message && <p className="text-xs text-slate-300 max-w-[280px]">{message}</p>}
+              {!compact && message && (
+                <p className="max-w-[330px] text-xs leading-relaxed text-slate-300">{message}</p>
+              )}
               {!compact && (
                 <p className="text-xs text-rose-200/90">
-                  Check microphone access, active provider, and shortcut permissions.
+                  Check microphone access, {routeLabel.toLowerCase()}, and shortcut permissions.
                 </p>
+              )}
+              {!compact && (
+                <div className="mt-2 flex items-center gap-2 text-xs text-slate-300">
+                  <button
+                    type="button"
+                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
+                    onClick={() => void openMainApp("settings")}
+                  >
+                    Open settings
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
+                    onClick={() => void openMainApp("dictation")}
+                  >
+                    Open history
+                  </button>
+                </div>
               )}
             </div>
           </div>

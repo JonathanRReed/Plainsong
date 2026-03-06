@@ -21,6 +21,10 @@ import {
 interface AiAnalysisPanelProps {
   recordingId: string;
   className?: string;
+  title?: string;
+  inputPlaceholder?: string;
+  templates?: AnalysisTemplate[];
+  emptyStateLabel?: string;
 }
 
 const ANALYSIS_TEMPLATES: AnalysisTemplate[] = [
@@ -54,7 +58,14 @@ const ANALYSIS_TEMPLATES: AnalysisTemplate[] = [
   }
 ];
 
-export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps) {
+export function AiAnalysisPanel({
+  recordingId,
+  className,
+  title = "AI Analysis",
+  inputPlaceholder = "Ask a custom question about this transcript...",
+  templates = ANALYSIS_TEMPLATES,
+  emptyStateLabel = "Analyzing transcript...",
+}: AiAnalysisPanelProps) {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [customQuery, setCustomQuery] = useState("");
   const [lastResult, setLastResult] = useState<LlmAnalysisResult | null>(null);
@@ -177,7 +188,7 @@ export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps
     <div className={cn("space-y-4", className)}>
       {/* Template Buttons */}
       <div className="grid grid-cols-2 gap-2">
-        {ANALYSIS_TEMPLATES.map((template) => (
+        {templates.map((template) => (
           <Button
             key={template.id}
             variant="outline"
@@ -199,7 +210,7 @@ export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps
       {/* Custom Query */}
       <div className="flex gap-2">
         <Input
-          placeholder="Ask a custom question about this transcript..."
+          placeholder={inputPlaceholder}
           value={customQuery}
           onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCustomQuery(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && handleCustomQuery()}
@@ -243,7 +254,7 @@ export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps
       {isAnalyzing && !lastResult && !actionItems && (
         <div className="flex items-center justify-center py-8 text-muted-foreground">
           <Loader2 className="h-5 w-5 mr-2 animate-spin" />
-          Analyzing transcript...
+          {emptyStateLabel}
         </div>
       )}
 
@@ -253,7 +264,7 @@ export function AiAnalysisPanel({ recordingId, className }: AiAnalysisPanelProps
             <div className="flex items-center justify-between">
               <CardTitle className="text-sm font-medium flex items-center gap-2">
                 <Sparkles className="h-4 w-4 text-trusted" />
-                AI Analysis
+                {title}
               </CardTitle>
               <div className="flex items-center gap-2">
                 <Badge variant="secondary" className="text-xs">

@@ -49,6 +49,7 @@ interface DictationTextReadyEvent {
   fallbackReason?: string | null;
   fallbackMessage?: string | null;
   modelId?: string;
+  startupLatencyMs?: number | null;
   latencyMs?: number;
   insertLatencyMs?: number;
   endToEndMs?: number;
@@ -89,6 +90,11 @@ type DictationCustomModeDraft = {
   activationAppMatcher: string;
 };
 
+type DictationModeSummaryItem = {
+  label: string;
+  value: string;
+};
+
 const COMMAND_PRESET_FIELDS: Array<{
   key: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection";
   label: string;
@@ -115,6 +121,25 @@ const COMMAND_PRESET_FIELDS: Array<{
 ];
 
 const DEFAULT_DICTATION_MODE: DictationModePreset = "voice";
+
+const INSERTION_MODE_LABELS: Record<DictationInsertionMode, string> = {
+  auto: "Recommended",
+  paste: "Paste at cursor",
+  inline: "Insert on release",
+  clipboard_only: "Clipboard only",
+};
+
+const CONTEXT_SOURCE_LABELS: Record<DictationContextSource, string> = {
+  none: "No context",
+  clipboard: "Clipboard",
+  selected_text: "Selected text",
+  application_context: "Application context",
+};
+
+const PROFILE_LABELS = {
+  normal_speed: "Fast capture",
+  power_rewrite: "Power rewrite",
+} as const;
 
 const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
   {
@@ -179,6 +204,49 @@ const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
   },
 ];
 
+function summarizeMode(mode: {
+  profile: "normal_speed" | "power_rewrite";
+  insertionMode: DictationInsertionMode;
+  contextSource: DictationContextSource;
+  saveToInbox: boolean;
+  copyToClipboard: boolean;
+  commandModeEnabled: boolean;
+  dictationProvider?: string | null;
+  dictationModelId?: string | null;
+  aiProvider?: string | null;
+  aiModelId?: string | null;
+  activationAppMatcher?: string | null;
+}): DictationModeSummaryItem[] {
+  return [
+    { label: "Style", value: PROFILE_LABELS[mode.profile] },
+    { label: "Result", value: INSERTION_MODE_LABELS[mode.insertionMode] },
+    { label: "Context", value: CONTEXT_SOURCE_LABELS[mode.contextSource] },
+    { label: "History", value: mode.saveToInbox ? "Save to Inbox" : "Do not save" },
+    { label: "Clipboard", value: mode.copyToClipboard ? "Copy enabled" : "Copy off" },
+    { label: "Commands", value: mode.commandModeEnabled ? "Command mode on" : "Command mode off" },
+    {
+      label: "Transcription",
+      value: mode.dictationProvider
+        ? mode.dictationModelId
+          ? `${mode.dictationProvider} · ${mode.dictationModelId}`
+          : mode.dictationProvider
+        : "Current route",
+    },
+    {
+      label: "AI",
+      value: mode.aiProvider
+        ? mode.aiModelId
+          ? `${mode.aiProvider} · ${mode.aiModelId}`
+          : mode.aiProvider
+        : "Current AI route",
+    },
+    {
+      label: "Auto",
+      value: mode.activationAppMatcher ? `For ${mode.activationAppMatcher}` : "Manual only",
+    },
+  ];
+}
+
 export function DictationView() {
   const { isRecording, formattedDuration, startDictation, stopDictation } = useRecording();
   const { projects } = useProjects();
@@ -191,6 +259,7 @@ export function DictationView() {
   const [lastModelId, setLastModelId] = useState<string | null>(null);
   const [fallbackStatus, setFallbackStatus] = useState<string | null>(null);
   const [pasteStatus, setPasteStatus] = useState<string | null>(null);
+  const [startupLatencyMs, setStartupLatencyMs] = useState<number | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [insertLatencyMs, setInsertLatencyMs] = useState<number | null>(null);
   const [endToEndMs, setEndToEndMs] = useState<number | null>(null);
@@ -270,6 +339,36 @@ export function DictationView() {
         ? dictationCustomModes.find((mode) => mode.id === selectedCustomModeId) ?? null
         : null,
     [dictationCustomModes, selectedCustomModeId]
+  );
+
+  const activeModeSummary = useMemo(
+    () =>
+      summarizeMode({
+        profile: dictationProfile,
+        insertionMode: dictationInsertionMode,
+        contextSource: dictationContextSource,
+        saveToInbox,
+        copyToClipboard: dictationCopyToClipboard,
+        commandModeEnabled: dictationCommandModeEnabled,
+        dictationProvider: currentDictationProvider,
+        dictationModelId: currentDictationModelId,
+        aiProvider: currentAiProvider,
+        aiModelId: currentAiModelId,
+        activationAppMatcher: selectedCustomMode?.activationAppMatcher ?? null,
+      }),
+    [
+      currentAiModelId,
+      currentAiProvider,
+      currentDictationModelId,
+      currentDictationProvider,
+      dictationCommandModeEnabled,
+      dictationContextSource,
+      dictationCopyToClipboard,
+      dictationInsertionMode,
+      dictationProfile,
+      saveToInbox,
+      selectedCustomMode?.activationAppMatcher,
+    ]
   );
 
   const inferModePreset = (values: {
@@ -755,6 +854,7 @@ export function DictationView() {
         if (payload?.modelId) {
           setLastModelId(payload.modelId);
         }
+        setStartupLatencyMs(payload?.startupLatencyMs ?? null);
         setLatencyMs(payload?.latencyMs ?? null);
         setInsertLatencyMs(payload?.insertLatencyMs ?? null);
         setEndToEndMs(payload?.endToEndMs ?? null);
@@ -1148,12 +1248,43 @@ export function DictationView() {
                               Delete
                             </Button>
                           </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {summarizeMode(mode).map((item) => (
+                              <span
+                                key={`${mode.id}-${item.label}`}
+                                className="rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground"
+                              >
+                                <span className="font-medium text-foreground">{item.label}:</span>{" "}
+                                {item.value}
+                              </span>
+                            ))}
+                          </div>
                         </div>
                       );
                     })}
                   </div>
                 </div>
               )}
+              <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                <div>
+                  <p className="text-sm font-medium">What this mode changes</p>
+                  <p className="text-xs text-muted-foreground">
+                    The active mode controls insertion, context, saved history, command behavior,
+                    and the transcription/AI routes captured below.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {activeModeSummary.map((item) => (
+                    <span
+                      key={item.label}
+                      className="rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground"
+                    >
+                      <span className="font-medium text-foreground">{item.label}:</span>{" "}
+                      {item.value}
+                    </span>
+                  ))}
+                </div>
+              </div>
               <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                 {dictationModePreset === "custom"
                   ? selectedCustomMode
@@ -1215,11 +1346,8 @@ export function DictationView() {
                     </div>
                   </div>
                   <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                    Captures the current dictation route and AI route too.
-                    {currentDictationProvider ? ` Transcription: ${currentDictationProvider}.` : ""}
-                    {currentDictationModelId ? ` Model: ${currentDictationModelId}.` : ""}
-                    {currentAiProvider ? ` AI: ${currentAiProvider}.` : ""}
-                    {currentAiModelId ? ` AI model: ${currentAiModelId}.` : ""}
+                    Saving a custom mode snapshots the current dictation style, result behavior,
+                    context source, transcription route, AI route, and optional auto-activation rule.
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <Button size="sm" onClick={() => void handleSaveCustomMode(false)}>
@@ -1394,6 +1522,7 @@ export function DictationView() {
                 )}
                 {(lastProvider ||
                   lastModelId ||
+                  startupLatencyMs !== null ||
                   latencyMs !== null ||
                   insertLatencyMs !== null ||
                   endToEndMs !== null ||
@@ -1403,6 +1532,14 @@ export function DictationView() {
                   appTarget ||
                   contextChars !== null) && (
                   <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                    {startupLatencyMs !== null && (
+                      <span>
+                        Start:{" "}
+                        {startupLatencyMs < 1000
+                          ? `${startupLatencyMs}ms`
+                          : `${(startupLatencyMs / 1000).toFixed(1)}s`}
+                      </span>
+                    )}
                     {latencyMs !== null && (
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-active/10 text-active font-medium">
                         <Zap className="h-3 w-3" />
@@ -2017,6 +2154,18 @@ export function DictationView() {
                       {selectedTranscript.segments?.length ?? 0}
                     </p>
                   </div>
+                  <div className="rounded-md border bg-muted/30 px-3 py-2">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Start
+                    </p>
+                    <p className="mt-1 text-sm font-medium">
+                      {selectedHistoryDetails?.startupLatencyMs != null
+                        ? selectedHistoryDetails.startupLatencyMs < 1000
+                          ? `${selectedHistoryDetails.startupLatencyMs}ms`
+                          : `${(selectedHistoryDetails.startupLatencyMs / 1000).toFixed(1)}s`
+                        : "Unavailable"}
+                    </p>
+                  </div>
                 </div>
               </div>
 
@@ -2157,10 +2306,58 @@ export function DictationView() {
                 )}
               </div>
 
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-lg border bg-muted/20 p-3">
+                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                    Heard
+                  </p>
+                  <p className="mt-1 text-sm font-medium">
+                    {selectedTranscript.requestedProvider || "Default route"}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {selectedTranscript.modelId || selectedTranscript.model || "Unknown model"}
+                  </p>
+                </div>
+                <div className="rounded-lg border bg-muted/20 p-3">
+                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                    Ready to use
+                  </p>
+                  <p className="mt-1 text-sm font-medium">
+                    {reprocessedResult
+                      ? modeDefinitionById[reprocessedResult.modePreset as DictationModePreset]?.label ??
+                        reprocessedResult.modePreset
+                      : modeDefinitionById[reprocessModePreset]?.label ?? reprocessModePreset}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {reprocessedResult
+                      ? reprocessedResult.usedAi
+                        ? "AI-tuned output"
+                        : "Rule-based output"
+                      : "Pick a mode to preview a final version"}
+                  </p>
+                </div>
+                <div className="rounded-lg border bg-muted/20 p-3">
+                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                    Compare
+                  </p>
+                  <p className="mt-1 text-sm font-medium">
+                    {reprocessedResult ? "Before and after" : "Raw transcript only"}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Judge what Nautilus heard versus what you want to paste or save.
+                  </p>
+                </div>
+              </div>
+
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <p className="text-sm font-medium">Original transcript</p>
+                    <div>
+                      <p className="text-sm font-medium">What Nautilus heard</p>
+                      <p className="text-xs text-muted-foreground">
+                        The saved raw transcript from the original capture.
+                      </p>
+                    </div>
                     <Button
                       variant="ghost"
                       size="sm"
@@ -2177,7 +2374,12 @@ export function DictationView() {
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <p className="text-sm font-medium">Reprocessed result</p>
+                    <div>
+                      <p className="text-sm font-medium">Ready to use</p>
+                      <p className="text-xs text-muted-foreground">
+                        A mode-shaped result for paste, clipboard, or follow-up writing.
+                      </p>
+                    </div>
                     {reprocessedResult?.outputText && (
                       <Button
                         variant="ghost"
@@ -2201,15 +2403,15 @@ export function DictationView() {
                   </div>
                 </div>
               </div>
-              <div className="text-xs text-muted-foreground">
+              <div className="rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
                 Duration: {selectedRecording ? formatRecordingDuration(selectedRecording.duration) : "N/A"} · 
                 Created: {selectedRecording ? new Date(selectedRecording.createdAt).toLocaleString() : "N/A"}
                 {reprocessedResult && (
                   <>
-                    {" "}· Mode: {modeDefinitionById[reprocessedResult.modePreset as DictationModePreset]?.label ?? reprocessedResult.modePreset}
-                    {" "}· {reprocessedResult.usedAi ? "AI reprocessed" : "Rule-based"}
-                    {reprocessedResult.provider ? ` · Engine: ${reprocessedResult.provider}` : ""}
-                    {reprocessedResult.modelId ? ` · Model: ${reprocessedResult.modelId}` : ""}
+                    {" "}· Final mode: {modeDefinitionById[reprocessedResult.modePreset as DictationModePreset]?.label ?? reprocessedResult.modePreset}
+                    {" "}· {reprocessedResult.usedAi ? "AI tuned" : "Rule based"}
+                    {reprocessedResult.provider ? ` · Final engine: ${reprocessedResult.provider}` : ""}
+                    {reprocessedResult.modelId ? ` · Final model: ${reprocessedResult.modelId}` : ""}
                   </>
                 )}
               </div>
