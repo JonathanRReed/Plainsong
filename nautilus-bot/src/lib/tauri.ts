@@ -37,6 +37,7 @@ export interface DictationHistoryDetails {
   requestedProvider: string | null;
   actualProvider: string | null;
   modelId: string | null;
+  startupLatencyMs: number | null;
   transcriptionLatencyMs: number | null;
   insertLatencyMs: number | null;
   endToEndMs: number | null;
@@ -84,6 +85,7 @@ export async function startRecording(options: {
   systemAudio: boolean;
   projectId: string;
   template?: string;
+  meetingNotes?: string;
   consentPromptShown?: boolean;
 }): Promise<string> {
   return await invoke("start_recording", { options });
@@ -125,12 +127,26 @@ export async function renameRecording(recordingId: string, newTitle: string): Pr
   await invoke("rename_recording", { recordingId, newTitle });
 }
 
+export async function updateRecordingNotes(
+  recordingId: string,
+  meetingNotes: string
+): Promise<void> {
+  await invoke("update_recording_notes", { recordingId, meetingNotes });
+}
+
 export async function updateTranscriptSegment(
   recordingId: string,
   segmentId: string,
   newText: string
 ): Promise<boolean> {
   return await invoke("update_transcript_segment", { recordingId, segmentId, newText });
+}
+
+export async function deleteTranscriptSegments(
+  recordingId: string,
+  segmentIds: string[]
+): Promise<number> {
+  return await invoke("delete_transcript_segments", { recordingId, segmentIds });
 }
 
 export async function retryMeetingAutoName(recordingId: string): Promise<void> {

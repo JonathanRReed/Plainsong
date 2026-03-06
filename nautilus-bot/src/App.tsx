@@ -109,6 +109,10 @@ const VIEW_COMPONENTS: Record<ViewId, ComponentType> = {
 
 type OverlayMode = "dictation" | "recording" | null;
 
+interface MainViewRequestEvent {
+  view?: ViewId | string | null;
+}
+
 function getOverlayMode(): OverlayMode {
   if (typeof window === "undefined") return null;
   const overlay = new URLSearchParams(window.location.search).get("overlay");
@@ -246,6 +250,28 @@ function App() {
     const alreadyOnboarded = localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
     setShowWizard(!alreadyOnboarded);
   }, [overlayMode, licenseChecked]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<MainViewRequestEvent>("main-view-requested", (event) => {
+      const requestedView = event.payload?.view;
+      if (
+        requestedView === "dashboard" ||
+        requestedView === "projects" ||
+        requestedView === "recordings" ||
+        requestedView === "dictation" ||
+        requestedView === "exports" ||
+        requestedView === "settings"
+      ) {
+        setActiveView(requestedView);
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   const handleActivated = (info: LicenseInfo) => {
     setLicense(info);

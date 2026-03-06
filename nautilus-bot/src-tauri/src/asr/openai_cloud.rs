@@ -207,9 +207,7 @@ mod tests {
     #[test]
     fn openai_asr_response_format_matches_selected_model() {
         assert!(OpenAiCloudWhisperProvider::new(Some("whisper-1")).uses_verbose_json());
-        assert!(
-            !OpenAiCloudWhisperProvider::new(Some("gpt-4o-transcribe")).uses_verbose_json()
-        );
+        assert!(!OpenAiCloudWhisperProvider::new(Some("gpt-4o-transcribe")).uses_verbose_json());
         assert!(
             !OpenAiCloudWhisperProvider::new(Some("gpt-4o-mini-transcribe")).uses_verbose_json()
         );

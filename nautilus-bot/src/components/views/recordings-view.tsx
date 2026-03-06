@@ -27,16 +27,18 @@ import {
   setRecordingSourceType,
   isDiarizationModelAvailable,
   updateTranscriptSegment,
+  deleteTranscriptSegments,
+  updateRecordingNotes,
 } from "@/lib/tauri";
 import type { Recording, Transcript, TranscriptSegment } from "@/types";
 import { listen } from "@tauri-apps/api/event";
 import {
   AlertCircle,
-  BarChart3,
   Edit3,
   FileAudio,
   FileOutput,
   FileText,
+  MessageSquare,
   Loader2,
   Mic2,
   MoreHorizontal,
@@ -45,6 +47,7 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
+import type { AnalysisTemplate } from "@/types";
 
 function normalizeTranscriptForViewer(
   transcript: Transcript | null,
@@ -74,6 +77,37 @@ function normalizeTranscriptForViewer(
   return { ...transcript, segments: normalizedSegments };
 }
 
+const MEETING_ASK_TEMPLATES: AnalysisTemplate[] = [
+  {
+    id: "summary",
+    name: "Refresh Summary",
+    icon: "file-text",
+    query: "Using the meeting transcript and saved meeting notes, write a crisp summary with outcomes, open questions, and next steps.",
+    description: "Rebuild the summary from notes and transcript",
+  },
+  {
+    id: "actions",
+    name: "Action Items",
+    icon: "check-square",
+    query: "Using the meeting transcript and saved meeting notes, extract clear action items with owners when they are stated.",
+    description: "Find follow-ups and owners",
+  },
+  {
+    id: "decisions",
+    name: "Decisions",
+    icon: "lightbulb",
+    query: "List the decisions, agreements, and commitments made in this meeting, using the saved meeting notes to clarify context.",
+    description: "Surface what was decided",
+  },
+  {
+    id: "dates",
+    name: "Deadlines",
+    icon: "calendar",
+    query: "Extract all deadlines, dates, and time-sensitive follow-ups from this meeting and the saved notes.",
+    description: "Highlight timing commitments",
+  },
+];
+
 export function RecordingsView() {
   const { recordings, refetch } = useRecordings();
   const { startMeeting, stopMeeting, isRecording, recordingId, formattedDuration } = useRecording();
@@ -95,16 +129,15 @@ export function RecordingsView() {
   const [renameValue, setRenameValue] = useState("");
   const [isStopping, setIsStopping] = useState(false);
   const [meetingNotes, setMeetingNotes] = useState("");
+  const [meetingNotesTargetId, setMeetingNotesTargetId] = useState<string | null>(null);
   const lastRecordingState = useRef(false);
+  const lastSavedMeetingNotesRef = useRef("");
 
   // Live streaming transcript state
   type StreamChunk = { text: string; startTime: number; isPartial: boolean };
   const [streamChunks, setStreamChunks] = useState<StreamChunk[]>([]);
   const streamScrollRef = useRef<HTMLDivElement>(null);
 
-  // Nautilus auto-analysis results keyed by recording ID
-  type AutoAnalysis = { summary: string | null; actionItems: string[] };
-  const [analysisCache, setAnalysisCache] = useState<Record<string, AutoAnalysis>>({});
   const [autoNameIssue, setAutoNameIssue] = useState<{
     recordingId: string;
     message: string;
@@ -135,18 +168,45 @@ export function RecordingsView() {
     lastRecordingState.current = isRecording;
   }, [isRecording, refetch]);
 
-  // Listen for recording-analysis-ready events (auto Nautilus-style summary)
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<{ recordingId: string; summary?: string | null; actionItems?: string[] }>(
-      "recording-analysis-ready",
-      (event) => {
-        const { recordingId, summary = null, actionItems = [] } = event.payload;
-        setAnalysisCache((prev) => ({ ...prev, [recordingId]: { summary, actionItems } }));
-      }
-    ).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
-  }, []);
+    if (!meetingNotesTargetId) {
+      return;
+    }
+
+    const normalizedNotes = meetingNotes.trim();
+    if (normalizedNotes === lastSavedMeetingNotesRef.current.trim()) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void updateRecordingNotes(meetingNotesTargetId, meetingNotes)
+        .then(() => {
+          lastSavedMeetingNotesRef.current = meetingNotes;
+          setSelectedRecording((current) =>
+            current?.id === meetingNotesTargetId
+              ? {
+                  ...current,
+                  meetingNotes: normalizedNotes ? meetingNotes : null,
+                  notesUpdatedAt: new Date().toISOString(),
+                }
+              : current
+          );
+        })
+        .catch((error) => {
+          console.error("Failed to update meeting notes:", error);
+        });
+    }, 350);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [meetingNotes, meetingNotesTargetId]);
+
+  useEffect(() => {
+    if (!isRecording && !showRecordingDetail) {
+      setMeetingNotes("");
+      setMeetingNotesTargetId(null);
+      lastSavedMeetingNotesRef.current = "";
+    }
+  }, [isRecording, showRecordingDetail]);
 
   // Subscribe to live streaming transcript events while recording
   useEffect(() => {
@@ -269,6 +329,9 @@ export function RecordingsView() {
           setSelectedRecording((current) =>
             current?.id === latestRecording.id ? latestRecording : current
           );
+          if (latestRecording.id === meetingNotesTargetId) {
+            lastSavedMeetingNotesRef.current = latestRecording.meetingNotes ?? "";
+          }
         }
         if (latestTranscript) {
           setSelectedTranscript(
@@ -297,6 +360,7 @@ export function RecordingsView() {
       clearInterval(id);
     };
   }, [
+    meetingNotesTargetId,
     refetch,
     selectedRecording,
     selectedTranscript,
@@ -308,9 +372,12 @@ export function RecordingsView() {
       const startedId = await startMeeting({
         ...options,
         projectId: "default",
+        meetingNotes: meetingNotes.trim() || undefined,
         consentPromptShown: true,
       });
       if (startedId) {
+        setMeetingNotesTargetId(startedId);
+        lastSavedMeetingNotesRef.current = meetingNotes;
         refetch();
       }
     } catch (error) {
@@ -387,6 +454,9 @@ export function RecordingsView() {
 
   const handleRecordingClick = (recording: Recording) => {
     setSelectedRecording(recording);
+    setMeetingNotes(recording.meetingNotes ?? "");
+    setMeetingNotesTargetId(recording.id);
+    lastSavedMeetingNotesRef.current = recording.meetingNotes ?? "";
     setShowRecordingDetail(true);
     void loadRecordingDetail(recording);
   };
@@ -397,6 +467,36 @@ export function RecordingsView() {
     }
     setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
     await renameSpeaker(selectedRecording.id, speakerId, newName);
+  };
+
+  const handleDeleteTranscriptSegments = async (segmentIds: string[]) => {
+    if (!selectedRecording || segmentIds.length === 0) {
+      return;
+    }
+
+    try {
+      const removed = await deleteTranscriptSegments(selectedRecording.id, segmentIds);
+      if (removed === 0) {
+        toast("Nothing was removed from the transcript.", "error");
+        return;
+      }
+
+      const updated = await getTranscript(selectedRecording.id);
+      setSelectedTranscript(normalizeTranscriptForViewer(updated, selectedRecording.id));
+      await refetch();
+      toast(
+        removed === 1
+          ? "Transcript section removed."
+          : `${removed} transcript sections removed.`,
+        "success"
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Failed to remove transcript text from this meeting.";
+      toast(message, "error");
+    }
   };
 
   const handleRunDiarization = async () => {
@@ -928,6 +1028,11 @@ export function RecordingsView() {
             setDiarizationMessage(null);
             setDiarizationError(null);
             setDetailError(null);
+            if (!isRecording) {
+              setMeetingNotesTargetId(null);
+              setMeetingNotes("");
+              lastSavedMeetingNotesRef.current = "";
+            }
           }
         }}
       >
@@ -936,21 +1041,138 @@ export function RecordingsView() {
             <DialogTitle>{selectedRecording?.title ?? "Recording"}</DialogTitle>
           </DialogHeader>
 
-          <Tabs defaultValue="transcript" className="flex-1 flex flex-col">
-            <TabsList className="grid w-full grid-cols-3">
+          <Tabs defaultValue="notes" className="flex-1 flex flex-col">
+            <TabsList className="grid w-full grid-cols-4">
+              <TabsTrigger value="notes" className="flex items-center gap-2">
+                <Edit3 className="h-4 w-4" />
+                Notes
+              </TabsTrigger>
+              <TabsTrigger value="ask" className="flex items-center gap-2">
+                <MessageSquare className="h-4 w-4" />
+                Ask
+              </TabsTrigger>
               <TabsTrigger value="transcript" className="flex items-center gap-2">
                 <FileText className="h-4 w-4" />
                 Transcript
               </TabsTrigger>
-              <TabsTrigger value="audio" className="flex items-center gap-2">
+              <TabsTrigger value="assets" className="flex items-center gap-2">
                 <FileAudio className="h-4 w-4" />
-                Audio
-              </TabsTrigger>
-              <TabsTrigger value="analysis" className="flex items-center gap-2">
-                <BarChart3 className="h-4 w-4" />
-                Analysis
+                Assets
               </TabsTrigger>
             </TabsList>
+
+            <TabsContent value="notes" className="flex-1 overflow-hidden">
+              <ScrollArea className="h-full pr-2">
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)]">
+                  <div className="rounded-lg border p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-medium">Meeting notes</p>
+                        <p className="text-xs text-muted-foreground">
+                          Keep the note canvas current. Summaries, action items, and meeting chat use this alongside the transcript.
+                        </p>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {selectedRecording?.meetingTemplateId
+                          ? `Template: ${selectedRecording.meetingTemplateId}`
+                          : "Template: Auto"}
+                        {selectedRecording?.notesUpdatedAt
+                          ? ` · Updated ${new Date(selectedRecording.notesUpdatedAt).toLocaleString()}`
+                          : ""}
+                      </div>
+                    </div>
+                    <textarea
+                      value={meetingNotes}
+                      onChange={(event) => setMeetingNotes(event.target.value)}
+                      placeholder="Capture goals, names, decisions, follow-ups, and shorthand while you review the meeting."
+                      rows={18}
+                      className="mt-4 w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-active"
+                    />
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
+                      <div className="rounded-lg border bg-muted/30 p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Meeting status
+                        </p>
+                        <p className="mt-1 text-sm font-medium capitalize">
+                          {selectedRecording?.status ?? "unknown"}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border bg-muted/30 p-4">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Transcript length
+                        </p>
+                        <p className="mt-1 text-sm font-medium">
+                          {selectedTranscript?.segments?.length ?? 0} segments
+                        </p>
+                      </div>
+                    </div>
+
+                    {selectedRecording?.summary && (
+                      <div className="rounded-lg border border-active/30 bg-active/5 p-4 space-y-2">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-active">
+                          Summary
+                        </p>
+                        <p className="text-sm whitespace-pre-wrap leading-relaxed">
+                          {selectedRecording.summary}
+                        </p>
+                      </div>
+                    )}
+
+                    {(selectedRecording?.actionItems?.length ?? 0) > 0 && (
+                      <div className="rounded-lg border p-4 space-y-2">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                          Action Items
+                        </p>
+                        <ul className="space-y-1.5">
+                          {selectedRecording?.actionItems?.map((item, index) => (
+                            <li key={index} className="flex items-start gap-2 text-sm">
+                              <span className="mt-1 h-2 w-2 rounded-full bg-active shrink-0" />
+                              {item}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {!selectedRecording?.summary &&
+                      (selectedRecording?.actionItems?.length ?? 0) === 0 && (
+                        <div className="rounded-lg border p-4 text-sm text-muted-foreground">
+                          Summary and action items will appear here after transcription and analysis finish.
+                        </div>
+                      )}
+                  </div>
+                </div>
+              </ScrollArea>
+            </TabsContent>
+
+            <TabsContent value="ask" className="flex-1 overflow-hidden">
+              {selectedRecording ? (
+                <ScrollArea className="h-full pr-2">
+                  <div className="space-y-4">
+                    <div className="rounded-lg border bg-muted/20 p-4">
+                      <p className="text-sm font-medium">Ask this meeting</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Chat against the transcript and saved meeting notes. Use this for follow-ups, decisions, blockers, or owner questions.
+                      </p>
+                    </div>
+                    <AiAnalysisPanel
+                      recordingId={selectedRecording.id}
+                      title="Meeting Chat"
+                      inputPlaceholder="Ask about decisions, blockers, follow-ups, or anything in this meeting..."
+                      templates={MEETING_ASK_TEMPLATES}
+                      emptyStateLabel="Reviewing meeting context..."
+                    />
+                  </div>
+                </ScrollArea>
+              ) : (
+                <div className="h-full flex items-center justify-center text-muted-foreground">
+                  Select a meeting to ask questions.
+                </div>
+              )}
+            </TabsContent>
 
             <TabsContent value="transcript" className="flex-1 flex flex-col">
               {isLoadingDetail ? (
@@ -997,6 +1219,9 @@ export function RecordingsView() {
                       )}
                     </div>
                   )}
+                  <div className="mb-3 rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
+                    Edit transcript paragraphs in place, or remove a paragraph if it should not be part of the meeting record.
+                  </div>
                   <TranscriptSearch
                     onSearch={setSearchQuery}
                     className="mb-4"
@@ -1016,6 +1241,7 @@ export function RecordingsView() {
                           );
                         }
                       }}
+                      onDeleteSegments={handleDeleteTranscriptSegments}
                     />
                   </div>
                 </>
@@ -1033,73 +1259,48 @@ export function RecordingsView() {
               )}
             </TabsContent>
 
-            <TabsContent value="audio" className="flex-1 flex flex-col">
+            <TabsContent value="assets" className="flex-1 flex flex-col">
               {isLoadingDetail ? (
                 <div className="flex-1 flex items-center justify-center text-muted-foreground">
                   <Loader2 className="h-5 w-5 mr-2 animate-spin" />
-                  Loading audio waveform...
+                  Loading meeting assets...
                 </div>
               ) : (
                 <div className="space-y-4">
-                  <div className="p-4 border rounded-lg">
+                  <div className="rounded-lg border p-4">
                     <h3 className="font-medium mb-2">Waveform</h3>
                     <WaveformVisualizer data={waveformData} height={100} />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div className="p-3 bg-muted rounded-lg">
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="p-3 bg-muted rounded-lg text-sm">
                       <span className="text-muted-foreground">Duration:</span>{" "}
                       <span className="font-medium">
                         {Math.floor((selectedRecording?.duration || 0) / 60)}:
                         {((selectedRecording?.duration || 0) % 60).toString().padStart(2, "0")}
                       </span>
                     </div>
-                    <div className="p-3 bg-muted rounded-lg">
+                    <div className="p-3 bg-muted rounded-lg text-sm">
                       <span className="text-muted-foreground">Status:</span>{" "}
-                      <span className="font-medium">{selectedRecording?.status ?? "unknown"}</span>
+                      <span className="font-medium capitalize">
+                        {selectedRecording?.status ?? "unknown"}
+                      </span>
+                    </div>
+                    <div className="p-3 bg-muted rounded-lg text-sm">
+                      <span className="text-muted-foreground">Created:</span>{" "}
+                      <span className="font-medium">
+                        {selectedRecording?.createdAt
+                          ? new Date(selectedRecording.createdAt).toLocaleString()
+                          : "Unknown"}
+                      </span>
+                    </div>
+                    <div className="p-3 bg-muted rounded-lg text-sm">
+                      <span className="text-muted-foreground">Audio:</span>{" "}
+                      <span className="font-medium">
+                        {selectedRecording?.audioPath ? "Available" : "Not saved"}
+                      </span>
                     </div>
                   </div>
-                </div>
-              )}
-            </TabsContent>
-
-            <TabsContent value="analysis" className="flex-1 overflow-hidden">
-              {selectedRecording ? (
-                <ScrollArea className="h-full pr-2">
-                  {analysisCache[selectedRecording.id] && (
-                    <div className="space-y-4 mb-6">
-                      {analysisCache[selectedRecording.id].summary && (
-                        <div className="rounded-lg border border-active/30 bg-active/5 p-4 space-y-2">
-                          <p className="text-xs font-semibold text-active uppercase tracking-wide">
-                            Nautilus Summary
-                          </p>
-                          <p className="text-sm leading-relaxed whitespace-pre-wrap">
-                            {analysisCache[selectedRecording.id].summary}
-                          </p>
-                        </div>
-                      )}
-                      {analysisCache[selectedRecording.id].actionItems.length > 0 && (
-                        <div className="rounded-lg border p-4 space-y-2">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                            Action Items
-                          </p>
-                          <ul className="space-y-1.5">
-                            {analysisCache[selectedRecording.id].actionItems.map((item, i) => (
-                              <li key={i} className="flex items-start gap-2 text-sm">
-                                <span className="mt-1 h-2 w-2 rounded-full bg-active shrink-0" />
-                                {item}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <AiAnalysisPanel recordingId={selectedRecording.id} />
-                </ScrollArea>
-              ) : (
-                <div className="h-full flex items-center justify-center text-muted-foreground">
-                  Select a recording to analyze.
                 </div>
               )}
             </TabsContent>

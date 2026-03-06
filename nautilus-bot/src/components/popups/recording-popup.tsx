@@ -217,9 +217,13 @@ export function RecordingPopup() {
     }
   };
 
-  const openMainApp = async () => {
+  const openMainApp = async (view?: "recordings" | "settings") => {
     try {
-      await invoke("open_main_window");
+      if (view) {
+        await invoke("open_main_window_to", { view });
+      } else {
+        await invoke("open_main_window");
+      }
     } catch (error) {
       console.error("Failed to open main window:", error);
     }
@@ -398,18 +402,36 @@ export function RecordingPopup() {
         </div>
 
         {displayMode === "full" && (
-          <div className="mt-4 rounded-2xl border border-white/8 bg-white/[0.04] p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
-                Transcript preview
-              </p>
-              <p className="text-[11px] text-slate-400">
-                {isTranscribing ? "Updates while processing" : "Appears after you stop"}
+          <div className="mt-4 space-y-3">
+            <div className="flex items-center gap-2 text-xs text-slate-300">
+              <button
+                type="button"
+                className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
+                onClick={() => void openMainApp("recordings")}
+              >
+                Meetings
+              </button>
+              <button
+                type="button"
+                className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
+                onClick={() => void openMainApp("settings")}
+              >
+                Settings
+              </button>
+            </div>
+            <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
+                  Transcript preview
+                </p>
+                <p className="text-[11px] text-slate-400">
+                  {isTranscribing ? "Updates while processing" : "Appears after you stop"}
+                </p>
+              </div>
+              <p className="max-h-20 overflow-hidden text-sm leading-6 text-slate-100">
+                {previewText}
               </p>
             </div>
-            <p className="max-h-20 overflow-hidden text-sm leading-6 text-slate-100">
-              {previewText}
-            </p>
           </div>
         )}
       </div>

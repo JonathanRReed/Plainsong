@@ -27,7 +27,7 @@ interface RecordingState {
 }
 
 interface DictationStateChangedEvent {
-  phase: "idle" | "recording" | "stopping" | "transcribing" | "done" | "error";
+  phase: "idle" | "starting" | "recording" | "stopping" | "transcribing" | "done" | "error";
   startedAtMs?: number | null;
 }
 
@@ -47,6 +47,7 @@ interface RecordingContextValue extends RecordingState {
     systemAudio: boolean;
     projectId: string;
     template?: string;
+    meetingNotes?: string;
     consentPromptShown?: boolean;
   }) => Promise<string | null>;
   stopMeeting: () => Promise<void>;
@@ -81,6 +82,10 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       typeof startedAtMs === "number" && Number.isFinite(startedAtMs)
         ? startedAtMs
         : Date.now();
+    setState((prev) => ({
+      ...prev,
+      duration: Math.max(0, Math.floor((Date.now() - startTime) / 1000)),
+    }));
     timerRef.current = setInterval(() => {
       setState((prev) => ({
         ...prev,
@@ -92,18 +97,10 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const startDictation = useCallback(async (options?: DictationStartOptions) => {
     try {
       await tauriStartDictation(options);
-      setState({
-        isRecording: true,
-        recordingId: null,
-        recordingMode: "dictation",
-        duration: 0,
-        isSystemAudioActive: false,
-      });
-      startTimer();
     } catch (error) {
       console.error("Failed to start dictation:", error);
     }
-  }, [startTimer]);
+  }, []);
 
   const stopDictation = useCallback(async () => {
     try {
@@ -125,6 +122,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       systemAudio: boolean;
       projectId: string;
       template?: string;
+      meetingNotes?: string;
       consentPromptShown?: boolean;
     }) => {
       try {
@@ -181,7 +179,22 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
             return;
           }
 
-          if (stateRef.current.recordingMode === "dictation") {
+          if (payload.phase === "starting") {
+            setState((prev) => ({
+              ...prev,
+              isRecording: true,
+              recordingMode: "dictation",
+              isSystemAudioActive: false,
+            }));
+            return;
+          }
+
+          if (
+            (payload.phase === "idle" ||
+              payload.phase === "done" ||
+              payload.phase === "error") &&
+            stateRef.current.recordingMode === "dictation"
+          ) {
             clearTimer();
             setState(INITIAL_STATE);
           }

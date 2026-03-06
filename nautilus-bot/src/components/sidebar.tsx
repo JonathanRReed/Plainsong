@@ -32,11 +32,14 @@ interface SidebarProps {
   onActivateClick?(): void;
 }
 
-const navItems = [
+const primaryNavItems = [
   { id: "dashboard", label: "Dashboard", icon: FileText },
-  { id: "projects", label: "Projects", icon: Folder },
-  { id: "recordings", label: "Meetings", icon: AudioWaveform },
   { id: "dictation", label: "Dictation", icon: Mic },
+  { id: "recordings", label: "Meetings", icon: AudioWaveform },
+  { id: "projects", label: "Projects", icon: Folder },
+];
+
+const utilityNavItems = [
   { id: "exports", label: "Exports", icon: FileOutput },
   { id: "settings", label: "Settings", icon: Settings },
 ];
@@ -245,28 +248,58 @@ export function Sidebar({
         <Separator />
 
         <ScrollArea className="flex-1 px-2 py-4">
-          <nav className="space-y-1">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const isActive = activeView === item.id;
-              return (
-                <Tooltip key={item.id} delayDuration={0}>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant={isActive ? "secondary" : "ghost"}
-                      className={cn("w-full justify-start", isCollapsed && "justify-center px-2")}
-                      onClick={() => onViewChange(item.id as ViewId)}
-                    >
-                      <Icon className="h-4 w-4 shrink-0" />
-                      {!isCollapsed && <span className="ml-3">{item.label}</span>}
-                    </Button>
-                  </TooltipTrigger>
-                  {isCollapsed && (
-                    <TooltipContent side="right">{item.label}</TooltipContent>
-                  )}
-                </Tooltip>
-              );
-            })}
+          <nav className="space-y-4">
+            <div className="space-y-1">
+              {primaryNavItems.map((item) => {
+                const Icon = item.icon;
+                const isActive = activeView === item.id;
+                return (
+                  <Tooltip key={item.id} delayDuration={0}>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant={isActive ? "secondary" : "ghost"}
+                        className={cn("w-full justify-start", isCollapsed && "justify-center px-2")}
+                        onClick={() => onViewChange(item.id as ViewId)}
+                      >
+                        <Icon className="h-4 w-4 shrink-0" />
+                        {!isCollapsed && <span className="ml-3">{item.label}</span>}
+                      </Button>
+                    </TooltipTrigger>
+                    {isCollapsed && (
+                      <TooltipContent side="right">{item.label}</TooltipContent>
+                    )}
+                  </Tooltip>
+                );
+              })}
+            </div>
+            <div className="space-y-1">
+              {!isCollapsed && (
+                <p className="px-3 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+                  Utilities
+                </p>
+              )}
+              {utilityNavItems.map((item) => {
+                const Icon = item.icon;
+                const isActive = activeView === item.id;
+                return (
+                  <Tooltip key={item.id} delayDuration={0}>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant={isActive ? "secondary" : "ghost"}
+                        className={cn("w-full justify-start", isCollapsed && "justify-center px-2")}
+                        onClick={() => onViewChange(item.id as ViewId)}
+                      >
+                        <Icon className="h-4 w-4 shrink-0" />
+                        {!isCollapsed && <span className="ml-3">{item.label}</span>}
+                      </Button>
+                    </TooltipTrigger>
+                    {isCollapsed && (
+                      <TooltipContent side="right">{item.label}</TooltipContent>
+                    )}
+                  </Tooltip>
+                );
+              })}
+            </div>
           </nav>
         </ScrollArea>
 

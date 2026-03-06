@@ -1756,10 +1756,7 @@ mod tests {
     async fn groq_provider_honors_selected_model_id() {
         let manager = AsrManager::new();
         manager
-            .set_provider_model_id(
-                AsrProviderType::Groq,
-                "whisper-large-v3".to_string(),
-            )
+            .set_provider_model_id(AsrProviderType::Groq, "whisper-large-v3".to_string())
             .await;
 
         let provider = manager.get_provider(AsrProviderType::Groq).await;

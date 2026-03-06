@@ -123,7 +123,10 @@ impl Database {
                 updated_at TEXT NOT NULL,
                 source_type TEXT NOT NULL,
                 audio_path TEXT,
-                status TEXT NOT NULL DEFAULT 'recording'
+                status TEXT NOT NULL DEFAULT 'recording',
+                meeting_notes TEXT,
+                meeting_template_id TEXT,
+                notes_updated_at TEXT
             )",
             [],
         )?;
@@ -321,6 +324,17 @@ impl Database {
         let _ = self
             .conn
             .execute("ALTER TABLE recordings ADD COLUMN action_items TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE recordings ADD COLUMN meeting_notes TEXT", []);
+        let _ = self.conn.execute(
+            "ALTER TABLE recordings ADD COLUMN meeting_template_id TEXT",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE recordings ADD COLUMN notes_updated_at TEXT",
+            [],
+        );
 
         Ok(())
     }
@@ -498,7 +512,7 @@ impl Database {
 
     pub fn get_recordings(&self, project_id: Option<&str>) -> Result<Vec<Recording>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status, summary, action_items
+            "SELECT id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status, summary, action_items, meeting_notes, meeting_template_id, notes_updated_at
              FROM recordings WHERE (?1 IS NULL OR project_id = ?1) ORDER BY created_at DESC"
         )?;
 
@@ -507,6 +521,9 @@ impl Database {
         let recordings = stmt.query_map(params![pid_param], |row| {
             let action_items_json: Option<String> = row.get(10)?;
             let action_items = action_items_json.and_then(|s| serde_json::from_str(&s).ok());
+            let notes_updated_at = row
+                .get::<_, Option<String>>(13)?
+                .and_then(|value| value.parse().ok());
             Ok(Recording {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -525,6 +542,9 @@ impl Database {
                 status: row.get(8)?,
                 summary: row.get(9)?,
                 action_items,
+                meeting_notes: row.get(11)?,
+                meeting_template_id: row.get(12)?,
+                notes_updated_at,
             })
         })?;
 
@@ -535,13 +555,16 @@ impl Database {
 
     pub fn get_recording(&self, recording_id: &str) -> Result<Option<Recording>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status, summary, action_items
+            "SELECT id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status, summary, action_items, meeting_notes, meeting_template_id, notes_updated_at
              FROM recordings WHERE id = ?1"
         )?;
 
         let result = stmt.query_row([recording_id], |row| {
             let action_items_json: Option<String> = row.get(10)?;
             let action_items = action_items_json.and_then(|s| serde_json::from_str(&s).ok());
+            let notes_updated_at = row
+                .get::<_, Option<String>>(13)?
+                .and_then(|value| value.parse().ok());
             Ok(Recording {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -560,6 +583,9 @@ impl Database {
                 status: row.get(8)?,
                 summary: row.get(9)?,
                 action_items,
+                meeting_notes: row.get(11)?,
+                meeting_template_id: row.get(12)?,
+                notes_updated_at,
             })
         });
 
@@ -634,8 +660,8 @@ impl Database {
 
     pub fn create_recording(&mut self, recording: &Recording) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO recordings (id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO recordings (id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status, meeting_notes, meeting_template_id, notes_updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 &recording.id,
                 &recording.title,
@@ -645,8 +671,29 @@ impl Database {
                 recording.updated_at.to_rfc3339(),
                 &recording.source_type,
                 &recording.audio_path,
-                &recording.status
+                &recording.status,
+                &recording.meeting_notes,
+                &recording.meeting_template_id,
+                recording
+                    .notes_updated_at
+                    .as_ref()
+                    .map(|value| value.to_rfc3339())
             ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_recording_notes(
+        &mut self,
+        recording_id: &str,
+        meeting_notes: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now();
+        self.conn.execute(
+            "UPDATE recordings
+             SET meeting_notes = ?1, notes_updated_at = ?2, updated_at = ?2
+             WHERE id = ?3",
+            params![meeting_notes, now.to_rfc3339(), recording_id],
         )?;
         Ok(())
     }
@@ -782,6 +829,56 @@ impl Database {
         );
         tx.commit()?;
         Ok(true)
+    }
+
+    pub fn delete_transcript_segments(
+        &mut self,
+        recording_id: &str,
+        segment_ids: &[String],
+    ) -> Result<usize> {
+        let Some(mut transcript) = self.get_transcript(recording_id)? else {
+            return Ok(0);
+        };
+
+        if segment_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let original_len = transcript.segments.len();
+        transcript.segments.retain(|segment| {
+            !segment_ids
+                .iter()
+                .any(|segment_id| segment_id == &segment.id)
+        });
+        let removed = original_len.saturating_sub(transcript.segments.len());
+        if removed == 0 {
+            return Ok(0);
+        }
+
+        transcript.full_text = transcript
+            .segments
+            .iter()
+            .map(|segment| segment.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let segments_json = serde_json::to_string(&transcript.segments)?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE transcripts SET segments = ?1, full_text = ?2 WHERE recording_id = ?3",
+            params![segments_json, transcript.full_text, recording_id],
+        )?;
+        {
+            let mut delete_stmt = tx.prepare(
+                "DELETE FROM transcript_fts WHERE recording_id = ?1 AND segment_id = ?2",
+            )?;
+            for segment_id in segment_ids {
+                let _ = delete_stmt.execute(params![recording_id, segment_id]);
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 
     pub fn save_asr_benchmark(&mut self, entry: &AsrBenchmarkEntry) -> Result<()> {
@@ -1704,6 +1801,9 @@ mod tests {
             status: "recording".to_string(),
             summary: None,
             action_items: None,
+            meeting_notes: None,
+            meeting_template_id: None,
+            notes_updated_at: None,
         }
     }
 
@@ -1829,6 +1929,58 @@ mod tests {
         let mut db = in_memory_db();
         let result = db.update_recording_source_type("missing-id", "dictation");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_delete_transcript_segments() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+
+        let transcript = Transcript {
+            id: "t1".to_string(),
+            recording_id: "r1".to_string(),
+            segments: vec![
+                TranscriptSegment {
+                    id: "s1".to_string(),
+                    start_time: 0.0,
+                    end_time: 1.0,
+                    text: "first segment".to_string(),
+                    speaker_id: None,
+                    confidence: 0.9,
+                },
+                TranscriptSegment {
+                    id: "s2".to_string(),
+                    start_time: 1.0,
+                    end_time: 2.0,
+                    text: "second segment".to_string(),
+                    speaker_id: None,
+                    confidence: 0.9,
+                },
+            ],
+            full_text: "first segment second segment".to_string(),
+            language: "en".to_string(),
+            confidence: 0.9,
+            model: "test".to_string(),
+            model_id: None,
+            requested_provider: None,
+            actual_provider: None,
+            created_at: Utc::now(),
+        };
+        db.save_transcript(&transcript).unwrap();
+
+        let removed = db
+            .delete_transcript_segments("r1", &["s1".to_string()])
+            .unwrap();
+        assert_eq!(removed, 1);
+
+        let updated = db.get_transcript("r1").unwrap().unwrap();
+        assert_eq!(updated.segments.len(), 1);
+        assert_eq!(updated.segments[0].id, "s2");
+        assert_eq!(updated.full_text, "second segment");
+
+        let hits = db.search_transcripts("first", 10, None).unwrap();
+        assert!(hits.is_empty());
     }
 
     #[test]
