@@ -117,7 +117,7 @@ export function DashboardView() {
     <div className="h-full flex flex-col">
       <div className="p-6 border-b">
         <h1 className="text-2xl font-semibold">Dashboard</h1>
-        <p className="text-muted-foreground">Cold Storage Overview</p>
+        <p className="text-muted-foreground">Recent activity, readiness, and quick actions</p>
       </div>
       
       <ScrollArea className="flex-1">
@@ -135,7 +135,7 @@ export function DashboardView() {
             
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Recordings</CardTitle>
+                <CardTitle className="text-sm font-medium">Meetings</CardTitle>
                 <FileAudio className="h-4 w-4 text-muted-foreground" />
               </CardHeader>
               <CardContent>
@@ -157,7 +157,7 @@ export function DashboardView() {
             
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Storage Status</CardTitle>
+                <CardTitle className="text-sm font-medium">Processing</CardTitle>
                 <Activity className="h-4 w-4 text-muted-foreground" />
               </CardHeader>
               <CardContent>
@@ -213,14 +213,14 @@ export function DashboardView() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Cross-Recording Search</CardTitle>
+              <CardTitle>Search Across Meetings</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex gap-2">
                 <Input
                   value={globalQuery}
                   onChange={(event: ChangeEvent<HTMLInputElement>) => setGlobalQuery(event.target.value)}
-                  placeholder="Search across all transcripts..."
+                  placeholder="Search every transcript..."
                 />
                 <Button onClick={runGlobalSearch} disabled={isSearching || !globalQuery.trim()}>
                   {isSearching ? "Searching..." : "Search"}
@@ -261,7 +261,7 @@ export function DashboardView() {
                 <Input
                   value={analysisQuery}
                   onChange={(event: ChangeEvent<HTMLInputElement>) => setAnalysisQuery(event.target.value)}
-                  placeholder="Ask across selected recordings..."
+                  placeholder="Ask across selected meetings..."
                 />
                 <Button
                   onClick={runMultiRecordingAnalysis}
@@ -294,7 +294,7 @@ export function DashboardView() {
 
           <Tabs defaultValue="recent" className="space-y-4">
             <TabsList>
-              <TabsTrigger value="recent">Recent Recordings</TabsTrigger>
+              <TabsTrigger value="recent">Recent Meetings</TabsTrigger>
               <TabsTrigger value="projects">Projects</TabsTrigger>
               <TabsTrigger value="timeline">Timeline</TabsTrigger>
             </TabsList>
@@ -302,7 +302,7 @@ export function DashboardView() {
             <TabsContent value="recent" className="space-y-4">
               {recentRecordings.length === 0 ? (
                 <div className="text-center py-12 text-muted-foreground">
-                  No recordings yet. Start capturing to see them here.
+                  No meetings yet. Start recording to see them here.
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -329,7 +329,7 @@ export function DashboardView() {
             <TabsContent value="projects" className="space-y-4">
               {projects.length === 0 ? (
                 <div className="text-center py-12 text-muted-foreground">
-                  No projects yet. Create your first project to organize recordings.
+                  No projects yet. Create your first project to organize meetings and dictation.
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -355,7 +355,7 @@ export function DashboardView() {
             <TabsContent value="timeline">
               {Object.keys(timelineGroups).length === 0 ? (
                 <div className="text-center py-12 text-muted-foreground">
-                  No recordings yet. Timeline will populate as recordings are created.
+                  No meetings yet. Timeline will populate as sessions are captured.
                 </div>
               ) : (
                 <div className="space-y-4">

@@ -68,7 +68,7 @@ const providerFixture = [
       sourceUrl: "https://developer.apple.com/documentation/speech",
     },
     selectedModelId: "macos_apple_speech",
-    modelOptions: [{ id: "macos_apple_speech", label: "Managed by macOS" }],
+    modelOptions: [{ id: "macos_apple_speech", label: "Built into macOS" }],
     downloadStatus: "Downloaded",
     runtimeStatus: "ready",
     runtimeDetails: {},
@@ -120,7 +120,7 @@ describe("Platform optimization settings", () => {
   it("persists fallback policy changes", async () => {
     render(<AsrProviderManager />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Show advanced tools" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show tools" }));
     const fallbackSelect = await screen.findByLabelText("Fallback policy");
     fireEvent.change(fallbackSelect, { target: { value: "fail_fast" } });
 
@@ -136,7 +136,7 @@ describe("Platform optimization settings", () => {
   it("persists ordered manual engine priority", async () => {
     render(<AsrProviderManager />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Show advanced tools" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show tools" }));
     const modeSelect = await screen.findByLabelText("Mode");
     fireEvent.change(modeSelect, { target: { value: "manual" } });
 
@@ -194,9 +194,9 @@ describe("Platform optimization settings", () => {
     render(<AsrProviderManager />);
 
     expect(await screen.findByText("Apple Native setup")).toBeInTheDocument();
-    expect(screen.getByText("Managed by macOS")).toBeInTheDocument();
+    expect(screen.getByText("Built into macOS")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Show advanced tools" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show tools" }));
 
     expect(screen.queryByText("macOS Apple Speech engine")).not.toBeInTheDocument();
     expect(screen.queryByText("Windows SDK dictation engine")).not.toBeInTheDocument();

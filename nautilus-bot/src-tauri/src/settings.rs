@@ -138,6 +138,14 @@ pub struct TranscriptionSettings {
     pub dictation_push_to_talk: bool,
     /// Dictation: Smart Format — LLM polishes text before insert
     pub dictation_ai_formatting: bool,
+    /// Dictation mode preset: voice, messages, email, notes, meeting_follow_up, custom
+    pub dictation_mode_preset: String,
+    /// Selected saved custom dictation mode id, if any.
+    pub dictation_selected_custom_mode_id: Option<String>,
+    /// Saved reusable custom dictation modes.
+    pub dictation_custom_modes: Vec<DictationCustomMode>,
+    /// Dictation context source: none, clipboard, selected_text
+    pub dictation_context_source: String,
     /// Dictation: Command mode toggle (e.g. "command newline")
     pub dictation_command_mode_enabled: bool,
     /// Dictation: Prefix used to activate command mode
@@ -186,6 +194,20 @@ pub struct TranscriptionSettings {
     pub platform_optimization: PlatformOptimizationSettings,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DictationCustomMode {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub profile: String,
+    pub insertion_mode: String,
+    pub context_source: String,
+    pub save_to_inbox: bool,
+    pub copy_to_clipboard: bool,
+    pub command_mode_enabled: bool,
+}
+
 impl Default for TranscriptionSettings {
     fn default() -> Self {
         Self {
@@ -212,6 +234,10 @@ impl Default for TranscriptionSettings {
             // Toggle mode is safer for new users and avoids silent hold-to-talk confusion.
             dictation_push_to_talk: false,
             dictation_ai_formatting: false,
+            dictation_mode_preset: "voice".to_string(),
+            dictation_selected_custom_mode_id: None,
+            dictation_custom_modes: Vec::new(),
+            dictation_context_source: "none".to_string(),
             dictation_command_mode_enabled: true,
             dictation_command_prefix: "command".to_string(),
             dictation_insertion_mode: "auto".to_string(),

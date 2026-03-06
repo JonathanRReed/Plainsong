@@ -181,20 +181,20 @@ describe("SettingsView performance behavior", () => {
     const tauri = await import("@/lib/tauri");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Configure Nautilus preferences");
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     expect(tauri.getSettings).toHaveBeenCalledTimes(1);
     expect(tauri.getBackupConfig).toHaveBeenCalledTimes(1);
     expect(tauri.listBackups).not.toHaveBeenCalled();
     expect(tauri.getPermissionDiagnostics).not.toHaveBeenCalled();
     expect(tauri.getSecurityStatus).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByText("Security & Privacy"));
+    fireEvent.click(screen.getByText("Privacy & Security"));
     await waitFor(() => {
       expect(tauri.getPermissionDiagnostics).toHaveBeenCalledTimes(1);
       expect(tauri.getSecurityStatus).toHaveBeenCalledTimes(1);
     });
 
-    fireEvent.click(screen.getByText("Data & Retention"));
+    fireEvent.click(screen.getByText("Storage"));
     await waitFor(() => {
       expect(tauri.listBackups).toHaveBeenCalledTimes(1);
     });
@@ -204,11 +204,9 @@ describe("SettingsView performance behavior", () => {
     const tauri = await import("@/lib/tauri");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Configure Nautilus preferences");
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     vi.useFakeTimers();
-    // Get a switch that actually triggers updateSettings (not the advanced toggle)
-    // The "Show in menu bar" switch (minimizeToTray) is in the General tab.
-    // It's the 2nd switch in the general tab (1st is Advanced Toggle).
+    // Get a switch that actually triggers updateSettings, not the power-user toggle.
     const switches = screen.getAllByRole("switch");
     fireEvent.click(switches[1]);
     fireEvent.click(switches[1]);
@@ -226,9 +224,9 @@ describe("SettingsView performance behavior", () => {
     const tauri = await import("@/lib/tauri");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
-    await screen.findByText("Configure Nautilus preferences");
-    fireEvent.click(screen.getByText("Data & Retention"));
-    await screen.findByText("Data lifecycle, backups, and cloud sync controls");
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Storage"));
+    await screen.findByText("Retention, backups, export paths, and cleanup tools");
 
     const exportRootInput = screen.getByPlaceholderText("/Users/you/Documents/Nautilus");
     fireEvent.change(exportRootInput, {
@@ -263,7 +261,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>
     );
 
-    await screen.findByText("Configure Nautilus preferences");
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     const select = screen.getByRole("combobox");
     expect(select).toHaveValue("default");
     expect(screen.queryByText("Rose Pine Night (Pro)")).not.toBeInTheDocument();
@@ -291,7 +289,7 @@ describe("SettingsView performance behavior", () => {
       </ToastProvider>
     );
 
-    await screen.findByText("Configure Nautilus preferences");
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     vi.useFakeTimers();
 
     const select = screen.getByRole("combobox");

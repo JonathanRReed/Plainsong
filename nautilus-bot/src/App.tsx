@@ -158,7 +158,7 @@ function AppRuntimeListeners() {
     let unlisten: (() => void) | undefined;
     void listen<void>("accessibility-permission-warning", () => {
       toast(
-        "Accessibility permission required for dictation. Enable it in System Preferences > Privacy & Security > Accessibility.",
+        "Accessibility permission required for dictation. Enable it in System Settings > Privacy & Security > Accessibility.",
         "error"
       );
     }).then((fn) => {
