@@ -569,7 +569,7 @@ export function RecordingsView() {
         <div>
           <h1 className="text-2xl font-semibold">Meetings</h1>
           <p className="text-muted-foreground">
-            Long-form sessions, meeting history, and transcript review.
+            Capture meetings, review transcripts, and keep follow-up moving.
           </p>
         </div>
         <div className="flex gap-2">

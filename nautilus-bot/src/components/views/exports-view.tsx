@@ -158,15 +158,15 @@ export function ExportsView() {
     <div className="h-full flex flex-col">
       <div className="p-6 border-b">
         <h1 className="text-2xl font-semibold">Exports</h1>
-        <p className="text-muted-foreground">Preview and export evidence bundles with redaction controls</p>
+        <p className="text-muted-foreground">Create shareable transcripts, notes, and evidence-ready exports</p>
       </div>
 
       <ScrollArea className="flex-1">
         <div className="p-6 space-y-6 max-w-5xl">
           <Card>
             <CardHeader>
-              <CardTitle>Export Settings</CardTitle>
-              <CardDescription>Choose recording, format, policy, and destination</CardDescription>
+              <CardTitle>Export Setup</CardTitle>
+              <CardDescription>Choose the source, format, privacy level, and destination</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
@@ -242,8 +242,8 @@ export function ExportsView() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Template Export</CardTitle>
-              <CardDescription>Render transcript using built-in structured templates</CardDescription>
+              <CardTitle>Structured Templates</CardTitle>
+              <CardDescription>Render transcripts into repeatable, shareable formats</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">

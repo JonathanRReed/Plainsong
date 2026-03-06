@@ -52,6 +52,9 @@ pub struct AppState {
     dictation_overlay_state: Arc<StdMutex<DictationOverlayState>>,
     recording_overlay_state: Arc<StdMutex<RecordingOverlayState>>,
     streaming_transcriber: Arc<streaming::StreamingTranscriber>,
+    dictation_stream_stop: Arc<AtomicBool>,
+    dictation_inline_state: Arc<Mutex<InlineDictationState>>,
+    apple_live_dictation: Arc<Mutex<Option<AppleLiveDictationRuntime>>>,
     vault_state: Arc<Mutex<VaultRuntimeState>>,
     /// Stop flag for the live recording streaming task; set to false to terminate it
     recording_stream_stop: Arc<AtomicBool>,
@@ -64,6 +67,15 @@ pub struct AppState {
 const DICTATION_OVERLAY_LABEL: &str = "dictation-overlay";
 const RECORDING_OVERLAY_LABEL: &str = "recording-overlay";
 const RECORDING_TRAY_ID: &str = "recording-indicator";
+const PRIMARY_TRAY_ID: &str = "primary-menu-bar";
+const TRAY_ITEM_STATUS: &str = "tray_status";
+const TRAY_ITEM_OPEN: &str = "tray_open";
+const TRAY_ITEM_START_DICTATION: &str = "tray_start_dictation";
+const TRAY_ITEM_STOP_DICTATION: &str = "tray_stop_dictation";
+const TRAY_ITEM_START_MEETING_MIC: &str = "tray_start_meeting_mic";
+const TRAY_ITEM_START_MEETING_SYSTEM: &str = "tray_start_meeting_system";
+const TRAY_ITEM_STOP_MEETING: &str = "tray_stop_meeting";
+const TRAY_ITEM_QUIT: &str = "tray_quit";
 const DICTATION_MAX_DURATION_SECONDS: u64 = 120;
 const DICTATION_AI_FORMAT_TIMEOUT_MS: u64 = 1400;
 const DICTATION_AI_FORMAT_MIN_CHARS: usize = 80;
@@ -101,6 +113,7 @@ enum DictationSessionState {
 enum DictationInsertionMode {
     Auto,
     Paste,
+    Inline,
     ClipboardOnly,
 }
 
@@ -108,6 +121,7 @@ impl DictationInsertionMode {
     fn from_settings_value(value: &str) -> Self {
         match value {
             "paste" => Self::Paste,
+            "inline" => Self::Inline,
             "clipboard_only" => Self::ClipboardOnly,
             _ => Self::Auto,
         }
@@ -117,6 +131,7 @@ impl DictationInsertionMode {
         match self {
             Self::Auto => "auto",
             Self::Paste => "paste",
+            Self::Inline => "inline",
             Self::ClipboardOnly => "clipboard_only",
         }
     }
@@ -137,6 +152,25 @@ struct DictationSessionTracker {
     next_session_id: u64,
     active_session_id: Option<u64>,
     started_at: Option<std::time::Instant>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct InlineDictationState {
+    session_id: Option<u64>,
+    app_target: Option<String>,
+    last_inserted_text: String,
+    original_clipboard: Option<String>,
+    keep_text_in_clipboard: bool,
+}
+
+#[cfg(target_os = "macos")]
+struct AppleLiveDictationRuntime {
+    session_id: u64,
+    final_rx: Option<
+        tokio::sync::oneshot::Receiver<
+            Result<crate::asr::platform::macos_speech::LiveSpeechResult, String>,
+        >,
+    >,
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +264,9 @@ struct PermissionDiagnostics {
     speech_recognition_ready: bool,
     accessibility_ready: bool,
     automation_ready: bool,
+    running_from_disk_image: bool,
+    app_bundle_path: Option<String>,
+    recommended_app_bundle_path: Option<String>,
     notes: Vec<String>,
 }
 
@@ -785,6 +822,43 @@ async fn collect_permission_diagnostics(
     };
 
     #[cfg(target_os = "macos")]
+    let app_bundle_path = current_app_bundle_path().map(|path| path.to_string_lossy().to_string());
+
+    #[cfg(not(target_os = "macos"))]
+    let app_bundle_path: Option<String> = None;
+
+    #[cfg(target_os = "macos")]
+    let recommended_app_bundle_path =
+        installed_nautilus_app_bundle_path().map(|path| path.to_string_lossy().to_string());
+
+    #[cfg(not(target_os = "macos"))]
+    let recommended_app_bundle_path: Option<String> = None;
+
+    #[cfg(target_os = "macos")]
+    let running_from_disk_image = is_running_from_disk_image();
+
+    #[cfg(not(target_os = "macos"))]
+    let running_from_disk_image = false;
+
+    #[cfg(target_os = "macos")]
+    if running_from_disk_image {
+        let running_path = app_bundle_path
+            .as_deref()
+            .unwrap_or("/Volumes/.../Nautilus.app");
+        if let Some(installed_path) = recommended_app_bundle_path.as_deref() {
+            notes.push(format!(
+                "Nautilus is running from the mounted disk image at {}. macOS permissions granted to {} do not apply to this copy. Quit this DMG copy and open the installed app instead.",
+                running_path, installed_path
+            ));
+        } else {
+            notes.push(format!(
+                "Nautilus is running from the mounted disk image at {}. Copy Nautilus.app into /Applications and open that installed copy so macOS permissions apply consistently.",
+                running_path
+            ));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     let speech_recognition_ready = {
         use crate::asr::platform::macos_speech::SpeechAuthorizationStatus;
 
@@ -826,10 +900,17 @@ async fn collect_permission_diagnostics(
     let (accessibility_ready, automation_ready) = {
         let accessibility_ready = check_accessibility_permission();
         if !accessibility_ready {
-            notes.push(
-                "Accessibility permission not granted yet. Enable Nautilus in Privacy & Security > Accessibility for cursor insertion."
-                    .to_string(),
-            );
+            if running_from_disk_image {
+                notes.push(
+                    "Accessibility is being checked for the currently running DMG copy, not the installed /Applications copy."
+                        .to_string(),
+                );
+            } else {
+                notes.push(
+                    "Accessibility permission not granted yet. Enable Nautilus in Privacy & Security > Accessibility for cursor insertion."
+                        .to_string(),
+                );
+            }
         }
 
         let automation_ready = match check_automation_permission() {
@@ -859,6 +940,9 @@ async fn collect_permission_diagnostics(
         speech_recognition_ready,
         accessibility_ready,
         automation_ready,
+        running_from_disk_image,
+        app_bundle_path,
+        recommended_app_bundle_path,
         notes,
     }
 }
@@ -897,6 +981,31 @@ fn open_permission_settings(section: String) -> Result<(), String> {
     {
         let _ = section;
         Err("Permission settings shortcut is supported on macOS only.".to_string())
+    }
+}
+
+#[tauri::command]
+fn open_installed_nautilus_app() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let app_path = installed_nautilus_app_bundle_path()
+            .ok_or_else(|| "Installed Nautilus.app was not found in /Applications.".to_string())?;
+
+        let status = std::process::Command::new("open")
+            .arg(app_path)
+            .status()
+            .map_err(|e| format!("Failed to open installed Nautilus.app: {}", e))?;
+
+        if !status.success() {
+            return Err("Failed to open installed Nautilus.app".to_string());
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Opening the installed Nautilus app is supported on macOS only.".to_string())
     }
 }
 
@@ -4164,6 +4273,12 @@ async fn save_settings(
             &dictation_profile_from_settings_value(&settings.transcription.dictation_profile),
         )
         .to_string();
+        settings.transcription.dictation_mode_preset =
+            normalize_dictation_mode_preset(&settings.transcription.dictation_mode_preset)
+                .to_string();
+        settings.transcription.dictation_context_source =
+            normalize_dictation_context_source(&settings.transcription.dictation_context_source)
+                .to_string();
         settings.transcription.dictation_command_prefix =
             normalize_dictation_command_prefix(&settings.transcription.dictation_command_prefix)
                 .to_string();
@@ -4242,6 +4357,7 @@ async fn save_settings(
         let _ =
             enforce_dictation_retention_policy(state.inner(), Some(&app), "settings-save").await;
         let _ = enforce_meeting_retention_policy(state.inner(), Some(&app), "settings-save").await;
+        sync_primary_tray(app.clone()).await;
 
         Ok(())
     }
@@ -4634,7 +4750,7 @@ async fn start_dictation_session(
     state: &AppState,
     app: &AppHandle,
     source: &str,
-    options: models::DictationStartOptions,
+    mut options: models::DictationStartOptions,
 ) -> Result<u64, String> {
     let settings_snapshot = {
         let settings_manager = state.settings_manager.lock().await;
@@ -4645,6 +4761,19 @@ async fn start_dictation_session(
         &settings_snapshot.transcription,
         TranscriptionScope::Dictation,
     );
+    let dictation_insertion_mode = DictationInsertionMode::from_settings_value(
+        &settings_snapshot.transcription.dictation_insertion_mode,
+    );
+    let inline_target_app = if matches!(dictation_insertion_mode, DictationInsertionMode::Inline) {
+        tauri::async_runtime::spawn_blocking(get_frontmost_app_name)
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
+    let context_target_app = tauri::async_runtime::spawn_blocking(get_frontmost_app_name)
+        .await
+        .unwrap_or(None);
 
     #[cfg(target_os = "macos")]
     if dictation_selection.0 == asr::AsrProviderType::MacosAppleSpeech {
@@ -4702,6 +4831,31 @@ async fn start_dictation_session(
         tracker.next_session_id
     };
 
+    let normalized_context_source = normalize_dictation_context_source(&options.context_source);
+    options.context_source = normalized_context_source.to_string();
+    options.context_app_name = context_target_app.clone();
+    options.captured_context_text = if normalized_context_source != "none" {
+        match capture_dictation_context_text(normalized_context_source, context_target_app.as_deref())
+        {
+            Ok(context) => context,
+            Err(error) => {
+                {
+                    let mut runtime_state = state.dictation_runtime_state.lock().await;
+                    *runtime_state = DictationSessionState::Idle;
+                }
+                {
+                    let mut tracker = state.dictation_session_tracker.lock().await;
+                    if tracker.active_session_id == Some(session_id) {
+                        tracker.active_session_id = None;
+                    }
+                }
+                return Err(format!("Failed to prepare dictation context: {}", error));
+            }
+        }
+    } else {
+        None
+    };
+
     {
         let mut audio = state.audio_capture.lock().await;
         if let Err(error) = audio.start_dictation() {
@@ -4735,6 +4889,56 @@ async fn start_dictation_session(
         None,
         None,
     );
+
+    #[cfg(target_os = "macos")]
+    {
+        let inline_mode = matches!(dictation_insertion_mode, DictationInsertionMode::Inline);
+
+        let live_start_result = if dictation_selection.0 == asr::AsrProviderType::MacosAppleSpeech {
+            start_apple_live_dictation_session(
+                state,
+                app,
+                session_id,
+                inline_mode,
+                inline_target_app.clone(),
+            )
+            .await
+        } else if inline_mode {
+            start_inline_dictation_stream(
+                state,
+                app,
+                session_id,
+                dictation_selection.0,
+                dictation_selection.1.clone(),
+                inline_target_app.clone(),
+            )
+            .await;
+            Ok(())
+        } else {
+            Ok(())
+        };
+
+        if let Err(error) = live_start_result {
+            {
+                let mut audio = state.audio_capture.lock().await;
+                let _ = audio.stop_dictation();
+            }
+            {
+                let mut runtime_state = state.dictation_runtime_state.lock().await;
+                *runtime_state = DictationSessionState::Idle;
+            }
+            {
+                let mut tracker = state.dictation_session_tracker.lock().await;
+                if tracker.active_session_id == Some(session_id) {
+                    tracker.active_session_id = None;
+                }
+            }
+            return Err(format!(
+                "Failed to start Apple Native live dictation session. {}",
+                error
+            ));
+        }
+    }
 
     let mut db = state.db.lock().await;
     if let Err(e) = db.log_audit_event(
@@ -4851,6 +5055,243 @@ async fn start_dictation_session(
     Ok(session_id)
 }
 
+#[cfg(target_os = "macos")]
+async fn start_inline_dictation_stream(
+    state: &AppState,
+    app: &AppHandle,
+    session_id: u64,
+    provider: asr::AsrProviderType,
+    selected_model_id: String,
+    _app_target: Option<String>,
+) {
+    let maybe_stream_info = {
+        let audio = state.audio_capture.lock().await;
+        audio.get_dictation_stream_queue()
+    };
+
+    let Some((stream_queue, sample_rate)) = maybe_stream_info else {
+        tracing::warn!("Inline dictation requested, but no dictation streaming queue is available");
+        return;
+    };
+
+    state.dictation_stream_stop.store(true, Ordering::SeqCst);
+    let stop_flag = Arc::clone(&state.dictation_stream_stop);
+    let streaming_transcriber = Arc::clone(&state.streaming_transcriber);
+    let app_handle = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let session_result = streaming_transcriber
+            .start_session(provider, sample_rate, selected_model_id)
+            .await;
+
+        let (stream_session_id, mut result_rx) = match session_result {
+            Ok(pair) => pair,
+            Err(error) => {
+                tracing::warn!("Failed to start inline dictation stream: {}", error);
+                return;
+            }
+        };
+
+        let emit_app = app_handle.clone();
+        let recv_task = tokio::spawn(async move {
+            while let Some(result) = result_rx.recv().await {
+                let preview_text = result.text.trim().to_string();
+                if !result.is_partial || preview_text.is_empty() {
+                    continue;
+                }
+
+                let state = emit_app.state::<AppState>();
+                if active_dictation_session_id(state.inner()).await != Some(session_id) {
+                    break;
+                }
+                let runtime_state = *state.dictation_runtime_state.lock().await;
+                if runtime_state != DictationSessionState::Recording {
+                    continue;
+                }
+                emit_dictation_state(
+                    &emit_app,
+                    "recording",
+                    None,
+                    Some("Listening"),
+                    Some(preview_text.as_str()),
+                    Some(session_id),
+                    None,
+                    Some("inline"),
+                );
+            }
+        });
+
+        let chunk_threshold = (sample_rate as usize / 4).max(1);
+        let mut pending: Vec<f32> = Vec::with_capacity(chunk_threshold * 2);
+
+        while stop_flag.load(Ordering::SeqCst) {
+            while let Some(chunk) = stream_queue.pop() {
+                pending.extend_from_slice(&chunk);
+            }
+
+            if pending.len() >= chunk_threshold {
+                let feed_slice = std::mem::take(&mut pending);
+                if let Err(error) = streaming_transcriber
+                    .feed_audio(&stream_session_id, &feed_slice)
+                    .await
+                {
+                    tracing::warn!("Inline dictation streaming feed error: {}", error);
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(120)).await;
+        }
+
+        while let Some(chunk) = stream_queue.pop() {
+            pending.extend_from_slice(&chunk);
+        }
+        if !pending.is_empty() {
+            let _ = streaming_transcriber
+                .feed_audio(&stream_session_id, &pending)
+                .await;
+        }
+        let _ = streaming_transcriber
+            .finalize_session(&stream_session_id)
+            .await;
+        recv_task.abort();
+    });
+}
+
+#[cfg(target_os = "macos")]
+async fn start_apple_live_dictation_session(
+    state: &AppState,
+    app: &AppHandle,
+    session_id: u64,
+    inline_mode: bool,
+    _app_target: Option<String>,
+) -> Result<(), String> {
+    let maybe_stream_info = {
+        let audio = state.audio_capture.lock().await;
+        audio.get_dictation_stream_queue()
+    };
+
+    let Some((stream_queue, sample_rate)) = maybe_stream_info else {
+        return Err("Apple live dictation queue is unavailable.".to_string());
+    };
+
+    let (audio_sink, mut event_rx, final_rx) =
+        crate::asr::platform::macos_speech::start_live_dictation_session(sample_rate)
+            .await
+            .map_err(|error| error.to_string())?;
+
+    {
+        let mut runtime = state.apple_live_dictation.lock().await;
+        *runtime = Some(AppleLiveDictationRuntime {
+            session_id,
+            final_rx: Some(final_rx),
+        });
+    }
+
+    state.dictation_stream_stop.store(true, Ordering::SeqCst);
+    let stop_flag = Arc::clone(&state.dictation_stream_stop);
+    let emit_app = app.clone();
+
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            if event.is_final {
+                break;
+            }
+
+            let preview_text = event.text.trim().to_string();
+            if preview_text.is_empty() {
+                continue;
+            }
+
+            let state = emit_app.state::<AppState>();
+            if active_dictation_session_id(state.inner()).await != Some(session_id) {
+                break;
+            }
+            let runtime_state = *state.dictation_runtime_state.lock().await;
+            if runtime_state != DictationSessionState::Recording {
+                continue;
+            }
+
+            emit_dictation_state(
+                &emit_app,
+                "recording",
+                None,
+                Some("Listening"),
+                Some(preview_text.as_str()),
+                Some(session_id),
+                None,
+                if inline_mode { Some("inline") } else { None },
+            );
+        }
+    });
+
+    tauri::async_runtime::spawn(async move {
+        let chunk_threshold = (sample_rate as usize / 10).max(1);
+        let mut pending: Vec<f32> = Vec::with_capacity(chunk_threshold * 2);
+
+        while stop_flag.load(Ordering::SeqCst) {
+            while let Some(chunk) = stream_queue.pop() {
+                pending.extend_from_slice(&chunk);
+            }
+
+            if pending.len() >= chunk_threshold {
+                let feed_slice = std::mem::take(&mut pending);
+                if let Err(error) = audio_sink.send_chunk(feed_slice) {
+                    tracing::warn!("Apple live dictation audio feed error: {}", error);
+                    break;
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+
+        while let Some(chunk) = stream_queue.pop() {
+            pending.extend_from_slice(&chunk);
+        }
+
+        if !pending.is_empty() {
+            let _ = audio_sink.send_chunk(pending);
+        }
+    });
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn finish_apple_live_dictation_session(
+    state: &AppState,
+    session_id: u64,
+) -> Option<Result<crate::asr::platform::macos_speech::LiveSpeechResult, String>> {
+    let final_rx = {
+        let mut runtime = state.apple_live_dictation.lock().await;
+        let live = runtime.as_mut()?;
+        if live.session_id != session_id {
+            return None;
+        }
+        live.final_rx.take()
+    }?;
+
+    let outcome = tokio::time::timeout(Duration::from_secs(12), final_rx).await;
+
+    {
+        let mut runtime = state.apple_live_dictation.lock().await;
+        if runtime
+            .as_ref()
+            .map(|live| live.session_id == session_id)
+            .unwrap_or(false)
+        {
+            *runtime = None;
+        }
+    }
+
+    Some(match outcome {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => {
+            Err("Apple live dictation session was canceled before completion.".to_string())
+        }
+        Err(_) => Err("Apple live dictation timed out while finalizing.".to_string()),
+    })
+}
+
 async fn stop_dictation_session(
     state: &AppState,
     app: &AppHandle,
@@ -4870,6 +5311,75 @@ async fn stop_dictation_session(
         copy_to_clipboard_enabled,
     )
     .await
+}
+
+#[tauri::command]
+async fn reprocess_dictation_text(
+    state: tauri::State<'_, AppState>,
+    text: String,
+    mode_preset: String,
+) -> Result<serde_json::Value, String> {
+    let input = text.trim();
+    if input.is_empty() {
+        return Err("Dictation text is empty.".to_string());
+    }
+
+    let normalized_mode = normalize_dictation_mode_preset(&mode_preset).to_string();
+    let (output_text, used_ai, provider, model_id) = match normalized_mode.as_str() {
+        "messages" | "email" | "meeting_follow_up" => {
+            let prompt = dictation_mode_transform_prompt(&normalized_mode)
+                .ok_or_else(|| "No transform prompt is configured for this mode.".to_string())?;
+            match run_custom_dictation_transform_with_selected_provider(
+                state.inner(),
+                input,
+                prompt,
+            )
+            .await
+            {
+                Ok((output, provider, model_id)) => (
+                    output,
+                    true,
+                    Some(provider.as_settings_value().to_string()),
+                    Some(model_id),
+                ),
+                Err(error) => {
+                    let fallback = match normalized_mode.as_str() {
+                        "messages" => rewrite_shorter_text(input),
+                        "email" => rewrite_professional_text(input),
+                        "meeting_follow_up" => rewrite_professional_text(input),
+                        _ => input.to_string(),
+                    };
+                    tracing::warn!(
+                        "Dictation reprocess for mode '{}' fell back to local transform: {}",
+                        normalized_mode,
+                        error
+                    );
+                    (fallback, false, None, None)
+                }
+            }
+        }
+        "notes" => (bulletize_text(input), false, None, None),
+        "voice" | "custom" => (
+            sanitize_dictation_output(input, input).trim().to_string(),
+            false,
+            None,
+            None,
+        ),
+        _ => (
+            sanitize_dictation_output(input, input).trim().to_string(),
+            false,
+            None,
+            None,
+        ),
+    };
+
+    Ok(serde_json::json!({
+        "modePreset": normalized_mode,
+        "outputText": output_text,
+        "usedAi": used_ai,
+        "provider": provider,
+        "modelId": model_id
+    }))
 }
 
 async fn stop_dictation_session_for_session(
@@ -4906,6 +5416,7 @@ async fn stop_dictation_session_for_session(
         None,
     );
     show_dictation_overlay(app);
+    state.dictation_stream_stop.store(false, Ordering::SeqCst);
 
     let audio_data = {
         let mut audio = state.audio_capture.lock().await;
@@ -4963,11 +5474,35 @@ async fn stop_dictation_session_for_session(
                     Some(stop_reason.to_string()),
                     Some(outcome.to_string()),
                 );
+                #[cfg(target_os = "macos")]
+                if matches!(
+                    DictationInsertionMode::from_settings_value(insertion_mode),
+                    DictationInsertionMode::Inline
+                ) {
+                    if let Err(clear_error) =
+                        clear_inline_dictation_session(state, session_id, true).await
+                    {
+                        tracing::warn!(
+                            "Failed to clear inline dictation preview after stop error: {}",
+                            clear_error
+                        );
+                    }
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let mut runtime = state.apple_live_dictation.lock().await;
+                    if runtime
+                        .as_ref()
+                        .map(|live| live.session_id == session_id)
+                        .unwrap_or(false)
+                    {
+                        *runtime = None;
+                    }
+                }
                 return Err(message);
             }
         }
     };
-
     {
         let mut runtime_state = state.dictation_runtime_state.lock().await;
         *runtime_state = DictationSessionState::Transcribing;
@@ -4994,18 +5529,60 @@ async fn stop_dictation_session_for_session(
     let raw_duration_seconds = compute_wav_duration_seconds_from_bytes(&audio_data) as f64;
 
     let transcription_start = std::time::Instant::now();
-    let mut result = match state
-        .asr_manager
-        .transcribe_bytes_with_provider(
-            dictation_provider,
-            &audio_data,
-            Some(dictation_model_id.as_str()),
-        )
-        .await
-    {
+    let result = {
+        #[cfg(target_os = "macos")]
+        if dictation_provider == asr::AsrProviderType::MacosAppleSpeech {
+            match finish_apple_live_dictation_session(state, session_id).await {
+                Some(Ok(live_result)) => Ok(asr::TranscriptionResult {
+                    text: live_result.text,
+                    segments: Vec::new(),
+                    language: live_result.language,
+                    confidence: live_result.confidence,
+                    processing_time_ms: transcription_start.elapsed().as_millis() as u64,
+                    model_name: "Apple Native Speech".to_string(),
+                    model_id: "macos_apple_speech".to_string(),
+                    requested_provider: asr::AsrProviderType::MacosAppleSpeech,
+                    actual_provider: asr::AsrProviderType::MacosAppleSpeech,
+                    requested_engine: Some("macos_apple_speech".to_string()),
+                    actual_engine: Some("macos_apple_speech".to_string()),
+                    optimization_applied: false,
+                    fallback_reason: None,
+                }),
+                Some(Err(error)) => Err(anyhow::anyhow!(error)),
+                None => Err(anyhow::anyhow!(
+                    "Apple Native live dictation session was not available when stopping."
+                )),
+            }
+        } else {
+            state
+                .asr_manager
+                .transcribe_bytes_with_provider(
+                    dictation_provider,
+                    &audio_data,
+                    Some(dictation_model_id.as_str()),
+                )
+                .await
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            state
+                .asr_manager
+                .transcribe_bytes_with_provider(
+                    dictation_provider,
+                    &audio_data,
+                    Some(dictation_model_id.as_str()),
+                )
+                .await
+        }
+    }
+    .map_err(|error| {
+        let message = error.to_string();
+        message
+    });
+
+    let mut result = match result {
         Ok(result) => result,
-        Err(error) => {
-            let message = error.to_string();
+        Err(message) => {
             {
                 let mut runtime_state = state.dictation_runtime_state.lock().await;
                 *runtime_state = DictationSessionState::Error;
@@ -5027,6 +5604,20 @@ async fn stop_dictation_session_for_session(
                 Some(stop_reason.to_string()),
                 Some("provider_error".to_string()),
             );
+            #[cfg(target_os = "macos")]
+            if matches!(
+                DictationInsertionMode::from_settings_value(insertion_mode),
+                DictationInsertionMode::Inline
+            ) {
+                if let Err(clear_error) =
+                    clear_inline_dictation_session(state, session_id, true).await
+                {
+                    tracing::warn!(
+                        "Failed to clear inline dictation preview after provider error: {}",
+                        clear_error
+                    );
+                }
+            }
             return Err(message);
         }
     };
@@ -5037,7 +5628,8 @@ async fn stop_dictation_session_for_session(
         transcription_latency_ms
     );
 
-    if raw_has_audio
+    if dictation_provider != asr::AsrProviderType::MacosAppleSpeech
+        && raw_has_audio
         && (looks_low_information_dictation(&result.text) || result.text.trim().is_empty())
     {
         if let Ok(trimmed_audio) = crate::audio::utils::remove_silence_from_wav_bytes(&audio_data) {
@@ -5101,7 +5693,7 @@ async fn stop_dictation_session_for_session(
         );
         match tokio::time::timeout(
             Duration::from_millis(DICTATION_AI_FORMAT_TIMEOUT_MS),
-            run_dictation_formatting_with_selected_provider(state, &result.text),
+            run_dictation_formatting_with_selected_provider(state, &result.text, &dictation_options),
         )
         .await
         {
@@ -5171,6 +5763,19 @@ async fn stop_dictation_session_for_session(
             Some(stop_reason.to_string()),
             Some(outcome.to_string()),
         );
+        #[cfg(target_os = "macos")]
+        if matches!(
+            DictationInsertionMode::from_settings_value(insertion_mode),
+            DictationInsertionMode::Inline
+        ) {
+            if let Err(clear_error) = clear_inline_dictation_session(state, session_id, true).await
+            {
+                tracing::warn!(
+                    "Failed to clear inline dictation preview after empty transcript: {}",
+                    clear_error
+                );
+            }
+        }
         return Err(message);
     }
 
@@ -5183,6 +5788,7 @@ async fn stop_dictation_session_for_session(
     .to_string();
     let snippets_enabled = settings_snapshot.transcription.dictation_snippets_enabled;
     let legacy_paste_to_cursor = settings_snapshot.transcription.dictation_paste_to_cursor;
+    let configured_mode = DictationInsertionMode::from_settings_value(insertion_mode);
 
     let app_target = tauri::async_runtime::spawn_blocking(get_frontmost_app_name)
         .await
@@ -5196,10 +5802,16 @@ async fn stop_dictation_session_for_session(
             match action {
                 DictationCommandAction::InsertText(text) => result.text = text,
                 DictationCommandAction::RewriteShorter(text) => {
+                    let command_input = resolve_contextual_command_input(
+                        text.as_str(),
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Rewrite Shorter",
+                    )?;
                     result.text = match run_dictation_command_with_selected_provider(
                         state,
                         "rewrite_shorter",
-                        text.as_str(),
+                        command_input.as_str(),
                     )
                     .await
                     {
@@ -5209,15 +5821,21 @@ async fn stop_dictation_session_for_session(
                                 "rewrite_shorter command fallback to local transform: {}",
                                 error
                             );
-                            rewrite_shorter_text(text.as_str())
+                            rewrite_shorter_text(command_input.as_str())
                         }
                     }
                 }
                 DictationCommandAction::RewriteProfessional(text) => {
+                    let command_input = resolve_contextual_command_input(
+                        text.as_str(),
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Rewrite Professional",
+                    )?;
                     result.text = match run_dictation_command_with_selected_provider(
                         state,
                         "rewrite_professional",
-                        text.as_str(),
+                        command_input.as_str(),
                     )
                     .await
                     {
@@ -5227,15 +5845,21 @@ async fn stop_dictation_session_for_session(
                                 "rewrite_professional command fallback to local transform: {}",
                                 error
                             );
-                            rewrite_professional_text(text.as_str())
+                            rewrite_professional_text(command_input.as_str())
                         }
                     }
                 }
                 DictationCommandAction::Bulletize(text) => {
+                    let command_input = resolve_contextual_command_input(
+                        text.as_str(),
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Bulletize Selection",
+                    )?;
                     result.text = match run_dictation_command_with_selected_provider(
                         state,
                         "bulletize_selection",
-                        text.as_str(),
+                        command_input.as_str(),
                     )
                     .await
                     {
@@ -5245,7 +5869,7 @@ async fn stop_dictation_session_for_session(
                                 "bulletize_selection command fallback to local transform: {}",
                                 error
                             );
-                            bulletize_text(text.as_str())
+                            bulletize_text(command_input.as_str())
                         }
                     }
                 }
@@ -5285,13 +5909,14 @@ async fn stop_dictation_session_for_session(
     let mut pasted = false;
     let mut copied = false;
     let mut paste_error: Option<String> = None;
+    let mut insert_latency_ms: Option<u64> = None;
     let mut insertion_mode_used = if command_applied.is_some() && result.text.trim().is_empty() {
         "command_only".to_string()
     } else {
         "none".to_string()
     };
     if !result.text.trim().is_empty() {
-        let configured_mode = DictationInsertionMode::from_settings_value(insertion_mode);
+        let insert_started = std::time::Instant::now();
         match configured_mode {
             DictationInsertionMode::Auto => {
                 if legacy_paste_to_cursor {
@@ -5340,6 +5965,23 @@ async fn stop_dictation_session_for_session(
                     "none".to_string()
                 };
             }
+            DictationInsertionMode::Inline => {
+                let outcome = paste_text_systemwide(
+                    &result.text,
+                    copy_to_clipboard_enabled,
+                    app_target.as_deref(),
+                );
+                pasted = outcome.pasted;
+                copied = outcome.copied;
+                paste_error = outcome.error;
+                insertion_mode_used = if pasted {
+                    "inline".to_string()
+                } else if copied {
+                    "clipboard_only".to_string()
+                } else {
+                    "none".to_string()
+                };
+            }
             DictationInsertionMode::ClipboardOnly => match copy_to_clipboard(&result.text) {
                 Ok(_) => {
                     copied = true;
@@ -5351,6 +5993,7 @@ async fn stop_dictation_session_for_session(
                 }
             },
         }
+        insert_latency_ms = Some(insert_started.elapsed().as_millis() as u64);
     }
     let end_to_end_ms = stop_pipeline_started.elapsed().as_millis() as u64;
 
@@ -5370,11 +6013,17 @@ async fn stop_dictation_session_for_session(
         paste_error.as_deref(),
         fallback_message.as_deref(),
         transcription_latency_ms,
+        insert_latency_ms,
         end_to_end_ms,
         insertion_mode_used.as_str(),
         command_applied.as_deref(),
         snippet_applied_count,
         app_target.as_deref(),
+        Some(&dictation_options.context_source),
+        dictation_options
+            .captured_context_text
+            .as_ref()
+            .map(|text| text.chars().count()),
     );
 
     if let Err(error) = app.emit("dictation-text-ready", payload) {
@@ -5574,9 +6223,27 @@ async fn force_stop_dictation_session(
     source: &str,
 ) -> Result<String, String> {
     let session_id = active_dictation_session_id(state).await;
+    state.dictation_stream_stop.store(false, Ordering::SeqCst);
     {
         let mut audio = state.audio_capture.lock().await;
         audio.abort_dictation();
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(active_session_id) = session_id {
+        if let Err(error) = clear_inline_dictation_session(state, active_session_id, true).await {
+            tracing::warn!(
+                "Failed to clear inline dictation preview during force stop: {}",
+                error
+            );
+        }
+        let mut runtime = state.apple_live_dictation.lock().await;
+        if runtime
+            .as_ref()
+            .map(|live| live.session_id == active_session_id)
+            .unwrap_or(false)
+        {
+            *runtime = None;
+        }
     }
 
     {
@@ -5799,6 +6466,10 @@ fn emit_dictation_state(
     if let Err(error) = app.emit("dictation-state-changed", payload) {
         tracing::warn!("Failed to emit dictation state: {}", error);
     }
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        sync_primary_tray(app_handle).await;
+    });
 }
 
 fn emit_recording_state(
@@ -5841,6 +6512,10 @@ fn emit_recording_state(
         "stopped" | "error" | "idle" => hide_recording_tray_icon(app),
         _ => {}
     }
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        sync_primary_tray(app_handle).await;
+    });
 }
 
 fn emit_recording_status(
@@ -5885,6 +6560,274 @@ fn emit_recording_status_with_markers(
     });
     if let Err(error) = app.emit("recording-status-changed", payload) {
         tracing::warn!("Failed to emit recording status: {}", error);
+    }
+}
+
+fn primary_tray_icon_image(_app: &AppHandle) -> tauri::image::Image<'static> {
+    let size: u32 = 18;
+    let mut rgba = vec![0u8; (size * size * 4) as usize];
+    let center = size as f32 / 2.0;
+    let radius = center - 2.0;
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let idx = ((y * size + x) * 4) as usize;
+            if dx * dx + dy * dy <= radius * radius {
+                rgba[idx] = 94;
+                rgba[idx + 1] = 234;
+                rgba[idx + 2] = 212;
+                rgba[idx + 3] = 255;
+            }
+        }
+    }
+    tauri::image::Image::new_owned(rgba, size, size)
+}
+
+fn build_primary_tray_menu(app: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+
+    let dictation_phase = app
+        .state::<AppState>()
+        .dictation_overlay_state
+        .lock()
+        .ok()
+        .map(|state| state.phase.clone())
+        .unwrap_or_else(|| "idle".to_string());
+    let recording_overlay = app
+        .state::<AppState>()
+        .recording_overlay_state
+        .lock()
+        .ok()
+        .map(|state| (state.phase.clone(), state.recording_id.clone()))
+        .unwrap_or_else(|| ("idle".to_string(), None));
+
+    let dictation_active = !matches!(dictation_phase.as_str(), "idle" | "done" | "error");
+    let meeting_active = matches!(recording_overlay.0.as_str(), "recording" | "transcribing");
+
+    let status_text = if dictation_active {
+        "Status: Dictation active"
+    } else if meeting_active {
+        "Status: Meeting capture active"
+    } else {
+        "Status: Ready"
+    };
+
+    let status_item = MenuItem::with_id(app, TRAY_ITEM_STATUS, status_text, false, None::<&str>)
+        .map_err(|e| e.to_string())?;
+    let open_item =
+        MenuItem::with_id(app, TRAY_ITEM_OPEN, "Open Nautilus", true, None::<&str>)
+            .map_err(|e| e.to_string())?;
+    let start_dictation_item = MenuItem::with_id(
+        app,
+        TRAY_ITEM_START_DICTATION,
+        "Start Dictation",
+        !dictation_active && !meeting_active,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
+    let stop_dictation_item = MenuItem::with_id(
+        app,
+        TRAY_ITEM_STOP_DICTATION,
+        "Stop Dictation",
+        dictation_active,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
+    let start_meeting_mic_item = MenuItem::with_id(
+        app,
+        TRAY_ITEM_START_MEETING_MIC,
+        "Start Meeting (Mic)",
+        !dictation_active && !meeting_active,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
+    let start_meeting_system_item = MenuItem::with_id(
+        app,
+        TRAY_ITEM_START_MEETING_SYSTEM,
+        "Start Meeting (Mic + System Audio)",
+        !dictation_active && !meeting_active,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
+    let stop_meeting_item = MenuItem::with_id(
+        app,
+        TRAY_ITEM_STOP_MEETING,
+        if recording_overlay.0 == "transcribing" {
+            "Meeting is processing"
+        } else {
+            "Stop Meeting"
+        },
+        recording_overlay.0 == "recording" && recording_overlay.1.is_some(),
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
+    let separator_top = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
+    let separator_bottom = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
+    let quit_item = MenuItem::with_id(app, TRAY_ITEM_QUIT, "Quit Nautilus", true, None::<&str>)
+        .map_err(|e| e.to_string())?;
+
+    Menu::with_items(
+        app,
+        &[
+            &status_item,
+            &open_item,
+            &separator_top,
+            &start_dictation_item,
+            &stop_dictation_item,
+            &start_meeting_mic_item,
+            &start_meeting_system_item,
+            &stop_meeting_item,
+            &separator_bottom,
+            &quit_item,
+        ],
+    )
+    .map_err(|e| e.to_string())
+}
+
+async fn sync_primary_tray(app: AppHandle) {
+    use tauri::tray::TrayIconBuilder;
+
+    let keep_running_after_close = {
+        let app_state = app.state::<AppState>();
+        let settings_manager = app_state.settings_manager.lock().await;
+        settings_manager.settings().ui.minimize_to_tray
+    };
+
+    let tray = app.tray_by_id(PRIMARY_TRAY_ID);
+    if !keep_running_after_close {
+        if let Some(tray) = tray {
+            let _ = tray.set_visible(false);
+        }
+        return;
+    }
+
+    let menu = match build_primary_tray_menu(&app) {
+        Ok(menu) => menu,
+        Err(error) => {
+            tracing::warn!("Failed to build primary tray menu: {}", error);
+            return;
+        }
+    };
+
+    let tooltip = app
+        .state::<AppState>()
+        .dictation_overlay_state
+        .lock()
+        .ok()
+        .map(|state| state.phase.clone())
+        .filter(|phase| !matches!(phase.as_str(), "idle" | "done" | "error"))
+        .map(|_| "Nautilus — Dictation active".to_string())
+        .or_else(|| {
+            app.state::<AppState>()
+                .recording_overlay_state
+                .lock()
+                .ok()
+                .and_then(|state| match state.phase.as_str() {
+                    "recording" => Some("Nautilus — Meeting capture active".to_string()),
+                    "transcribing" => Some("Nautilus — Meeting processing".to_string()),
+                    _ => None,
+                })
+        })
+        .unwrap_or_else(|| "Nautilus — Ready".to_string());
+
+    if let Some(tray) = tray {
+        if let Err(error) = tray.set_menu(Some(menu)) {
+            tracing::warn!("Failed to refresh primary tray menu: {}", error);
+        }
+        let _ = tray.set_tooltip(Some(tooltip));
+        let _ = tray.set_visible(true);
+        return;
+    }
+
+    let icon = primary_tray_icon_image(&app);
+    if let Err(error) = TrayIconBuilder::with_id(PRIMARY_TRAY_ID)
+        .menu(&menu)
+        .icon(icon)
+        .icon_as_template(true)
+        .tooltip(tooltip)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| {
+            let action = event.id().0.clone();
+            let app_handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                handle_primary_tray_action(app_handle, action).await;
+            });
+        })
+        .build(&app)
+    {
+        tracing::warn!("Failed to create primary tray icon: {}", error);
+    }
+}
+
+async fn handle_primary_tray_action(app: AppHandle, action: String) {
+    match action.as_str() {
+        TRAY_ITEM_OPEN => {
+            if let Err(error) = show_main_window(&app) {
+                tracing::warn!("Failed to open main window from tray: {}", error);
+            }
+        }
+        TRAY_ITEM_START_DICTATION => {
+            let state = app.state::<AppState>();
+            let options = default_dictation_start_options(state.inner()).await;
+            if let Err(error) =
+                start_dictation_session(state.inner(), &app, "tray", options).await
+            {
+                tracing::warn!("Failed to start dictation from tray: {}", error);
+                let _ = app.emit("asr-provider-warning", error);
+            }
+        }
+        TRAY_ITEM_STOP_DICTATION => {
+            let state = app.state::<AppState>();
+            let settings = state.settings_manager.lock().await.settings().clone();
+            let insertion_mode =
+                normalize_dictation_insertion_mode(&settings.transcription.dictation_insertion_mode)
+                    .to_string();
+            if let Err(error) = stop_dictation_session(
+                state.inner(),
+                &app,
+                "tray",
+                insertion_mode.as_str(),
+                settings.transcription.dictation_copy_to_clipboard,
+            )
+            .await
+            {
+                tracing::warn!("Failed to stop dictation from tray: {}", error);
+            }
+        }
+        TRAY_ITEM_START_MEETING_MIC | TRAY_ITEM_START_MEETING_SYSTEM => {
+            let state = app.state::<AppState>();
+            let system_audio = action == TRAY_ITEM_START_MEETING_SYSTEM;
+            let options = models::RecordingOptions {
+                mic: true,
+                system_audio,
+                project_id: "default".to_string(),
+                template: None,
+                consent_prompt_shown: true,
+            };
+            if let Err(error) = start_recording(app.clone(), state, options).await {
+                tracing::warn!("Failed to start meeting from tray: {}", error);
+                let _ = app.emit("asr-provider-warning", error);
+            }
+        }
+        TRAY_ITEM_STOP_MEETING => {
+            let recording_id = app
+                .state::<AppState>()
+                .recording_overlay_state
+                .lock()
+                .ok()
+                .and_then(|state| state.recording_id.clone());
+            if let Some(recording_id) = recording_id {
+                let state = app.state::<AppState>();
+                if let Err(error) = stop_recording(app.clone(), state, recording_id).await {
+                    tracing::warn!("Failed to stop meeting from tray: {}", error);
+                }
+            }
+        }
+        TRAY_ITEM_QUIT => {
+            app.exit(0);
+        }
+        _ => {}
     }
 }
 
@@ -6578,31 +7521,56 @@ fn parse_dictation_command(
     }
 
     if let Some(payload) = command_payload(&remainder, "rewrite shorter") {
-        if !payload.is_empty() {
-            return Some((
-                "rewrite_shorter".to_string(),
-                DictationCommandAction::RewriteShorter(payload.to_string()),
-            ));
-        }
+        return Some((
+            "rewrite_shorter".to_string(),
+            DictationCommandAction::RewriteShorter(payload.to_string()),
+        ));
     }
     if let Some(payload) = command_payload(&remainder, "rewrite professional") {
-        if !payload.is_empty() {
-            return Some((
-                "rewrite_professional".to_string(),
-                DictationCommandAction::RewriteProfessional(payload.to_string()),
-            ));
-        }
+        return Some((
+            "rewrite_professional".to_string(),
+            DictationCommandAction::RewriteProfessional(payload.to_string()),
+        ));
     }
     if let Some(payload) = command_payload(&remainder, "bulletize selection") {
-        if !payload.is_empty() {
-            return Some((
-                "bulletize_selection".to_string(),
-                DictationCommandAction::Bulletize(payload.to_string()),
-            ));
-        }
+        return Some((
+            "bulletize_selection".to_string(),
+            DictationCommandAction::Bulletize(payload.to_string()),
+        ));
     }
 
     None
+}
+
+fn resolve_contextual_command_input(
+    spoken_payload: &str,
+    captured_context_text: Option<&str>,
+    context_source: &str,
+    action_label: &str,
+) -> Result<String, String> {
+    let spoken = spoken_payload.trim();
+    if !spoken.is_empty() {
+        return Ok(spoken.to_string());
+    }
+
+    if let Some(context) = captured_context_text.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(context.to_string());
+    }
+
+    Err(match normalize_dictation_context_source(context_source) {
+        "selected_text" => format!(
+            "{} needs selected text, but Nautilus could not capture any selected text from the frontmost app.",
+            action_label
+        ),
+        "clipboard" => format!(
+            "{} needs clipboard text, but the clipboard was empty when dictation started.",
+            action_label
+        ),
+        _ => format!(
+            "{} needs source text. Enable Text context or speak the text after the command.",
+            action_label
+        ),
+    })
 }
 
 fn rewrite_shorter_text(text: &str) -> String {
@@ -6760,11 +7728,14 @@ fn build_dictation_text_ready_payload(
     paste_error: Option<&str>,
     fallback_message: Option<&str>,
     transcription_latency_ms: u64,
+    insert_latency_ms: Option<u64>,
     end_to_end_ms: u64,
     insertion_mode_used: &str,
     command_applied: Option<&str>,
     snippet_applied_count: usize,
     app_target: Option<&str>,
+    context_source: Option<&str>,
+    context_chars: Option<usize>,
 ) -> serde_json::Value {
     let is_fallback = result.requested_provider != result.actual_provider
         || result
@@ -6791,11 +7762,14 @@ fn build_dictation_text_ready_payload(
         "fallbackMessage": fallback_message,
         "modelId": result.model_id,
         "latencyMs": transcription_latency_ms,
+        "insertLatencyMs": insert_latency_ms,
         "endToEndMs": end_to_end_ms,
         "insertionModeUsed": insertion_mode_used,
         "commandApplied": command_applied,
         "snippetAppliedCount": snippet_applied_count,
-        "appTarget": app_target
+        "appTarget": app_target,
+        "contextSource": context_source,
+        "contextChars": context_chars
     })
 }
 
@@ -6812,6 +7786,21 @@ fn default_dictation_command_prompt(command_key: &str) -> Option<&'static str> {
         "bulletize_selection" => Some(
             "Convert the user's text into concise bullet points. \
             Use one bullet per idea. Return only the bullet list.",
+        ),
+        _ => None,
+    }
+}
+
+fn dictation_mode_transform_prompt(mode_preset: &str) -> Option<&'static str> {
+    match normalize_dictation_mode_preset(mode_preset) {
+        "messages" => Some(
+            "Rewrite the user's text as a short, natural message. Keep it concise, clear, and conversational. Return only the final message.",
+        ),
+        "email" => Some(
+            "Rewrite the user's text into polished email-ready prose. Keep the meaning, improve structure, punctuation, and professionalism. Return only the final text.",
+        ),
+        "meeting_follow_up" => Some(
+            "Turn the user's text into a concise professional meeting follow-up. Keep action items, owners, and next steps clear. Return only the final follow-up text.",
         ),
         _ => None,
     }
@@ -6874,6 +7863,7 @@ fn generate_default_dictation_prompt(active_app: Option<String>) -> String {
 async fn run_dictation_formatting_with_selected_provider(
     state: &AppState,
     transcript: &str,
+    dictation_options: &models::DictationStartOptions,
 ) -> Result<String, String> {
     let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state).await;
@@ -6884,9 +7874,13 @@ async fn run_dictation_formatting_with_selected_provider(
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| provider.default_model());
 
-    let active_app = tauri::async_runtime::spawn_blocking(get_frontmost_app_name)
-        .await
-        .unwrap_or(None);
+    let active_app = if dictation_options.context_app_name.is_some() {
+        dictation_options.context_app_name.clone()
+    } else {
+        tauri::async_runtime::spawn_blocking(get_frontmost_app_name)
+            .await
+            .unwrap_or(None)
+    };
 
     let settings = state.settings_manager.lock().await.settings().clone();
 
@@ -6906,6 +7900,22 @@ async fn run_dictation_formatting_with_selected_provider(
         }
     } else {
         generate_default_dictation_prompt(active_app)
+    };
+
+    let system_prompt = if let Some(context_text) = dictation_options
+        .captured_context_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        format!(
+            "{}\n\n[Existing text context from {}]\n{}",
+            system_prompt,
+            normalize_dictation_context_source(&dictation_options.context_source),
+            context_text
+        )
+    } else {
+        system_prompt
     };
 
     match provider {
@@ -7030,6 +8040,77 @@ async fn run_dictation_command_with_selected_provider(
     }
 
     Ok(cleaned.trim().to_string())
+}
+
+async fn run_custom_dictation_transform_with_selected_provider(
+    state: &AppState,
+    input: &str,
+    system_prompt: &str,
+) -> Result<(String, AnalysisProvider, String), String> {
+    let transcript = input.trim();
+    if transcript.is_empty() {
+        return Err("Text cannot be empty".to_string());
+    }
+
+    let (provider, remote_processing_enabled, _, settings_model) =
+        selected_analysis_provider_and_settings(state).await;
+    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
+
+    let selected_model = settings_model
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| provider.default_model())
+        .to_string();
+
+    let raw_output = match provider {
+        AnalysisProvider::Ollama => state
+            .ollama_client
+            .generate(&selected_model, &format!("{}\n\n{}", system_prompt, transcript))
+            .await
+            .map_err(|e| e.to_string())?,
+        AnalysisProvider::OllamaCloud => {
+            let api_key = provider_secret_for(provider)?;
+            llm::OllamaCloudClient::with_api_key(Some(api_key))
+                .generate(&selected_model, &format!("{}\n\n{}", system_prompt, transcript))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        AnalysisProvider::OpenAi => {
+            let api_key = provider_secret_for(provider)?;
+            llm::OpenAIClient::with_api_key(Some(api_key))
+                .generate(&selected_model, transcript, Some(system_prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        AnalysisProvider::Anthropic => {
+            let api_key = provider_secret_for(provider)?;
+            llm::AnthropicClient::with_api_key(Some(api_key))
+                .generate(&selected_model, transcript, Some(system_prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        AnalysisProvider::Gemini => {
+            let api_key = provider_secret_for(provider)?;
+            llm::GeminiClient::with_api_key(Some(api_key))
+                .generate(&selected_model, transcript, Some(system_prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        AnalysisProvider::DeepSeek => {
+            let api_key = provider_secret_for(provider)?;
+            llm::DeepSeekClient::with_api_key(Some(api_key))
+                .generate(&selected_model, transcript, Some(system_prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+    };
+
+    let cleaned = sanitize_dictation_output(raw_output.trim(), transcript);
+    if cleaned.trim().is_empty() {
+        return Err("Reprocess returned an empty response".to_string());
+    }
+
+    Ok((cleaned.trim().to_string(), provider, selected_model))
 }
 
 async fn run_summary_with_selected_provider(
@@ -7644,6 +8725,9 @@ pub fn run() {
             dictation_overlay_state: Arc::new(StdMutex::new(DictationOverlayState::default())),
             recording_overlay_state: Arc::new(StdMutex::new(RecordingOverlayState::default())),
             streaming_transcriber,
+            dictation_stream_stop: Arc::new(AtomicBool::new(false)),
+            dictation_inline_state: Arc::new(Mutex::new(InlineDictationState::default())),
+            apple_live_dictation: Arc::new(Mutex::new(None)),
             vault_state: Arc::new(Mutex::new(VaultRuntimeState::default())),
             recording_stream_stop: Arc::new(AtomicBool::new(false)),
             recording_templates: Arc::new(StdMutex::new(std::collections::HashMap::new())),
@@ -7757,6 +8841,13 @@ pub fn run() {
                 }
             }
 
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    sync_primary_tray(app_handle).await;
+                });
+            }
+
             #[cfg(target_os = "macos")]
             {
                 if !check_accessibility_permission() {
@@ -7811,11 +8902,16 @@ pub fn run() {
                     return;
                 }
                 let app_state = window.state::<AppState>();
-                let capture_active = tauri::async_runtime::block_on(async {
+                let (capture_active, keep_running_after_close) = tauri::async_runtime::block_on(async {
                     let audio = app_state.audio_capture.lock().await;
-                    audio.is_dictating() || audio.is_recording()
+                    let capture_active = audio.is_dictating() || audio.is_recording();
+                    drop(audio);
+
+                    let settings_manager = app_state.settings_manager.lock().await;
+                    let keep_running_after_close = settings_manager.settings().ui.minimize_to_tray;
+                    (capture_active, keep_running_after_close)
                 });
-                if capture_active {
+                if capture_active || keep_running_after_close {
                     api.prevent_close();
                     if let Err(error) = window.hide() {
                         tracing::warn!("Failed to hide main window on close: {}", error);
@@ -7827,6 +8923,7 @@ pub fn run() {
             start_dictation,
             stop_dictation,
             force_stop_dictation,
+            reprocess_dictation_text,
             get_dictation_audio_level,
             start_recording,
             stop_recording,
@@ -7899,6 +8996,7 @@ pub fn run() {
             get_permission_diagnostics,
             request_dictation_permissions,
             open_permission_settings,
+            open_installed_nautilus_app,
             run_diarization,
             get_speakers,
             rename_speaker,
@@ -8480,10 +9578,21 @@ mod tests {
 
     #[test]
     fn dictation_command_and_insertion_mode_normalization_is_stable() {
+        assert_eq!(normalize_dictation_mode_preset("voice"), "voice");
+        assert_eq!(normalize_dictation_mode_preset("meeting_follow_up"), "meeting_follow_up");
+        assert_eq!(normalize_dictation_mode_preset("unknown"), "voice");
+        assert_eq!(normalize_dictation_context_source("none"), "none");
+        assert_eq!(normalize_dictation_context_source("clipboard"), "clipboard");
+        assert_eq!(
+            normalize_dictation_context_source("selected_text"),
+            "selected_text"
+        );
+        assert_eq!(normalize_dictation_context_source("unexpected"), "none");
         assert_eq!(normalize_dictation_command_prefix(""), "command");
         assert_eq!(normalize_dictation_command_prefix(" cmd "), "cmd");
         assert_eq!(normalize_dictation_insertion_mode("auto"), "auto");
         assert_eq!(normalize_dictation_insertion_mode("paste"), "paste");
+        assert_eq!(normalize_dictation_insertion_mode("inline"), "inline");
         assert_eq!(
             normalize_dictation_insertion_mode("clipboard_only"),
             "clipboard_only"
@@ -8591,19 +9700,25 @@ mod tests {
             None,
             Some("fallback message"),
             180,
+            Some(24),
             320,
             "paste",
             Some("newline"),
             1,
             Some("Notes"),
+            Some("clipboard"),
+            Some(42),
         );
 
         for key in [
             "endToEndMs",
+            "insertLatencyMs",
             "insertionModeUsed",
             "commandApplied",
             "snippetAppliedCount",
             "appTarget",
+            "contextSource",
+            "contextChars",
             "requestedProvider",
             "actualProvider",
             "fallbackReason",
@@ -8616,6 +9731,44 @@ mod tests {
             payload.get("isFallback").and_then(|value| value.as_bool()),
             Some(true)
         );
+    }
+
+    #[test]
+    fn contextual_command_input_prefers_spoken_text_then_context() {
+        let spoken = resolve_contextual_command_input(
+            "draft this response",
+            Some("clipboard content"),
+            "clipboard",
+            "Rewrite Professional",
+        )
+        .expect("spoken input should win");
+        assert_eq!(spoken, "draft this response");
+
+        let fallback = resolve_contextual_command_input(
+            "",
+            Some("selected content"),
+            "selected_text",
+            "Rewrite Professional",
+        )
+        .expect("captured context should be used");
+        assert_eq!(fallback, "selected content");
+
+        let error = resolve_contextual_command_input(
+            "",
+            None,
+            "none",
+            "Rewrite Professional",
+        )
+        .expect_err("missing context should error");
+        assert!(error.contains("Enable Text context"));
+    }
+
+    #[test]
+    fn dictation_mode_transform_prompts_cover_reprocess_modes() {
+        assert!(dictation_mode_transform_prompt("messages").is_some());
+        assert!(dictation_mode_transform_prompt("email").is_some());
+        assert!(dictation_mode_transform_prompt("meeting_follow_up").is_some());
+        assert!(dictation_mode_transform_prompt("voice").is_none());
     }
 
     #[test]
@@ -8771,6 +9924,12 @@ fn dictation_options_from_settings(settings: &settings::Settings) -> models::Dic
         save_to_inbox: settings.transcription.dictation_save_to_inbox,
         project_id: Some(settings.transcription.dictation_project_id.clone()),
         profile: dictation_profile_from_settings_value(&settings.transcription.dictation_profile),
+        context_source: normalize_dictation_context_source(
+            &settings.transcription.dictation_context_source,
+        )
+        .to_string(),
+        captured_context_text: None,
+        context_app_name: None,
     }
 }
 
@@ -8794,6 +9953,26 @@ fn normalize_dictation_command_prefix(value: &str) -> &str {
         DICTATION_COMMAND_PREFIX_DEFAULT
     } else {
         trimmed
+    }
+}
+
+fn normalize_dictation_mode_preset(value: &str) -> &'static str {
+    match value.trim() {
+        "voice" => "voice",
+        "messages" => "messages",
+        "email" => "email",
+        "notes" => "notes",
+        "meeting_follow_up" => "meeting_follow_up",
+        "custom" => "custom",
+        _ => "voice",
+    }
+}
+
+fn normalize_dictation_context_source(value: &str) -> &'static str {
+    match value {
+        "clipboard" => "clipboard",
+        "selected_text" => "selected_text",
+        _ => "none",
     }
 }
 
@@ -10809,6 +11988,37 @@ fn check_accessibility_permission() -> bool {
 }
 
 #[cfg(target_os = "macos")]
+fn current_app_bundle_path() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let macos_dir = executable.parent()?;
+    if macos_dir.file_name()?.to_str()? != "MacOS" {
+        return None;
+    }
+    let contents_dir = macos_dir.parent()?;
+    if contents_dir.file_name()?.to_str()? != "Contents" {
+        return None;
+    }
+    let bundle_dir = contents_dir.parent()?;
+    if bundle_dir.extension()?.to_str()? != "app" {
+        return None;
+    }
+    Some(bundle_dir.to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
+fn installed_nautilus_app_bundle_path() -> Option<PathBuf> {
+    let path = PathBuf::from("/Applications/Nautilus.app");
+    path.exists().then_some(path)
+}
+
+#[cfg(target_os = "macos")]
+fn is_running_from_disk_image() -> bool {
+    current_app_bundle_path()
+        .map(|path| path.starts_with("/Volumes/"))
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
 fn check_automation_permission() -> Result<(), String> {
     let output = std::process::Command::new("osascript")
         .arg("-e")
@@ -10916,6 +12126,23 @@ fn read_clipboard_text() -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|e| format!("Clipboard data was not utf-8: {}", e))
 }
 
+#[cfg(target_os = "windows")]
+fn read_clipboard_text() -> Result<String, String> {
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Get-Clipboard"])
+        .output()
+        .map_err(|e| format!("Failed to launch Get-Clipboard: {}", e))?;
+    if !output.status.success() {
+        return Err("Get-Clipboard exited with failure status".to_string());
+    }
+    String::from_utf8(output.stdout).map_err(|e| format!("Clipboard data was not utf-8: {}", e))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn read_clipboard_text() -> Result<String, String> {
+    Err("Clipboard read is not implemented on this platform yet.".to_string())
+}
+
 #[cfg(target_os = "macos")]
 enum PasteDispatchStatus {
     Confirmed,
@@ -11001,6 +12228,39 @@ fn send_native_paste_key(target_app: Option<&str>) -> Result<PasteDispatchStatus
 }
 
 #[cfg(target_os = "macos")]
+fn send_native_copy_key(target_app: Option<&str>) -> Result<PasteDispatchStatus, String> {
+    use std::process::Command;
+
+    if let Some(app_name) = target_app {
+        if let Err(error) = reactivate_target_application(app_name) {
+            tracing::warn!(
+                "Failed to reactivate copy target '{}': {}",
+                app_name,
+                error
+            );
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    let apple_script = Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to keystroke \"c\" using command down")
+        .output()
+        .map_err(|e| format!("Failed to invoke osascript for copy: {}", e))?;
+    if apple_script.status.success() {
+        return Ok(PasteDispatchStatus::Confirmed);
+    }
+
+    let script_error = String::from_utf8_lossy(&apple_script.stderr)
+        .trim()
+        .to_string();
+
+    dispatch_command_keystroke(8)
+        .map_err(|error| format!("{} (CoreGraphics fallback failed: {})", script_error, error))?;
+    Ok(PasteDispatchStatus::FallbackDispatched)
+}
+
+#[cfg(target_os = "macos")]
 fn send_native_undo_key() -> Result<(), String> {
     let output = std::process::Command::new("osascript")
         .arg("-e")
@@ -11061,6 +12321,95 @@ fn schedule_clipboard_restore(previous: String, inserted_text: String) {
     });
 }
 
+#[cfg(target_os = "macos")]
+fn dispatch_paste_from_clipboard(target_app: Option<&str>) -> Result<PasteDispatchStatus, String> {
+    let paste_result = send_native_paste_key(target_app).or_else(|first_error| {
+        std::thread::sleep(std::time::Duration::from_millis(45));
+        send_native_paste_key(target_app)
+            .map_err(|retry_error| format!("{} (retry failed: {})", first_error, retry_error))
+    });
+
+    match paste_result {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            if is_automation_permission_error(&error) {
+                Err(format!(
+                    "macOS blocked Automation for System Events ({}). Enable Nautilus under System Settings > Privacy & Security > Automation, or paste manually with Cmd+V.",
+                    error
+                ))
+            } else {
+                Err(format!(
+                    "macOS blocked keystroke paste ({}). Grant Accessibility in System Settings > Privacy & Security > Accessibility.",
+                    error
+                ))
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn capture_selected_text_via_clipboard(target_app: Option<&str>) -> Result<Option<String>, String> {
+    if !check_accessibility_permission() {
+        return Err(
+            "Selected text capture needs Accessibility permission in System Settings > Privacy & Security > Accessibility."
+                .to_string(),
+        );
+    }
+
+    let original_clipboard = read_clipboard_text().unwrap_or_default();
+    let sentinel = format!(
+        "__nautilus_context_capture_{}__",
+        chrono::Utc::now().timestamp_millis()
+    );
+    copy_to_clipboard(&sentinel)?;
+
+    send_native_copy_key(target_app)?;
+
+    let mut captured: Option<String> = None;
+    for _ in 0..6 {
+        std::thread::sleep(std::time::Duration::from_millis(45));
+        if let Ok(current) = read_clipboard_text() {
+            if current != sentinel {
+                captured = Some(current);
+                break;
+            }
+        }
+    }
+
+    let restore_value = if original_clipboard.is_empty() {
+        String::new()
+    } else {
+        original_clipboard
+    };
+    let _ = copy_to_clipboard(&restore_value);
+
+    Ok(captured.map(|text| text.trim().to_string()).filter(|text| !text.is_empty()))
+}
+
+fn capture_dictation_context_text(
+    context_source: &str,
+    target_app: Option<&str>,
+) -> Result<Option<String>, String> {
+    match normalize_dictation_context_source(context_source) {
+        "none" => Ok(None),
+        "clipboard" => read_clipboard_text()
+            .map(|text| text.trim().to_string())
+            .map(|text| if text.is_empty() { None } else { Some(text) }),
+        "selected_text" => {
+            #[cfg(target_os = "macos")]
+            {
+                capture_selected_text_via_clipboard(target_app)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = target_app;
+                Err("Selected text capture is currently supported on macOS only.".to_string())
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
 fn paste_text_systemwide(
     text: &str,
     keep_text_in_clipboard: bool,
@@ -11100,31 +12449,14 @@ fn paste_text_systemwide(
             };
         }
 
-        let paste_result = send_native_paste_key(target_app).or_else(|first_error| {
-            std::thread::sleep(std::time::Duration::from_millis(45));
-            send_native_paste_key(target_app)
-                .map_err(|retry_error| format!("{} (retry failed: {})", first_error, retry_error))
-        });
-
-        let paste_dispatch = match paste_result {
+        let paste_dispatch = match dispatch_paste_from_clipboard(target_app) {
             Ok(status) => status,
             Err(error) => {
                 tracing::error!("Paste key simulation failed: {}", error);
-                let remediation = if is_automation_permission_error(&error) {
-                    format!(
-                        "Copied to clipboard. macOS blocked Automation for System Events ({}). Enable Nautilus under System Settings > Privacy & Security > Automation, or paste manually with Cmd+V.",
-                        error
-                    )
-                } else {
-                    format!(
-                        "Copied to clipboard. macOS blocked keystroke paste ({}). Grant Accessibility in System Settings > Privacy & Security > Accessibility.",
-                        error
-                    )
-                };
                 return PasteOutcome {
                     pasted: false,
                     copied: true,
-                    error: Some(remediation),
+                    error: Some(format!("Copied to clipboard. {}", error)),
                 };
             }
         };
@@ -11160,4 +12492,48 @@ fn paste_text_systemwide(
             ),
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+async fn clear_inline_dictation_session(
+    state: &AppState,
+    session_id: u64,
+    remove_inserted_text: bool,
+) -> Result<(), String> {
+    let snapshot = {
+        let inline_state = state.dictation_inline_state.lock().await;
+        if inline_state.session_id != Some(session_id) {
+            return Ok(());
+        }
+        inline_state.clone()
+    };
+
+    if remove_inserted_text
+        && !snapshot.last_inserted_text.is_empty()
+        && check_accessibility_permission()
+    {
+        if let Some(target) = snapshot.app_target.as_deref() {
+            if let Err(error) = reactivate_target_application(target) {
+                tracing::warn!(
+                    "Failed to reactivate inline dictation target '{}': {}",
+                    target,
+                    error
+                );
+            }
+        }
+        send_native_undo_key()?;
+    }
+
+    if !snapshot.keep_text_in_clipboard {
+        if let Some(previous) = snapshot.original_clipboard.as_deref() {
+            copy_to_clipboard(previous)?;
+        }
+    }
+
+    let mut inline_state = state.dictation_inline_state.lock().await;
+    if inline_state.session_id == Some(session_id) {
+        *inline_state = InlineDictationState::default();
+    }
+
+    Ok(())
 }

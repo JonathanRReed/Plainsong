@@ -5,7 +5,10 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio::sync::{mpsc, Mutex};
 
 /// Streaming transcription session
@@ -25,6 +28,8 @@ pub struct StreamingSession {
     selected_model_id: String,
     /// Last processed position in buffer
     last_processed_pos: Arc<Mutex<usize>>,
+    /// Prevent overlapping chunk transcriptions from piling up and completing late.
+    processing_in_flight: Arc<AtomicBool>,
     /// Minimum chunk size for transcription (in samples)
     min_chunk_size: usize,
     /// Overlap between chunks (in samples)
@@ -118,8 +123,8 @@ impl StreamingTranscriber {
         let (result_tx, result_rx) = mpsc::channel::<StreamingResult>(100);
 
         let normalized_sample_rate = sample_rate.max(8_000);
-        let min_chunk_size = (normalized_sample_rate as usize) / 2; // 0.5 seconds for faster partials
-        let overlap_size = (normalized_sample_rate as usize) / 4; // 0.25 second overlap
+        let min_chunk_size = (normalized_sample_rate as usize / 4).max(1); // 0.25 seconds
+        let overlap_size = (normalized_sample_rate as usize / 8).max(1); // 0.125 second overlap
         let buffer_capacity = (normalized_sample_rate as usize) * 60 * 5; // 5-minute ring buffer
 
         let session = StreamingSession {
@@ -130,6 +135,7 @@ impl StreamingTranscriber {
             provider_type,
             selected_model_id,
             last_processed_pos: Arc::new(Mutex::new(0)),
+            processing_in_flight: Arc::new(AtomicBool::new(false)),
             min_chunk_size,
             overlap_size,
             sample_rate: normalized_sample_rate,
@@ -164,7 +170,12 @@ impl StreamingTranscriber {
             let buffer_total = session.buffer.lock().await.total_written();
             let new_samples = buffer_total.saturating_sub(last_pos);
 
-            if new_samples >= session.min_chunk_size {
+            if new_samples >= session.min_chunk_size
+                && session
+                    .processing_in_flight
+                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            {
                 // Clone session handle for background task
                 let session_clone = session.clone();
                 let asr_manager = self.asr_manager.clone();
@@ -174,6 +185,9 @@ impl StreamingTranscriber {
                     if let Err(e) = process_chunk(&session_clone, &asr_manager).await {
                         tracing::warn!("Transcription error: {}", e);
                     }
+                    session_clone
+                        .processing_in_flight
+                        .store(false, Ordering::SeqCst);
                 });
             }
 
@@ -192,6 +206,12 @@ impl StreamingTranscriber {
 
             // Get remaining audio and transcribe
             let session = handle.session.clone();
+            let wait_started = std::time::Instant::now();
+            while session.processing_in_flight.load(Ordering::SeqCst)
+                && wait_started.elapsed() < std::time::Duration::from_secs(2)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
             let last_pos = *session.last_processed_pos.lock().await;
             let buffer = session.buffer.lock().await;
             let total = buffer.total_written();
@@ -318,6 +338,7 @@ async fn process_chunk(
                     transcript.push(' ');
                 }
                 transcript.push_str(&result.text);
+                let transcript_snapshot = transcript.clone();
                 drop(transcript);
 
                 // Update position (minus overlap for next chunk)
@@ -329,7 +350,7 @@ async fn process_chunk(
                     .result_tx
                     .send(StreamingResult {
                         is_partial: true,
-                        text: result.text,
+                        text: transcript_snapshot,
                         start_time: last_pos as f64 / session.sample_rate as f64,
                         end_time: new_pos as f64 / session.sample_rate as f64,
                         confidence: result.confidence,

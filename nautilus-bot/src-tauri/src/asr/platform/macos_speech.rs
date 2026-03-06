@@ -44,6 +44,24 @@ use std::sync::{Arc, Condvar, Mutex};
     nautilus_macos_speech_helper
 ))]
 use std::time::{Duration, Instant};
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
+use tokio::process::Command as TokioCommand;
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
+use tokio::sync::{mpsc, oneshot};
 
 #[cfg(all(
     target_os = "macos",
@@ -139,6 +157,56 @@ struct MacosSpeechPayload {
     target_arch = "aarch64",
     nautilus_macos_speech_helper
 ))]
+#[derive(Debug, Clone, Deserialize)]
+pub struct LiveSpeechEvent {
+    pub event: String,
+    pub text: String,
+    pub language: String,
+    pub confidence: f64,
+    #[serde(rename = "isFinal")]
+    pub is_final: bool,
+}
+
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
+#[derive(Debug, Clone)]
+pub struct LiveSpeechResult {
+    pub text: String,
+    pub language: String,
+    pub confidence: f64,
+}
+
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
+pub struct LiveSpeechAudioSink {
+    sender: mpsc::UnboundedSender<Vec<f32>>,
+}
+
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
+impl LiveSpeechAudioSink {
+    pub fn send_chunk(&self, chunk: Vec<f32>) -> Result<()> {
+        self.sender
+            .send(chunk)
+            .map_err(|_| anyhow::anyhow!("Apple live dictation audio stream is closed"))?;
+        Ok(())
+    }
+}
+
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
 pub fn transcribe_file(audio_path: &Path) -> Result<(String, String, f64)> {
     ensure_speech_authorized(false)?;
     let helper = resolve_helper_binary_path()?;
@@ -180,6 +248,156 @@ pub fn transcribe_file(audio_path: &Path) -> Result<(String, String, f64)> {
         payload.language,
         payload.confidence.unwrap_or(0.0),
     ))
+}
+
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
+pub async fn start_live_dictation_session(
+    sample_rate: u32,
+) -> Result<(
+    LiveSpeechAudioSink,
+    mpsc::UnboundedReceiver<LiveSpeechEvent>,
+    oneshot::Receiver<Result<LiveSpeechResult, String>>,
+)> {
+    ensure_speech_authorized(false)?;
+    let helper = resolve_helper_binary_path()?;
+    let mut child = TokioCommand::new(&helper)
+        .arg("--live")
+        .arg("--sample-rate")
+        .arg(sample_rate.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "Failed to start macOS Speech live helper at '{}'",
+                helper.display()
+            )
+        })?;
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("macOS Speech live helper stdin is unavailable"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("macOS Speech live helper stdout is unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("macOS Speech live helper stderr is unavailable"))?;
+
+    let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<f32>>();
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<LiveSpeechEvent>();
+    let (final_tx, final_rx) = oneshot::channel::<Result<LiveSpeechResult, String>>();
+
+    tokio::spawn(async move {
+        let mut stdin = stdin;
+        while let Some(chunk) = audio_rx.recv().await {
+            let mut bytes = Vec::with_capacity(chunk.len() * std::mem::size_of::<f32>());
+            for sample in chunk {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+
+            if let Err(error) = stdin.write_all(&bytes).await {
+                tracing::warn!("Failed writing Apple live dictation audio chunk: {}", error);
+                break;
+            }
+        }
+
+        let _ = stdin.shutdown().await;
+    });
+
+    tokio::spawn(async move {
+        let stderr_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut stderr_text = String::new();
+            let _ = reader.read_to_string(&mut stderr_text).await;
+            stderr_text
+        });
+
+        let mut lines = BufReader::new(stdout).lines();
+        let mut last_payload: Option<LiveSpeechEvent> = None;
+        let mut final_sent = false;
+        let mut parse_error: Option<String> = None;
+        let mut final_tx = Some(final_tx);
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<LiveSpeechEvent>(&line) {
+                Ok(payload) => {
+                    if !payload.text.trim().is_empty() {
+                        last_payload = Some(payload.clone());
+                    }
+                    let _ = event_tx.send(payload.clone());
+                    if payload.is_final || payload.event == "final" {
+                        if let Some(sender) = final_tx.take() {
+                            let _ = sender.send(Ok(LiveSpeechResult {
+                                text: payload.text,
+                                language: payload.language,
+                                confidence: payload.confidence,
+                            }));
+                        }
+                        final_sent = true;
+                        break;
+                    }
+                }
+                Err(error) => {
+                    parse_error = Some(format!(
+                        "Failed to parse macOS Speech live helper output: {} ({})",
+                        error, line
+                    ));
+                }
+            }
+        }
+
+        let child_status = child.wait().await.ok();
+        let stderr_text = stderr_task.await.unwrap_or_default();
+
+        if !final_sent {
+            if let Some(payload) = last_payload {
+                if let Some(sender) = final_tx.take() {
+                    let _ = sender.send(Ok(LiveSpeechResult {
+                        text: payload.text,
+                        language: payload.language,
+                        confidence: payload.confidence,
+                    }));
+                }
+            } else {
+                let status_note = child_status
+                    .and_then(|status| status.code().map(|code| format!("exit code {}", code)))
+                    .unwrap_or_else(|| "unknown exit status".to_string());
+                let stderr_note = stderr_text.trim();
+                let message = parse_error
+                    .or_else(|| {
+                        if stderr_note.is_empty() {
+                            None
+                        } else {
+                            Some(stderr_note.to_string())
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        format!(
+                            "macOS Speech live helper ended without a final transcript ({})",
+                            status_note
+                        )
+                    });
+                if let Some(sender) = final_tx.take() {
+                    let _ = sender.send(Err(message));
+                }
+            }
+        }
+    });
+
+    Ok((LiveSpeechAudioSink { sender: audio_tx }, event_rx, final_rx))
 }
 
 #[cfg(all(

@@ -9,6 +9,7 @@ import {
   saveSettings,
   getPermissionDiagnostics,
   openPermissionSettings,
+  openInstalledNautilusApp,
   requestDictationPermissions,
   type PermissionDiagnostics,
 } from "@/lib/tauri";
@@ -376,10 +377,10 @@ export function AsrProviderManager({
 
   const managedModelLabel = (providerType: AsrProviderType) =>
     providerType === "macos_apple_speech"
-      ? "Managed by macOS"
+      ? "Built into macOS"
       : providerType === "windows_sdk_dictation"
-        ? "Managed by Windows"
-        : "Managed by system";
+        ? "Built into Windows"
+        : "Built into your system";
 
   const handleSetDefault = async (providerType: AsrProviderType) => {
     const selected = providers.find((provider) => provider.providerType === providerType);
@@ -849,6 +850,27 @@ export function AsrProviderManager({
           </p>
         </div>
 
+        {permissionDiagnostics?.runningFromDiskImage ? (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 space-y-2">
+            <p className="text-sm font-medium text-amber-200">
+              You are running Nautilus from the mounted DMG, not the installed app.
+            </p>
+            <p className="text-xs text-amber-100/90">
+              macOS permissions granted to the installed app do not apply to the disk image copy.
+              Open the installed app in <code>/Applications</code>, then quit this DMG copy.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void openInstalledNautilusApp()}
+              >
+                Open installed app
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
         <div className="grid gap-3 md:grid-cols-3">
           {appleNativePermissionRows.map((row) => (
             <div key={row.key} className="rounded-md border bg-background/60 p-3 space-y-2">
@@ -1062,9 +1084,9 @@ export function AsrProviderManager({
           </Card>
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Advanced Tools</CardTitle>
+              <CardTitle className="text-base">Downloads & Diagnostics</CardTitle>
               <CardDescription>
-                Runtime routing, model diagnostics, downloads, and repair tools for power users.
+                Model downloads, compatibility tuning, and repair tools for power users.
               </CardDescription>
             </CardHeader>
             <CardContent className="pt-0">
@@ -1073,17 +1095,16 @@ export function AsrProviderManager({
                 size="sm"
                 onClick={() => setShowAdvancedTools((value) => !value)}
               >
-                {showAdvancedTools ? "Hide advanced tools" : "Show advanced tools"}
+                {showAdvancedTools ? "Hide tools" : "Show tools"}
               </Button>
             </CardContent>
           </Card>
           {showAdvancedTools && platformSettings ? (
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-base">Platform Optimization (Advanced)</CardTitle>
+                <CardTitle className="text-base">Compatibility & Runtime Tuning</CardTitle>
                 <CardDescription>
-                  Optional macOS/Windows runtime optimizations. Apple/Windows native toggles enforce an
-                  exclusive engine route.
+                  Optional macOS and Windows tuning for compatibility, local performance, and repair.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">

@@ -5,7 +5,10 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   AppWindow,
+  CheckCircle2,
   GripHorizontal,
+  Loader2,
+  Mic,
   Minimize2,
   Monitor,
   PanelsTopLeft,
@@ -32,24 +35,27 @@ interface RecordingTranscriptionStreamEvent {
   confidence?: number;
 }
 
+type DisplayMode = "full" | "compact" | "minimal";
+
 export function RecordingPopup() {
   const window = getCurrentWindow();
   const [recordingId, setRecordingId] = useState<string | null>(null);
   const [startedAtMs, setStartedAtMs] = useState<number | null>(null);
   const [systemAudioActive, setSystemAudioActive] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [phase, setPhase] = useState<"recording" | "transcribing" | "error">("recording");
   const [transcriptionPreview, setTranscriptionPreview] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [stopping, setStopping] = useState(false);
-  const [compact, setCompact] = useState(false);
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("full");
   const [levels, setLevels] = useState<number[]>([]);
+  const [message, setMessage] = useState<string | null>(null);
   const recordingIdRef = useRef<string | null>(null);
   const isTranscribingRef = useRef(false);
 
   useEffect(() => {
     recordingIdRef.current = recordingId;
-    isTranscribingRef.current = isTranscribing;
-  }, [isTranscribing, recordingId]);
+    isTranscribingRef.current = phase === "transcribing";
+  }, [phase, recordingId]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -60,16 +66,17 @@ export function RecordingPopup() {
         const initialState = await invoke<MeetingRecordingStateChangedEvent>(
           "get_recording_overlay_state"
         );
-        if (initialState.phase === "recording" && initialState.recordingId) {
+        if (
+          (initialState.phase === "recording" || initialState.phase === "transcribing") &&
+          initialState.recordingId
+        ) {
           setRecordingId(initialState.recordingId);
           setStartedAtMs(
             typeof initialState.startedAtMs === "number" ? initialState.startedAtMs : Date.now()
           );
           setSystemAudioActive(Boolean(initialState.systemAudioActive));
-          setIsTranscribing(false);
-        } else if (initialState.phase === "transcribing" && initialState.recordingId) {
-          setRecordingId(initialState.recordingId);
-          setIsTranscribing(true);
+          setPhase(initialState.phase);
+          setMessage(initialState.message ?? null);
         }
       } catch (error) {
         console.error("Failed to load initial recording popup state:", error);
@@ -79,21 +86,17 @@ export function RecordingPopup() {
         "meeting-recording-state-changed",
         (event) => {
           const payload = event.payload;
-          if (payload.phase === "recording" && payload.recordingId) {
+          if ((payload.phase === "recording" || payload.phase === "transcribing") && payload.recordingId) {
             setRecordingId(payload.recordingId);
             setStartedAtMs(
               typeof payload.startedAtMs === "number" ? payload.startedAtMs : Date.now()
             );
             setSystemAudioActive(Boolean(payload.systemAudioActive));
-            setIsTranscribing(false);
-            setTranscriptionPreview("");
-            setStopping(false);
-            return;
-          }
-
-          if (payload.phase === "transcribing" && payload.recordingId) {
-            setRecordingId(payload.recordingId);
-            setIsTranscribing(true);
+            setPhase(payload.phase);
+            setMessage(payload.message ?? null);
+            if (payload.phase === "recording") {
+              setTranscriptionPreview("");
+            }
             setStopping(false);
             return;
           }
@@ -101,7 +104,8 @@ export function RecordingPopup() {
           setRecordingId(null);
           setStartedAtMs(null);
           setSystemAudioActive(false);
-          setIsTranscribing(false);
+          setPhase("recording");
+          setMessage(null);
           setTranscriptionPreview("");
           setStopping(false);
         }
@@ -119,7 +123,7 @@ export function RecordingPopup() {
             setTranscriptionPreview(event.payload.text);
           }
           if (event.payload.isFinal) {
-            setIsTranscribing(false);
+            setMessage("Transcript preview is ready in Meetings.");
           }
         }
       );
@@ -133,7 +137,7 @@ export function RecordingPopup() {
   }, []);
 
   useEffect(() => {
-    if (!recordingId || isTranscribing) {
+    if (!recordingId || phase === "transcribing") {
       setElapsed(0);
       return;
     }
@@ -145,10 +149,10 @@ export function RecordingPopup() {
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [isTranscribing, recordingId, startedAtMs]);
+  }, [phase, recordingId, startedAtMs]);
 
   useEffect(() => {
-    if (!recordingId || isTranscribing) {
+    if (!recordingId || phase === "transcribing") {
       setLevels([]);
       return;
     }
@@ -178,7 +182,7 @@ export function RecordingPopup() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [isTranscribing, recordingId]);
+  }, [phase, recordingId]);
 
   const elapsedText = useMemo(() => {
     const mins = Math.floor(elapsed / 60);
@@ -186,11 +190,20 @@ export function RecordingPopup() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   }, [elapsed]);
 
-  const toggleCompact = async () => {
-    const next = !compact;
-    setCompact(next);
+  const isTranscribing = phase === "transcribing";
+
+  const cycleDisplayMode = async () => {
+    const next: DisplayMode =
+      displayMode === "full" ? "compact" : displayMode === "compact" ? "minimal" : "full";
+    setDisplayMode(next);
     try {
-      await window.setSize(new LogicalSize(next ? 300 : 460, next ? 130 : 220));
+      if (next === "minimal") {
+        await window.setSize(new LogicalSize(170, 46));
+      } else if (next === "compact") {
+        await window.setSize(new LogicalSize(330, 126));
+      } else {
+        await window.setSize(new LogicalSize(470, 228));
+      }
     } catch (error) {
       console.error("Failed to resize recording popup:", error);
     }
@@ -227,30 +240,77 @@ export function RecordingPopup() {
     return <div className="h-screen w-screen bg-transparent" />;
   }
 
+  if (displayMode === "minimal") {
+    return (
+      <div
+        className="flex h-screen w-screen items-center justify-center bg-transparent"
+        onMouseDown={() => void window.startDragging()}
+      >
+        <div className="flex items-center gap-3 rounded-full border border-cyan-400/25 bg-slate-950/92 px-3 py-2 text-white shadow-[0_20px_60px_rgba(2,6,23,0.45)] backdrop-blur-md">
+          <span className={`h-2.5 w-2.5 rounded-full ${isTranscribing ? "bg-cyan-400" : "bg-rose-400"}`} />
+          <span className="text-xs font-medium uppercase tracking-[0.18em]">
+            {isTranscribing ? "Processing" : "Meeting"}
+          </span>
+          <span className="font-mono text-sm text-cyan-100">
+            {isTranscribing ? "..." : elapsedText}
+          </span>
+          {!isTranscribing && (
+            <button
+              type="button"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-rose-500/90 text-white hover:bg-rose-500 disabled:opacity-50"
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={handleStop}
+              disabled={stopping}
+              aria-label="Stop recording"
+            >
+              <Square className="h-3.5 w-3.5 fill-current" />
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const previewText =
+    transcriptionPreview.trim() ||
+    (isTranscribing
+      ? "Generating the first transcript preview for this meeting."
+      : "Capture is live. Stop when you want Nautilus to save and process the meeting.");
+
+  const waveformBars = levels.length
+    ? levels
+    : isTranscribing
+      ? [0.2, 0.28, 0.34, 0.26, 0.22, 0.28]
+      : [0.18, 0.34, 0.24, 0.4, 0.3, 0.22];
+
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="rounded-2xl border border-cyan-400/30 bg-slate-950/92 px-4 py-3 backdrop-blur-md">
+      <div className="rounded-[28px] border border-cyan-400/20 bg-[linear-gradient(180deg,rgba(2,6,23,0.96),rgba(15,23,42,0.92))] px-4 py-3 text-white shadow-[0_24px_80px_rgba(2,6,23,0.5)] backdrop-blur-xl">
         <div
-          className="mb-2 flex items-center justify-between text-slate-300"
+          className="mb-3 flex items-center justify-between text-slate-300"
           onMouseDown={() => void window.startDragging()}
         >
-          <div className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide">
+          <div className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.2em]">
             <GripHorizontal className="h-3 w-3" />
             Move
           </div>
           <div className="inline-flex items-center gap-1">
             <button
               type="button"
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md hover:bg-white/10"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-white/10"
               onMouseDown={(event) => event.stopPropagation()}
-              onClick={() => void toggleCompact()}
-              aria-label={compact ? "Expand popup" : "Compact popup"}
+              onClick={() => void cycleDisplayMode()}
+              aria-label={displayMode === "compact" ? "Minimal popup" : "Compact popup"}
             >
-              {compact ? <PanelsTopLeft className="h-3.5 w-3.5" /> : <Minimize2 className="h-3.5 w-3.5" />}
+              {displayMode === "compact" ? (
+                <PanelsTopLeft className="h-3.5 w-3.5" />
+              ) : (
+                <Minimize2 className="h-3.5 w-3.5" />
+              )}
             </button>
             <button
               type="button"
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md hover:bg-white/10"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-white/10"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void openMainApp()}
               aria-label="Open app"
@@ -259,7 +319,7 @@ export function RecordingPopup() {
             </button>
             <button
               type="button"
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md hover:bg-white/10"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-white/10"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void hidePopup()}
               aria-label="Hide popup"
@@ -269,51 +329,87 @@ export function RecordingPopup() {
           </div>
         </div>
 
-        <div className="flex items-center justify-between gap-3 text-white">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-2 rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-cyan-100">
+            {isTranscribing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mic className="h-3.5 w-3.5" />}
+            {isTranscribing ? "Processing" : "Meeting"}
+          </span>
+          <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-slate-200">
+            {systemAudioActive ? <Monitor className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
+            {systemAudioActive ? "Mic + system audio" : "Microphone only"}
+          </span>
+          {transcriptionPreview.trim() && (
+            <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-medium text-emerald-100">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              Live transcript preview
+            </span>
+          )}
+        </div>
+
+        <div className={`mt-3 ${displayMode === "compact" ? "flex items-center justify-between gap-3" : "space-y-4"}`}>
           <div className="flex items-center gap-3">
-            {!compact && (
-              <div className="flex h-8 items-end gap-1">
-                {(levels.length ? levels : isTranscribing ? [0.25, 0.3, 0.25, 0.3] : [0.15, 0.35, 0.2, 0.4]).map((level, idx) => (
+            {displayMode === "full" && (
+              <div className="flex h-14 items-end gap-1.5 rounded-2xl border border-white/8 bg-white/[0.04] px-3 py-2">
+                {waveformBars.map((level, idx) => (
                   <span
                     key={`${idx}-${Math.round(level * 100)}`}
-                    className="w-1 rounded-full bg-cyan-300/90 transition-all"
-                    style={{ height: `${Math.max(20, Math.round(level * 100))}%` }}
+                    className="w-1.5 rounded-full bg-cyan-300/90 transition-all"
+                    style={{ height: `${Math.max(18, Math.round(level * 100))}%` }}
                   />
                 ))}
               </div>
             )}
             <div>
-              <p className="text-sm font-semibold">Meeting recording</p>
-              <p className="text-xs text-slate-300">
-                {isTranscribing ? "Generating transcript preview" : "Live capture in progress"}
-                {systemAudioActive && !isTranscribing && (
-                  <span className="ml-2 inline-flex items-center gap-1">
-                    <Monitor className="h-3 w-3" />
-                    System audio
-                  </span>
-                )}
+              <p className="text-base font-semibold tracking-tight">
+                {isTranscribing ? "Finishing your meeting" : "Meeting recording in progress"}
+              </p>
+              <p className="text-sm text-slate-300">
+                {stopping
+                  ? "Stopping capture and handing off to transcription."
+                  : message ||
+                    (isTranscribing
+                      ? "Nautilus is preparing the transcript and summary."
+                      : "Capture stays local until you stop the meeting.")}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-3">
-            <span className="font-mono text-sm text-cyan-200">{elapsedText}</span>
+            <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-right">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-cyan-100/80">
+                {isTranscribing ? "Status" : "Elapsed"}
+              </p>
+              <p className="font-mono text-base text-cyan-100">
+                {isTranscribing ? "Saving" : elapsedText}
+              </p>
+            </div>
             {!isTranscribing && (
               <button
                 type="button"
-                className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-rose-500/90 text-white hover:bg-rose-500 disabled:opacity-50"
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-rose-500/90 text-white hover:bg-rose-500 disabled:opacity-50"
                 onClick={handleStop}
                 disabled={stopping}
                 aria-label="Stop recording"
               >
-                <Square className="h-4 w-4 fill-current" />
+                <Square className="h-4.5 w-4.5 fill-current" />
               </button>
             )}
           </div>
         </div>
-        {isTranscribing && (
-          <div className="mt-2 rounded-lg border border-cyan-300/20 bg-slate-900/70 p-2 text-xs text-slate-200">
-            {transcriptionPreview || "Preparing transcript preview..."}
+
+        {displayMode === "full" && (
+          <div className="mt-4 rounded-2xl border border-white/8 bg-white/[0.04] p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
+                Transcript preview
+              </p>
+              <p className="text-[11px] text-slate-400">
+                {isTranscribing ? "Updates while processing" : "Appears after you stop"}
+              </p>
+            </div>
+            <p className="max-h-20 overflow-hidden text-sm leading-6 text-slate-100">
+              {previewText}
+            </p>
           </div>
         )}
       </div>

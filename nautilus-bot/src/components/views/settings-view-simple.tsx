@@ -126,7 +126,7 @@ function AdvancedToggle({
 }) {
   return (
     <div className="flex items-center gap-2">
-      <Label className="text-xs text-muted-foreground font-normal cursor-pointer">Advanced settings</Label>
+      <Label className="text-xs text-muted-foreground font-normal cursor-pointer">Power user details</Label>
       <Switch checked={checked} onCheckedChange={onCheckedChange} className="scale-75 data-[state=checked]:bg-amber-600" />
     </div>
   );
@@ -188,13 +188,13 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const [licenseError, setLicenseError] = useState<string | null>(null);
   const [capturingShortcut, setCapturingShortcut] = useState<ShortcutFieldKey | null>(null);
   const [advancedTabs, setAdvancedTabs] = useState<Record<TabId, boolean>>({
-    asr: false,
-    general: false,
-    security: false,
-    storage: false,
-    ai: false,
-    updates: false,
-    license: false,
+    asr: true,
+    general: true,
+    security: true,
+    storage: true,
+    ai: true,
+    updates: true,
+    license: true,
   });
   const mountedRef = useRef(true);
   const saveSchedulerRef = useRef<SettingsSaveScheduler>({
@@ -813,11 +813,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
   const tabList = useMemo(
     () => [
-      { id: "asr" as TabId, label: "ASR Models", icon: Mic },
+      { id: "asr" as TabId, label: "Transcription", icon: Mic },
       { id: "general" as TabId, label: "General", icon: Monitor },
-      { id: "security" as TabId, label: "Security & Privacy", icon: Shield },
-      { id: "storage" as TabId, label: "Data & Retention", icon: Database },
-      { id: "ai" as TabId, label: "AI & Models", icon: Key },
+      { id: "security" as TabId, label: "Privacy & Security", icon: Shield },
+      { id: "storage" as TabId, label: "Storage", icon: Database },
+      { id: "ai" as TabId, label: "AI & Keys", icon: Key },
       { id: "updates" as TabId, label: "Updates", icon: RefreshCw },
       { id: "license" as TabId, label: "License", icon: Shield },
     ],
@@ -837,7 +837,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     <div className="h-full flex flex-col">
       <div className="p-6 border-b">
         <h1 className="text-2xl font-semibold">Settings</h1>
-        <p className="text-muted-foreground">Configure Nautilus preferences</p>
+        <p className="text-muted-foreground">Tune transcription, AI, privacy, storage, and app behavior</p>
       </div>
 
       <div className="flex-1 overflow-auto">
@@ -849,7 +849,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
             </div>
           )}
 
-          <div className="grid w-full grid-cols-6 bg-muted p-1 rounded-md">
+          <div className="grid w-full grid-cols-2 gap-1 rounded-md bg-muted p-1 md:grid-cols-4 xl:grid-cols-7">
             {tabList.map((tab) => (
               <button
                 key={tab.id}
@@ -869,11 +869,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
             <Card>
               <CardHeader>
                 <div className="flex items-center justify-between">
-                  <CardTitle>Audio & Transcription</CardTitle>
+                  <CardTitle>Transcription</CardTitle>
                   <AdvancedToggle checked={advancedTabs.asr} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, asr: c }))} />
                 </div>
                 <CardDescription>
-                  Configure ASR models, platform optimization routing, diarization, and audio capture
+                  Choose how Nautilus transcribes dictation and meetings, then tune language, audio, and speaker labeling.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
@@ -1070,7 +1070,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                 {advancedTabs.asr && (
                   <div className="pt-4 border-t space-y-5">
-                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
+                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
@@ -1471,10 +1471,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
             <Card>
               <CardHeader>
                 <div className="flex items-center justify-between">
-                  <CardTitle>Application Preferences</CardTitle>
+                  <CardTitle>General</CardTitle>
                   <AdvancedToggle checked={advancedTabs.general} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, general: c }))} />
                 </div>
-                <CardDescription>Core interface and control defaults</CardDescription>
+                <CardDescription>Appearance, shortcuts, overlays, and everyday app behavior</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
                 <div className="space-y-2">
@@ -1558,8 +1558,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
-                    <Label>Show in menu bar</Label>
-                    <p className="text-sm text-muted-foreground">Keep app accessible in the system tray</p>
+                    <Label>Keep running after close</Label>
+                    <p className="text-sm text-muted-foreground">Keep hotkeys, overlays, and background capture available when you close the main window</p>
                   </div>
                   <Switch
                     checked={settings.ui.minimizeToTray}
@@ -1588,9 +1588,54 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   />
                 </div>
 
+                <div className="pt-4 border-t space-y-4">
+                  <div className="space-y-1">
+                    <Label>Overlay windows</Label>
+                    <p className="text-sm text-muted-foreground">
+                      Keep the floating dictation and meeting recorder controls visible while you work.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <Label>Show dictation mini window</Label>
+                      <p className="text-sm text-muted-foreground">
+                        Show the floating recorder shell during global dictation.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.ui.showDictationPopup}
+                      onCheckedChange={(checked) =>
+                        void updateSettings({
+                          ...settings,
+                          ui: { ...settings.ui, showDictationPopup: checked },
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <Label>Show meeting mini window</Label>
+                      <p className="text-sm text-muted-foreground">
+                        Show the floating recorder shell during meeting capture and processing.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.ui.showRecordingPopup}
+                      onCheckedChange={(checked) =>
+                        void updateSettings({
+                          ...settings,
+                          ui: { ...settings.ui, showRecordingPopup: checked },
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+
                 {advancedTabs.general && (
                   <div className="pt-4 border-t space-y-5">
-                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
+                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
@@ -1723,38 +1768,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       />
                     </div>
                     
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Show dictation popup</Label>
-                        <p className="text-sm text-muted-foreground">Show an overlay when dictating text globally</p>
-                      </div>
-                      <Switch
-                        checked={settings.ui.showDictationPopup}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            ui: { ...settings.ui, showDictationPopup: checked },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Show recording popup</Label>
-                        <p className="text-sm text-muted-foreground">Show an overlay when recording audio</p>
-                      </div>
-                      <Switch
-                        checked={settings.ui.showRecordingPopup}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            ui: { ...settings.ui, showRecordingPopup: checked },
-                          })
-                        }
-                      />
-                    </div>
-
                     <div className="space-y-3 pt-2 border-t">
                       <div className="space-y-1">
                         <Label>Global keyboard shortcuts</Label>
@@ -1820,7 +1833,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
             <Card>
               <CardHeader>
                 <div className="flex items-center justify-between">
-                  <CardTitle>Security & Privacy</CardTitle>
+                  <CardTitle>Privacy & Security</CardTitle>
                   <AdvancedToggle checked={advancedTabs.security} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, security: c }))} />
                 </div>
                 <CardDescription>Local-first defaults with explicit remote opt-in</CardDescription>
@@ -1868,7 +1881,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                 {advancedTabs.security && (
                   <div className="pt-4 border-t space-y-5">
-                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
+                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
@@ -2226,10 +2239,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
             <Card>
               <CardHeader>
                 <div className="flex items-center justify-between">
-                  <CardTitle>Data & Retention</CardTitle>
+                  <CardTitle>Storage</CardTitle>
                   <AdvancedToggle checked={advancedTabs.storage} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, storage: c }))} />
                 </div>
-                <CardDescription>Data lifecycle, backups, and cloud sync controls</CardDescription>
+                <CardDescription>Retention, backups, export paths, and cleanup tools</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
                 <div className="space-y-3">
@@ -2568,7 +2581,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                 {advancedTabs.storage && backupConfig && (
                   <div className="pt-4 border-t space-y-5">
-                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
+                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
@@ -2981,10 +2994,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
             <Card>
               <CardHeader>
                 <div className="flex items-center justify-between">
-                  <CardTitle>AI & Models</CardTitle>
+                  <CardTitle>AI & Keys</CardTitle>
                   <AdvancedToggle checked={advancedTabs.ai} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, ai: c }))} />
                 </div>
-                <CardDescription>Choose your default brain provider and manage cloud keys</CardDescription>
+                <CardDescription>Choose the default analysis provider, model, and API credentials</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
                 <div className="space-y-2">
@@ -3207,7 +3220,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                 {advancedTabs.ai && (
                   <div className="pt-4 border-t space-y-5">
-                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Advanced settings</h3>
+                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
                     
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">

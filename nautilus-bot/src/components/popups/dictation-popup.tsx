@@ -6,13 +6,18 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   AppWindow,
   CheckCircle2,
+  Clipboard,
   GripHorizontal,
   Loader2,
+  Mail,
   Mic,
   Minimize2,
   PanelsTopLeft,
   Square,
+  StickyNote,
+  TextCursorInput,
   TriangleAlert,
+  Wand2,
   X,
 } from "lucide-react";
 import { forceStopDictation, getSettings, getDictationAudioLevel } from "@/lib/tauri";
@@ -30,6 +35,42 @@ interface DictationStateChangedEvent {
   outcome?: string | null;
 }
 
+type DictationModePreset =
+  | "voice"
+  | "messages"
+  | "email"
+  | "notes"
+  | "meeting_follow_up"
+  | "custom";
+
+type DictationContextSource = "none" | "clipboard" | "selected_text";
+
+const MODE_META: Record<
+  DictationModePreset,
+  { label: string; icon: typeof Mic; accent: string }
+> = {
+  voice: { label: "Voice", icon: Mic, accent: "text-cyan-200 bg-cyan-400/10 border-cyan-400/30" },
+  messages: {
+    label: "Messages",
+    icon: TextCursorInput,
+    accent: "text-emerald-200 bg-emerald-400/10 border-emerald-400/30",
+  },
+  email: { label: "Email", icon: Mail, accent: "text-amber-200 bg-amber-400/10 border-amber-400/30" },
+  notes: { label: "Notes", icon: StickyNote, accent: "text-violet-200 bg-violet-400/10 border-violet-400/30" },
+  meeting_follow_up: {
+    label: "Follow-up",
+    icon: Wand2,
+    accent: "text-fuchsia-200 bg-fuchsia-400/10 border-fuchsia-400/30",
+  },
+  custom: { label: "Custom", icon: Wand2, accent: "text-slate-200 bg-slate-400/10 border-slate-400/30" },
+};
+
+const CONTEXT_META: Record<DictationContextSource, { label: string; detail: string }> = {
+  none: { label: "No context", detail: "Fresh dictation" },
+  clipboard: { label: "Clipboard", detail: "Using copied text" },
+  selected_text: { label: "Selected text", detail: "Using current selection" },
+};
+
 export function DictationPopup() {
   const window = getCurrentWindow();
   const [phase, setPhase] = useState<DictationPhase>("idle");
@@ -42,6 +83,8 @@ export function DictationPopup() {
   const [sessionId, setSessionId] = useState<number | null>(null);
   const [pushToTalk, setPushToTalk] = useState(true);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [modePreset, setModePreset] = useState<DictationModePreset>("voice");
+  const [contextSource, setContextSource] = useState<DictationContextSource>("none");
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -52,6 +95,10 @@ export function DictationPopup() {
         try {
           const settings = await getSettings();
           setPushToTalk(Boolean(settings.transcription.dictationPushToTalk));
+          setModePreset((settings.transcription.dictationModePreset ?? "voice") as DictationModePreset);
+          setContextSource(
+            (settings.transcription.dictationContextSource ?? "none") as DictationContextSource
+          );
         } catch {
           // Keep default mode if settings are temporarily unavailable.
         }
@@ -156,6 +203,9 @@ export function DictationPopup() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   }, [elapsed]);
 
+  const modeMeta = MODE_META[modePreset] ?? MODE_META.voice;
+  const contextMeta = CONTEXT_META[contextSource] ?? CONTEXT_META.none;
+
   const cycleDisplayMode = async () => {
     const next: DisplayMode =
       displayMode === "full" ? "compact" : displayMode === "compact" ? "minimal" : "full";
@@ -237,7 +287,7 @@ export function DictationPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="rounded-2xl border border-cyan-400/35 bg-linear-to-br from-slate-950/95 via-slate-900/90 to-cyan-950/55 px-4 py-3 backdrop-blur-md">
+      <div className="rounded-[24px] border border-cyan-400/35 bg-linear-to-br from-slate-950/95 via-slate-900/92 to-cyan-950/55 px-4 py-3 backdrop-blur-xl shadow-[0_18px_80px_rgba(8,15,28,0.55)]">
         <div
           className="mb-2 flex items-center justify-between text-slate-300"
           onMouseDown={() => void window.startDragging()}
@@ -277,16 +327,34 @@ export function DictationPopup() {
           </div>
         </div>
 
+        {!compact && (
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <div className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium ${modeMeta.accent}`}>
+              <modeMeta.icon className="h-3.5 w-3.5" />
+              {modeMeta.label}
+            </div>
+            <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-slate-200">
+              <Clipboard className="h-3.5 w-3.5 text-slate-300" />
+              {contextMeta.label}
+            </div>
+            <div className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300">
+              {pushToTalk ? "Hold to talk" : "Toggle capture"}
+            </div>
+          </div>
+        )}
+
         {phase === "recording" && (
           <div className="flex items-center gap-3 text-white">
-            <div className="rounded-full bg-orange-500/20 p-2">
-              <Mic className="h-5 w-5 text-orange-300 animate-pulse" />
+            <div className="relative rounded-full bg-orange-500/15 p-3 ring-1 ring-orange-300/25">
+              <div className="absolute inset-0 rounded-full bg-orange-400/10 blur-md" />
+              <Mic className="relative h-5 w-5 text-orange-300 animate-pulse" />
             </div>
             <div className="flex-1">
               <p className="text-sm font-semibold">Listening</p>
               {!compact && (
                 <>
-                  <div className="mt-2 h-2 w-full max-w-[220px] rounded-full bg-slate-700/50 overflow-hidden">
+                  <p className="mt-1 text-xs text-slate-300">{contextMeta.detail}</p>
+                  <div className="mt-2 h-2.5 w-full max-w-[220px] rounded-full bg-slate-700/50 overflow-hidden">
                     <div
                       className="h-full bg-linear-to-r from-emerald-500 via-orange-400 to-rose-500 transition-all duration-50 rounded-full"
                       style={{ width: `${Math.min(100, audioLevel * 100)}%` }}
@@ -326,7 +394,7 @@ export function DictationPopup() {
             <Loader2 className="h-5 w-5 animate-spin text-orange-300" />
             <div>
               <p className="text-sm font-semibold">Stopping capture</p>
-              <p className="text-xs text-slate-300">Finalizing audio…</p>
+              <p className="text-xs text-slate-300">Finalizing audio and preserving context…</p>
             </div>
           </div>
         )}
@@ -336,7 +404,9 @@ export function DictationPopup() {
             <Loader2 className="h-5 w-5 animate-spin text-cyan-300" />
             <div>
               <p className="text-sm font-semibold">Transcribing</p>
-              <p className="text-xs text-slate-300">Preparing text for paste/clipboard…</p>
+              <p className="text-xs text-slate-300">
+                {modeMeta.label} mode is shaping the result for insert or clipboard.
+              </p>
             </div>
           </div>
         )}
@@ -357,6 +427,11 @@ export function DictationPopup() {
               )}
               {!compact && !message && preview && (
                 <p className="text-xs text-slate-300 truncate max-w-[260px]">{preview}</p>
+              )}
+              {!compact && !message && !preview && (
+                <p className="text-xs text-slate-300">
+                  Ready in {modeMeta.label.toLowerCase()} mode.
+                </p>
               )}
             </div>
           </div>

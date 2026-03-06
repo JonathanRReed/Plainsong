@@ -181,7 +181,7 @@ impl AudioCapture {
 
         let is_dictating = Arc::clone(&self.is_dictating);
         let buffer = Arc::clone(&self.dictation_buffer);
-        let _stream_queue = Arc::clone(&self.dictation_stream_queue);
+        let stream_queue = Arc::clone(&self.dictation_stream_queue);
         let callback_count = Arc::clone(&self.dictation_callback_count);
         let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
         let audio_level = Arc::clone(&self.dictation_audio_level);
@@ -217,6 +217,9 @@ impl AudioCapture {
             let is_dictating_f32 = Arc::clone(&is_dictating);
             let is_dictating_i16 = Arc::clone(&is_dictating);
             let is_dictating_u8 = Arc::clone(&is_dictating);
+            let stream_queue_f32 = Arc::clone(&stream_queue);
+            let stream_queue_i16 = Arc::clone(&stream_queue);
+            let stream_queue_u8 = Arc::clone(&stream_queue);
             let audio_level_f32 = Arc::clone(&audio_level);
             let audio_level_i16 = Arc::clone(&audio_level);
             let audio_level_u8 = Arc::clone(&audio_level);
@@ -235,17 +238,24 @@ impl AudioCapture {
                         if is_dictating_f32.load(Ordering::SeqCst) {
                             callback_count.fetch_add(1, Ordering::Relaxed);
                             let mut sum_sq: f64 = 0.0;
+                            let mut stream_chunk =
+                                Vec::with_capacity(data.len() / num_channels.max(1));
                             if num_channels == 1 {
                                 for &sample in data {
                                     buffer.push(sample);
+                                    stream_chunk.push(sample);
                                     sum_sq += (sample as f64) * (sample as f64);
                                 }
                             } else {
                                 for chunk in data.chunks_exact(num_channels) {
                                     let mono: f32 = chunk.iter().sum::<f32>() / num_channels as f32;
                                     buffer.push(mono);
+                                    stream_chunk.push(mono);
                                     sum_sq += (mono as f64) * (mono as f64);
                                 }
+                            }
+                            if !stream_chunk.is_empty() {
+                                stream_queue_f32.push(stream_chunk);
                             }
                             let rms = (sum_sq / data.len() as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
@@ -267,10 +277,13 @@ impl AudioCapture {
                         if is_dictating_i16.load(Ordering::SeqCst) {
                             callback_count.fetch_add(1, Ordering::Relaxed);
                             let mut sum_sq: f64 = 0.0;
+                            let mut stream_chunk =
+                                Vec::with_capacity(data.len() / num_channels.max(1));
                             if num_channels == 1 {
                                 for &sample in data {
                                     let f = sample as f32 / i16::MAX as f32;
                                     buffer.push(f);
+                                    stream_chunk.push(f);
                                     sum_sq += (f as f64) * (f as f64);
                                 }
                             } else {
@@ -281,8 +294,12 @@ impl AudioCapture {
                                         .sum::<f32>()
                                         / num_channels as f32;
                                     buffer.push(mono);
+                                    stream_chunk.push(mono);
                                     sum_sq += (mono as f64) * (mono as f64);
                                 }
+                            }
+                            if !stream_chunk.is_empty() {
+                                stream_queue_i16.push(stream_chunk);
                             }
                             let rms = (sum_sq / data.len() as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
@@ -304,10 +321,13 @@ impl AudioCapture {
                         if is_dictating_u8.load(Ordering::SeqCst) {
                             callback_count.fetch_add(1, Ordering::Relaxed);
                             let mut sum_sq: f64 = 0.0;
+                            let mut stream_chunk =
+                                Vec::with_capacity(data.len() / num_channels.max(1));
                             if num_channels == 1 {
                                 for &sample in data {
                                     let f = (sample as f32 - 128.0) / 128.0;
                                     buffer.push(f);
+                                    stream_chunk.push(f);
                                     sum_sq += (f as f64) * (f as f64);
                                 }
                             } else {
@@ -318,8 +338,12 @@ impl AudioCapture {
                                         .sum::<f32>()
                                         / num_channels as f32;
                                     buffer.push(mono);
+                                    stream_chunk.push(mono);
                                     sum_sq += (mono as f64) * (mono as f64);
                                 }
+                            }
+                            if !stream_chunk.is_empty() {
+                                stream_queue_u8.push(stream_chunk);
                             }
                             let rms = (sum_sq / data.len() as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
@@ -894,6 +918,18 @@ impl AudioCapture {
             return None;
         }
         Some((Arc::clone(&session.streaming_queue), session.sample_rate))
+    }
+
+    pub fn get_dictation_stream_queue(
+        &self,
+    ) -> Option<(Arc<crossbeam::queue::SegQueue<Vec<f32>>>, u32)> {
+        if !self.is_dictating.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some((
+            Arc::clone(&self.dictation_stream_queue),
+            self.dictation_sample_rate,
+        ))
     }
 
     pub fn get_waveform_data(&self, recording_id: &str) -> Option<Vec<f32>> {

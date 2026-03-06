@@ -8,6 +8,8 @@ import {
   getSettings,
   saveSettings,
   getTranscript,
+  reprocessDictationText,
+  deleteRecording,
   listDictationSnippets,
   createDictationSnippet,
   updateDictationSnippet,
@@ -17,6 +19,7 @@ import {
   deleteDictationCommandPreset,
   type DictationSnippet,
   type DictationCommandPreset,
+  type DictationReprocessResult,
 } from "@/lib/tauri";
 import {
   defaultDictationShortcut,
@@ -31,6 +34,7 @@ import { Keyboard, Mic, Square, Zap, Save, RefreshCw } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 import type { Recording, Transcript } from "@/types";
+import type { DictationCustomMode } from "@/types/settings";
 
 interface DictationTextReadyEvent {
   text: string;
@@ -44,12 +48,43 @@ interface DictationTextReadyEvent {
   fallbackMessage?: string | null;
   modelId?: string;
   latencyMs?: number;
+  insertLatencyMs?: number;
   endToEndMs?: number;
-  insertionModeUsed?: "auto" | "paste" | "clipboard_only" | "command_only" | "none";
+  insertionModeUsed?: "auto" | "paste" | "inline" | "clipboard_only" | "command_only" | "none";
   commandApplied?: string | null;
   snippetAppliedCount?: number;
   appTarget?: string | null;
+  contextSource?: DictationContextSource | null;
+  contextChars?: number | null;
 }
+
+type DictationModePreset =
+  | "voice"
+  | "messages"
+  | "email"
+  | "notes"
+  | "meeting_follow_up"
+  | "custom";
+
+type DictationInsertionMode = "auto" | "paste" | "inline" | "clipboard_only";
+type DictationContextSource = "none" | "clipboard" | "selected_text";
+
+type DictationModeDefinition = {
+  id: DictationModePreset;
+  label: string;
+  description: string;
+  profile?: "normal_speed" | "power_rewrite";
+  insertionMode?: DictationInsertionMode;
+  contextSource?: DictationContextSource;
+  saveToInbox?: boolean;
+  copyToClipboard?: boolean;
+  commandModeEnabled?: boolean;
+};
+
+type DictationCustomModeDraft = {
+  name: string;
+  description: string;
+};
 
 const COMMAND_PRESET_FIELDS: Array<{
   key: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection";
@@ -76,6 +111,71 @@ const COMMAND_PRESET_FIELDS: Array<{
   },
 ];
 
+const DEFAULT_DICTATION_MODE: DictationModePreset = "voice";
+
+const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
+  {
+    id: "voice",
+    label: "Voice",
+    description: "Fast everyday dictation with reliable insert behavior.",
+    profile: "normal_speed",
+    insertionMode: "auto",
+    contextSource: "none",
+    saveToInbox: true,
+    copyToClipboard: true,
+    commandModeEnabled: true,
+  },
+  {
+    id: "messages",
+    label: "Messages",
+    description: "Quick replies that paste cleanly into the current app.",
+    profile: "normal_speed",
+    insertionMode: "paste",
+    contextSource: "none",
+    saveToInbox: false,
+    copyToClipboard: true,
+    commandModeEnabled: false,
+  },
+  {
+    id: "email",
+    label: "Email",
+    description: "Slower, cleaner output for polished writing and rewrites.",
+    profile: "power_rewrite",
+    insertionMode: "auto",
+    contextSource: "selected_text",
+    saveToInbox: true,
+    copyToClipboard: true,
+    commandModeEnabled: true,
+  },
+  {
+    id: "notes",
+    label: "Notes",
+    description: "Capture ideas quickly and keep them saved for later.",
+    profile: "normal_speed",
+    insertionMode: "inline",
+    contextSource: "none",
+    saveToInbox: true,
+    copyToClipboard: true,
+    commandModeEnabled: true,
+  },
+  {
+    id: "meeting_follow_up",
+    label: "Meeting Follow-up",
+    description: "Generate polished follow-up text without forcing an insert.",
+    profile: "power_rewrite",
+    insertionMode: "clipboard_only",
+    contextSource: "clipboard",
+    saveToInbox: true,
+    copyToClipboard: true,
+    commandModeEnabled: true,
+  },
+  {
+    id: "custom",
+    label: "Custom",
+    description: "Keep full control over capture, insertion, and automation.",
+  },
+];
+
 export function DictationView() {
   const { isRecording, formattedDuration, startDictation, stopDictation } = useRecording();
   const { projects } = useProjects();
@@ -89,24 +189,35 @@ export function DictationView() {
   const [fallbackStatus, setFallbackStatus] = useState<string | null>(null);
   const [pasteStatus, setPasteStatus] = useState<string | null>(null);
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [insertLatencyMs, setInsertLatencyMs] = useState<number | null>(null);
   const [endToEndMs, setEndToEndMs] = useState<number | null>(null);
   const [insertionModeUsed, setInsertionModeUsed] = useState<string | null>(null);
   const [commandApplied, setCommandApplied] = useState<string | null>(null);
   const [snippetAppliedCount, setSnippetAppliedCount] = useState(0);
   const [appTarget, setAppTarget] = useState<string | null>(null);
+  const [contextChars, setContextChars] = useState<number | null>(null);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const [saveToInbox, setSaveToInbox] = useState(true);
   const [dictationProfile, setDictationProfile] = useState<"normal_speed" | "power_rewrite">(
     "normal_speed"
   );
+  const [dictationModePreset, setDictationModePreset] =
+    useState<DictationModePreset>(DEFAULT_DICTATION_MODE);
+  const [dictationCustomModes, setDictationCustomModes] = useState<DictationCustomMode[]>([]);
+  const [selectedCustomModeId, setSelectedCustomModeId] = useState<string | null>(null);
+  const [customModeDraft, setCustomModeDraft] = useState<DictationCustomModeDraft>({
+    name: "Custom Mode",
+    description: "",
+  });
   const [defaultProjectId, setDefaultProjectId] = useState("inbox");
   const [dictationPushToTalk, setDictationPushToTalk] = useState(true);
+  const [dictationContextSource, setDictationContextSource] =
+    useState<DictationContextSource>("none");
   const [dictationCopyToClipboard, setDictationCopyToClipboard] = useState(true);
   const [dictationCommandModeEnabled, setDictationCommandModeEnabled] = useState(true);
   const [dictationCommandPrefix, setDictationCommandPrefix] = useState("command");
-  const [dictationInsertionMode, setDictationInsertionMode] = useState<
-    "auto" | "paste" | "clipboard_only"
-  >("auto");
+  const [dictationInsertionMode, setDictationInsertionMode] =
+    useState<DictationInsertionMode>("auto");
   const [dictationSnippetsEnabled, setDictationSnippetsEnabled] = useState(true);
   const [dictationSnippets, setDictationSnippets] = useState<DictationSnippet[]>([]);
   const [dictationCommandPresets, setDictationCommandPresets] = useState<
@@ -125,14 +236,69 @@ export function DictationView() {
   const [selectedTranscript, setSelectedTranscript] = useState<Transcript | null>(null);
   const [isLoadingTranscript, setIsLoadingTranscript] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [reprocessModePreset, setReprocessModePreset] =
+    useState<DictationModePreset>(DEFAULT_DICTATION_MODE);
+  const [reprocessedResult, setReprocessedResult] = useState<DictationReprocessResult | null>(null);
+  const [isReprocessing, setIsReprocessing] = useState(false);
+  const [reprocessError, setReprocessError] = useState<string | null>(null);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const modeDefinitionById = useMemo(
+    () =>
+      DICTATION_MODE_DEFINITIONS.reduce<Record<DictationModePreset, DictationModeDefinition>>(
+        (acc, definition) => {
+          acc[definition.id] = definition;
+          return acc;
+        },
+        {} as Record<DictationModePreset, DictationModeDefinition>
+      ),
+    []
+  );
+
+  const selectedCustomMode = useMemo(
+    () =>
+      selectedCustomModeId
+        ? dictationCustomModes.find((mode) => mode.id === selectedCustomModeId) ?? null
+        : null,
+    [dictationCustomModes, selectedCustomModeId]
+  );
+
+  const inferModePreset = (values: {
+    profile: "normal_speed" | "power_rewrite";
+    insertionMode: DictationInsertionMode;
+    contextSource: DictationContextSource;
+    saveToInbox: boolean;
+    copyToClipboard: boolean;
+    commandModeEnabled: boolean;
+  }): DictationModePreset => {
+    const matched = DICTATION_MODE_DEFINITIONS.find((definition) => {
+      if (definition.id === "custom") return false;
+      return (
+        definition.profile === values.profile &&
+        definition.insertionMode === values.insertionMode &&
+        definition.contextSource === values.contextSource &&
+        definition.saveToInbox === values.saveToInbox &&
+        definition.copyToClipboard === values.copyToClipboard &&
+        definition.commandModeEnabled === values.commandModeEnabled
+      );
+    });
+
+    return matched?.id ?? "custom";
+  };
 
   useEffect(() => {
     if (!isDialogOpen || !selectedRecording) {
       setSelectedTranscript(null);
+      setReprocessedResult(null);
+      setReprocessError(null);
       return;
     }
     setIsLoadingTranscript(true);
+    setReprocessedResult(null);
+    setReprocessError(null);
+    setReprocessModePreset(
+      dictationModePreset === "custom" ? DEFAULT_DICTATION_MODE : dictationModePreset
+    );
     const fetchTranscript = async () => {
       try {
         const transcript = await getTranscript(selectedRecording.id);
@@ -145,7 +311,7 @@ export function DictationView() {
       }
     };
     void fetchTranscript();
-  }, [isDialogOpen, selectedRecording]);
+  }, [dictationModePreset, isDialogOpen, selectedRecording]);
 
   const dictationHistory = useMemo(
     () =>
@@ -171,16 +337,39 @@ export function DictationView() {
     void getSettings()
       .then((settings) => {
         if (!mounted) return;
-        setSaveToInbox(settings.transcription.dictationSaveToInbox);
-        setDictationProfile(settings.transcription.dictationProfile);
+        const nextSaveToInbox = settings.transcription.dictationSaveToInbox;
+        const nextProfile = settings.transcription.dictationProfile;
+        const nextCopyToClipboard = settings.transcription.dictationCopyToClipboard ?? true;
+        const nextCommandModeEnabled =
+          settings.transcription.dictationCommandModeEnabled ?? true;
+        const nextContextSource =
+          (settings.transcription.dictationContextSource as DictationContextSource | undefined) ??
+          "none";
+        const nextInsertionMode =
+          (settings.transcription.dictationInsertionMode as DictationInsertionMode | undefined) ??
+          "auto";
+        const nextModePreset =
+          settings.transcription.dictationModePreset ??
+          inferModePreset({
+            profile: nextProfile,
+            insertionMode: nextInsertionMode,
+            contextSource: nextContextSource,
+            saveToInbox: nextSaveToInbox,
+            copyToClipboard: nextCopyToClipboard,
+            commandModeEnabled: nextCommandModeEnabled,
+          });
+        setSaveToInbox(nextSaveToInbox);
+        setDictationProfile(nextProfile);
+        setDictationModePreset(nextModePreset);
+        setDictationCustomModes(settings.transcription.dictationCustomModes ?? []);
+        setSelectedCustomModeId(settings.transcription.dictationSelectedCustomModeId ?? null);
         setDefaultProjectId(settings.transcription.dictationProjectId || "inbox");
         setDictationPushToTalk(settings.transcription.dictationPushToTalk);
-        setDictationCopyToClipboard(settings.transcription.dictationCopyToClipboard ?? true);
-        setDictationCommandModeEnabled(
-          settings.transcription.dictationCommandModeEnabled ?? true
-        );
+        setDictationContextSource(nextContextSource);
+        setDictationCopyToClipboard(nextCopyToClipboard);
+        setDictationCommandModeEnabled(nextCommandModeEnabled);
         setDictationCommandPrefix(settings.transcription.dictationCommandPrefix ?? "command");
-        setDictationInsertionMode(settings.transcription.dictationInsertionMode ?? "auto");
+        setDictationInsertionMode(nextInsertionMode);
         setDictationSnippetsEnabled(settings.transcription.dictationSnippetsEnabled ?? true);
         setDictationRetentionPreset(settings.transcription.dictationRetentionPreset ?? "never");
         setDictationRetentionCustomHours(settings.transcription.dictationRetentionCustomHours ?? 24);
@@ -232,12 +421,16 @@ export function DictationView() {
     updates: Partial<{
       saveToInbox: boolean;
       profile: "normal_speed" | "power_rewrite";
+      modePreset: DictationModePreset;
+      selectedCustomModeId: string | null;
+      customModes: DictationCustomMode[];
+      contextSource: DictationContextSource;
       projectId: string;
       pushToTalk: boolean;
       copyToClipboard: boolean;
       commandModeEnabled: boolean;
       commandPrefix: string;
-      insertionMode: "auto" | "paste" | "clipboard_only";
+      insertionMode: DictationInsertionMode;
       snippetsEnabled: boolean;
       retentionPreset: "immediate" | "24h" | "72h" | "never" | "custom";
       retentionCustomHours: number;
@@ -245,18 +438,39 @@ export function DictationView() {
   ) => {
     try {
       const settings = await getSettings();
-      settings.transcription.dictationSaveToInbox = updates.saveToInbox ?? saveToInbox;
-      settings.transcription.dictationProfile = updates.profile ?? dictationProfile;
+      const nextSaveToInbox = updates.saveToInbox ?? saveToInbox;
+      const nextProfile = updates.profile ?? dictationProfile;
+      const nextCustomModes = updates.customModes ?? dictationCustomModes;
+      const nextContextSource = updates.contextSource ?? dictationContextSource;
+      const nextCopyToClipboard = updates.copyToClipboard ?? dictationCopyToClipboard;
+      const nextCommandModeEnabled =
+        updates.commandModeEnabled ?? dictationCommandModeEnabled;
+      const nextInsertionMode = updates.insertionMode ?? dictationInsertionMode;
+      const nextModePreset =
+        updates.modePreset ??
+        inferModePreset({
+          profile: nextProfile,
+          insertionMode: nextInsertionMode,
+          contextSource: nextContextSource,
+          saveToInbox: nextSaveToInbox,
+          copyToClipboard: nextCopyToClipboard,
+          commandModeEnabled: nextCommandModeEnabled,
+        });
+
+      settings.transcription.dictationSaveToInbox = nextSaveToInbox;
+      settings.transcription.dictationProfile = nextProfile;
+      settings.transcription.dictationModePreset = nextModePreset;
+      settings.transcription.dictationSelectedCustomModeId =
+        updates.selectedCustomModeId ?? null;
+      settings.transcription.dictationCustomModes = nextCustomModes;
+      settings.transcription.dictationContextSource = nextContextSource;
       settings.transcription.dictationProjectId = updates.projectId ?? defaultProjectId;
       settings.transcription.dictationPushToTalk = updates.pushToTalk ?? dictationPushToTalk;
-      settings.transcription.dictationCopyToClipboard =
-        updates.copyToClipboard ?? dictationCopyToClipboard;
-      settings.transcription.dictationCommandModeEnabled =
-        updates.commandModeEnabled ?? dictationCommandModeEnabled;
+      settings.transcription.dictationCopyToClipboard = nextCopyToClipboard;
+      settings.transcription.dictationCommandModeEnabled = nextCommandModeEnabled;
       settings.transcription.dictationCommandPrefix =
         updates.commandPrefix ?? dictationCommandPrefix;
-      settings.transcription.dictationInsertionMode =
-        updates.insertionMode ?? dictationInsertionMode;
+      settings.transcription.dictationInsertionMode = nextInsertionMode;
       settings.transcription.dictationSnippetsEnabled =
         updates.snippetsEnabled ?? dictationSnippetsEnabled;
       settings.transcription.dictationRetentionPreset =
@@ -268,6 +482,155 @@ export function DictationView() {
       console.warn("Failed to persist dictation preferences:", error);
     }
   };
+
+  const applyDictationMode = (modeId: DictationModePreset) => {
+    setDictationModePreset(modeId);
+    setSelectedCustomModeId(null);
+    const definition = modeDefinitionById[modeId];
+    if (!definition || modeId === "custom") {
+      void persistDictationPreferences({ modePreset: modeId, selectedCustomModeId: null });
+      return;
+    }
+
+    const nextProfile = definition.profile ?? dictationProfile;
+    const nextInsertionMode = definition.insertionMode ?? dictationInsertionMode;
+    const nextContextSource = definition.contextSource ?? dictationContextSource;
+    const nextSaveToInbox = definition.saveToInbox ?? saveToInbox;
+    const nextCopyToClipboard =
+      definition.copyToClipboard ?? dictationCopyToClipboard;
+    const nextCommandModeEnabled =
+      definition.commandModeEnabled ?? dictationCommandModeEnabled;
+
+    setDictationProfile(nextProfile);
+    setDictationInsertionMode(nextInsertionMode);
+    setDictationContextSource(nextContextSource);
+    setSaveToInbox(nextSaveToInbox);
+    setDictationCopyToClipboard(nextCopyToClipboard);
+    setDictationCommandModeEnabled(nextCommandModeEnabled);
+
+    void persistDictationPreferences({
+      modePreset: modeId,
+      selectedCustomModeId: null,
+      profile: nextProfile,
+      insertionMode: nextInsertionMode,
+      contextSource: nextContextSource,
+      saveToInbox: nextSaveToInbox,
+      copyToClipboard: nextCopyToClipboard,
+      commandModeEnabled: nextCommandModeEnabled,
+    });
+  };
+
+  const syncModePreset = (overrides: Partial<{
+    profile: "normal_speed" | "power_rewrite";
+    insertionMode: DictationInsertionMode;
+    contextSource: DictationContextSource;
+    saveToInbox: boolean;
+    copyToClipboard: boolean;
+    commandModeEnabled: boolean;
+  }> = {}) => {
+    const nextModePreset = inferModePreset({
+      profile: overrides.profile ?? dictationProfile,
+      insertionMode: overrides.insertionMode ?? dictationInsertionMode,
+      contextSource: overrides.contextSource ?? dictationContextSource,
+      saveToInbox: overrides.saveToInbox ?? saveToInbox,
+      copyToClipboard: overrides.copyToClipboard ?? dictationCopyToClipboard,
+      commandModeEnabled: overrides.commandModeEnabled ?? dictationCommandModeEnabled,
+    });
+    setDictationModePreset(nextModePreset);
+    if (nextModePreset === "custom") {
+      setSelectedCustomModeId(null);
+    } else {
+      setSelectedCustomModeId(null);
+    }
+    return nextModePreset;
+  };
+
+  const buildCurrentCustomMode = (overrides?: Partial<DictationCustomMode>): DictationCustomMode => ({
+    id:
+      overrides?.id ??
+      selectedCustomModeId ??
+      `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: (overrides?.name ?? customModeDraft.name).trim() || "Custom Mode",
+    description: (overrides?.description ?? customModeDraft.description).trim(),
+    profile: overrides?.profile ?? dictationProfile,
+    insertionMode: overrides?.insertionMode ?? dictationInsertionMode,
+    contextSource: overrides?.contextSource ?? dictationContextSource,
+    saveToInbox: overrides?.saveToInbox ?? saveToInbox,
+    copyToClipboard: overrides?.copyToClipboard ?? dictationCopyToClipboard,
+    commandModeEnabled: overrides?.commandModeEnabled ?? dictationCommandModeEnabled,
+  });
+
+  const applySavedCustomMode = (mode: DictationCustomMode) => {
+    setDictationModePreset("custom");
+    setSelectedCustomModeId(mode.id);
+    setCustomModeDraft({ name: mode.name, description: mode.description });
+    setDictationProfile(mode.profile);
+    setDictationInsertionMode(mode.insertionMode);
+    setDictationContextSource(mode.contextSource);
+    setSaveToInbox(mode.saveToInbox);
+    setDictationCopyToClipboard(mode.copyToClipboard);
+    setDictationCommandModeEnabled(mode.commandModeEnabled);
+    void persistDictationPreferences({
+      modePreset: "custom",
+      selectedCustomModeId: mode.id,
+      profile: mode.profile,
+      insertionMode: mode.insertionMode,
+      contextSource: mode.contextSource,
+      saveToInbox: mode.saveToInbox,
+      copyToClipboard: mode.copyToClipboard,
+      commandModeEnabled: mode.commandModeEnabled,
+    });
+  };
+
+  const handleSaveCustomMode = async (saveAsNew = false) => {
+    const nextMode = buildCurrentCustomMode({
+      id: saveAsNew ? undefined : selectedCustomModeId ?? undefined,
+    });
+    const nextModes = saveAsNew
+      ? [...dictationCustomModes, nextMode]
+      : dictationCustomModes.some((mode) => mode.id === nextMode.id)
+        ? dictationCustomModes.map((mode) => (mode.id === nextMode.id ? nextMode : mode))
+        : [...dictationCustomModes, nextMode];
+    setDictationCustomModes(nextModes);
+    setDictationModePreset("custom");
+    setSelectedCustomModeId(nextMode.id);
+    setCustomModeDraft({ name: nextMode.name, description: nextMode.description });
+    await persistDictationPreferences({
+      modePreset: "custom",
+      selectedCustomModeId: nextMode.id,
+      customModes: nextModes,
+    });
+  };
+
+  const handleDeleteCustomMode = async (modeId: string) => {
+    const nextModes = dictationCustomModes.filter((mode) => mode.id !== modeId);
+    setDictationCustomModes(nextModes);
+    const shouldClearSelection = selectedCustomModeId === modeId;
+    if (shouldClearSelection) {
+      setSelectedCustomModeId(null);
+      setCustomModeDraft({ name: "Custom Mode", description: "" });
+    }
+    await persistDictationPreferences({
+      selectedCustomModeId: shouldClearSelection ? null : selectedCustomModeId,
+      customModes: nextModes,
+    });
+  };
+
+  useEffect(() => {
+    if (selectedCustomMode) {
+      setCustomModeDraft({
+        name: selectedCustomMode.name,
+        description: selectedCustomMode.description,
+      });
+      return;
+    }
+    if (dictationModePreset === "custom") {
+      setCustomModeDraft((current) => ({
+        name: current.name || "Custom Mode",
+        description: current.description,
+      }));
+    }
+  }, [dictationModePreset, selectedCustomMode]);
 
   useEffect(() => {
     // Listen for hotkey visual feedback
@@ -327,16 +690,14 @@ export function DictationView() {
         if (payload?.modelId) {
           setLastModelId(payload.modelId);
         }
-        if (payload?.latencyMs !== undefined) {
-          setLatencyMs(payload.latencyMs);
-        }
-        if (payload?.endToEndMs !== undefined) {
-          setEndToEndMs(payload.endToEndMs);
-        }
+        setLatencyMs(payload?.latencyMs ?? null);
+        setInsertLatencyMs(payload?.insertLatencyMs ?? null);
+        setEndToEndMs(payload?.endToEndMs ?? null);
         setInsertionModeUsed(payload?.insertionModeUsed ?? null);
         setCommandApplied(payload?.commandApplied ?? null);
         setSnippetAppliedCount(payload?.snippetAppliedCount ?? 0);
         setAppTarget(payload?.appTarget ?? null);
+        setContextChars(payload?.contextChars ?? null);
         if (payload?.pasted) {
           setPasteStatus("Paste command sent (also copied to clipboard)");
         } else if (payload?.copied) {
@@ -503,13 +864,65 @@ export function DictationView() {
     }
   };
 
+  const handleReprocessSelectedDictation = async () => {
+    if (!selectedTranscript?.fullText?.trim()) {
+      return;
+    }
+
+    setIsReprocessing(true);
+    setReprocessError(null);
+    try {
+      const result = await reprocessDictationText(
+        selectedTranscript.fullText,
+        reprocessModePreset
+      );
+      setReprocessedResult(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setReprocessError(message);
+      setReprocessedResult(null);
+    } finally {
+      setIsReprocessing(false);
+    }
+  };
+
+  const handleCopyHistoryTranscript = async (recordingId: string) => {
+    try {
+      const transcript = await getTranscript(recordingId);
+      const text = transcript?.fullText?.trim();
+      if (!text) {
+        return;
+      }
+      await navigator.clipboard.writeText(text);
+      setPasteStatus("Copied dictation history item");
+    } catch (error) {
+      console.warn("Failed to copy dictation history transcript:", error);
+    }
+  };
+
+  const handleDeleteHistoryItem = async (recordingId: string) => {
+    try {
+      await deleteRecording(recordingId);
+      if (selectedRecording?.id === recordingId) {
+        setIsDialogOpen(false);
+        setSelectedRecording(null);
+        setSelectedTranscript(null);
+        setReprocessedResult(null);
+        setReprocessError(null);
+      }
+      await refetchDictationHistory();
+    } catch (error) {
+      console.warn("Failed to delete dictation history item:", error);
+    }
+  };
+
   return (
     <div className="h-full flex flex-col">
       <div className="p-6 border-b">
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Dictation</h1>
-            <p className="text-muted-foreground">Global hotkey capture</p>
+            <p className="text-muted-foreground">Fast voice capture that inserts text where you work</p>
           </div>
           <div className="flex items-center gap-4">
             <div 
@@ -532,7 +945,8 @@ export function DictationView() {
                 onChange={(e) => {
                   const next = e.target.checked;
                   setSaveToInbox(next);
-                  void persistDictationPreferences({ saveToInbox: next });
+                  const nextModePreset = syncModePreset({ saveToInbox: next });
+                  void persistDictationPreferences({ saveToInbox: next, modePreset: nextModePreset });
                 }}
                 className="h-4 w-4"
               />
@@ -548,7 +962,11 @@ export function DictationView() {
                 onChange={(e) => {
                   const next = e.target.checked;
                   setDictationCopyToClipboard(next);
-                  void persistDictationPreferences({ copyToClipboard: next });
+                  const nextModePreset = syncModePreset({ copyToClipboard: next });
+                  void persistDictationPreferences({
+                    copyToClipboard: next,
+                    modePreset: nextModePreset,
+                  });
                 }}
                 className="h-4 w-4"
               />
@@ -570,6 +988,162 @@ export function DictationView() {
             </Card>
           )}
 
+          <Card>
+            <CardHeader>
+              <CardTitle>Modes</CardTitle>
+              <CardDescription>
+                Start with a preset tuned for your workflow, then adjust the details below if you
+                need something custom.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {DICTATION_MODE_DEFINITIONS.map((mode) => {
+                  const isActive = dictationModePreset === mode.id;
+                  return (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      onClick={() => applyDictationMode(mode.id)}
+                      className={cn(
+                        "rounded-xl border p-4 text-left transition-colors",
+                        isActive
+                          ? "border-active bg-active/10 shadow-sm"
+                          : "border-border hover:border-active/50 hover:bg-muted/40"
+                      )}
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="font-medium">{mode.label}</p>
+                        {isActive && (
+                          <span className="rounded-full bg-active px-2 py-0.5 text-[11px] font-semibold text-active-foreground">
+                            Active
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-2 text-sm text-muted-foreground">{mode.description}</p>
+                    </button>
+                  );
+                })}
+              </div>
+              {dictationCustomModes.length > 0 && (
+                <div className="space-y-3 border-t pt-4">
+                  <div>
+                    <p className="text-sm font-medium">Saved custom modes</p>
+                    <p className="text-xs text-muted-foreground">
+                      Reuse your own dictation setups without rebuilding them from scratch.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    {dictationCustomModes.map((mode) => {
+                      const isActive =
+                        dictationModePreset === "custom" && selectedCustomModeId === mode.id;
+                      return (
+                        <div
+                          key={mode.id}
+                          className={cn(
+                            "rounded-xl border p-4",
+                            isActive
+                              ? "border-active bg-active/10 shadow-sm"
+                              : "border-border bg-muted/20"
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="font-medium">{mode.name}</p>
+                              <p className="mt-1 text-sm text-muted-foreground">
+                                {mode.description || "Custom dictation workflow"}
+                              </p>
+                            </div>
+                            {isActive && (
+                              <span className="rounded-full bg-active px-2 py-0.5 text-[11px] font-semibold text-active-foreground">
+                                Active
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-3 flex gap-2">
+                            <Button
+                              variant={isActive ? "default" : "outline"}
+                              size="sm"
+                              onClick={() => applySavedCustomMode(mode)}
+                            >
+                              {isActive ? "Using now" : "Use mode"}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => void handleDeleteCustomMode(mode.id)}
+                            >
+                              Delete
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                {dictationModePreset === "custom"
+                  ? selectedCustomMode
+                    ? `${selectedCustomMode.name} is active. Update it when you want the current lower controls to become the new default.`
+                    : "Unsaved custom setup is active. Save it as a reusable mode when it feels right."
+                  : `${modeDefinitionById[dictationModePreset]?.label ?? "Voice"} mode is active. Lower controls stay editable if you want to fine-tune them.`}
+              </div>
+              {dictationModePreset === "custom" && (
+                <div className="rounded-xl border border-border/70 bg-background/70 p-4 space-y-3">
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Mode name</label>
+                      <input
+                        type="text"
+                        aria-label="Mode name"
+                        className="w-full rounded-md border bg-background p-2 text-sm"
+                        value={customModeDraft.name}
+                        onChange={(event) =>
+                          setCustomModeDraft((current) => ({ ...current, name: event.target.value }))
+                        }
+                        placeholder="Custom Mode"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Short description</label>
+                      <input
+                        type="text"
+                        aria-label="Short description"
+                        className="w-full rounded-md border bg-background p-2 text-sm"
+                        value={customModeDraft.description}
+                        onChange={(event) =>
+                          setCustomModeDraft((current) => ({
+                            ...current,
+                            description: event.target.value,
+                          }))
+                        }
+                        placeholder="What this mode is for"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" onClick={() => void handleSaveCustomMode(false)}>
+                      {selectedCustomModeId ? "Update mode" : "Save current setup"}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => void handleSaveCustomMode(true)}>
+                      Save as new mode
+                    </Button>
+                    {selectedCustomModeId && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => void handleDeleteCustomMode(selectedCustomModeId)}
+                      >
+                        Delete mode
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* Quick Capture Card */}
           <Card className={cn(
             "border-2 transition-all duration-300",
@@ -578,7 +1152,7 @@ export function DictationView() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Zap className="h-5 w-5" />
-                Quick Capture
+                Capture
               </CardTitle>
               <CardDescription>
                 {dictationInstruction(hotkeyShortcut, dictationPushToTalk ? "hold_to_talk" : "toggle")}
@@ -627,6 +1201,7 @@ export function DictationView() {
                           saveToInbox,
                           projectId: defaultProjectId,
                           profile: dictationProfile,
+                          contextSource: dictationContextSource,
                         })
                       }
                       className="mt-4"
@@ -660,12 +1235,12 @@ export function DictationView() {
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm flex items-center gap-2">
                   <Zap className="h-4 w-4" />
-                  Instant Transcription
+                  Fast insertion
                 </CardTitle>
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground">
-                  Text appears at your cursor within seconds after transcription finishes.
+                    Your final text is inserted after capture finishes.
                 </p>
               </CardContent>
             </Card>
@@ -674,12 +1249,12 @@ export function DictationView() {
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm flex items-center gap-2">
                   <Save className="h-4 w-4" />
-                  Automatic Save
+                  Save history
                 </CardTitle>
               </CardHeader>
               <CardContent>
                   <p className="text-sm text-muted-foreground">
-                    All dictations are saved to your Inbox for future reference and search.
+                    Keep dictations in Inbox so they are searchable later.
                   </p>
               </CardContent>
             </Card>
@@ -690,7 +1265,7 @@ export function DictationView() {
             <Card>
               <CardHeader className="flex flex-row items-center justify-between">
                 <div>
-                  <CardTitle>Last Transcription</CardTitle>
+                  <CardTitle>Latest Result</CardTitle>
                   <CardDescription>
                     {pasteStatus ?? "Latest dictation result"}
                   </CardDescription>
@@ -721,27 +1296,48 @@ export function DictationView() {
                 {(lastProvider ||
                   lastModelId ||
                   latencyMs !== null ||
+                  insertLatencyMs !== null ||
                   endToEndMs !== null ||
                   insertionModeUsed ||
                   commandApplied ||
                   snippetAppliedCount > 0 ||
-                  appTarget) && (
+                  appTarget ||
+                  contextChars !== null) && (
                   <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                     {latencyMs !== null && (
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-active/10 text-active font-medium">
                         <Zap className="h-3 w-3" />
+                        Transcription{" "}
                         {latencyMs < 1000
                           ? `${latencyMs}ms`
                           : `${(latencyMs / 1000).toFixed(1)}s`}
                       </span>
                     )}
-                    {endToEndMs !== null && <span>End-to-end: {endToEndMs}ms</span>}
-                    {lastProvider && <span>Provider: {lastProvider}</span>}
+                    {endToEndMs !== null && (
+                      <span>
+                        Ready to insert:{" "}
+                        {endToEndMs < 1000
+                          ? `${endToEndMs}ms`
+                          : `${(endToEndMs / 1000).toFixed(1)}s`}
+                      </span>
+                    )}
+                    {insertLatencyMs !== null && (
+                      <span>
+                        Insert:{" "}
+                        {insertLatencyMs < 1000
+                          ? `${insertLatencyMs}ms`
+                          : `${(insertLatencyMs / 1000).toFixed(1)}s`}
+                      </span>
+                    )}
+                    {lastProvider && <span>Engine: {lastProvider}</span>}
                     {lastModelId && <span>Model: {lastModelId}</span>}
-                    {insertionModeUsed && <span>Insert mode: {insertionModeUsed}</span>}
+                    {insertionModeUsed && <span>Inserted via: {insertionModeUsed}</span>}
                     {commandApplied && <span>Command: {commandApplied}</span>}
                     {snippetAppliedCount > 0 && <span>Snippets: {snippetAppliedCount}</span>}
-                    {appTarget && <span>App: {appTarget}</span>}
+                    {appTarget && <span>Target app: {appTarget}</span>}
+                    {contextChars !== null && contextChars > 0 && (
+                      <span>Context: {contextChars} chars</span>
+                    )}
                   </div>
                 )}
               </CardContent>
@@ -752,7 +1348,7 @@ export function DictationView() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <div>
-                <CardTitle>Saved Dictations</CardTitle>
+                <CardTitle>Recent Dictations</CardTitle>
                 <CardDescription>
                   Dictation recordings retained by your current auto-delete policy.
                 </CardDescription>
@@ -786,9 +1382,31 @@ export function DictationView() {
                           {new Date(recording.createdAt).toLocaleString()} · {recording.status}
                         </p>
                       </div>
-                      <p className="text-sm text-muted-foreground">
-                        {formatRecordingDuration(recording.duration)}
-                      </p>
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm text-muted-foreground">
+                          {formatRecordingDuration(recording.duration)}
+                        </p>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleCopyHistoryTranscript(recording.id);
+                          }}
+                        >
+                          Copy
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleDeleteHistoryItem(recording.id);
+                          }}
+                        >
+                          Delete
+                        </Button>
+                      </div>
                      </div>
                     ))}
                   </div>
@@ -799,7 +1417,11 @@ export function DictationView() {
           {/* Settings */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-sm">Dictation Settings</CardTitle>
+              <CardTitle className="text-sm">Capture, Insert, and Automation</CardTitle>
+              <CardDescription>
+                Modes handle the recommended defaults. These controls are here when you want to
+                tune the details.
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -811,14 +1433,15 @@ export function DictationView() {
                     onChange={(event) => {
                       const profile = event.target.value as "normal_speed" | "power_rewrite";
                       setDictationProfile(profile);
-                      void persistDictationPreferences({ profile });
+                      const nextModePreset = syncModePreset({ profile });
+                      void persistDictationPreferences({ profile, modePreset: nextModePreset });
                     }}
                   >
                     <option value="normal_speed">Normal Speed</option>
                     <option value="power_rewrite">Power Rewrite</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    ASR model selection follows your global default local ASR model in Settings.
+                    Uses the transcription route selected in Settings → Transcription.
                   </p>
                 </div>
                 
@@ -858,6 +1481,32 @@ export function DictationView() {
                   </select>
                   <p className="text-xs text-muted-foreground">
                     Hold-to-talk starts on key press and transcribes on release.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Text context</label>
+                  <select
+                    className="w-full p-2 border rounded-md bg-background"
+                    value={dictationContextSource}
+                    onChange={(event) => {
+                      const contextSource = event.target.value as DictationContextSource;
+                      setDictationContextSource(contextSource);
+                      const nextModePreset = syncModePreset({ contextSource });
+                      void persistDictationPreferences({
+                        contextSource,
+                        modePreset: nextModePreset,
+                      });
+                    }}
+                  >
+                    <option value="none">Off</option>
+                    <option value="selected_text">Use selected text</option>
+                    <option value="clipboard">Use clipboard</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Lets voice commands transform existing text. Try &quot;command rewrite professional&quot;
+                    or &quot;command bulletize selection&quot;. Nautilus also uses the active app name as
+                    writing context automatically.
                   </p>
                 </div>
 
@@ -902,15 +1551,24 @@ export function DictationView() {
                     className="w-full p-2 border rounded-md bg-background"
                     value={dictationInsertionMode}
                     onChange={(event) => {
-                      const mode = event.target.value as "auto" | "paste" | "clipboard_only";
+                      const mode = event.target.value as "auto" | "paste" | "inline" | "clipboard_only";
                       setDictationInsertionMode(mode);
-                      void persistDictationPreferences({ insertionMode: mode });
+                      const nextModePreset = syncModePreset({ insertionMode: mode });
+                      void persistDictationPreferences({
+                        insertionMode: mode,
+                        modePreset: nextModePreset,
+                      });
                     }}
                   >
-                    <option value="auto">Auto (best effort)</option>
+                    <option value="auto">Recommended</option>
                     <option value="paste">Paste at cursor</option>
+                    <option value="inline">Insert on release</option>
                     <option value="clipboard_only">Clipboard only</option>
                   </select>
+                  <p className="text-xs text-muted-foreground">
+                    Recommended tries the best available insertion path. Insert on release keeps the
+                    flow simple and consistent.
+                  </p>
                 </div>
 
                 <div className="space-y-2">
@@ -933,7 +1591,11 @@ export function DictationView() {
                       onChange={(event) => {
                         const next = event.target.checked;
                         setDictationCommandModeEnabled(next);
-                        void persistDictationPreferences({ commandModeEnabled: next });
+                        const nextModePreset = syncModePreset({ commandModeEnabled: next });
+                        void persistDictationPreferences({
+                          commandModeEnabled: next,
+                          modePreset: nextModePreset,
+                        });
                       }}
                     />
                     Enable command mode
@@ -943,9 +1605,9 @@ export function DictationView() {
 
               <div className="mt-5 border-t pt-4 space-y-3">
                 <div>
-                  <p className="text-sm font-medium">Command Presets</p>
+                  <p className="text-sm font-medium">Text actions</p>
                   <p className="text-xs text-muted-foreground">
-                    Customize prompts used for command rewrite and bulletize actions.
+                    Customize rewrite and bullet actions that run after dictation.
                   </p>
                 </div>
                 <div className="space-y-3">
@@ -1004,9 +1666,9 @@ export function DictationView() {
               <div className="mt-5 border-t pt-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium">Snippets</p>
+                    <p className="text-sm font-medium">Phrase expansions</p>
                     <p className="text-xs text-muted-foreground">
-                      Expand trigger phrases after transcription and before insertion.
+                      Expand short trigger phrases before text is inserted.
                     </p>
                   </div>
                   <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
@@ -1169,20 +1831,203 @@ export function DictationView() {
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{selectedRecording?.title ?? "Dictation"}</DialogTitle>
+            <div className="flex items-center justify-between gap-3">
+              <DialogTitle>{selectedRecording?.title ?? "Dictation"}</DialogTitle>
+              {selectedRecording && (
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void handleCopyHistoryTranscript(selectedRecording.id)}
+                  >
+                    Copy
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void handleDeleteHistoryItem(selectedRecording.id)}
+                  >
+                    Delete
+                  </Button>
+                </div>
+              )}
+            </div>
           </DialogHeader>
           {isLoadingTranscript ? (
             <p className="text-muted-foreground">Loading transcript...</p>
           ) : selectedTranscript ? (
             <div className="space-y-4">
-              <div className="p-4 bg-muted rounded-lg">
-                <p className="whitespace-pre-wrap text-sm">
-                  {selectedTranscript.fullText}
+              <div className="rounded-lg border p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium">Capture details</p>
+                    <p className="text-xs text-muted-foreground">
+                      Inspect the original route, model, and transcript quality before reprocessing.
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  <div className="rounded-md border bg-muted/30 px-3 py-2">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Requested engine
+                    </p>
+                    <p className="mt-1 text-sm font-medium">
+                      {selectedTranscript.requestedProvider || "Default route"}
+                    </p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 px-3 py-2">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Actual engine
+                    </p>
+                    <p className="mt-1 text-sm font-medium">
+                      {selectedTranscript.actualProvider || selectedTranscript.requestedProvider || "Unknown"}
+                    </p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 px-3 py-2">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Model
+                    </p>
+                    <p className="mt-1 text-sm font-medium">
+                      {selectedTranscript.modelId || selectedTranscript.model || "Unknown"}
+                    </p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 px-3 py-2">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Language
+                    </p>
+                    <p className="mt-1 text-sm font-medium">
+                      {selectedTranscript.language || "Unknown"}
+                    </p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 px-3 py-2">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Confidence
+                    </p>
+                    <p className="mt-1 text-sm font-medium">
+                      {Number.isFinite(selectedTranscript.confidence)
+                        ? `${Math.round(selectedTranscript.confidence * 100)}%`
+                        : "Unavailable"}
+                    </p>
+                  </div>
+                  <div className="rounded-md border bg-muted/30 px-3 py-2">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Segments
+                    </p>
+                    <p className="mt-1 text-sm font-medium">
+                      {selectedTranscript.segments?.length ?? 0}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-lg border p-4 space-y-3">
+                <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Reprocess with mode</label>
+                    <select
+                      className="w-full min-w-[220px] rounded-md border bg-background p-2 text-sm"
+                      value={reprocessModePreset}
+                      onChange={(event) =>
+                        setReprocessModePreset(event.target.value as DictationModePreset)
+                      }
+                    >
+                      {DICTATION_MODE_DEFINITIONS.filter((mode) => mode.id !== "custom").map(
+                        (mode) => (
+                          <option key={mode.id} value={mode.id}>
+                            {mode.label}
+                          </option>
+                        )
+                      )}
+                    </select>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => void handleReprocessSelectedDictation()}
+                      disabled={isReprocessing}
+                    >
+                      {isReprocessing ? "Reprocessing..." : "Reprocess"}
+                    </Button>
+                    {reprocessedResult && (
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          setTranscribedText(reprocessedResult.outputText);
+                          setPasteStatus(
+                            `Reprocessed with ${modeDefinitionById[reprocessedResult.modePreset as DictationModePreset]?.label ?? reprocessedResult.modePreset}`
+                          );
+                        }}
+                      >
+                        Use Result
+                      </Button>
+                    )}
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Compare the saved transcript with a mode-tuned result before you copy or reuse it.
                 </p>
+                {reprocessError && (
+                  <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                    {reprocessError}
+                  </div>
+                )}
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium">Original transcript</p>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => navigator.clipboard.writeText(selectedTranscript.fullText)}
+                    >
+                      Copy
+                    </Button>
+                  </div>
+                  <div className="p-4 bg-muted rounded-lg min-h-[180px]">
+                    <p className="whitespace-pre-wrap text-sm">
+                      {selectedTranscript.fullText}
+                    </p>
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium">Reprocessed result</p>
+                    {reprocessedResult?.outputText && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => navigator.clipboard.writeText(reprocessedResult.outputText)}
+                      >
+                        Copy
+                      </Button>
+                    )}
+                  </div>
+                  <div className="p-4 bg-muted rounded-lg min-h-[180px]">
+                    {reprocessedResult ? (
+                      <p className="whitespace-pre-wrap text-sm">
+                        {reprocessedResult.outputText}
+                      </p>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Pick a mode and run Reprocess to preview an alternate result.
+                      </p>
+                    )}
+                  </div>
+                </div>
               </div>
               <div className="text-xs text-muted-foreground">
                 Duration: {selectedRecording ? formatRecordingDuration(selectedRecording.duration) : "N/A"} · 
                 Created: {selectedRecording ? new Date(selectedRecording.createdAt).toLocaleString() : "N/A"}
+                {reprocessedResult && (
+                  <>
+                    {" "}· Mode: {modeDefinitionById[reprocessedResult.modePreset as DictationModePreset]?.label ?? reprocessedResult.modePreset}
+                    {" "}· {reprocessedResult.usedAi ? "AI reprocessed" : "Rule-based"}
+                    {reprocessedResult.provider ? ` · Engine: ${reprocessedResult.provider}` : ""}
+                    {reprocessedResult.modelId ? ` · Model: ${reprocessedResult.modelId}` : ""}
+                  </>
+                )}
               </div>
             </div>
           ) : (

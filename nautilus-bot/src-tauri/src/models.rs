@@ -99,6 +99,12 @@ pub struct DictationStartOptions {
     pub save_to_inbox: bool,
     pub project_id: Option<String>,
     pub profile: DictationProfile,
+    #[serde(default)]
+    pub context_source: String,
+    #[serde(default)]
+    pub captured_context_text: Option<String>,
+    #[serde(default)]
+    pub context_app_name: Option<String>,
 }
 
 impl Default for DictationStartOptions {
@@ -107,6 +113,9 @@ impl Default for DictationStartOptions {
             save_to_inbox: true,
             project_id: Some("inbox".to_string()),
             profile: DictationProfile::NormalSpeed,
+            context_source: "none".to_string(),
+            captured_context_text: None,
+            context_app_name: None,
         }
     }
 }

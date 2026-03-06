@@ -49,8 +49,8 @@ interface LocalModeStatus {
 
 const DEFAULT_LOCAL_MODE_STATUS: LocalModeStatus = {
   active: true,
-  label: "Local Mode",
-  detail: "Using local analysis provider and privacy-safe defaults.",
+  label: "Local only",
+  detail: "Using local analysis with privacy-first defaults.",
 };
 
 function deriveLocalModeStatus(
@@ -60,7 +60,7 @@ function deriveLocalModeStatus(
   if (!remoteProcessingEnabled) {
     return {
       active: true,
-      label: "Local Mode",
+      label: "Local only",
       detail: "Remote processing is disabled by policy.",
     };
   }
@@ -68,7 +68,7 @@ function deriveLocalModeStatus(
   if (llmProvider === "ollama") {
     return {
       active: true,
-      label: "Local Mode",
+      label: "Local only",
       detail: "Default analysis provider is local (Ollama).",
     };
   }
@@ -223,7 +223,7 @@ export function Sidebar({
         <div className="p-4 flex items-center justify-between">
           <div className={cn(isCollapsed && "hidden")}>
             <h1 className="font-semibold text-lg">Nautilus</h1>
-            <p className="text-xs text-muted-foreground mt-1">Verifiable Memory Layer</p>
+            <p className="text-xs text-muted-foreground mt-1">Local-first meeting notes and dictation</p>
           </div>
           {onToggleCollapse && (
             <Button

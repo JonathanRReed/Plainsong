@@ -22,6 +22,7 @@ export interface DictationStartOptions {
   saveToInbox: boolean;
   projectId?: string;
   profile: "normal_speed" | "power_rewrite";
+  contextSource?: "none" | "clipboard" | "selected_text";
 }
 
 export async function startDictation(options?: DictationStartOptions): Promise<void> {
@@ -30,6 +31,21 @@ export async function startDictation(options?: DictationStartOptions): Promise<v
 
 export async function stopDictation(): Promise<string> {
   return await invoke("stop_dictation");
+}
+
+export interface DictationReprocessResult {
+  modePreset: string;
+  outputText: string;
+  usedAi: boolean;
+  provider: string | null;
+  modelId: string | null;
+}
+
+export async function reprocessDictationText(
+  text: string,
+  modePreset: string
+): Promise<DictationReprocessResult> {
+  return await invoke("reprocess_dictation_text", { text, modePreset });
 }
 
 export async function forceStopDictation(): Promise<string> {
@@ -485,6 +501,9 @@ export interface PermissionDiagnostics {
   speechRecognitionReady?: boolean;
   accessibilityReady: boolean;
   automationReady: boolean;
+  runningFromDiskImage?: boolean;
+  appBundlePath?: string | null;
+  recommendedAppBundlePath?: string | null;
   notes: string[];
 }
 
@@ -496,6 +515,10 @@ export async function openPermissionSettings(
   section: "microphone" | "speech" | "accessibility" | "automation"
 ): Promise<void> {
   await invoke("open_permission_settings", { section });
+}
+
+export async function openInstalledNautilusApp(): Promise<void> {
+  await invoke("open_installed_nautilus_app");
 }
 
 export async function requestDictationPermissions(): Promise<PermissionDiagnostics> {

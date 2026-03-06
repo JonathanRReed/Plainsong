@@ -10,6 +10,18 @@ export interface Settings {
   theme: "light" | "dark" | "system";
 }
 
+export interface DictationCustomMode {
+  id: string;
+  name: string;
+  description: string;
+  profile: "normal_speed" | "power_rewrite";
+  insertionMode: "auto" | "paste" | "inline" | "clipboard_only";
+  contextSource: "none" | "clipboard" | "selected_text";
+  saveToInbox: boolean;
+  copyToClipboard: boolean;
+  commandModeEnabled: boolean;
+}
+
 export interface AudioSettings {
   sampleRate: number;
   channels: number;
@@ -44,9 +56,19 @@ export interface TranscriptionSettings {
   dictationAutoRequestPermissions?: boolean;
   dictationPushToTalk: boolean;
   dictationAiFormatting: boolean;
+  dictationModePreset?:
+    | "voice"
+    | "messages"
+    | "email"
+    | "notes"
+    | "meeting_follow_up"
+    | "custom";
+  dictationSelectedCustomModeId?: string | null;
+  dictationCustomModes?: DictationCustomMode[];
+  dictationContextSource?: "none" | "clipboard" | "selected_text";
   dictationCommandModeEnabled?: boolean;
   dictationCommandPrefix?: string;
-  dictationInsertionMode?: "auto" | "paste" | "clipboard_only";
+  dictationInsertionMode?: "auto" | "paste" | "inline" | "clipboard_only";
   dictationSnippetsEnabled?: boolean;
   dictationCustomPrompt: string | null;
   meetingCustomPrompt: string | null;
