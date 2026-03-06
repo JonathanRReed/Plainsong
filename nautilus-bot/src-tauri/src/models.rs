@@ -122,6 +122,25 @@ impl Default for DictationStartOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DictationHistoryDetails {
+    pub mode_preset: Option<String>,
+    pub context_source: Option<String>,
+    pub context_preview: Option<String>,
+    pub context_app_name: Option<String>,
+    pub app_target: Option<String>,
+    pub command_applied: Option<String>,
+    pub prompt_source: Option<String>,
+    pub prompt_preview: Option<String>,
+    pub requested_provider: Option<String>,
+    pub actual_provider: Option<String>,
+    pub model_id: Option<String>,
+    pub transcription_latency_ms: Option<u64>,
+    pub insert_latency_ms: Option<u64>,
+    pub end_to_end_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuditLogEntry {
     pub id: String,
     pub timestamp: DateTime<Utc>,

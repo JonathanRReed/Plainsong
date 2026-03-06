@@ -20,6 +20,8 @@ import {
   type DictationSnippet,
   type DictationCommandPreset,
   type DictationReprocessResult,
+  type DictationHistoryDetails,
+  getDictationHistoryDetails,
 } from "@/lib/tauri";
 import {
   defaultDictationShortcut,
@@ -67,7 +69,7 @@ type DictationModePreset =
   | "custom";
 
 type DictationInsertionMode = "auto" | "paste" | "inline" | "clipboard_only";
-type DictationContextSource = "none" | "clipboard" | "selected_text";
+type DictationContextSource = "none" | "clipboard" | "selected_text" | "application_context";
 
 type DictationModeDefinition = {
   id: DictationModePreset;
@@ -84,6 +86,7 @@ type DictationModeDefinition = {
 type DictationCustomModeDraft = {
   name: string;
   description: string;
+  activationAppMatcher: string;
 };
 
 const COMMAND_PRESET_FIELDS: Array<{
@@ -208,6 +211,7 @@ export function DictationView() {
   const [customModeDraft, setCustomModeDraft] = useState<DictationCustomModeDraft>({
     name: "Custom Mode",
     description: "",
+    activationAppMatcher: "",
   });
   const [defaultProjectId, setDefaultProjectId] = useState("inbox");
   const [dictationPushToTalk, setDictationPushToTalk] = useState(true);
@@ -234,6 +238,7 @@ export function DictationView() {
   const [hotkeyPressed, setHotkeyPressed] = useState(false);
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null);
   const [selectedTranscript, setSelectedTranscript] = useState<Transcript | null>(null);
+  const [selectedHistoryDetails, setSelectedHistoryDetails] = useState<DictationHistoryDetails | null>(null);
   const [isLoadingTranscript, setIsLoadingTranscript] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [reprocessModePreset, setReprocessModePreset] =
@@ -241,6 +246,10 @@ export function DictationView() {
   const [reprocessedResult, setReprocessedResult] = useState<DictationReprocessResult | null>(null);
   const [isReprocessing, setIsReprocessing] = useState(false);
   const [reprocessError, setReprocessError] = useState<string | null>(null);
+  const [currentDictationProvider, setCurrentDictationProvider] = useState<string | null>(null);
+  const [currentDictationModelId, setCurrentDictationModelId] = useState<string | null>(null);
+  const [currentAiProvider, setCurrentAiProvider] = useState<string | null>(null);
+  const [currentAiModelId, setCurrentAiModelId] = useState<string | null>(null);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const modeDefinitionById = useMemo(
@@ -289,6 +298,7 @@ export function DictationView() {
   useEffect(() => {
     if (!isDialogOpen || !selectedRecording) {
       setSelectedTranscript(null);
+      setSelectedHistoryDetails(null);
       setReprocessedResult(null);
       setReprocessError(null);
       return;
@@ -301,11 +311,16 @@ export function DictationView() {
     );
     const fetchTranscript = async () => {
       try {
-        const transcript = await getTranscript(selectedRecording.id);
+        const [transcript, historyDetails] = await Promise.all([
+          getTranscript(selectedRecording.id),
+          getDictationHistoryDetails(selectedRecording.id),
+        ]);
         setSelectedTranscript(transcript);
+        setSelectedHistoryDetails(historyDetails);
       } catch (error) {
         console.error("Failed to fetch transcript:", error);
         setSelectedTranscript(null);
+        setSelectedHistoryDetails(null);
       } finally {
         setIsLoadingTranscript(false);
       }
@@ -363,6 +378,10 @@ export function DictationView() {
         setDictationModePreset(nextModePreset);
         setDictationCustomModes(settings.transcription.dictationCustomModes ?? []);
         setSelectedCustomModeId(settings.transcription.dictationSelectedCustomModeId ?? null);
+        setCurrentDictationProvider(settings.transcription.dictationProvider ?? null);
+        setCurrentDictationModelId(settings.transcription.dictationModelId ?? null);
+        setCurrentAiProvider(settings.privacy.llmProvider ?? null);
+        setCurrentAiModelId(settings.privacy.llmModelId ?? null);
         setDefaultProjectId(settings.transcription.dictationProjectId || "inbox");
         setDictationPushToTalk(settings.transcription.dictationPushToTalk);
         setDictationContextSource(nextContextSource);
@@ -558,18 +577,33 @@ export function DictationView() {
     saveToInbox: overrides?.saveToInbox ?? saveToInbox,
     copyToClipboard: overrides?.copyToClipboard ?? dictationCopyToClipboard,
     commandModeEnabled: overrides?.commandModeEnabled ?? dictationCommandModeEnabled,
+    dictationProvider: overrides?.dictationProvider ?? currentDictationProvider,
+    dictationModelId: overrides?.dictationModelId ?? currentDictationModelId,
+    aiProvider: overrides?.aiProvider ?? currentAiProvider,
+    aiModelId: overrides?.aiModelId ?? currentAiModelId,
+    activationAppMatcher:
+      overrides?.activationAppMatcher ??
+      (customModeDraft.activationAppMatcher.trim() || null),
   });
 
   const applySavedCustomMode = (mode: DictationCustomMode) => {
     setDictationModePreset("custom");
     setSelectedCustomModeId(mode.id);
-    setCustomModeDraft({ name: mode.name, description: mode.description });
+    setCustomModeDraft({
+      name: mode.name,
+      description: mode.description,
+      activationAppMatcher: mode.activationAppMatcher ?? "",
+    });
     setDictationProfile(mode.profile);
     setDictationInsertionMode(mode.insertionMode);
     setDictationContextSource(mode.contextSource);
     setSaveToInbox(mode.saveToInbox);
     setDictationCopyToClipboard(mode.copyToClipboard);
     setDictationCommandModeEnabled(mode.commandModeEnabled);
+    setCurrentDictationProvider(mode.dictationProvider ?? currentDictationProvider);
+    setCurrentDictationModelId(mode.dictationModelId ?? currentDictationModelId);
+    setCurrentAiProvider(mode.aiProvider ?? currentAiProvider);
+    setCurrentAiModelId(mode.aiModelId ?? currentAiModelId);
     void persistDictationPreferences({
       modePreset: "custom",
       selectedCustomModeId: mode.id,
@@ -580,6 +614,18 @@ export function DictationView() {
       copyToClipboard: mode.copyToClipboard,
       commandModeEnabled: mode.commandModeEnabled,
     });
+    void (async () => {
+      try {
+        const settings = await getSettings();
+        if (mode.dictationProvider) settings.transcription.dictationProvider = mode.dictationProvider;
+        if (mode.dictationModelId) settings.transcription.dictationModelId = mode.dictationModelId;
+        if (mode.aiProvider) settings.privacy.llmProvider = mode.aiProvider;
+        settings.privacy.llmModelId = mode.aiModelId ?? settings.privacy.llmModelId ?? null;
+        await saveSettings(settings);
+      } catch (error) {
+        console.warn("Failed to apply custom mode engine settings:", error);
+      }
+    })();
   };
 
   const handleSaveCustomMode = async (saveAsNew = false) => {
@@ -594,12 +640,29 @@ export function DictationView() {
     setDictationCustomModes(nextModes);
     setDictationModePreset("custom");
     setSelectedCustomModeId(nextMode.id);
-    setCustomModeDraft({ name: nextMode.name, description: nextMode.description });
+    setCustomModeDraft({
+      name: nextMode.name,
+      description: nextMode.description,
+      activationAppMatcher: nextMode.activationAppMatcher ?? "",
+    });
     await persistDictationPreferences({
       modePreset: "custom",
       selectedCustomModeId: nextMode.id,
       customModes: nextModes,
     });
+    try {
+      const settings = await getSettings();
+      settings.transcription.dictationModePreset = "custom";
+      settings.transcription.dictationSelectedCustomModeId = nextMode.id;
+      settings.transcription.dictationCustomModes = nextModes;
+      settings.transcription.dictationProvider = nextMode.dictationProvider ?? settings.transcription.dictationProvider;
+      settings.transcription.dictationModelId = nextMode.dictationModelId ?? settings.transcription.dictationModelId;
+      settings.privacy.llmProvider = nextMode.aiProvider ?? settings.privacy.llmProvider;
+      settings.privacy.llmModelId = nextMode.aiModelId ?? settings.privacy.llmModelId ?? null;
+      await saveSettings(settings);
+    } catch (error) {
+      console.warn("Failed to persist custom mode engine snapshot:", error);
+    }
   };
 
   const handleDeleteCustomMode = async (modeId: string) => {
@@ -608,7 +671,7 @@ export function DictationView() {
     const shouldClearSelection = selectedCustomModeId === modeId;
     if (shouldClearSelection) {
       setSelectedCustomModeId(null);
-      setCustomModeDraft({ name: "Custom Mode", description: "" });
+      setCustomModeDraft({ name: "Custom Mode", description: "", activationAppMatcher: "" });
     }
     await persistDictationPreferences({
       selectedCustomModeId: shouldClearSelection ? null : selectedCustomModeId,
@@ -621,6 +684,7 @@ export function DictationView() {
       setCustomModeDraft({
         name: selectedCustomMode.name,
         description: selectedCustomMode.description,
+        activationAppMatcher: selectedCustomMode.activationAppMatcher ?? "",
       });
       return;
     }
@@ -628,6 +692,7 @@ export function DictationView() {
       setCustomModeDraft((current) => ({
         name: current.name || "Custom Mode",
         description: current.description,
+        activationAppMatcher: current.activationAppMatcher,
       }));
     }
   }, [dictationModePreset, selectedCustomMode]);
@@ -1053,6 +1118,13 @@ export function DictationView() {
                               <p className="mt-1 text-sm text-muted-foreground">
                                 {mode.description || "Custom dictation workflow"}
                               </p>
+                              <p className="mt-2 text-xs text-muted-foreground">
+                                {mode.dictationProvider || "Current transcription"} ·{" "}
+                                {mode.dictationModelId || "Current model"}
+                                {mode.activationAppMatcher
+                                  ? ` · Auto for ${mode.activationAppMatcher}`
+                                  : ""}
+                              </p>
                             </div>
                             {isActive && (
                               <span className="rounded-full bg-active px-2 py-0.5 text-[11px] font-semibold text-active-foreground">
@@ -1121,6 +1193,33 @@ export function DictationView() {
                         placeholder="What this mode is for"
                       />
                     </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Auto-activate for app</label>
+                      <input
+                        type="text"
+                        aria-label="Auto-activate for app"
+                        className="w-full rounded-md border bg-background p-2 text-sm"
+                        value={customModeDraft.activationAppMatcher}
+                        onChange={(event) =>
+                          setCustomModeDraft((current) => ({
+                            ...current,
+                            activationAppMatcher: event.target.value,
+                          }))
+                        }
+                        placeholder="Slack, Gmail, Cursor"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Optional. When the frontmost app name matches, Nautilus can switch to this
+                        mode automatically for hotkey and tray dictation.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                    Captures the current dictation route and AI route too.
+                    {currentDictationProvider ? ` Transcription: ${currentDictationProvider}.` : ""}
+                    {currentDictationModelId ? ` Model: ${currentDictationModelId}.` : ""}
+                    {currentAiProvider ? ` AI: ${currentAiProvider}.` : ""}
+                    {currentAiModelId ? ` AI model: ${currentAiModelId}.` : ""}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <Button size="sm" onClick={() => void handleSaveCustomMode(false)}>
@@ -1500,13 +1599,14 @@ export function DictationView() {
                     }}
                   >
                     <option value="none">Off</option>
+                    <option value="application_context">Use application context</option>
                     <option value="selected_text">Use selected text</option>
                     <option value="clipboard">Use clipboard</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
                     Lets voice commands transform existing text. Try &quot;command rewrite professional&quot;
-                    or &quot;command bulletize selection&quot;. Nautilus also uses the active app name as
-                    writing context automatically.
+                    or &quot;command bulletize selection&quot;. Application context captures the
+                    frontmost app, window title, and selected text when available.
                   </p>
                 </div>
 
@@ -1918,6 +2018,90 @@ export function DictationView() {
                     </p>
                   </div>
                 </div>
+              </div>
+
+              <div className="rounded-lg border p-4">
+                <div>
+                  <p className="text-sm font-medium">Prompt and context</p>
+                  <p className="text-xs text-muted-foreground">
+                    Inspect the app context and prompt strategy Nautilus used for this dictation.
+                  </p>
+                </div>
+                {selectedHistoryDetails ? (
+                  <div className="mt-4 space-y-3">
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                      <div className="rounded-md border bg-muted/30 px-3 py-2">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Mode
+                        </p>
+                        <p className="mt-1 text-sm font-medium">
+                          {selectedHistoryDetails.modePreset
+                            ? modeDefinitionById[
+                                selectedHistoryDetails.modePreset as DictationModePreset
+                              ]?.label ?? selectedHistoryDetails.modePreset
+                            : "Unavailable"}
+                        </p>
+                      </div>
+                      <div className="rounded-md border bg-muted/30 px-3 py-2">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Context source
+                        </p>
+                        <p className="mt-1 text-sm font-medium">
+                          {selectedHistoryDetails.contextSource ?? "Unavailable"}
+                        </p>
+                      </div>
+                      <div className="rounded-md border bg-muted/30 px-3 py-2">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Prompt strategy
+                        </p>
+                        <p className="mt-1 text-sm font-medium">
+                          {selectedHistoryDetails.promptSource ?? "Direct transcript"}
+                        </p>
+                      </div>
+                    </div>
+                    {(selectedHistoryDetails.contextAppName ||
+                      selectedHistoryDetails.appTarget ||
+                      selectedHistoryDetails.commandApplied) && (
+                      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                        {selectedHistoryDetails.contextAppName && (
+                          <span>Context app: {selectedHistoryDetails.contextAppName}</span>
+                        )}
+                        {selectedHistoryDetails.appTarget && (
+                          <span>Insert target: {selectedHistoryDetails.appTarget}</span>
+                        )}
+                        {selectedHistoryDetails.commandApplied && (
+                          <span>Command: {selectedHistoryDetails.commandApplied}</span>
+                        )}
+                      </div>
+                    )}
+                    {(selectedHistoryDetails.contextPreview ||
+                      selectedHistoryDetails.promptPreview) && (
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <p className="text-sm font-medium">Captured context</p>
+                          <div className="min-h-[110px] rounded-lg bg-muted p-4 text-sm">
+                            <p className="whitespace-pre-wrap">
+                              {selectedHistoryDetails.contextPreview || "No saved context preview."}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <p className="text-sm font-medium">Prompt preview</p>
+                          <div className="min-h-[110px] rounded-lg bg-muted p-4 text-sm">
+                            <p className="whitespace-pre-wrap">
+                              {selectedHistoryDetails.promptPreview || "Using the standard prompt for this path."}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mt-4 text-sm text-muted-foreground">
+                    Prompt/context inspection is available for newer dictations saved after this
+                    update.
+                  </p>
+                )}
               </div>
 
               <div className="rounded-lg border p-4 space-y-3">

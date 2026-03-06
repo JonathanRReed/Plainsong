@@ -22,7 +22,24 @@ export interface DictationStartOptions {
   saveToInbox: boolean;
   projectId?: string;
   profile: "normal_speed" | "power_rewrite";
-  contextSource?: "none" | "clipboard" | "selected_text";
+  contextSource?: "none" | "clipboard" | "selected_text" | "application_context";
+}
+
+export interface DictationHistoryDetails {
+  modePreset: string | null;
+  contextSource: string | null;
+  contextPreview: string | null;
+  contextAppName: string | null;
+  appTarget: string | null;
+  commandApplied: string | null;
+  promptSource: string | null;
+  promptPreview: string | null;
+  requestedProvider: string | null;
+  actualProvider: string | null;
+  modelId: string | null;
+  transcriptionLatencyMs: number | null;
+  insertLatencyMs: number | null;
+  endToEndMs: number | null;
 }
 
 export async function startDictation(options?: DictationStartOptions): Promise<void> {
@@ -46,6 +63,12 @@ export async function reprocessDictationText(
   modePreset: string
 ): Promise<DictationReprocessResult> {
   return await invoke("reprocess_dictation_text", { text, modePreset });
+}
+
+export async function getDictationHistoryDetails(
+  recordingId: string
+): Promise<DictationHistoryDetails | null> {
+  return await invoke("get_dictation_history_details", { recordingId });
 }
 
 export async function forceStopDictation(): Promise<string> {

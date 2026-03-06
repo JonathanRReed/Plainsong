@@ -16,10 +16,15 @@ export interface DictationCustomMode {
   description: string;
   profile: "normal_speed" | "power_rewrite";
   insertionMode: "auto" | "paste" | "inline" | "clipboard_only";
-  contextSource: "none" | "clipboard" | "selected_text";
+  contextSource: "none" | "clipboard" | "selected_text" | "application_context";
   saveToInbox: boolean;
   copyToClipboard: boolean;
   commandModeEnabled: boolean;
+  dictationProvider?: string | null;
+  dictationModelId?: string | null;
+  aiProvider?: string | null;
+  aiModelId?: string | null;
+  activationAppMatcher?: string | null;
 }
 
 export interface AudioSettings {
@@ -65,7 +70,7 @@ export interface TranscriptionSettings {
     | "custom";
   dictationSelectedCustomModeId?: string | null;
   dictationCustomModes?: DictationCustomMode[];
-  dictationContextSource?: "none" | "clipboard" | "selected_text";
+  dictationContextSource?: "none" | "clipboard" | "selected_text" | "application_context";
   dictationCommandModeEnabled?: boolean;
   dictationCommandPrefix?: string;
   dictationInsertionMode?: "auto" | "paste" | "inline" | "clipboard_only";

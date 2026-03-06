@@ -23,6 +23,7 @@ pub struct GroqProvider {
 struct GroqTranscriptionResponse {
     text: String,
     segments: Option<Vec<GroqSegment>>,
+    language: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -123,7 +124,7 @@ impl GroqProvider {
         Ok(TranscriptionResult {
             text: result.text,
             segments,
-            language: "en".to_string(),
+            language: result.language.unwrap_or_else(|| "auto".to_string()),
             confidence: 0.92,
             processing_time_ms: elapsed,
             model_name: format!("Groq ({})", self.model_id),

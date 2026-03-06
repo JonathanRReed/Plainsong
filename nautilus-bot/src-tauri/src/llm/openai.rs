@@ -34,8 +34,8 @@ impl OpenAIClient {
         self.api_key.is_some()
     }
 
-    /// List available models
-    pub async fn list_models(&self) -> Result<Vec<String>> {
+    /// List all available model ids from OpenAI.
+    pub async fn list_all_models(&self) -> Result<Vec<String>> {
         let Some(ref key) = self.api_key else {
             return Ok(vec![]);
         };
@@ -48,16 +48,31 @@ impl OpenAIClient {
             .await
             .context("Failed to connect to OpenAI")?;
 
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenAI model list error {}: {}", status, body);
+        }
+
         let data: serde_json::Value = response
             .json()
             .await
             .context("Failed to parse OpenAI response")?;
 
-        let models: Vec<String> = data["data"]
+        Ok(data["data"]
             .as_array()
             .unwrap_or(&vec![])
             .iter()
             .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+            .collect())
+    }
+
+    /// List available chat/reasoning models used by Nautilus analysis flows.
+    pub async fn list_models(&self) -> Result<Vec<String>> {
+        let models: Vec<String> = self
+            .list_all_models()
+            .await?
+            .into_iter()
             .filter(|id| {
                 id.contains("gpt")
                     || id.contains("o1")
@@ -112,6 +127,12 @@ impl OpenAIClient {
             .send()
             .await
             .context("Failed to send request to OpenAI")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("OpenAI completion error {}: {}", status, body);
+        }
 
         let data: serde_json::Value = response
             .json()
