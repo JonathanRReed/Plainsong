@@ -10,6 +10,14 @@ pub struct DictationStateChangedEvent {
     pub session_id: Option<u64>,
     pub stop_reason: Option<String>,
     pub outcome: Option<String>,
+    pub resolved_mode_preset: Option<String>,
+    pub resolved_custom_mode_id: Option<String>,
+    pub resolved_mode_label: Option<String>,
+    pub context_source: Option<String>,
+    pub insertion_mode: Option<String>,
+    pub app_target: Option<String>,
+    pub dictation_provider: Option<String>,
+    pub dictation_model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

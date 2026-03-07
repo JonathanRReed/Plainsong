@@ -5,6 +5,7 @@ mod commands;
 mod crypto;
 mod db;
 mod diarization;
+mod dictation_parity;
 mod download;
 mod events;
 mod export;
@@ -21,6 +22,7 @@ mod transcription;
 pub mod update;
 
 use crate::asr::manager::RuntimeStatus;
+use crate::dictation_parity::SnippetRule;
 use crate::events::{
     DictationStateChangedEvent, DictationTextReadyEvent, MeetingRecordingStateChangedEvent,
     RecordingStatusChangedEvent,
@@ -152,15 +154,7 @@ impl DictationInsertionMode {
     }
 }
 
-#[derive(Debug, Clone)]
-enum DictationCommandAction {
-    InsertText(String),
-    UndoLastInsert,
-    DeleteLastSentence,
-    RewriteShorter(String),
-    RewriteProfessional(String),
-    Bulletize(String),
-}
+type DictationCommandAction = crate::dictation_parity::DictationCommandAction;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct DictationSessionTracker {
@@ -235,6 +229,14 @@ struct DictationOverlayState {
     session_id: Option<u64>,
     stop_reason: Option<String>,
     outcome: Option<String>,
+    resolved_mode_preset: Option<String>,
+    resolved_custom_mode_id: Option<String>,
+    resolved_mode_label: Option<String>,
+    context_source: Option<String>,
+    insertion_mode: Option<String>,
+    app_target: Option<String>,
+    dictation_provider: Option<String>,
+    dictation_model_id: Option<String>,
 }
 
 impl Default for DictationOverlayState {
@@ -247,6 +249,14 @@ impl Default for DictationOverlayState {
             session_id: None,
             stop_reason: None,
             outcome: None,
+            resolved_mode_preset: None,
+            resolved_custom_mode_id: None,
+            resolved_mode_label: None,
+            context_source: None,
+            insertion_mode: None,
+            app_target: None,
+            dictation_provider: None,
+            dictation_model_id: None,
         }
     }
 }
@@ -5178,6 +5188,14 @@ async fn start_dictation_session(
         tracker.next_session_id
     };
 
+    sync_dictation_overlay_runtime_metadata(
+        app,
+        &settings_snapshot,
+        context_target_app.as_deref(),
+        Some(asr_provider_to_settings_value(dictation_selection.0)),
+        Some(dictation_selection.1.as_str()),
+    );
+
     emit_dictation_state(
         app,
         "starting",
@@ -7202,6 +7220,15 @@ fn emit_dictation_state(
     stop_reason: Option<&str>,
     outcome: Option<&str>,
 ) {
+    let mut resolved_mode_preset = None;
+    let mut resolved_custom_mode_id = None;
+    let mut resolved_mode_label = None;
+    let mut context_source = None;
+    let mut insertion_mode = None;
+    let mut app_target = None;
+    let mut dictation_provider = None;
+    let mut dictation_model_id = None;
+
     if let Ok(mut state) = app.state::<AppState>().dictation_overlay_state.lock() {
         state.phase = phase.to_string();
         state.started_at_ms = started_at_ms;
@@ -7210,6 +7237,24 @@ fn emit_dictation_state(
         state.session_id = session_id;
         state.stop_reason = stop_reason.map(str::to_string);
         state.outcome = outcome.map(str::to_string);
+        if phase == "idle" {
+            state.resolved_mode_preset = None;
+            state.resolved_custom_mode_id = None;
+            state.resolved_mode_label = None;
+            state.context_source = None;
+            state.insertion_mode = None;
+            state.app_target = None;
+            state.dictation_provider = None;
+            state.dictation_model_id = None;
+        }
+        resolved_mode_preset = state.resolved_mode_preset.clone();
+        resolved_custom_mode_id = state.resolved_custom_mode_id.clone();
+        resolved_mode_label = state.resolved_mode_label.clone();
+        context_source = state.context_source.clone();
+        insertion_mode = state.insertion_mode.clone();
+        app_target = state.app_target.clone();
+        dictation_provider = state.dictation_provider.clone();
+        dictation_model_id = state.dictation_model_id.clone();
     }
 
     let payload = DictationStateChangedEvent {
@@ -7220,6 +7265,14 @@ fn emit_dictation_state(
         session_id,
         stop_reason: stop_reason.map(str::to_string),
         outcome: outcome.map(str::to_string),
+        resolved_mode_preset,
+        resolved_custom_mode_id,
+        resolved_mode_label,
+        context_source,
+        insertion_mode,
+        app_target,
+        dictation_provider,
+        dictation_model_id,
     };
     if let Err(error) = app.emit("dictation-state-changed", &payload) {
         tracing::warn!("Failed to emit dictation state: {}", error);
@@ -8453,82 +8506,14 @@ fn sanitize_dictation_output(candidate: &str, fallback: &str) -> String {
     cleaned
 }
 
-fn command_payload<'a>(raw: &'a str, phrase: &str) -> Option<&'a str> {
-    let head = raw.get(..phrase.len())?;
-    let tail = raw.get(phrase.len()..)?;
-    if !head.eq_ignore_ascii_case(phrase) {
-        return None;
-    }
-    Some(tail.trim_start_matches([' ', ':', ',']).trim())
-}
-
 fn parse_dictation_command(
     raw_text: &str,
     prefix: &str,
 ) -> Option<(String, DictationCommandAction)> {
-    let text = raw_text.trim();
-    if text.is_empty() {
-        return None;
-    }
-
-    let normalized_prefix = normalize_dictation_command_prefix(prefix);
-    let mut words = text.split_whitespace();
-    let first = words.next()?;
-    let first_normalized = first.trim_end_matches([':', ',']);
-    if !first_normalized.eq_ignore_ascii_case(normalized_prefix) {
-        return None;
-    }
-
-    let remainder = words.collect::<Vec<_>>().join(" ");
-    if remainder.is_empty() {
-        return None;
-    }
-
-    if remainder.eq_ignore_ascii_case("newline") {
-        return Some((
-            "newline".to_string(),
-            DictationCommandAction::InsertText("\n".to_string()),
-        ));
-    }
-    if remainder.eq_ignore_ascii_case("paragraph") {
-        return Some((
-            "paragraph".to_string(),
-            DictationCommandAction::InsertText("\n\n".to_string()),
-        ));
-    }
-    if remainder.eq_ignore_ascii_case("undo last insert") {
-        return Some((
-            "undo_last_insert".to_string(),
-            DictationCommandAction::UndoLastInsert,
-        ));
-    }
-    if remainder.eq_ignore_ascii_case("delete last sentence") {
-        return Some((
-            "delete_last_sentence".to_string(),
-            DictationCommandAction::DeleteLastSentence,
-        ));
-    }
-
-    if let Some(payload) = command_payload(&remainder, "rewrite shorter") {
-        return Some((
-            "rewrite_shorter".to_string(),
-            DictationCommandAction::RewriteShorter(payload.to_string()),
-        ));
-    }
-    if let Some(payload) = command_payload(&remainder, "rewrite professional") {
-        return Some((
-            "rewrite_professional".to_string(),
-            DictationCommandAction::RewriteProfessional(payload.to_string()),
-        ));
-    }
-    if let Some(payload) = command_payload(&remainder, "bulletize selection") {
-        return Some((
-            "bulletize_selection".to_string(),
-            DictationCommandAction::Bulletize(payload.to_string()),
-        ));
-    }
-
-    None
+    crate::dictation_parity::parse_dictation_command(
+        raw_text,
+        normalize_dictation_command_prefix(prefix),
+    )
 }
 
 fn resolve_contextual_command_input(
@@ -8537,36 +8522,12 @@ fn resolve_contextual_command_input(
     context_source: &str,
     action_label: &str,
 ) -> Result<String, String> {
-    let spoken = spoken_payload.trim();
-    if !spoken.is_empty() {
-        return Ok(spoken.to_string());
-    }
-
-    if let Some(context) = captured_context_text
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return Ok(context.to_string());
-    }
-
-    Err(match normalize_dictation_context_source(context_source) {
-        "selected_text" => format!(
-            "{} needs selected text, but Nautilus could not capture any selected text from the frontmost app.",
-            action_label
-        ),
-        "clipboard" => format!(
-            "{} needs clipboard text, but the clipboard was empty when dictation started.",
-            action_label
-        ),
-        "application_context" => format!(
-            "{} needs app context, but Nautilus could not capture useful text from the frontmost app.",
-            action_label
-        ),
-        _ => format!(
-            "{} needs source text. Enable Text context or speak the text after the command.",
-            action_label
-        ),
-    })
+    crate::dictation_parity::resolve_contextual_command_input(
+        spoken_payload,
+        captured_context_text,
+        normalize_dictation_context_source(context_source),
+        action_label,
+    )
 }
 
 fn rewrite_shorter_text(text: &str) -> String {
@@ -8635,82 +8596,22 @@ fn bulletize_text(text: &str) -> String {
     items.join("\n")
 }
 
-fn replace_case_insensitive_all(
-    haystack: &str,
-    needle: &str,
-    replacement: &str,
-) -> (String, usize) {
-    if needle.is_empty() {
-        return (haystack.to_string(), 0);
-    }
-    let Ok(re) = Regex::new(&format!("(?i){}", regex::escape(needle))) else {
-        return (haystack.to_string(), 0);
-    };
-    let applied = re.find_iter(haystack).count();
-    if applied == 0 {
-        return (haystack.to_string(), 0);
-    }
-    (re.replace_all(haystack, replacement).to_string(), applied)
-}
-
-fn snippet_app_scope_matches(snippet_scope: Option<&str>, app_target: Option<&str>) -> bool {
-    let Some(scope) = snippet_scope
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return true;
-    };
-    let Some(app_name) = app_target else {
-        return false;
-    };
-    app_name.to_lowercase().contains(&scope.to_lowercase())
-}
-
 fn apply_dictation_snippets(
     input: &str,
     snippets: &[models::DictationSnippet],
     app_target: Option<&str>,
 ) -> (String, usize) {
-    if input.trim().is_empty() || snippets.is_empty() {
-        return (input.to_string(), 0);
-    }
-
-    let mut output = input.to_string();
-    let mut applied_total = 0usize;
-    let mut ordered = snippets.to_vec();
-    ordered.sort_by(|a, b| b.trigger.len().cmp(&a.trigger.len()));
-
-    for snippet in ordered {
-        if !snippet.enabled {
-            continue;
-        }
-        if !snippet_app_scope_matches(snippet.app_scope.as_deref(), app_target) {
-            continue;
-        }
-        if snippet.trigger.trim().is_empty() {
-            continue;
-        }
-
-        if snippet.case_sensitive {
-            let matches = output.matches(snippet.trigger.as_str()).count();
-            if matches > 0 {
-                output = output.replace(snippet.trigger.as_str(), snippet.expansion.as_str());
-                applied_total += matches;
-            }
-        } else {
-            let (next, applied) = replace_case_insensitive_all(
-                output.as_str(),
-                snippet.trigger.as_str(),
-                snippet.expansion.as_str(),
-            );
-            if applied > 0 {
-                output = next;
-                applied_total += applied;
-            }
-        }
-    }
-
-    (output, applied_total)
+    let rules = snippets
+        .iter()
+        .map(|snippet| SnippetRule {
+            trigger: snippet.trigger.clone(),
+            expansion: snippet.expansion.clone(),
+            app_scope: snippet.app_scope.clone(),
+            case_sensitive: snippet.case_sensitive,
+            enabled: snippet.enabled,
+        })
+        .collect::<Vec<_>>();
+    crate::dictation_parity::apply_dictation_snippets(input, &rules, app_target)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8785,21 +8686,7 @@ fn truncate_for_audit_preview(value: Option<&str>, limit: usize) -> Option<Strin
 }
 
 fn default_dictation_command_prompt(command_key: &str) -> Option<&'static str> {
-    match command_key {
-        "rewrite_shorter" => Some(
-            "Rewrite the user's text to be shorter while preserving intent. \
-            Keep the same language and tone. Return only the rewritten text.",
-        ),
-        "rewrite_professional" => Some(
-            "Rewrite the user's text in a professional tone while preserving meaning. \
-            Keep it clear and concise. Return only the rewritten text.",
-        ),
-        "bulletize_selection" => Some(
-            "Convert the user's text into concise bullet points. \
-            Use one bullet per idea. Return only the bullet list.",
-        ),
-        _ => None,
-    }
+    crate::dictation_parity::default_dictation_command_prompt(command_key)
 }
 
 fn dictation_mode_transform_prompt(mode_preset: &str) -> Option<&'static str> {
@@ -11118,6 +11005,57 @@ fn custom_mode_matches_frontmost_app(
     active_app
         .to_ascii_lowercase()
         .contains(&matcher.trim().to_ascii_lowercase())
+}
+
+fn dictation_mode_label(
+    mode_preset: &str,
+    selected_custom_mode_id: Option<&str>,
+    custom_modes: &[settings::DictationCustomMode],
+) -> String {
+    match normalize_dictation_mode_preset(mode_preset) {
+        "messages" => "Messages".to_string(),
+        "email" => "Email".to_string(),
+        "notes" => "Notes".to_string(),
+        "meeting_follow_up" => "Meeting Follow-up".to_string(),
+        "custom" => selected_custom_mode_id
+            .and_then(|selected_id| {
+                custom_modes
+                    .iter()
+                    .find(|mode| mode.id == selected_id)
+                    .map(|mode| mode.name.clone())
+            })
+            .unwrap_or_else(|| "Custom".to_string()),
+        _ => "Voice".to_string(),
+    }
+}
+
+fn sync_dictation_overlay_runtime_metadata(
+    app: &AppHandle,
+    settings: &settings::Settings,
+    app_target: Option<&str>,
+    dictation_provider: Option<&str>,
+    dictation_model_id: Option<&str>,
+) {
+    if let Ok(mut state) = app.state::<AppState>().dictation_overlay_state.lock() {
+        state.resolved_mode_preset = Some(settings.transcription.dictation_mode_preset.clone());
+        state.resolved_custom_mode_id = settings
+            .transcription
+            .dictation_selected_custom_mode_id
+            .clone();
+        state.resolved_mode_label = Some(dictation_mode_label(
+            &settings.transcription.dictation_mode_preset,
+            settings
+                .transcription
+                .dictation_selected_custom_mode_id
+                .as_deref(),
+            &settings.transcription.dictation_custom_modes,
+        ));
+        state.context_source = Some(settings.transcription.dictation_context_source.clone());
+        state.insertion_mode = Some(settings.transcription.dictation_insertion_mode.clone());
+        state.app_target = app_target.map(str::to_string);
+        state.dictation_provider = dictation_provider.map(str::to_string);
+        state.dictation_model_id = dictation_model_id.map(str::to_string);
+    }
 }
 
 fn apply_runtime_dictation_custom_mode(
