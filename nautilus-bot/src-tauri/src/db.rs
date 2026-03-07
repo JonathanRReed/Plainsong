@@ -6,6 +6,9 @@
 #![allow(dead_code)]
 
 use crate::models::*;
+use crate::store::{
+    CaptureSessionRecord, ContextSnapshotRecord, PolicySnapshotRecord, RuntimeEventRecord,
+};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, params_from_iter, types::Value, Connection};
@@ -97,6 +100,234 @@ impl Database {
         Ok(())
     }
 
+    pub fn append_runtime_event(&mut self, entry: &RuntimeEventRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO runtime_events (
+                id, event_type, surface, session_id, recording_id, payload, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                &entry.id,
+                &entry.event_type,
+                &entry.surface,
+                &entry.session_id,
+                &entry.recording_id,
+                entry.payload.to_string(),
+                entry.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_runtime_events(&self, limit: usize) -> Result<Vec<RuntimeEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, event_type, surface, session_id, recording_id, payload, created_at
+             FROM runtime_events
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            let payload_json: String = row.get(5)?;
+            let created_at: String = row.get(6)?;
+            Ok(RuntimeEventRecord {
+                id: row.get(0)?,
+                event_type: row.get(1)?,
+                surface: row.get(2)?,
+                session_id: row.get(3)?,
+                recording_id: row.get(4)?,
+                payload: serde_json::from_str(&payload_json).unwrap_or(serde_json::json!({})),
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn save_capture_session(&mut self, session: &CaptureSessionRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO capture_sessions (
+                id, surface, state, started_at, stopped_at, audio_sources, target_app,
+                context_snapshot_id, policy_snapshot_id, provider_plan_id, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(id) DO UPDATE SET
+                surface = excluded.surface,
+                state = excluded.state,
+                started_at = excluded.started_at,
+                stopped_at = excluded.stopped_at,
+                audio_sources = excluded.audio_sources,
+                target_app = excluded.target_app,
+                context_snapshot_id = excluded.context_snapshot_id,
+                policy_snapshot_id = excluded.policy_snapshot_id,
+                provider_plan_id = excluded.provider_plan_id,
+                updated_at = excluded.updated_at",
+            params![
+                &session.id,
+                &session.surface,
+                &session.state,
+                session.started_at.to_rfc3339(),
+                session.stopped_at.map(|value| value.to_rfc3339()),
+                serde_json::to_string(&session.audio_sources)?,
+                &session.target_app,
+                &session.context_snapshot_id,
+                &session.policy_snapshot_id,
+                &session.provider_plan_id,
+                session.created_at.to_rfc3339(),
+                session.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_capture_session(&self, session_id: &str) -> Result<Option<CaptureSessionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, surface, state, started_at, stopped_at, audio_sources, target_app,
+                    context_snapshot_id, policy_snapshot_id, provider_plan_id, created_at, updated_at
+             FROM capture_sessions WHERE id = ?1",
+        )?;
+        let result = stmt.query_row([session_id], |row| {
+            let audio_sources_json: String = row.get(5)?;
+            let started_at: String = row.get(3)?;
+            let stopped_at: Option<String> = row.get(4)?;
+            let created_at: String = row.get(10)?;
+            let updated_at: String = row.get(11)?;
+            Ok(CaptureSessionRecord {
+                id: row.get(0)?,
+                surface: row.get(1)?,
+                state: row.get(2)?,
+                started_at: chrono::DateTime::parse_from_rfc3339(&started_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                stopped_at: stopped_at.and_then(|value| {
+                    chrono::DateTime::parse_from_rfc3339(&value)
+                        .ok()
+                        .map(|dt| dt.with_timezone(&Utc))
+                }),
+                audio_sources: serde_json::from_str(&audio_sources_json).unwrap_or_default(),
+                target_app: row.get(6)?,
+                context_snapshot_id: row.get(7)?,
+                policy_snapshot_id: row.get(8)?,
+                provider_plan_id: row.get(9)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        });
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn save_context_snapshot(&mut self, snapshot: &ContextSnapshotRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO context_snapshots (
+                id, frontmost_app, frontmost_bundle_id, window_title, selected_text,
+                clipboard_text, meeting_hint, active_mode, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                &snapshot.id,
+                &snapshot.frontmost_app,
+                &snapshot.frontmost_bundle_id,
+                &snapshot.window_title,
+                &snapshot.selected_text,
+                &snapshot.clipboard_text,
+                &snapshot.meeting_hint,
+                &snapshot.active_mode,
+                snapshot.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_context_snapshot(&self, snapshot_id: &str) -> Result<Option<ContextSnapshotRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, frontmost_app, frontmost_bundle_id, window_title, selected_text,
+                    clipboard_text, meeting_hint, active_mode, created_at
+             FROM context_snapshots WHERE id = ?1",
+        )?;
+        let result = stmt.query_row([snapshot_id], |row| {
+            let created_at: String = row.get(8)?;
+            Ok(ContextSnapshotRecord {
+                id: row.get(0)?,
+                frontmost_app: row.get(1)?,
+                frontmost_bundle_id: row.get(2)?,
+                window_title: row.get(3)?,
+                selected_text: row.get(4)?,
+                clipboard_text: row.get(5)?,
+                meeting_hint: row.get(6)?,
+                active_mode: row.get(7)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        });
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn save_policy_snapshot(&mut self, snapshot: &PolicySnapshotRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO policy_snapshots (
+                id, retention_mode, storage_mode, provider_policy, ai_policy,
+                insertion_policy, export_constraints, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                &snapshot.id,
+                &snapshot.retention_mode,
+                &snapshot.storage_mode,
+                snapshot.provider_policy.to_string(),
+                snapshot.ai_policy.to_string(),
+                snapshot.insertion_policy.to_string(),
+                snapshot.export_constraints.to_string(),
+                snapshot.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_policy_snapshot(&self, snapshot_id: &str) -> Result<Option<PolicySnapshotRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, retention_mode, storage_mode, provider_policy, ai_policy,
+                    insertion_policy, export_constraints, created_at
+             FROM policy_snapshots WHERE id = ?1",
+        )?;
+        let result = stmt.query_row([snapshot_id], |row| {
+            let provider_policy: String = row.get(3)?;
+            let ai_policy: String = row.get(4)?;
+            let insertion_policy: String = row.get(5)?;
+            let export_constraints: String = row.get(6)?;
+            let created_at: String = row.get(7)?;
+            Ok(PolicySnapshotRecord {
+                id: row.get(0)?,
+                retention_mode: row.get(1)?,
+                storage_mode: row.get(2)?,
+                provider_policy: serde_json::from_str(&provider_policy)
+                    .unwrap_or(serde_json::json!({})),
+                ai_policy: serde_json::from_str(&ai_policy).unwrap_or(serde_json::json!({})),
+                insertion_policy: serde_json::from_str(&insertion_policy)
+                    .unwrap_or(serde_json::json!({})),
+                export_constraints: serde_json::from_str(&export_constraints)
+                    .unwrap_or(serde_json::json!({})),
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        });
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn init_tables(&self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS projects (
@@ -174,6 +405,130 @@ impl Database {
                 event TEXT NOT NULL,
                 details TEXT,
                 severity TEXT NOT NULL DEFAULT 'info'
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS runtime_events (
+                id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                surface TEXT,
+                session_id TEXT,
+                recording_id TEXT,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runtime_events_created_at
+             ON runtime_events(created_at DESC)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_runtime_events_session
+             ON runtime_events(session_id, created_at DESC)",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS capture_sessions (
+                id TEXT PRIMARY KEY,
+                surface TEXT NOT NULL,
+                state TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                stopped_at TEXT,
+                audio_sources TEXT NOT NULL,
+                target_app TEXT,
+                context_snapshot_id TEXT,
+                policy_snapshot_id TEXT,
+                provider_plan_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS context_snapshots (
+                id TEXT PRIMARY KEY,
+                frontmost_app TEXT,
+                frontmost_bundle_id TEXT,
+                window_title TEXT,
+                selected_text TEXT,
+                clipboard_text TEXT,
+                meeting_hint TEXT,
+                active_mode TEXT,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS transcript_artifacts (
+                id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL,
+                transcript_id TEXT,
+                segment_count INTEGER NOT NULL DEFAULT 0,
+                model_id TEXT,
+                requested_provider TEXT,
+                actual_provider TEXT,
+                quality_score REAL,
+                startup_latency_ms INTEGER,
+                transcription_latency_ms INTEGER,
+                insert_latency_ms INTEGER,
+                end_to_end_ms INTEGER,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS insertion_actions (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                recording_id TEXT,
+                requested_mode TEXT NOT NULL,
+                actual_mode TEXT NOT NULL,
+                pasted INTEGER NOT NULL DEFAULT 0,
+                copied INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                undo_token TEXT,
+                command_applied TEXT,
+                snippet_applied_count INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS meeting_artifacts (
+                id TEXT PRIMARY KEY,
+                recording_id TEXT NOT NULL UNIQUE,
+                title TEXT,
+                summary TEXT,
+                action_items TEXT NOT NULL,
+                decisions TEXT NOT NULL,
+                deadlines TEXT NOT NULL,
+                template_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS policy_snapshots (
+                id TEXT PRIMARY KEY,
+                retention_mode TEXT NOT NULL,
+                storage_mode TEXT NOT NULL,
+                provider_policy TEXT NOT NULL,
+                ai_policy TEXT NOT NULL,
+                insertion_policy TEXT NOT NULL,
+                export_constraints TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )",
             [],
         )?;
@@ -1772,6 +2127,9 @@ fn build_fts_query(query: &str) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use crate::store::{
+        CaptureSessionRecord, ContextSnapshotRecord, PolicySnapshotRecord, RuntimeEventRecord,
+    };
 
     fn in_memory_db() -> Database {
         let conn = Connection::open_in_memory().expect("in-memory db");
@@ -1826,6 +2184,63 @@ mod tests {
             model_id: Some("base.en".to_string()),
             requested_provider: Some("whisper".to_string()),
             actual_provider: Some("whisper".to_string()),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn sample_runtime_event() -> RuntimeEventRecord {
+        RuntimeEventRecord {
+            id: "evt-1".to_string(),
+            event_type: "dictation.state_changed".to_string(),
+            surface: Some("dictation".to_string()),
+            session_id: Some("session-1".to_string()),
+            recording_id: None,
+            payload: serde_json::json!({ "phase": "recording" }),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn sample_capture_session() -> CaptureSessionRecord {
+        let now = Utc::now();
+        CaptureSessionRecord {
+            id: "session-1".to_string(),
+            surface: "dictation".to_string(),
+            state: "recording".to_string(),
+            started_at: now,
+            stopped_at: None,
+            audio_sources: vec!["microphone".to_string()],
+            target_app: Some("Slack".to_string()),
+            context_snapshot_id: Some("ctx-1".to_string()),
+            policy_snapshot_id: Some("policy-1".to_string()),
+            provider_plan_id: Some("distil_whisper/default".to_string()),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn sample_context_snapshot() -> ContextSnapshotRecord {
+        ContextSnapshotRecord {
+            id: "ctx-1".to_string(),
+            frontmost_app: Some("Slack".to_string()),
+            frontmost_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
+            window_title: Some("Engineering".to_string()),
+            selected_text: Some("Ship the release".to_string()),
+            clipboard_text: Some("Clipboard context".to_string()),
+            meeting_hint: None,
+            active_mode: Some("messages".to_string()),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn sample_policy_snapshot() -> PolicySnapshotRecord {
+        PolicySnapshotRecord {
+            id: "policy-1".to_string(),
+            retention_mode: "never".to_string(),
+            storage_mode: "always".to_string(),
+            provider_policy: serde_json::json!({ "remoteProcessingEnabled": false }),
+            ai_policy: serde_json::json!({ "provider": "ollama" }),
+            insertion_policy: serde_json::json!({ "mode": "paste" }),
+            export_constraints: serde_json::json!({ "includeSpeakers": true }),
             created_at: Utc::now(),
         }
     }
@@ -2061,6 +2476,56 @@ mod tests {
             result.is_err(),
             "Audit log should be append-only (no deletes)"
         );
+    }
+
+    #[test]
+    fn test_append_and_list_runtime_events() {
+        let mut db = in_memory_db();
+        let event = sample_runtime_event();
+        db.append_runtime_event(&event).unwrap();
+
+        let events = db.list_runtime_events(10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "dictation.state_changed");
+        assert_eq!(events[0].session_id.as_deref(), Some("session-1"));
+        assert_eq!(events[0].payload["phase"], "recording");
+    }
+
+    #[test]
+    fn test_save_and_get_capture_session() {
+        let mut db = in_memory_db();
+        let session = sample_capture_session();
+        db.save_capture_session(&session).unwrap();
+
+        let fetched = db.get_capture_session("session-1").unwrap().unwrap();
+        assert_eq!(fetched.surface, "dictation");
+        assert_eq!(fetched.audio_sources, vec!["microphone".to_string()]);
+        assert_eq!(fetched.target_app.as_deref(), Some("Slack"));
+    }
+
+    #[test]
+    fn test_save_and_get_context_snapshot() {
+        let mut db = in_memory_db();
+        let snapshot = sample_context_snapshot();
+        db.save_context_snapshot(&snapshot).unwrap();
+
+        let fetched = db.get_context_snapshot("ctx-1").unwrap().unwrap();
+        assert_eq!(fetched.frontmost_app.as_deref(), Some("Slack"));
+        assert_eq!(fetched.active_mode.as_deref(), Some("messages"));
+        assert_eq!(fetched.selected_text.as_deref(), Some("Ship the release"));
+    }
+
+    #[test]
+    fn test_save_and_get_policy_snapshot() {
+        let mut db = in_memory_db();
+        let snapshot = sample_policy_snapshot();
+        db.save_policy_snapshot(&snapshot).unwrap();
+
+        let fetched = db.get_policy_snapshot("policy-1").unwrap().unwrap();
+        assert_eq!(fetched.retention_mode, "never");
+        assert_eq!(fetched.storage_mode, "always");
+        assert_eq!(fetched.provider_policy["remoteProcessingEnabled"], false);
+        assert_eq!(fetched.insertion_policy["mode"], "paste");
     }
 
     #[test]

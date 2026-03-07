@@ -15,6 +15,7 @@ mod models;
 mod secrets;
 pub mod settings;
 mod streaming;
+mod store;
 mod text;
 mod transcription;
 pub mod update;
@@ -24,6 +25,7 @@ use crate::events::{
     DictationStateChangedEvent, DictationTextReadyEvent, MeetingRecordingStateChangedEvent,
     RecordingStatusChangedEvent,
 };
+use crate::store::RuntimeEventRecord;
 use anyhow::Result;
 use commands::backup::*;
 use commands::infra::*;
@@ -6567,9 +6569,17 @@ async fn stop_dictation_session_for_session(
             .map(|text| text.chars().count()),
     );
 
-    if let Err(error) = app.emit("dictation-text-ready", payload) {
+    if let Err(error) = app.emit("dictation-text-ready", &payload) {
         tracing::warn!("Failed to emit dictation text event: {}", error);
     }
+    persist_runtime_event(
+        app,
+        "dictation.text_ready",
+        Some("dictation"),
+        Some(session_id.to_string()),
+        None,
+        payload.clone(),
+    );
 
     let preview = result
         .text
@@ -7075,9 +7085,17 @@ fn emit_dictation_state(
         stop_reason: stop_reason.map(str::to_string),
         outcome: outcome.map(str::to_string),
     };
-    if let Err(error) = app.emit("dictation-state-changed", payload) {
+    if let Err(error) = app.emit("dictation-state-changed", &payload) {
         tracing::warn!("Failed to emit dictation state: {}", error);
     }
+    persist_runtime_event(
+        app,
+        "dictation.state_changed",
+        Some("dictation"),
+        session_id.map(|value| value.to_string()),
+        None,
+        payload.clone(),
+    );
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let state = app_handle.state::<AppState>();
@@ -7116,9 +7134,17 @@ fn emit_recording_state(
         system_audio_active,
         message: message.map(str::to_string),
     };
-    if let Err(error) = app.emit("meeting-recording-state-changed", payload) {
+    if let Err(error) = app.emit("meeting-recording-state-changed", &payload) {
         tracing::warn!("Failed to emit meeting recording state: {}", error);
     }
+    persist_runtime_event(
+        app,
+        "meeting.recording_state_changed",
+        Some("meeting"),
+        None,
+        recording_id.map(str::to_string),
+        payload.clone(),
+    );
 
     // Update macOS menu bar recording indicator
     match phase {
@@ -7174,9 +7200,55 @@ fn emit_recording_status_with_markers(
         transcript_first_available_at: transcript_first_available_at.map(str::to_string),
         consent_prompt_shown,
     };
-    if let Err(error) = app.emit("recording-status-changed", payload) {
+    if let Err(error) = app.emit("recording-status-changed", &payload) {
         tracing::warn!("Failed to emit recording status: {}", error);
     }
+    persist_runtime_event(
+        app,
+        "meeting.recording_status_changed",
+        Some("meeting"),
+        None,
+        Some(recording_id.to_string()),
+        payload,
+    );
+}
+
+fn persist_runtime_event<T: serde::Serialize + Send + 'static>(
+    app: &AppHandle,
+    event_type: &str,
+    surface: Option<&str>,
+    session_id: Option<String>,
+    recording_id: Option<String>,
+    payload: T,
+) {
+    let app_handle = app.clone();
+    let event_type = event_type.to_string();
+    let surface = surface.map(str::to_string);
+    tauri::async_runtime::spawn(async move {
+        let payload_value = match serde_json::to_value(payload) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!("Failed to serialize runtime event '{}': {}", event_type, error);
+                return;
+            }
+        };
+
+        let entry = RuntimeEventRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            event_type,
+            surface,
+            session_id,
+            recording_id,
+            payload: payload_value,
+            created_at: chrono::Utc::now(),
+        };
+
+        let state = app_handle.state::<AppState>();
+        let mut db = state.db.lock().await;
+        if let Err(error) = db.append_runtime_event(&entry) {
+            tracing::warn!("Failed to persist runtime event '{}': {}", entry.event_type, error);
+        }
+    });
 }
 
 fn primary_tray_icon_image(_app: &AppHandle) -> tauri::image::Image<'static> {
