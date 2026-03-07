@@ -872,13 +872,14 @@ export function DictationView() {
         } else {
           setPasteStatus(null);
         }
+        void refetchDictationHistory();
       });
     };
     void setup();
     return () => {
       unlisten?.();
     };
-  }, []);
+  }, [refetchDictationHistory]);
 
   const handleStopDictation = async () => {
     try {
