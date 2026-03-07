@@ -14,8 +14,8 @@ mod llm;
 mod models;
 mod secrets;
 pub mod settings;
-mod streaming;
 mod store;
+mod streaming;
 mod text;
 mod transcription;
 pub mod update;
@@ -25,7 +25,7 @@ use crate::events::{
     DictationStateChangedEvent, DictationTextReadyEvent, MeetingRecordingStateChangedEvent,
     RecordingStatusChangedEvent,
 };
-use crate::store::RuntimeEventRecord;
+use crate::store::{InsertionActionRecord, RuntimeEventRecord, TranscriptArtifactRecord};
 use anyhow::Result;
 use commands::backup::*;
 use commands::infra::*;
@@ -4189,8 +4189,14 @@ async fn get_dictation_history_details(
     recording_id: String,
 ) -> Result<Option<models::DictationHistoryDetails>, String> {
     let db = state.db.lock().await;
+    let transcript_artifact = db
+        .get_latest_transcript_artifact(&recording_id)
+        .map_err(|e| e.to_string())?;
+    let insertion_action = db
+        .get_latest_insertion_action(&recording_id)
+        .map_err(|e| e.to_string())?;
     let audit_log = db.get_all_audit_log().map_err(|e| e.to_string())?;
-    let details = audit_log
+    let audit_details = audit_log
         .into_iter()
         .rev()
         .find(|entry| {
@@ -4201,81 +4207,129 @@ async fn get_dictation_history_details(
                     .and_then(|value| value.as_str())
                     == Some(recording_id.as_str())
         })
-        .map(|entry| models::DictationHistoryDetails {
-            mode_preset: entry
-                .details
-                .get("dictation_mode_preset")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            context_source: entry
-                .details
-                .get("context_source")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            context_preview: entry
-                .details
-                .get("context_preview")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            context_app_name: entry
-                .details
-                .get("context_app_name")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            app_target: entry
-                .details
-                .get("app_target")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            command_applied: entry
-                .details
-                .get("command_applied")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            prompt_source: entry
-                .details
-                .get("prompt_source")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            prompt_preview: entry
-                .details
-                .get("prompt_preview")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            requested_provider: entry
-                .details
-                .get("requested_provider")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            actual_provider: entry
-                .details
-                .get("actual_provider")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            model_id: entry
-                .details
-                .get("model_id")
-                .and_then(|value| value.as_str())
-                .map(str::to_string),
-            startup_latency_ms: entry
-                .details
-                .get("startup_latency_ms")
-                .and_then(|value| value.as_u64()),
-            transcription_latency_ms: entry
-                .details
-                .get("transcription_latency_ms")
-                .and_then(|value| value.as_u64()),
-            insert_latency_ms: entry
-                .details
-                .get("insert_latency_ms")
-                .and_then(|value| value.as_u64()),
-            end_to_end_ms: entry
-                .details
-                .get("end_to_end_ms")
-                .and_then(|value| value.as_u64()),
-        });
+        .map(|entry| dictation_history_details_from_audit(&entry.details))
+        .unwrap_or_default();
 
-    Ok(details)
+    let details = merge_dictation_history_details(
+        audit_details,
+        transcript_artifact.as_ref(),
+        insertion_action.as_ref(),
+    );
+
+    if dictation_history_details_is_empty(&details) {
+        Ok(None)
+    } else {
+        Ok(Some(details))
+    }
+}
+
+fn dictation_history_details_from_audit(
+    details: &serde_json::Value,
+) -> models::DictationHistoryDetails {
+    models::DictationHistoryDetails {
+        mode_preset: details
+            .get("dictation_mode_preset")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        context_source: details
+            .get("context_source")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        context_preview: details
+            .get("context_preview")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        context_app_name: details
+            .get("context_app_name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        app_target: details
+            .get("app_target")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        command_applied: details
+            .get("command_applied")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        prompt_source: details
+            .get("prompt_source")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        prompt_preview: details
+            .get("prompt_preview")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        requested_provider: details
+            .get("requested_provider")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        actual_provider: details
+            .get("actual_provider")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        model_id: details
+            .get("model_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        startup_latency_ms: details
+            .get("startup_latency_ms")
+            .and_then(|value| value.as_u64()),
+        transcription_latency_ms: details
+            .get("transcription_latency_ms")
+            .and_then(|value| value.as_u64()),
+        insert_latency_ms: details
+            .get("insert_latency_ms")
+            .and_then(|value| value.as_u64()),
+        end_to_end_ms: details
+            .get("end_to_end_ms")
+            .and_then(|value| value.as_u64()),
+    }
+}
+
+fn merge_dictation_history_details(
+    mut details: models::DictationHistoryDetails,
+    transcript_artifact: Option<&TranscriptArtifactRecord>,
+    insertion_action: Option<&InsertionActionRecord>,
+) -> models::DictationHistoryDetails {
+    if let Some(artifact) = transcript_artifact {
+        details.requested_provider = artifact.requested_provider.clone();
+        details.actual_provider = artifact.actual_provider.clone();
+        details.model_id = artifact.model_id.clone();
+        details.startup_latency_ms = artifact.startup_latency_ms.map(|value| value as u64);
+        details.transcription_latency_ms =
+            artifact.transcription_latency_ms.map(|value| value as u64);
+        details.insert_latency_ms = artifact.insert_latency_ms.map(|value| value as u64);
+        details.end_to_end_ms = artifact.end_to_end_ms.map(|value| value as u64);
+    }
+
+    if let Some(action) = insertion_action {
+        if action.app_target.is_some() {
+            details.app_target = action.app_target.clone();
+        }
+        if action.command_applied.is_some() {
+            details.command_applied = action.command_applied.clone();
+        }
+    }
+
+    details
+}
+
+fn dictation_history_details_is_empty(details: &models::DictationHistoryDetails) -> bool {
+    details.mode_preset.is_none()
+        && details.context_source.is_none()
+        && details.context_preview.is_none()
+        && details.context_app_name.is_none()
+        && details.app_target.is_none()
+        && details.command_applied.is_none()
+        && details.prompt_source.is_none()
+        && details.prompt_preview.is_none()
+        && details.requested_provider.is_none()
+        && details.actual_provider.is_none()
+        && details.model_id.is_none()
+        && details.startup_latency_ms.is_none()
+        && details.transcription_latency_ms.is_none()
+        && details.insert_latency_ms.is_none()
+        && details.end_to_end_ms.is_none()
 }
 
 // Settings commands
@@ -5025,9 +5079,10 @@ async fn start_dictation_session(
     let context_target_app = tauri::async_runtime::spawn_blocking(get_frontmost_app_name)
         .await
         .unwrap_or(None);
-    let context_target_bundle_id = tauri::async_runtime::spawn_blocking(get_frontmost_app_bundle_id)
-        .await
-        .unwrap_or(None);
+    let context_target_bundle_id =
+        tauri::async_runtime::spawn_blocking(get_frontmost_app_bundle_id)
+            .await
+            .unwrap_or(None);
     if let Some(mode) = settings_snapshot
         .transcription
         .dictation_custom_modes
@@ -6310,7 +6365,8 @@ async fn stop_dictation_session_for_session(
             .await
             .unwrap_or(None)
     };
-    let app_target_bundle_id = if let Some(target) = dictation_options.context_app_bundle_id.clone() {
+    let app_target_bundle_id = if let Some(target) = dictation_options.context_app_bundle_id.clone()
+    {
         Some(target)
     } else {
         tauri::async_runtime::spawn_blocking(get_frontmost_app_bundle_id)
@@ -6659,6 +6715,7 @@ async fn stop_dictation_session_for_session(
     let persist_dictation_record = dictation_retention_preset != "immediate";
 
     let mut persisted_recording_id: Option<String> = None;
+    let mut persisted_transcript_id: Option<String> = None;
     let mut db = state.db.lock().await;
     if dictation_options.save_to_inbox && persist_dictation_record && !result.text.trim().is_empty()
     {
@@ -6725,10 +6782,57 @@ async fn stop_dictation_session_for_session(
 
             if let Err(error) = db.save_transcript(&transcript) {
                 tracing::warn!("Failed to persist dictation transcript: {}", error);
+            } else {
+                persisted_transcript_id = Some(transcript.id.clone());
             }
         }
     } else if dictation_options.save_to_inbox && !persist_dictation_record {
         tracing::info!("Skipping dictation persistence due to immediate retention policy");
+    }
+
+    if let Some(recording_id) = persisted_recording_id.clone() {
+        let transcript_artifact = TranscriptArtifactRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            recording_id,
+            transcript_id: persisted_transcript_id.clone(),
+            segment_count: result.segments.len() as i64,
+            model_id: Some(result.model_id.clone()),
+            requested_provider: Some(
+                asr_provider_to_settings_value(result.requested_provider).to_string(),
+            ),
+            actual_provider: Some(
+                asr_provider_to_settings_value(result.actual_provider).to_string(),
+            ),
+            quality_score: Some(result.confidence),
+            startup_latency_ms: startup_latency_ms.map(|value| value as i64),
+            transcription_latency_ms: Some(transcription_latency_ms as i64),
+            insert_latency_ms: insert_latency_ms.map(|value| value as i64),
+            end_to_end_ms: Some(end_to_end_ms as i64),
+            created_at: chrono::Utc::now(),
+        };
+        if let Err(error) = db.save_transcript_artifact(&transcript_artifact) {
+            tracing::warn!("Failed to persist dictation transcript artifact: {}", error);
+        }
+    }
+
+    let insertion_action = InsertionActionRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        session_id: Some(session_id.to_string()),
+        recording_id: persisted_recording_id.clone(),
+        requested_mode: insertion_mode.to_string(),
+        actual_mode: insertion_mode_used.clone(),
+        pasted,
+        copied,
+        failed: !pasted && !copied && paste_error.is_some(),
+        undo_token: None,
+        command_applied: command_applied.clone(),
+        snippet_applied_count: snippet_applied_count as i64,
+        app_target: app_target.clone(),
+        error: paste_error.clone(),
+        created_at: chrono::Utc::now(),
+    };
+    if let Err(error) = db.save_insertion_action(&insertion_action) {
+        tracing::warn!("Failed to persist dictation insertion action: {}", error);
     }
 
     let details = serde_json::json!({
@@ -7228,7 +7332,11 @@ fn persist_runtime_event<T: serde::Serialize + Send + 'static>(
         let payload_value = match serde_json::to_value(payload) {
             Ok(value) => value,
             Err(error) => {
-                tracing::warn!("Failed to serialize runtime event '{}': {}", event_type, error);
+                tracing::warn!(
+                    "Failed to serialize runtime event '{}': {}",
+                    event_type,
+                    error
+                );
                 return;
             }
         };
@@ -7246,7 +7354,11 @@ fn persist_runtime_event<T: serde::Serialize + Send + 'static>(
         let state = app_handle.state::<AppState>();
         let mut db = state.db.lock().await;
         if let Err(error) = db.append_runtime_event(&entry) {
-            tracing::warn!("Failed to persist runtime event '{}': {}", entry.event_type, error);
+            tracing::warn!(
+                "Failed to persist runtime event '{}': {}",
+                entry.event_type,
+                error
+            );
         }
     });
 }
@@ -10636,6 +10748,90 @@ mod tests {
     }
 
     #[test]
+    fn dictation_history_details_merge_prefers_artifact_records() {
+        let audit = serde_json::json!({
+            "dictation_mode_preset": "brain-dump",
+            "context_source": "clipboard",
+            "context_preview": "legacy context",
+            "context_app_name": "Notes",
+            "app_target": "Legacy Notes",
+            "command_applied": "legacy_command",
+            "prompt_source": "default_dictation_format",
+            "prompt_preview": "legacy prompt",
+            "requested_provider": "voxtral",
+            "actual_provider": "voxtral",
+            "model_id": "legacy-model",
+            "startup_latency_ms": 999,
+            "transcription_latency_ms": 888,
+            "insert_latency_ms": 777,
+            "end_to_end_ms": 666
+        });
+        let artifact = TranscriptArtifactRecord {
+            id: "artifact-1".to_string(),
+            recording_id: "recording-1".to_string(),
+            transcript_id: Some("transcript-1".to_string()),
+            segment_count: 2,
+            model_id: Some("distil-large-v3.5".to_string()),
+            requested_provider: Some("voxtral".to_string()),
+            actual_provider: Some("distil-whisper".to_string()),
+            quality_score: Some(0.94),
+            startup_latency_ms: Some(80),
+            transcription_latency_ms: Some(220),
+            insert_latency_ms: Some(20),
+            end_to_end_ms: Some(320),
+            created_at: chrono::Utc::now(),
+        };
+        let insertion_action = InsertionActionRecord {
+            id: "insert-1".to_string(),
+            session_id: Some("session-1".to_string()),
+            recording_id: Some("recording-1".to_string()),
+            requested_mode: "paste".to_string(),
+            actual_mode: "paste".to_string(),
+            pasted: true,
+            copied: true,
+            failed: false,
+            undo_token: None,
+            command_applied: Some("rewrite_shorter".to_string()),
+            snippet_applied_count: 1,
+            app_target: Some("Slack".to_string()),
+            error: None,
+            created_at: chrono::Utc::now(),
+        };
+
+        let details = merge_dictation_history_details(
+            dictation_history_details_from_audit(&audit),
+            Some(&artifact),
+            Some(&insertion_action),
+        );
+
+        assert_eq!(details.mode_preset.as_deref(), Some("brain-dump"));
+        assert_eq!(details.context_preview.as_deref(), Some("legacy context"));
+        assert_eq!(
+            details.prompt_source.as_deref(),
+            Some("default_dictation_format")
+        );
+        assert_eq!(details.actual_provider.as_deref(), Some("distil-whisper"));
+        assert_eq!(details.model_id.as_deref(), Some("distil-large-v3.5"));
+        assert_eq!(details.startup_latency_ms, Some(80));
+        assert_eq!(details.end_to_end_ms, Some(320));
+        assert_eq!(details.app_target.as_deref(), Some("Slack"));
+        assert_eq!(details.command_applied.as_deref(), Some("rewrite_shorter"));
+    }
+
+    #[test]
+    fn dictation_history_details_empty_check_detects_missing_data() {
+        assert!(dictation_history_details_is_empty(
+            &models::DictationHistoryDetails::default()
+        ));
+        assert!(!dictation_history_details_is_empty(
+            &models::DictationHistoryDetails {
+                app_target: Some("Slack".to_string()),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
     fn contextual_command_input_prefers_spoken_text_then_context() {
         let spoken = resolve_contextual_command_input(
             "draft this response",
@@ -13003,8 +13199,7 @@ fn is_self_activation_target(app_name: Option<&str>, app_bundle_id: Option<&str>
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| {
-            value.eq_ignore_ascii_case("Nautilus")
-                || value.eq_ignore_ascii_case("nautilus-bot")
+            value.eq_ignore_ascii_case("Nautilus") || value.eq_ignore_ascii_case("nautilus-bot")
         })
         .unwrap_or(false);
     let bundle_matches = app_bundle_id
@@ -13066,7 +13261,9 @@ fn reactivate_target_application(
     let mut command = std::process::Command::new("osascript");
     command.arg("-e").arg("on run argv");
     if trimmed_bundle_id.is_some() {
-        command.arg("-e").arg("set targetBundleId to item 1 of argv");
+        command
+            .arg("-e")
+            .arg("set targetBundleId to item 1 of argv");
     }
     if trimmed_name.is_some() {
         let index = if trimmed_bundle_id.is_some() { 2 } else { 1 };
@@ -13091,11 +13288,7 @@ fn reactivate_target_application(
     if trimmed_bundle_id.is_some() {
         command.arg("-e").arg("end try");
     }
-    command
-        .arg("-e")
-        .arg("delay 0.08")
-        .arg("-e")
-        .arg("end run");
+    command.arg("-e").arg("delay 0.08").arg("-e").arg("end run");
     if let Some(bundle_id) = trimmed_bundle_id {
         command.arg(bundle_id);
     }
@@ -13133,8 +13326,7 @@ fn reactivate_target_application(
                 get_frontmost_app_name().map(|current| current.eq_ignore_ascii_case(name))
             })
             .unwrap_or(false);
-        if bundle_matches || name_matches
-        {
+        if bundle_matches || name_matches {
             return Ok(());
         }
     }
@@ -13480,11 +13672,12 @@ fn dispatch_paste_from_clipboard(
     target_app: Option<&str>,
     target_app_bundle_id: Option<&str>,
 ) -> Result<PasteDispatchStatus, String> {
-    let paste_result = send_native_paste_key(target_app, target_app_bundle_id).or_else(|first_error| {
-        std::thread::sleep(std::time::Duration::from_millis(45));
-        send_native_paste_key(target_app, target_app_bundle_id)
-            .map_err(|retry_error| format!("{} (retry failed: {})", first_error, retry_error))
-    });
+    let paste_result =
+        send_native_paste_key(target_app, target_app_bundle_id).or_else(|first_error| {
+            std::thread::sleep(std::time::Duration::from_millis(45));
+            send_native_paste_key(target_app, target_app_bundle_id)
+                .map_err(|retry_error| format!("{} (retry failed: {})", first_error, retry_error))
+        });
 
     match paste_result {
         Ok(status) => Ok(status),

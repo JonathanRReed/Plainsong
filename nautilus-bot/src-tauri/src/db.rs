@@ -7,7 +7,8 @@
 
 use crate::models::*;
 use crate::store::{
-    CaptureSessionRecord, ContextSnapshotRecord, PolicySnapshotRecord, RuntimeEventRecord,
+    CaptureSessionRecord, ContextSnapshotRecord, InsertionActionRecord, PolicySnapshotRecord,
+    RuntimeEventRecord, TranscriptArtifactRecord,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -328,6 +329,140 @@ impl Database {
         }
     }
 
+    pub fn save_transcript_artifact(&mut self, artifact: &TranscriptArtifactRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO transcript_artifacts (
+                id, recording_id, transcript_id, segment_count, model_id, requested_provider,
+                actual_provider, quality_score, startup_latency_ms, transcription_latency_ms,
+                insert_latency_ms, end_to_end_ms, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                &artifact.id,
+                &artifact.recording_id,
+                &artifact.transcript_id,
+                artifact.segment_count,
+                &artifact.model_id,
+                &artifact.requested_provider,
+                &artifact.actual_provider,
+                artifact.quality_score,
+                artifact.startup_latency_ms,
+                artifact.transcription_latency_ms,
+                artifact.insert_latency_ms,
+                artifact.end_to_end_ms,
+                artifact.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_latest_transcript_artifact(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<TranscriptArtifactRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, recording_id, transcript_id, segment_count, model_id, requested_provider,
+                    actual_provider, quality_score, startup_latency_ms, transcription_latency_ms,
+                    insert_latency_ms, end_to_end_ms, created_at
+             FROM transcript_artifacts
+             WHERE recording_id = ?1
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )?;
+        let result = stmt.query_row([recording_id], |row| {
+            let created_at: String = row.get(12)?;
+            Ok(TranscriptArtifactRecord {
+                id: row.get(0)?,
+                recording_id: row.get(1)?,
+                transcript_id: row.get(2)?,
+                segment_count: row.get(3)?,
+                model_id: row.get(4)?,
+                requested_provider: row.get(5)?,
+                actual_provider: row.get(6)?,
+                quality_score: row.get(7)?,
+                startup_latency_ms: row.get(8)?,
+                transcription_latency_ms: row.get(9)?,
+                insert_latency_ms: row.get(10)?,
+                end_to_end_ms: row.get(11)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        });
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn save_insertion_action(&mut self, action: &InsertionActionRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO insertion_actions (
+                id, session_id, recording_id, requested_mode, actual_mode, pasted, copied,
+                failed, undo_token, command_applied, snippet_applied_count, app_target, error,
+                created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                &action.id,
+                &action.session_id,
+                &action.recording_id,
+                &action.requested_mode,
+                &action.actual_mode,
+                if action.pasted { 1 } else { 0 },
+                if action.copied { 1 } else { 0 },
+                if action.failed { 1 } else { 0 },
+                &action.undo_token,
+                &action.command_applied,
+                action.snippet_applied_count,
+                &action.app_target,
+                &action.error,
+                action.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_latest_insertion_action(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<InsertionActionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, recording_id, requested_mode, actual_mode, pasted, copied,
+                    failed, undo_token, command_applied, snippet_applied_count, app_target,
+                    error, created_at
+             FROM insertion_actions
+             WHERE recording_id = ?1
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )?;
+        let result = stmt.query_row([recording_id], |row| {
+            let created_at: String = row.get(13)?;
+            Ok(InsertionActionRecord {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                recording_id: row.get(2)?,
+                requested_mode: row.get(3)?,
+                actual_mode: row.get(4)?,
+                pasted: row.get::<_, i64>(5)? != 0,
+                copied: row.get::<_, i64>(6)? != 0,
+                failed: row.get::<_, i64>(7)? != 0,
+                undo_token: row.get(8)?,
+                command_applied: row.get(9)?,
+                snippet_applied_count: row.get(10)?,
+                app_target: row.get(11)?,
+                error: row.get(12)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        });
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn init_tables(&self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS projects (
@@ -483,6 +618,11 @@ impl Database {
             )",
             [],
         )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_transcript_artifacts_recording_created_at
+             ON transcript_artifacts(recording_id, created_at DESC)",
+            [],
+        )?;
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS insertion_actions (
@@ -497,9 +637,19 @@ impl Database {
                 undo_token TEXT,
                 command_applied TEXT,
                 snippet_applied_count INTEGER NOT NULL DEFAULT 0,
+                app_target TEXT,
                 error TEXT,
                 created_at TEXT NOT NULL
             )",
+            [],
+        )?;
+        let _ = self.conn.execute(
+            "ALTER TABLE insertion_actions ADD COLUMN app_target TEXT",
+            [],
+        );
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_insertion_actions_recording_created_at
+             ON insertion_actions(recording_id, created_at DESC)",
             [],
         )?;
 
@@ -2126,10 +2276,11 @@ fn build_fts_query(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use crate::store::{
-        CaptureSessionRecord, ContextSnapshotRecord, PolicySnapshotRecord, RuntimeEventRecord,
+        CaptureSessionRecord, ContextSnapshotRecord, InsertionActionRecord, PolicySnapshotRecord,
+        RuntimeEventRecord, TranscriptArtifactRecord,
     };
+    use chrono::Utc;
 
     fn in_memory_db() -> Database {
         let conn = Connection::open_in_memory().expect("in-memory db");
@@ -2241,6 +2392,43 @@ mod tests {
             ai_policy: serde_json::json!({ "provider": "ollama" }),
             insertion_policy: serde_json::json!({ "mode": "paste" }),
             export_constraints: serde_json::json!({ "includeSpeakers": true }),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn sample_transcript_artifact() -> TranscriptArtifactRecord {
+        TranscriptArtifactRecord {
+            id: "artifact-1".to_string(),
+            recording_id: "recording-1".to_string(),
+            transcript_id: Some("transcript-1".to_string()),
+            segment_count: 3,
+            model_id: Some("distil-large-v3.5".to_string()),
+            requested_provider: Some("voxtral".to_string()),
+            actual_provider: Some("distil-whisper".to_string()),
+            quality_score: Some(0.94),
+            startup_latency_ms: Some(90),
+            transcription_latency_ms: Some(210),
+            insert_latency_ms: Some(18),
+            end_to_end_ms: Some(320),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn sample_insertion_action() -> InsertionActionRecord {
+        InsertionActionRecord {
+            id: "insert-1".to_string(),
+            session_id: Some("session-1".to_string()),
+            recording_id: Some("recording-1".to_string()),
+            requested_mode: "paste".to_string(),
+            actual_mode: "paste".to_string(),
+            pasted: true,
+            copied: true,
+            failed: false,
+            undo_token: None,
+            command_applied: Some("rewrite_shorter".to_string()),
+            snippet_applied_count: 2,
+            app_target: Some("Slack".to_string()),
+            error: None,
             created_at: Utc::now(),
         }
     }
@@ -2526,6 +2714,37 @@ mod tests {
         assert_eq!(fetched.storage_mode, "always");
         assert_eq!(fetched.provider_policy["remoteProcessingEnabled"], false);
         assert_eq!(fetched.insertion_policy["mode"], "paste");
+    }
+
+    #[test]
+    fn test_save_and_get_transcript_artifact() {
+        let mut db = in_memory_db();
+        let artifact = sample_transcript_artifact();
+        db.save_transcript_artifact(&artifact).unwrap();
+
+        let fetched = db
+            .get_latest_transcript_artifact("recording-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.transcript_id.as_deref(), Some("transcript-1"));
+        assert_eq!(fetched.actual_provider.as_deref(), Some("distil-whisper"));
+        assert_eq!(fetched.end_to_end_ms, Some(320));
+    }
+
+    #[test]
+    fn test_save_and_get_insertion_action() {
+        let mut db = in_memory_db();
+        let action = sample_insertion_action();
+        db.save_insertion_action(&action).unwrap();
+
+        let fetched = db
+            .get_latest_insertion_action("recording-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.requested_mode, "paste");
+        assert_eq!(fetched.command_applied.as_deref(), Some("rewrite_shorter"));
+        assert_eq!(fetched.app_target.as_deref(), Some("Slack"));
+        assert!(fetched.pasted);
     }
 
     #[test]
