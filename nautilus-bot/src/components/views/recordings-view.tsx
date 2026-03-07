@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -112,6 +112,9 @@ export function RecordingsView() {
   const { recordings, refetch } = useRecordings();
   const { startMeeting, stopMeeting, isRecording, recordingId, formattedDuration } = useRecording();
   const { toast } = useToast();
+  const [recordingStatusOverrides, setRecordingStatusOverrides] = useState<
+    Record<string, Recording["status"]>
+  >({});
   const [showConsent, setShowConsent] = useState(false);
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null);
   const [showRecordingDetail, setShowRecordingDetail] = useState(false);
@@ -155,10 +158,27 @@ export function RecordingsView() {
     status: Recording["status"];
     message?: string | null;
     progress?: number | null;
+    updatedAt?: string | null;
     meetingProcessingStartedAt?: string | null;
     transcriptFirstAvailableAt?: string | null;
     consentPromptShown?: boolean | null;
   };
+
+  const refreshSelectedRecording = useCallback(
+    async (recordingIdToRefresh: string) => {
+      const latestRecording = await getRecording(recordingIdToRefresh);
+      if (latestRecording) {
+        setSelectedRecording((current) =>
+          current?.id === latestRecording.id ? latestRecording : current
+        );
+        if (latestRecording.id === meetingNotesTargetId) {
+          lastSavedMeetingNotesRef.current = latestRecording.meetingNotes ?? "";
+        }
+      }
+      return latestRecording;
+    },
+    [meetingNotesTargetId]
+  );
 
   useEffect(() => {
     if (lastRecordingState.current && !isRecording) {
@@ -255,10 +275,8 @@ export function RecordingsView() {
         setAutoNameIssue((current) =>
           current?.recordingId === updatedId ? null : current
         );
-        setSelectedRecording((current) =>
-          current && current.id === updatedId ? { ...current, title: newTitle } : current
-        );
-        refetch();
+        void refreshSelectedRecording(updatedId);
+        void refetch();
         return;
       }
       if (status === "error") {
@@ -274,13 +292,34 @@ export function RecordingsView() {
     return () => {
       unlisten?.();
     };
-  }, [refetch]);
+  }, [refetch, refreshSelectedRecording]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ recordingId: string }>("recording-analysis-ready", (event) => {
+      const updatedId = event.payload?.recordingId;
+      if (!updatedId) return;
+      void refreshSelectedRecording(updatedId);
+      void refetch();
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      unlisten?.();
+    };
+  }, [refetch, refreshSelectedRecording]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     listen<RecordingStatusChangedEvent>("recording-status-changed", (event) => {
       const payload = event.payload;
       if (!payload?.recordingId) return;
+
+      setRecordingStatusOverrides((current) => ({
+        ...current,
+        [payload.recordingId]: payload.status,
+      }));
 
       if (selectedRecording?.id === payload.recordingId) {
         setSelectedRecording((current) =>
@@ -289,7 +328,8 @@ export function RecordingsView() {
       }
 
       if (payload.status === "completed" || payload.status === "error") {
-        refetch();
+        void refreshSelectedRecording(payload.recordingId);
+        void refetch();
       }
     }).then((fn) => {
       unlisten = fn;
@@ -298,7 +338,7 @@ export function RecordingsView() {
     return () => {
       unlisten?.();
     };
-  }, [refetch, selectedRecording?.id]);
+  }, [refetch, refreshSelectedRecording, selectedRecording?.id]);
 
   useEffect(() => {
     if (!showRecordingDetail || !selectedRecording) {
@@ -320,19 +360,11 @@ export function RecordingsView() {
     const poll = async () => {
       try {
         const [latestRecording, latestTranscript] = await Promise.all([
-          getRecording(selectedRecording.id),
+          refreshSelectedRecording(selectedRecording.id),
           getTranscript(selectedRecording.id),
         ]);
         if (cancelled) return;
 
-        if (latestRecording) {
-          setSelectedRecording((current) =>
-            current?.id === latestRecording.id ? latestRecording : current
-          );
-          if (latestRecording.id === meetingNotesTargetId) {
-            lastSavedMeetingNotesRef.current = latestRecording.meetingNotes ?? "";
-          }
-        }
         if (latestTranscript) {
           setSelectedTranscript(
             normalizeTranscriptForViewer(latestTranscript, selectedRecording.id)
@@ -360,8 +392,8 @@ export function RecordingsView() {
       clearInterval(id);
     };
   }, [
-    meetingNotesTargetId,
     refetch,
+    refreshSelectedRecording,
     selectedRecording,
     selectedTranscript,
     showRecordingDetail,
@@ -402,13 +434,23 @@ export function RecordingsView() {
     setDiarizationError(null);
 
     try {
-      const [transcriptResult, waveformResult, speakersResult] = await Promise.allSettled([
+      const [recordingResult, transcriptResult, waveformResult, speakersResult] = await Promise.allSettled([
+        getRecording(recording.id),
         getTranscript(recording.id),
         getRecordingWaveform(recording.id, 500),
         getSpeakers(recording.id),
       ]);
 
       let hadAnyFailure = false;
+
+      if (recordingResult.status === "fulfilled" && recordingResult.value) {
+        setSelectedRecording(recordingResult.value);
+        if (recordingResult.value.id === meetingNotesTargetId) {
+          lastSavedMeetingNotesRef.current = recordingResult.value.meetingNotes ?? "";
+        }
+      } else if (recordingResult.status === "rejected") {
+        hadAnyFailure = true;
+      }
 
       if (transcriptResult.status === "fulfilled") {
         setSelectedTranscript(normalizeTranscriptForViewer(transcriptResult.value, recording.id));
@@ -594,9 +636,17 @@ export function RecordingsView() {
     () => Boolean(selectedTranscript?.segments.some((segment) => Boolean(segment.speakerId))),
     [selectedTranscript]
   );
+  const effectiveRecordings = useMemo(
+    () =>
+      recordings.map((recording) => ({
+        ...recording,
+        status: recordingStatusOverrides[recording.id] ?? recording.status,
+      })),
+    [recordingStatusOverrides, recordings]
+  );
   const meetings = useMemo(
-    () => recordings.filter((recording) => recording.sourceType === "meeting"),
-    [recordings]
+    () => effectiveRecordings.filter((recording) => recording.sourceType === "meeting"),
+    [effectiveRecordings]
   );
   const filteredMeetings = useMemo(() => {
     const query = meetingSearch.trim().toLowerCase();

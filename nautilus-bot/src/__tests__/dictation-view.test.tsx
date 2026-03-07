@@ -1,9 +1,11 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DictationView } from "@/components/views/dictation-view";
 
 const tauriMocks = vi.hoisted(() => ({
+  eventListeners: new Map<string, (event: { payload: any }) => void>(),
   saveSettings: vi.fn(async () => {}),
+  refetchDictationHistory: vi.fn(),
   getSettings: vi.fn(async () => ({
   audio: {
     sampleRate: 16000,
@@ -98,7 +100,12 @@ const tauriMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async () => () => {}),
+  listen: vi.fn(async (eventName: string, handler: (event: { payload: any }) => void) => {
+    tauriMocks.eventListeners.set(eventName, handler);
+    return () => {
+      tauriMocks.eventListeners.delete(eventName);
+    };
+  }),
 }));
 
 vi.mock("@/hooks/use-recording", () => ({
@@ -120,7 +127,7 @@ vi.mock("@/hooks/use-recordings", () => ({
   useRecordings: () => ({
     recordings: [],
     isLoading: false,
-    refetch: vi.fn(),
+    refetch: tauriMocks.refetchDictationHistory,
   }),
 }));
 
@@ -141,6 +148,7 @@ vi.mock("@/lib/tauri", () => ({
 describe("DictationView modes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    tauriMocks.eventListeners.clear();
   });
 
   it("renders the new mode presets", async () => {
@@ -195,5 +203,26 @@ describe("DictationView modes", () => {
     expect(latestSettings.transcription.dictationSelectedCustomModeId).toBeTruthy();
     expect(latestSettings.transcription.dictationCustomModes).toHaveLength(1);
     expect(latestSettings.transcription.dictationCustomModes[0].name).toBe("Sales Follow-up");
+  });
+
+  it("refreshes dictation history when a dictation result event arrives", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("Modes");
+    const handler = tauriMocks.eventListeners.get("dictation-text-ready");
+    expect(handler).toBeTruthy();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          text: "Ship it",
+          actualProvider: "distil_whisper",
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(tauriMocks.refetchDictationHistory).toHaveBeenCalled();
+    });
   });
 });
