@@ -78,6 +78,7 @@ pub struct InsertionActionRecord {
     pub undo_token: Option<String>,
     pub command_applied: Option<String>,
     pub snippet_applied_count: i64,
+    pub app_target: Option<String>,
     pub error: Option<String>,
     pub created_at: DateTime<Utc>,
 }

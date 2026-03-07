@@ -131,7 +131,7 @@ impl Default for DictationStartOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationHistoryDetails {
     pub mode_preset: Option<String>,
