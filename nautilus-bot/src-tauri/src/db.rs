@@ -467,8 +467,8 @@ impl Database {
         self.conn.execute(
             "INSERT INTO meeting_artifacts (
                 id, recording_id, title, summary, action_items, decisions, deadlines,
-                template_id, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                template_id, chat_messages, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(recording_id) DO UPDATE SET
                 title = excluded.title,
                 summary = excluded.summary,
@@ -476,6 +476,7 @@ impl Database {
                 decisions = excluded.decisions,
                 deadlines = excluded.deadlines,
                 template_id = excluded.template_id,
+                chat_messages = excluded.chat_messages,
                 updated_at = excluded.updated_at",
             params![
                 &artifact.id,
@@ -486,6 +487,7 @@ impl Database {
                 serde_json::to_string(&artifact.decisions)?,
                 serde_json::to_string(&artifact.deadlines)?,
                 &artifact.template_id,
+                serde_json::to_string(&artifact.chat_messages)?,
                 artifact.created_at.to_rfc3339(),
                 artifact.updated_at.to_rfc3339(),
             ],
@@ -499,7 +501,7 @@ impl Database {
     ) -> Result<Option<MeetingArtifactRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, recording_id, title, summary, action_items, decisions, deadlines,
-                    template_id, created_at, updated_at
+                    template_id, chat_messages, created_at, updated_at
              FROM meeting_artifacts
              WHERE recording_id = ?1",
         )?;
@@ -507,8 +509,9 @@ impl Database {
             let action_items_json: String = row.get(4)?;
             let decisions_json: String = row.get(5)?;
             let deadlines_json: String = row.get(6)?;
-            let created_at: String = row.get(8)?;
-            let updated_at: String = row.get(9)?;
+            let chat_messages_json: String = row.get(8)?;
+            let created_at: String = row.get(9)?;
+            let updated_at: String = row.get(10)?;
             Ok(MeetingArtifactRecord {
                 id: row.get(0)?,
                 recording_id: row.get(1)?,
@@ -518,6 +521,7 @@ impl Database {
                 decisions: serde_json::from_str(&decisions_json).unwrap_or_default(),
                 deadlines: serde_json::from_str(&deadlines_json).unwrap_or_default(),
                 template_id: row.get(7)?,
+                chat_messages: serde_json::from_str(&chat_messages_json).unwrap_or_default(),
                 created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now()),
@@ -733,11 +737,16 @@ impl Database {
                 decisions TEXT NOT NULL,
                 deadlines TEXT NOT NULL,
                 template_id TEXT,
+                chat_messages TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",
             [],
         )?;
+        let _ = self.conn.execute(
+            "ALTER TABLE meeting_artifacts ADD COLUMN chat_messages TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_meeting_artifacts_updated_at
              ON meeting_artifacts(updated_at DESC)",
@@ -1335,16 +1344,89 @@ impl Database {
         summary: Option<&str>,
         action_items: &[String],
     ) -> Result<()> {
+        let now = Utc::now();
         let action_items_json = serde_json::to_string(action_items)?;
         self.conn.execute(
             "UPDATE recordings SET summary = ?1, action_items = ?2, updated_at = ?3 WHERE id = ?4",
-            params![
-                summary,
-                action_items_json,
-                Utc::now().to_rfc3339(),
-                recording_id
-            ],
+            params![summary, action_items_json, now.to_rfc3339(), recording_id],
         )?;
+
+        let recording = self
+            .get_recording(recording_id)?
+            .ok_or_else(|| anyhow::anyhow!("Recording not found: {}", recording_id))?;
+        let mut artifact = self
+            .get_meeting_artifact(recording_id)?
+            .unwrap_or(MeetingArtifactRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                recording_id: recording_id.to_string(),
+                title: Some(recording.title.clone()),
+                summary: None,
+                action_items: Vec::new(),
+                decisions: Vec::new(),
+                deadlines: Vec::new(),
+                template_id: recording.meeting_template_id.clone(),
+                chat_messages: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            });
+        artifact.title = artifact.title.or(Some(recording.title));
+        artifact.summary = summary.map(|value| value.to_string());
+        artifact.action_items = action_items.to_vec();
+        artifact.template_id = recording.meeting_template_id;
+        artifact.updated_at = now;
+        self.save_meeting_artifact(&artifact)?;
+        Ok(())
+    }
+
+    pub fn update_recording_meeting_template(
+        &mut self,
+        recording_id: &str,
+        meeting_template_id: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now();
+        self.conn.execute(
+            "UPDATE recordings
+             SET meeting_template_id = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![meeting_template_id, now.to_rfc3339(), recording_id],
+        )?;
+
+        if let Some(mut artifact) = self.get_meeting_artifact(recording_id)? {
+            artifact.template_id = meeting_template_id.map(|value| value.to_string());
+            artifact.updated_at = now;
+            self.save_meeting_artifact(&artifact)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn update_recording_meeting_chat(
+        &mut self,
+        recording_id: &str,
+        messages: &[crate::store::MeetingChatMessageRecord],
+    ) -> Result<()> {
+        let now = Utc::now();
+        let recording = self
+            .get_recording(recording_id)?
+            .ok_or_else(|| anyhow::anyhow!("Recording not found: {}", recording_id))?;
+        let mut artifact = self
+            .get_meeting_artifact(recording_id)?
+            .unwrap_or(MeetingArtifactRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                recording_id: recording_id.to_string(),
+                title: Some(recording.title.clone()),
+                summary: recording.summary,
+                action_items: recording.action_items.unwrap_or_default(),
+                decisions: Vec::new(),
+                deadlines: Vec::new(),
+                template_id: recording.meeting_template_id,
+                chat_messages: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            });
+        artifact.chat_messages = messages.to_vec();
+        artifact.updated_at = now;
+        self.save_meeting_artifact(&artifact)?;
         Ok(())
     }
 
@@ -2553,6 +2635,7 @@ mod tests {
             decisions: vec!["Delay referral program to Q2".to_string()],
             deadlines: vec!["2026-03-10".to_string()],
             template_id: Some("exec-update".to_string()),
+            chat_messages: Vec::new(),
             created_at: now,
             updated_at: now,
         }
@@ -2915,6 +2998,47 @@ mod tests {
             ])
         );
         assert_eq!(fetched.meeting_template_id.as_deref(), Some("exec-update"));
+    }
+
+    #[test]
+    fn test_update_recording_analysis_updates_meeting_artifact_values() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("r1", "inbox");
+        recording.summary = Some("Legacy summary".to_string());
+        recording.action_items = Some(vec!["Legacy action".to_string()]);
+        db.create_recording(&recording).unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact()).unwrap();
+
+        db.update_recording_analysis(
+            "r1",
+            Some("Edited summary"),
+            &["Edited follow-up".to_string()],
+        )
+        .unwrap();
+
+        let fetched = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(fetched.summary.as_deref(), Some("Edited summary"));
+        assert_eq!(fetched.action_items, Some(vec!["Edited follow-up".to_string()]));
+
+        let artifact = db.get_meeting_artifact("r1").unwrap().unwrap();
+        assert_eq!(artifact.summary.as_deref(), Some("Edited summary"));
+        assert_eq!(artifact.action_items, vec!["Edited follow-up".to_string()]);
+    }
+
+    #[test]
+    fn test_update_recording_meeting_template_updates_meeting_artifact_values() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact()).unwrap();
+
+        db.update_recording_meeting_template("r1", Some("standup"))
+            .unwrap();
+
+        let fetched = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(fetched.meeting_template_id.as_deref(), Some("standup"));
+
+        let artifact = db.get_meeting_artifact("r1").unwrap().unwrap();
+        assert_eq!(artifact.template_id.as_deref(), Some("standup"));
     }
 
     #[test]

@@ -139,6 +139,7 @@ pub struct DictationHistoryDetails {
     pub context_preview: Option<String>,
     pub context_app_name: Option<String>,
     pub app_target: Option<String>,
+    pub activation_matcher: Option<String>,
     pub command_applied: Option<String>,
     pub prompt_source: Option<String>,
     pub prompt_preview: Option<String>,

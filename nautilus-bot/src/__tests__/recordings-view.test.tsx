@@ -10,6 +10,13 @@ const mocks = vi.hoisted(() => ({
   getTranscript: vi.fn(),
   getRecordingWaveform: vi.fn(async () => []),
   getSpeakers: vi.fn(async () => []),
+  getMeetingChatMessages: vi.fn(),
+  updateMeetingChatMessages: vi.fn(),
+  updateRecordingNotes: vi.fn(),
+  updateRecordingAnalysis: vi.fn(),
+  updateRecordingTemplate: vi.fn(),
+  summarizeRecordingGrounded: vi.fn(),
+  extractActionItemsGrounded: vi.fn(),
   recordings: [
     {
       id: "r1",
@@ -72,7 +79,44 @@ vi.mock("@/components/waveform-visualizer", () => ({
 }));
 
 vi.mock("@/components/ai-analysis-panel", () => ({
-  AiAnalysisPanel: () => null,
+  AiAnalysisPanel: (props: any) => (
+    <div>
+      <button
+        type="button"
+        onClick={() =>
+          props.onChatMessagesChange?.([
+            {
+              id: "m1",
+              role: "user",
+              content: "What slipped?",
+              templateId: null,
+              citations: [],
+              createdAt: "2026-03-06T12:00:00Z",
+            },
+            {
+              id: "m2",
+              role: "assistant",
+              content: "Launch review slipped to Monday.",
+              templateId: null,
+              citations: [
+                {
+                  text: "Let's move launch review to Monday",
+                  startTime: 2,
+                  endTime: 4,
+                  recordingId: "r1",
+                  certainty: 0.94,
+                },
+              ],
+              createdAt: "2026-03-06T12:01:00Z",
+            },
+          ])
+        }
+      >
+        Push meeting chat
+      </button>
+      <div>{props.chatMessages?.length ?? 0} chat messages</div>
+    </div>
+  ),
 }));
 
 vi.mock("@/lib/tauri", () => ({
@@ -88,9 +132,15 @@ vi.mock("@/lib/tauri", () => ({
   retryMeetingAutoName: vi.fn(),
   setRecordingSourceType: vi.fn(),
   isDiarizationModelAvailable: vi.fn(async () => false),
+  getMeetingChatMessages: mocks.getMeetingChatMessages,
+  updateMeetingChatMessages: mocks.updateMeetingChatMessages,
   updateTranscriptSegment: vi.fn(),
   deleteTranscriptSegments: vi.fn(),
-  updateRecordingNotes: vi.fn(),
+  updateRecordingNotes: mocks.updateRecordingNotes,
+  updateRecordingAnalysis: mocks.updateRecordingAnalysis,
+  updateRecordingTemplate: mocks.updateRecordingTemplate,
+  summarizeRecordingGrounded: mocks.summarizeRecordingGrounded,
+  extractActionItemsGrounded: mocks.extractActionItemsGrounded,
 }));
 
 describe("RecordingsView", () => {
@@ -114,6 +164,29 @@ describe("RecordingsView", () => {
       language: "en",
       confidence: 0.9,
       model: "distil-whisper",
+    });
+    mocks.getMeetingChatMessages.mockResolvedValue([]);
+    mocks.updateMeetingChatMessages.mockResolvedValue(undefined);
+    mocks.updateRecordingNotes.mockResolvedValue(undefined);
+    mocks.updateRecordingAnalysis.mockResolvedValue(undefined);
+    mocks.updateRecordingTemplate.mockResolvedValue(undefined);
+    mocks.summarizeRecordingGrounded.mockResolvedValue({
+      summary: "Fresh grounded summary",
+      citations: [],
+      model: "test-model",
+      processingTimeMs: 1200,
+    });
+    mocks.extractActionItemsGrounded.mockResolvedValue({
+      items: [
+        {
+          task: "Ship launch checklist",
+          assignee: "Jon",
+          deadline: "Friday",
+          citations: [],
+        },
+      ],
+      model: "test-model",
+      processingTimeMs: 900,
     });
   });
 
@@ -168,6 +241,164 @@ describe("RecordingsView", () => {
     await waitFor(() => {
       expect(screen.getByText("Canonical meeting summary")).toBeInTheDocument();
       expect(screen.getByText("Ship launch checklist")).toBeInTheDocument();
+    });
+  });
+
+  it("persists edited summary and action item blocks from the notes tab", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Meeting summary");
+
+    fireEvent.change(screen.getByLabelText("Meeting summary"), {
+      target: { value: "User-edited recap" },
+    });
+    fireEvent.change(screen.getByLabelText("Meeting action items"), {
+      target: { value: "Follow up with design\nShip release notes" },
+    });
+
+    await waitFor(() => {
+      expect(mocks.updateRecordingAnalysis).toHaveBeenCalledWith(
+        "r1",
+        "User-edited recap",
+        ["Follow up with design", "Ship release notes"]
+      );
+    });
+  });
+
+  it("regenerates summary and action items into editable meeting blocks", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Meeting summary");
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Summary" }));
+
+    await waitFor(() => {
+      expect(mocks.summarizeRecordingGrounded).toHaveBeenCalledWith("r1");
+    });
+    expect(screen.getByDisplayValue("Fresh grounded summary")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Action Items" }));
+
+    await waitFor(() => {
+      expect(mocks.extractActionItemsGrounded).toHaveBeenCalledWith("r1");
+    });
+    expect(
+      screen.getByDisplayValue("Ship launch checklist (Owner: Jon · Due: Friday)")
+    ).toBeInTheDocument();
+  });
+
+  it("persists template changes and can apply the matching notes outline", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByRole("group", { name: "Meeting notes" });
+
+    fireEvent.change(screen.getByLabelText("Format"), {
+      target: { value: "standup" },
+    });
+
+    await waitFor(() => {
+      expect(mocks.updateRecordingTemplate).toHaveBeenCalledWith("r1", "standup");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply Outline" }));
+
+    await waitFor(() => {
+      expect(mocks.updateRecordingNotes).toHaveBeenCalledWith(
+        "r1",
+        "Done\n- \n\nPlanned next\n- \n\nBlockers\n- \n\nOwners\n- "
+      );
+    });
+    expect(screen.getByLabelText("Done notes")).toHaveValue("");
+    expect(screen.getByLabelText("Blockers notes")).toHaveValue("");
+  });
+
+  it("persists meeting note section edits through the notes autosave flow", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Goals notes");
+
+    fireEvent.change(screen.getByLabelText("Goals notes"), {
+      target: { value: "Align launch scope and decide owners" },
+    });
+
+    await waitFor(() => {
+      expect(mocks.updateRecordingNotes).toHaveBeenCalledWith(
+        "r1",
+        "Goals\nAlign launch scope and decide owners"
+      );
+    });
+  });
+
+  it("adds and removes custom meeting note sections", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByRole("button", { name: "Add Section" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Section" }));
+
+    const customTitleInput = screen.getByDisplayValue("Custom section");
+    fireEvent.change(customTitleInput, {
+      target: { value: "Risks" },
+    });
+    fireEvent.change(screen.getByLabelText("Risks notes"), {
+      target: { value: "Legal review may slip next week" },
+    });
+
+    await waitFor(() => {
+      expect(mocks.updateRecordingNotes).toHaveBeenLastCalledWith(
+        "r1",
+        "Risks\nLegal review may slip next week"
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove section Risks" }));
+
+    await waitFor(() => {
+      expect(screen.queryByDisplayValue("Risks")).not.toBeInTheDocument();
+    });
+  });
+
+  it("persists meeting chat history for the selected recording", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByRole("tab", { name: "Ask" });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Push meeting chat", hidden: true })
+    );
+
+    await waitFor(() => {
+      expect(mocks.updateMeetingChatMessages).toHaveBeenCalledWith("r1", [
+        {
+          id: "m1",
+          role: "user",
+          content: "What slipped?",
+          templateId: null,
+          citations: [],
+          createdAt: "2026-03-06T12:00:00Z",
+        },
+        {
+          id: "m2",
+          role: "assistant",
+          content: "Launch review slipped to Monday.",
+          templateId: null,
+          citations: [
+            {
+              text: "Let's move launch review to Monday",
+              startTime: 2,
+              endTime: 4,
+              recordingId: "r1",
+              certainty: 0.94,
+            },
+          ],
+          createdAt: "2026-03-06T12:01:00Z",
+        },
+      ]);
     });
   });
 });

@@ -28,7 +28,8 @@ use crate::events::{
     RecordingStatusChangedEvent,
 };
 use crate::store::{
-    InsertionActionRecord, MeetingArtifactRecord, RuntimeEventRecord, TranscriptArtifactRecord,
+    InsertionActionRecord, MeetingArtifactRecord, MeetingChatCitationRecord,
+    MeetingChatMessageRecord, RuntimeEventRecord, TranscriptArtifactRecord,
 };
 use anyhow::Result;
 use commands::backup::*;
@@ -235,6 +236,7 @@ struct DictationOverlayState {
     context_source: Option<String>,
     insertion_mode: Option<String>,
     app_target: Option<String>,
+    activation_matcher: Option<String>,
     dictation_provider: Option<String>,
     dictation_model_id: Option<String>,
 }
@@ -255,6 +257,7 @@ impl Default for DictationOverlayState {
             context_source: None,
             insertion_mode: None,
             app_target: None,
+            activation_matcher: None,
             dictation_provider: None,
             dictation_model_id: None,
         }
@@ -2083,6 +2086,7 @@ async fn stop_recording(
                                         decisions: Vec::new(),
                                         deadlines,
                                         template_id: template_for_analysis.clone(),
+                                        chat_messages: Vec::new(),
                                         created_at: now,
                                         updated_at: now,
                                     };
@@ -2792,7 +2796,13 @@ async fn summarize_recording_grounded_internal(
     recording_id: &str,
     model: Option<&str>,
 ) -> Result<GroundedSummaryResult, String> {
-    let summary_query = "Provide a concise but complete meeting summary with key discussion points, decisions, and concrete outcomes.";
+    let template_id = {
+        let db = state.db.lock().await;
+        db.get_recording(recording_id)
+            .map_err(|e| e.to_string())?
+            .and_then(|recording| recording.meeting_template_id)
+    };
+    let summary_query = meeting_template_summary_query(template_id.as_deref());
     let result =
         run_grounded_response_query_for_recording(state, recording_id, summary_query, model)
             .await?;
@@ -2803,6 +2813,29 @@ async fn summarize_recording_grounded_internal(
         model: result.model,
         processing_time_ms: result.processing_time_ms,
     })
+}
+
+fn meeting_template_summary_query(template_id: Option<&str>) -> &'static str {
+    match template_id {
+        Some("standup") => {
+            "Summarize this standup with work completed, work planned next, blockers, and owners where stated."
+        }
+        Some("1on1") => {
+            "Summarize this 1:1 with discussion topics, feedback exchanged, goals, commitments, and unresolved concerns."
+        }
+        Some("sales") => {
+            "Summarize this sales call with prospect context, pain points, objections, buying signals, next steps, and deal status."
+        }
+        Some("interview") => {
+            "Summarize this interview with candidate strengths, weaknesses, notable answers, open concerns, and hiring recommendation."
+        }
+        Some("brainstorm") => {
+            "Summarize this brainstorm with ideas generated, strongest candidates, decisions made, and follow-up experiments or tasks."
+        }
+        _ => {
+            "Provide a concise but complete meeting summary with key discussion points, decisions, and concrete outcomes."
+        }
+    }
 }
 
 async fn extract_action_items_grounded_internal(
@@ -3800,6 +3833,166 @@ async fn update_recording_notes(
 
 #[tauri::command]
 #[allow(non_snake_case)]
+async fn update_recording_analysis(
+    state: tauri::State<'_, AppState>,
+    recordingId: String,
+    summary: Option<String>,
+    actionItems: Vec<String>,
+) -> Result<(), String> {
+    let normalized_summary = summary.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    let normalized_action_items: Vec<String> = actionItems
+        .into_iter()
+        .filter_map(|item| {
+            let trimmed = item.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        })
+        .collect();
+
+    let mut db = state.db.lock().await;
+    db.update_recording_analysis(
+        &recordingId,
+        normalized_summary.as_deref(),
+        &normalized_action_items,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let details = serde_json::json!({
+        "recording_id": &recordingId,
+        "summary_length": normalized_summary.as_ref().map(|value| value.len()).unwrap_or(0),
+        "action_items_count": normalized_action_items.len(),
+    });
+    if let Err(e) = db.log_audit_event("recording_analysis_updated", Some(details), "info") {
+        tracing::warn!("Failed to log audit event: {}", e);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn update_recording_template(
+    state: tauri::State<'_, AppState>,
+    recordingId: String,
+    meetingTemplateId: Option<String>,
+) -> Result<(), String> {
+    let normalized_template = meetingTemplateId.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+
+    {
+        let mut db = state.db.lock().await;
+        db.update_recording_meeting_template(&recordingId, normalized_template.as_deref())
+            .map_err(|e| e.to_string())?;
+
+        let details = serde_json::json!({
+            "recording_id": &recordingId,
+            "meeting_template_id": normalized_template.clone(),
+        });
+        if let Err(e) = db.log_audit_event("recording_template_updated", Some(details), "info") {
+            tracing::warn!("Failed to log audit event: {}", e);
+        }
+    }
+
+    if let Ok(mut templates) = state.recording_templates.lock() {
+        match normalized_template {
+            Some(template_id) => {
+                templates.insert(recordingId, template_id);
+            }
+            None => {
+                templates.remove(&recordingId);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn get_meeting_chat_messages(
+    state: tauri::State<'_, AppState>,
+    recordingId: String,
+) -> Result<Vec<MeetingChatMessageRecord>, String> {
+    let db = state.db.lock().await;
+    Ok(db
+        .get_meeting_artifact(&recordingId)
+        .map_err(|e| e.to_string())?
+        .map(|artifact| artifact.chat_messages)
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn update_meeting_chat_messages(
+    state: tauri::State<'_, AppState>,
+    recordingId: String,
+    messages: Vec<MeetingChatMessageRecord>,
+) -> Result<(), String> {
+    let normalized_messages = messages
+        .into_iter()
+        .map(|message| MeetingChatMessageRecord {
+            id: if message.id.trim().is_empty() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                message.id.trim().to_string()
+            },
+            role: if message.role.trim().eq_ignore_ascii_case("assistant") {
+                "assistant".to_string()
+            } else {
+                "user".to_string()
+            },
+            content: message.content.trim().to_string(),
+            template_id: message
+                .template_id
+                .and_then(|value| (!value.trim().is_empty()).then(|| value.trim().to_string())),
+            citations: message
+                .citations
+                .into_iter()
+                .filter_map(|citation| {
+                    let text = citation.text.trim().to_string();
+                    if text.is_empty() {
+                        return None;
+                    }
+                    Some(MeetingChatCitationRecord {
+                        text,
+                        start_time: citation.start_time,
+                        end_time: citation.end_time,
+                        recording_id: citation.recording_id.and_then(|value| {
+                            (!value.trim().is_empty()).then(|| value.trim().to_string())
+                        }),
+                        certainty: citation.certainty,
+                    })
+                })
+                .collect(),
+            created_at: message.created_at,
+        })
+        .filter(|message| !message.content.is_empty())
+        .collect::<Vec<_>>();
+
+    let mut db = state.db.lock().await;
+    db.update_recording_meeting_chat(&recordingId, &normalized_messages)
+        .map_err(|e| e.to_string())?;
+    let _ = db.log_audit_event(
+        "meeting_chat_updated",
+        Some(serde_json::json!({
+            "recording_id": &recordingId,
+            "message_count": normalized_messages.len(),
+        })),
+        "info",
+    );
+    Ok(())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
 async fn update_transcript_segment(
     state: tauri::State<'_, AppState>,
     recordingId: String,
@@ -4289,6 +4482,10 @@ fn dictation_history_details_from_audit(
             .get("app_target")
             .and_then(|value| value.as_str())
             .map(str::to_string),
+        activation_matcher: details
+            .get("activation_matcher")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
         command_applied: details
             .get("command_applied")
             .and_then(|value| value.as_str())
@@ -4362,6 +4559,7 @@ fn dictation_history_details_is_empty(details: &models::DictationHistoryDetails)
         && details.context_preview.is_none()
         && details.context_app_name.is_none()
         && details.app_target.is_none()
+        && details.activation_matcher.is_none()
         && details.command_applied.is_none()
         && details.prompt_source.is_none()
         && details.prompt_preview.is_none()
@@ -5125,13 +5323,25 @@ async fn start_dictation_session(
         tauri::async_runtime::spawn_blocking(get_frontmost_app_bundle_id)
             .await
             .unwrap_or(None);
-    if let Some(mode) = settings_snapshot
+    let context_target_browser_url =
+        tauri::async_runtime::spawn_blocking(get_frontmost_browser_url)
+            .await
+            .unwrap_or(None);
+    let mut resolved_activation_matcher = None;
+    if let Some((mode, matcher)) = settings_snapshot
         .transcription
         .dictation_custom_modes
         .iter()
-        .find(|mode| custom_mode_matches_frontmost_app(mode, context_target_app.as_deref()))
-        .cloned()
+        .find_map(|mode| {
+            custom_mode_matches_context(
+                mode,
+                context_target_app.as_deref(),
+                context_target_browser_url.as_deref(),
+            )
+            .map(|matcher| (mode.clone(), matcher))
+        })
     {
+        resolved_activation_matcher = Some(matcher);
         apply_runtime_dictation_custom_mode(&mut settings_snapshot, &mode);
         if source != "manual" {
             options.save_to_inbox = settings_snapshot.transcription.dictation_save_to_inbox;
@@ -5192,6 +5402,7 @@ async fn start_dictation_session(
         app,
         &settings_snapshot,
         context_target_app.as_deref(),
+        resolved_activation_matcher.as_deref(),
         Some(asr_provider_to_settings_value(dictation_selection.0)),
         Some(dictation_selection.1.as_str()),
     );
@@ -6423,6 +6634,13 @@ async fn stop_dictation_session_for_session(
             .await
             .unwrap_or(None)
     };
+    let resolved_activation_matcher = {
+        state
+            .dictation_overlay_state
+            .lock()
+            .ok()
+            .and_then(|overlay_state| overlay_state.activation_matcher.clone())
+    };
 
     let mut command_applied: Option<String> = None;
     if command_mode_enabled {
@@ -6668,6 +6886,7 @@ async fn stop_dictation_session_for_session(
         command_applied.as_deref(),
         snippet_applied_count,
         app_target.as_deref(),
+        resolved_activation_matcher.as_deref(),
         Some(&dictation_options.context_source),
         dictation_options
             .captured_context_text
@@ -6918,6 +7137,7 @@ async fn stop_dictation_session_for_session(
         "dictation_model_id": dictation_model_id,
         "recording_id": persisted_recording_id,
         "dictation_mode_preset": settings_snapshot.transcription.dictation_mode_preset,
+        "activation_matcher": resolved_activation_matcher,
         "context_source": dictation_options.context_source,
         "context_app_name": dictation_options.context_app_name,
         "context_preview": truncate_for_audit_preview(dictation_options.captured_context_text.as_deref(), 280),
@@ -7226,6 +7446,7 @@ fn emit_dictation_state(
     let mut context_source = None;
     let mut insertion_mode = None;
     let mut app_target = None;
+    let mut activation_matcher = None;
     let mut dictation_provider = None;
     let mut dictation_model_id = None;
 
@@ -7244,6 +7465,7 @@ fn emit_dictation_state(
             state.context_source = None;
             state.insertion_mode = None;
             state.app_target = None;
+            state.activation_matcher = None;
             state.dictation_provider = None;
             state.dictation_model_id = None;
         }
@@ -7253,6 +7475,7 @@ fn emit_dictation_state(
         context_source = state.context_source.clone();
         insertion_mode = state.insertion_mode.clone();
         app_target = state.app_target.clone();
+        activation_matcher = state.activation_matcher.clone();
         dictation_provider = state.dictation_provider.clone();
         dictation_model_id = state.dictation_model_id.clone();
     }
@@ -7271,6 +7494,7 @@ fn emit_dictation_state(
         context_source,
         insertion_mode,
         app_target,
+        activation_matcher,
         dictation_provider,
         dictation_model_id,
     };
@@ -8269,6 +8493,47 @@ fn get_frontmost_window_title() -> Option<String> {
     None
 }
 
+#[cfg(target_os = "macos")]
+fn get_frontmost_browser_url() -> Option<String> {
+    let script = r#"
+tell application "System Events"
+    set frontApp to name of first application process whose frontmost is true
+end tell
+
+if frontApp is "Safari" then
+    tell application "Safari" to return URL of front document
+else if frontApp is "Google Chrome" then
+    tell application "Google Chrome" to return URL of active tab of front window
+else if frontApp is "Arc" then
+    tell application "Arc" to return URL of active tab of front window
+else if frontApp is "Brave Browser" then
+    tell application "Brave Browser" to return URL of active tab of front window
+else if frontApp is "Microsoft Edge" then
+    tell application "Microsoft Edge" to return URL of active tab of front window
+else
+    return ""
+end if
+"#;
+
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() { None } else { Some(url) }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_frontmost_browser_url() -> Option<String> {
+    None
+}
+
 fn normalize_sentence_for_compare(sentence: &str) -> String {
     sentence
         .trim()
@@ -8632,6 +8897,7 @@ fn build_dictation_text_ready_payload(
     command_applied: Option<&str>,
     snippet_applied_count: usize,
     app_target: Option<&str>,
+    activation_matcher: Option<&str>,
     context_source: Option<&str>,
     context_chars: Option<usize>,
 ) -> DictationTextReadyEvent {
@@ -8667,6 +8933,7 @@ fn build_dictation_text_ready_payload(
         command_applied: command_applied.map(str::to_string),
         snippet_applied_count,
         app_target: app_target.map(str::to_string),
+        activation_matcher: activation_matcher.map(str::to_string),
         context_source: context_source.map(str::to_string),
         context_chars,
     }
@@ -9838,6 +10105,10 @@ pub fn run() {
             get_recording,
             get_transcript,
             update_recording_notes,
+            update_recording_analysis,
+            update_recording_template,
+            get_meeting_chat_messages,
+            update_meeting_chat_messages,
             open_recording_audio,
             get_waveform_data,
             get_recording_waveform,
@@ -10515,6 +10786,53 @@ mod tests {
     }
 
     #[test]
+    fn extract_host_from_url_handles_common_variants() {
+        assert_eq!(
+            extract_host_from_url("https://docs.google.com/document/d/123"),
+            Some("docs.google.com".to_string())
+        );
+        assert_eq!(
+            extract_host_from_url("http://www.linear.app/issue"),
+            Some("linear.app".to_string())
+        );
+        assert_eq!(extract_host_from_url(""), None);
+    }
+
+    #[test]
+    fn custom_mode_matches_domain_before_app() {
+        let mode = settings::DictationCustomMode {
+            id: "custom-1".to_string(),
+            name: "Gmail Replies".to_string(),
+            description: String::new(),
+            profile: "normal_speed".to_string(),
+            insertion_mode: "paste".to_string(),
+            context_source: "selected_text".to_string(),
+            save_to_inbox: false,
+            copy_to_clipboard: true,
+            command_mode_enabled: true,
+            dictation_provider: None,
+            dictation_model_id: None,
+            ai_provider: None,
+            ai_model_id: None,
+            activation_app_matcher: Some("chrome".to_string()),
+            activation_domain_matcher: Some("gmail.com".to_string()),
+        };
+
+        assert_eq!(
+            custom_mode_matches_context(
+                &mode,
+                Some("Google Chrome"),
+                Some("https://mail.gmail.com/mail/u/0/#inbox")
+            ),
+            Some("gmail.com".to_string())
+        );
+        assert_eq!(
+            custom_mode_matches_context(&mode, Some("Google Chrome"), None),
+            Some("chrome".to_string())
+        );
+    }
+
+    #[test]
     fn windows_sendkeys_script_is_built_without_activation_by_default() {
         let script = build_windows_sendkeys_script("^v", None);
         assert!(script.contains("System.Windows.Forms"));
@@ -10637,6 +10955,7 @@ mod tests {
             Some("newline"),
             1,
             Some("Notes"),
+            Some("slack"),
             Some("clipboard"),
             Some(42),
         );
@@ -10650,6 +10969,7 @@ mod tests {
             "commandApplied",
             "snippetAppliedCount",
             "appTarget",
+            "activationMatcher",
             "contextSource",
             "contextChars",
             "requestedProvider",
@@ -10674,6 +10994,7 @@ mod tests {
             "context_preview": "legacy context",
             "context_app_name": "Notes",
             "app_target": "Legacy Notes",
+            "activation_matcher": "slack",
             "command_applied": "legacy_command",
             "prompt_source": "default_dictation_format",
             "prompt_preview": "legacy prompt",
@@ -10725,6 +11046,7 @@ mod tests {
 
         assert_eq!(details.mode_preset.as_deref(), Some("brain-dump"));
         assert_eq!(details.context_preview.as_deref(), Some("legacy context"));
+        assert_eq!(details.activation_matcher.as_deref(), Some("slack"));
         assert_eq!(
             details.prompt_source.as_deref(),
             Some("default_dictation_format")
@@ -10990,21 +11312,68 @@ fn normalize_dictation_custom_mode(
     mode.ai_model_id = normalize_optional_trimmed(mode.ai_model_id.clone())
         .or_else(|| fallback_ai_model.map(str::to_string));
     mode.activation_app_matcher = normalize_optional_trimmed(mode.activation_app_matcher.clone());
+    mode.activation_domain_matcher =
+        normalize_optional_trimmed(mode.activation_domain_matcher.clone());
 }
 
-fn custom_mode_matches_frontmost_app(
+fn extract_host_from_url(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let without_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let host = without_scheme
+        .split('/')
+        .next()
+        .unwrap_or(without_scheme)
+        .split('@')
+        .next_back()
+        .unwrap_or(without_scheme)
+        .split(':')
+        .next()
+        .unwrap_or(without_scheme)
+        .trim()
+        .trim_start_matches("www.");
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+fn custom_mode_matches_context(
     mode: &settings::DictationCustomMode,
     app_name: Option<&str>,
-) -> bool {
-    let Some(matcher) = mode.activation_app_matcher.as_deref() else {
-        return false;
-    };
-    let Some(active_app) = app_name.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-    active_app
-        .to_ascii_lowercase()
-        .contains(&matcher.trim().to_ascii_lowercase())
+    browser_url: Option<&str>,
+) -> Option<String> {
+    if let Some(matcher) = mode.activation_domain_matcher.as_deref() {
+        let normalized_matcher = matcher.trim().trim_start_matches("www.").to_ascii_lowercase();
+        if !normalized_matcher.is_empty() {
+            if let Some(active_domain) = browser_url.and_then(extract_host_from_url) {
+                if active_domain == normalized_matcher
+                    || active_domain.ends_with(&format!(".{}", normalized_matcher))
+                {
+                    return Some(matcher.trim().to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(matcher) = mode.activation_app_matcher.as_deref() {
+        if let Some(active_app) = app_name.map(str::trim).filter(|value| !value.is_empty()) {
+            if active_app
+                .to_ascii_lowercase()
+                .contains(&matcher.trim().to_ascii_lowercase())
+            {
+                return Some(matcher.trim().to_string());
+            }
+        }
+    }
+
+    None
 }
 
 fn dictation_mode_label(
@@ -11033,6 +11402,7 @@ fn sync_dictation_overlay_runtime_metadata(
     app: &AppHandle,
     settings: &settings::Settings,
     app_target: Option<&str>,
+    activation_matcher: Option<&str>,
     dictation_provider: Option<&str>,
     dictation_model_id: Option<&str>,
 ) {
@@ -11053,6 +11423,7 @@ fn sync_dictation_overlay_runtime_metadata(
         state.context_source = Some(settings.transcription.dictation_context_source.clone());
         state.insertion_mode = Some(settings.transcription.dictation_insertion_mode.clone());
         state.app_target = app_target.map(str::to_string);
+        state.activation_matcher = activation_matcher.map(str::to_string);
         state.dictation_provider = dictation_provider.map(str::to_string);
         state.dictation_model_id = dictation_model_id.map(str::to_string);
     }

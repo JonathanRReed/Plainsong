@@ -191,6 +191,9 @@ describe("DictationView modes", () => {
 
     const nameInput = await screen.findByLabelText("Mode name");
     fireEvent.change(nameInput, { target: { value: "Sales Follow-up" } });
+    fireEvent.change(screen.getByLabelText("Auto-activate for domain"), {
+      target: { value: "gmail.com" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /save current setup/i }));
 
     await waitFor(() => {
@@ -203,6 +206,9 @@ describe("DictationView modes", () => {
     expect(latestSettings.transcription.dictationSelectedCustomModeId).toBeTruthy();
     expect(latestSettings.transcription.dictationCustomModes).toHaveLength(1);
     expect(latestSettings.transcription.dictationCustomModes[0].name).toBe("Sales Follow-up");
+    expect(latestSettings.transcription.dictationCustomModes[0].activationDomainMatcher).toBe(
+      "gmail.com"
+    );
   });
 
   it("refreshes dictation history when a dictation result event arrives", async () => {
@@ -224,5 +230,27 @@ describe("DictationView modes", () => {
     await waitFor(() => {
       expect(tauriMocks.refetchDictationHistory).toHaveBeenCalled();
     });
+  });
+
+  it("surfaces auto-activated app matcher details in the latest result", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("Modes");
+    const handler = tauriMocks.eventListeners.get("dictation-text-ready");
+    expect(handler).toBeTruthy();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          text: "Reply sent",
+          actualProvider: "distil_whisper",
+          appTarget: "Slack",
+          activationMatcher: "slack",
+        },
+      });
+    });
+
+    expect(await screen.findByText("Auto mode: slack")).toBeInTheDocument();
+    expect(screen.getByText("Target app: Slack")).toBeInTheDocument();
   });
 });

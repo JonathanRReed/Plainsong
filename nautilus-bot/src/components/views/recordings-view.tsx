@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { useRecordings } from "@/hooks/use-recordings";
 import { useRecording } from "@/hooks/use-recording";
 import { useRecordingDetail } from "@/hooks/use-recording-detail";
@@ -26,8 +27,20 @@ import {
   updateTranscriptSegment,
   deleteTranscriptSegments,
   updateRecordingNotes,
+  updateRecordingAnalysis,
+  updateRecordingTemplate,
+  getMeetingChatMessages,
+  updateMeetingChatMessages,
+  summarizeRecordingGrounded,
+  extractActionItemsGrounded,
 } from "@/lib/tauri";
+import type { MeetingChatMessage } from "@/lib/tauri";
 import type { Recording } from "@/types";
+import {
+  buildMeetingTemplateOutline,
+  getMeetingTemplateOption,
+  MEETING_TEMPLATES,
+} from "@/lib/meeting-templates";
 import { listen } from "@tauri-apps/api/event";
 import {
   AlertCircle,
@@ -39,7 +52,9 @@ import {
   Loader2,
   Mic2,
   MoreHorizontal,
+  Plus,
   Play,
+  RefreshCw,
   Search,
   Square,
   Trash2,
@@ -77,6 +92,188 @@ const MEETING_ASK_TEMPLATES: AnalysisTemplate[] = [
   },
 ];
 
+function normalizeActionItems(items: string[]): string[] {
+  return items
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function actionItemsToText(items: string[] | null | undefined): string {
+  return normalizeActionItems(items ?? []).join("\n");
+}
+
+function actionItemsFromText(value: string): string[] {
+  return normalizeActionItems(value.split("\n"));
+}
+
+function formatGroundedActionItem(item: {
+  task: string;
+  assignee?: string | null;
+  deadline?: string | null;
+}): string {
+  const details = [
+    item.assignee?.trim() ? `Owner: ${item.assignee.trim()}` : null,
+    item.deadline?.trim() ? `Due: ${item.deadline.trim()}` : null,
+  ].filter(Boolean);
+
+  if (details.length === 0) {
+    return item.task.trim();
+  }
+
+  return `${item.task.trim()} (${details.join(" · ")})`;
+}
+
+type MeetingNoteSection = {
+  title: string;
+  body: string;
+  isTemplateSection: boolean;
+  hasExplicitPlaceholder: boolean;
+};
+
+function normalizeMeetingSectionTitle(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function looksLikeMeetingSectionHeading(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (/^[-*•]\s/.test(trimmed) || /^\d+[.)]\s/.test(trimmed)) {
+    return false;
+  }
+  if (trimmed.length > 72) {
+    return false;
+  }
+  if (/[.!?]$/.test(trimmed)) {
+    return false;
+  }
+  return trimmed.split(/\s+/).length <= 10;
+}
+
+function serializeMeetingNoteSections(sections: MeetingNoteSection[]): string {
+  return sections
+    .flatMap((section) => {
+      const title = section.title.trim();
+      if (!title) {
+        return [];
+      }
+
+      const body = section.body.trimEnd();
+      if (!body && !section.hasExplicitPlaceholder) {
+        return [];
+      }
+
+      return [body ? `${title}\n${body}` : `${title}\n- `];
+    })
+    .join("\n\n");
+}
+
+function parseMeetingNoteSections(
+  notes: string,
+  templateId: string | null | undefined
+): MeetingNoteSection[] {
+  const template = getMeetingTemplateOption(templateId);
+  const templateTitles = new Set(
+    template.notesOutline.map((title) => normalizeMeetingSectionTitle(title))
+  );
+  const parsedSections: MeetingNoteSection[] = [];
+  const generalBlocks: string[] = [];
+
+  for (const block of notes.split(/\n{2,}/)) {
+    const trimmedBlock = block.trim();
+    if (!trimmedBlock) {
+      continue;
+    }
+
+    const lines = trimmedBlock.split("\n");
+    const title = lines[0]?.trim() ?? "";
+    const bodyText = lines.slice(1).join("\n").trimEnd();
+    const normalizedTitle = normalizeMeetingSectionTitle(title);
+
+    if (
+      title &&
+      (templateTitles.has(normalizedTitle) || looksLikeMeetingSectionHeading(title))
+    ) {
+      const hasExplicitPlaceholder = bodyText.trim() === "-";
+      parsedSections.push({
+        title,
+        body: hasExplicitPlaceholder ? "" : bodyText,
+        isTemplateSection: templateTitles.has(normalizedTitle),
+        hasExplicitPlaceholder,
+      });
+      continue;
+    }
+
+    generalBlocks.push(trimmedBlock);
+  }
+
+  const sections: MeetingNoteSection[] = [];
+
+  if (generalBlocks.length > 0) {
+    sections.push({
+      title: "General notes",
+      body: generalBlocks.join("\n\n"),
+      isTemplateSection: false,
+      hasExplicitPlaceholder: false,
+    });
+  }
+
+  for (const title of template.notesOutline) {
+    const normalizedTitle = normalizeMeetingSectionTitle(title);
+    const matchedSection = parsedSections.find(
+      (section) => normalizeMeetingSectionTitle(section.title) === normalizedTitle
+    );
+    sections.push(
+      matchedSection ?? {
+        title,
+        body: "",
+        isTemplateSection: true,
+        hasExplicitPlaceholder: false,
+      }
+    );
+  }
+
+  for (const section of parsedSections) {
+    if (templateTitles.has(normalizeMeetingSectionTitle(section.title))) {
+      continue;
+    }
+    sections.push({
+      ...section,
+      isTemplateSection: false,
+    });
+  }
+
+  if (sections.length > 0) {
+    return sections;
+  }
+
+  return template.notesOutline.map((title) => ({
+    title,
+    body: "",
+    isTemplateSection: true,
+    hasExplicitPlaceholder: false,
+  }));
+}
+
+function getNextMeetingSectionTitle(sections: MeetingNoteSection[]): string {
+  const baseTitle = "Custom section";
+  const usedTitles = new Set(
+    sections.map((section) => normalizeMeetingSectionTitle(section.title))
+  );
+
+  if (!usedTitles.has(normalizeMeetingSectionTitle(baseTitle))) {
+    return baseTitle;
+  }
+
+  let index = 2;
+  while (usedTitles.has(normalizeMeetingSectionTitle(`${baseTitle} ${index}`))) {
+    index += 1;
+  }
+
+  return `${baseTitle} ${index}`;
+}
+
 export function RecordingsView() {
   const { recordings, refetch } = useRecordings();
   const { startMeeting, stopMeeting, isRecording, recordingId, formattedDuration } = useRecording();
@@ -96,8 +293,18 @@ export function RecordingsView() {
   const [isStopping, setIsStopping] = useState(false);
   const [meetingNotes, setMeetingNotes] = useState("");
   const [meetingNotesTargetId, setMeetingNotesTargetId] = useState<string | null>(null);
+  const [meetingTemplateId, setMeetingTemplateId] = useState("auto");
+  const [meetingSummary, setMeetingSummary] = useState("");
+  const [meetingActionItemsText, setMeetingActionItemsText] = useState("");
+  const [meetingChatMessages, setMeetingChatMessages] = useState<MeetingChatMessage[]>([]);
+  const [isRefreshingSummary, setIsRefreshingSummary] = useState(false);
+  const [isRefreshingActionItems, setIsRefreshingActionItems] = useState(false);
   const lastRecordingState = useRef(false);
   const lastSavedMeetingNotesRef = useRef("");
+  const lastSavedMeetingTemplateRef = useRef("auto");
+  const lastSavedMeetingSummaryRef = useRef("");
+  const lastSavedMeetingActionItemsRef = useRef("[]");
+  const lastSavedMeetingChatRef = useRef("[]");
 
   // Live streaming transcript state
   type StreamChunk = { text: string; startTime: number; isPartial: boolean };
@@ -133,6 +340,11 @@ export function RecordingsView() {
     onRecordingLoaded: (recording) => {
       if (recording.id === meetingNotesTargetId) {
         lastSavedMeetingNotesRef.current = recording.meetingNotes ?? "";
+        lastSavedMeetingTemplateRef.current = recording.meetingTemplateId ?? "auto";
+        lastSavedMeetingSummaryRef.current = recording.summary ?? "";
+        lastSavedMeetingActionItemsRef.current = JSON.stringify(
+          normalizeActionItems(recording.actionItems ?? [])
+        );
       }
     },
   });
@@ -189,12 +401,152 @@ export function RecordingsView() {
   }, [meetingNotes, meetingNotesTargetId]);
 
   useEffect(() => {
+    if (!meetingNotesTargetId) {
+      return;
+    }
+
+    const normalizedTemplateId = meetingTemplateId === "auto" ? "auto" : meetingTemplateId.trim();
+    if (normalizedTemplateId === lastSavedMeetingTemplateRef.current) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void updateRecordingTemplate(
+        meetingNotesTargetId,
+        normalizedTemplateId === "auto" ? null : normalizedTemplateId
+      )
+        .then(() => {
+          lastSavedMeetingTemplateRef.current = normalizedTemplateId;
+          setSelectedRecording((current) =>
+            current?.id === meetingNotesTargetId
+              ? {
+                  ...current,
+                  meetingTemplateId:
+                    normalizedTemplateId === "auto" ? null : normalizedTemplateId,
+                }
+              : current
+          );
+        })
+        .catch((error) => {
+          console.error("Failed to update meeting template:", error);
+        });
+    }, 250);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [meetingNotesTargetId, meetingTemplateId, setSelectedRecording]);
+
+  useEffect(() => {
+    if (!meetingNotesTargetId) {
+      return;
+    }
+
+    const normalizedSummary = meetingSummary.trim();
+    const normalizedActionItems = actionItemsFromText(meetingActionItemsText);
+    const nextActionItemsKey = JSON.stringify(normalizedActionItems);
+
+    if (
+      normalizedSummary === lastSavedMeetingSummaryRef.current.trim() &&
+      nextActionItemsKey === lastSavedMeetingActionItemsRef.current
+    ) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void updateRecordingAnalysis(
+        meetingNotesTargetId,
+        normalizedSummary || null,
+        normalizedActionItems
+      )
+        .then(() => {
+          lastSavedMeetingSummaryRef.current = normalizedSummary;
+          lastSavedMeetingActionItemsRef.current = nextActionItemsKey;
+          setSelectedRecording((current) =>
+            current?.id === meetingNotesTargetId
+              ? {
+                  ...current,
+                  summary: normalizedSummary || undefined,
+                  actionItems: normalizedActionItems,
+                }
+              : current
+          );
+        })
+        .catch((error) => {
+          console.error("Failed to update meeting analysis:", error);
+        });
+    }, 350);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [meetingActionItemsText, meetingNotesTargetId, meetingSummary, setSelectedRecording]);
+
+  useEffect(() => {
+    if (!meetingNotesTargetId) {
+      return;
+    }
+
+    const nextMessagesKey = JSON.stringify(meetingChatMessages);
+    if (nextMessagesKey === lastSavedMeetingChatRef.current) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void updateMeetingChatMessages(meetingNotesTargetId, meetingChatMessages)
+        .then(() => {
+          lastSavedMeetingChatRef.current = nextMessagesKey;
+        })
+        .catch((error) => {
+          console.error("Failed to update meeting chat:", error);
+        });
+    }, 250);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [meetingChatMessages, meetingNotesTargetId]);
+
+  useEffect(() => {
     if (!isRecording && !showRecordingDetail) {
       setMeetingNotes("");
       setMeetingNotesTargetId(null);
+      setMeetingTemplateId("auto");
+      setMeetingSummary("");
+      setMeetingActionItemsText("");
+      setMeetingChatMessages([]);
       lastSavedMeetingNotesRef.current = "";
+      lastSavedMeetingTemplateRef.current = "auto";
+      lastSavedMeetingSummaryRef.current = "";
+      lastSavedMeetingActionItemsRef.current = "[]";
+      lastSavedMeetingChatRef.current = "[]";
     }
   }, [isRecording, showRecordingDetail]);
+
+  useEffect(() => {
+    if (!selectedRecording) {
+      setMeetingTemplateId("auto");
+      setMeetingSummary("");
+      setMeetingActionItemsText("");
+      setMeetingChatMessages([]);
+      lastSavedMeetingTemplateRef.current = "auto";
+      lastSavedMeetingSummaryRef.current = "";
+      lastSavedMeetingActionItemsRef.current = "[]";
+      lastSavedMeetingChatRef.current = "[]";
+      return;
+    }
+
+    const nextTemplateId = selectedRecording.meetingTemplateId ?? "auto";
+    const nextSummary = selectedRecording.summary ?? "";
+    const nextActionItemsText = actionItemsToText(selectedRecording.actionItems);
+    setMeetingTemplateId(nextTemplateId);
+    setMeetingSummary(nextSummary);
+    setMeetingActionItemsText(nextActionItemsText);
+    lastSavedMeetingTemplateRef.current = nextTemplateId;
+    lastSavedMeetingSummaryRef.current = nextSummary;
+    lastSavedMeetingActionItemsRef.current = JSON.stringify(
+      normalizeActionItems(selectedRecording.actionItems ?? [])
+    );
+  }, [
+    selectedRecording?.actionItems,
+    selectedRecording?.id,
+    selectedRecording?.meetingTemplateId,
+    selectedRecording?.summary,
+  ]);
 
   // Subscribe to live streaming transcript events while recording
   useEffect(() => {
@@ -312,11 +664,59 @@ export function RecordingsView() {
     setMeetingNotes(recording.meetingNotes ?? "");
     setMeetingNotesTargetId(recording.id);
     lastSavedMeetingNotesRef.current = recording.meetingNotes ?? "";
+    setMeetingTemplateId(recording.meetingTemplateId ?? "auto");
+    lastSavedMeetingTemplateRef.current = recording.meetingTemplateId ?? "auto";
+    setMeetingSummary(recording.summary ?? "");
+    setMeetingActionItemsText(actionItemsToText(recording.actionItems));
+    lastSavedMeetingSummaryRef.current = recording.summary ?? "";
+    lastSavedMeetingActionItemsRef.current = JSON.stringify(
+      normalizeActionItems(recording.actionItems ?? [])
+    );
+    setMeetingChatMessages([]);
+    lastSavedMeetingChatRef.current = "[]";
     setShowRecordingDetail(true);
     setSearchQuery("");
     setDiarizationMessage(null);
     setDiarizationError(null);
     void loadRecordingDetail(recording);
+    void getMeetingChatMessages(recording.id)
+      .then((messages) => {
+        setMeetingChatMessages(messages);
+        lastSavedMeetingChatRef.current = JSON.stringify(messages);
+      })
+      .catch((error) => {
+        console.error("Failed to load meeting chat:", error);
+      });
+  };
+
+  const handleApplyTemplateOutline = () => {
+    const outline = buildMeetingTemplateOutline(meetingTemplateId);
+    setMeetingNotes((current) => {
+      const trimmedCurrent = current.trim();
+      if (!trimmedCurrent) {
+        return outline;
+      }
+      if (trimmedCurrent.includes(outline.trim())) {
+        return current;
+      }
+      return `${current.trimEnd()}\n\n${outline}`;
+    });
+  };
+
+  const appendMeetingNotesBlock = (heading: string, body: string) => {
+    const trimmedBody = body.trim();
+    if (!trimmedBody) {
+      return;
+    }
+
+    setMeetingNotes((current) => {
+      const nextBlock = `${heading}\n${trimmedBody}`;
+      const trimmedCurrent = current.trim();
+      if (!trimmedCurrent) {
+        return nextBlock;
+      }
+      return `${current.trimEnd()}\n\n${nextBlock}`;
+    });
   };
 
   const handleRenameSpeaker = async (speakerId: string, newName: string) => {
@@ -353,6 +753,85 @@ export function RecordingsView() {
           ? error.message
           : "Failed to remove transcript text from this meeting.";
       toast(message, "error");
+    }
+  };
+
+  const handleRefreshSummary = async () => {
+    if (!selectedRecording) {
+      return;
+    }
+
+    setIsRefreshingSummary(true);
+    try {
+      const result = await summarizeRecordingGrounded(selectedRecording.id);
+      const nextSummary = result.summary.trim();
+      const currentActionItems = actionItemsFromText(meetingActionItemsText);
+
+      setMeetingSummary(nextSummary);
+      lastSavedMeetingSummaryRef.current = nextSummary;
+      lastSavedMeetingActionItemsRef.current = JSON.stringify(currentActionItems);
+      setSelectedRecording((current) =>
+        current?.id === selectedRecording.id
+          ? {
+              ...current,
+              summary: nextSummary || undefined,
+              actionItems: currentActionItems,
+            }
+          : current
+      );
+      await updateRecordingAnalysis(
+        selectedRecording.id,
+        nextSummary || null,
+        currentActionItems
+      );
+      toast("Summary refreshed from this meeting.", "success");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to refresh the summary.";
+      toast(message, "error");
+    } finally {
+      setIsRefreshingSummary(false);
+    }
+  };
+
+  const handleRefreshActionItems = async () => {
+    if (!selectedRecording) {
+      return;
+    }
+
+    setIsRefreshingActionItems(true);
+    try {
+      const result = await extractActionItemsGrounded(selectedRecording.id);
+      const nextActionItems = normalizeActionItems(
+        result.items.map((item) => formatGroundedActionItem(item))
+      );
+      const nextActionItemsText = actionItemsToText(nextActionItems);
+      const normalizedSummary = meetingSummary.trim();
+
+      setMeetingActionItemsText(nextActionItemsText);
+      lastSavedMeetingSummaryRef.current = normalizedSummary;
+      lastSavedMeetingActionItemsRef.current = JSON.stringify(nextActionItems);
+      setSelectedRecording((current) =>
+        current?.id === selectedRecording.id
+          ? {
+              ...current,
+              summary: normalizedSummary || undefined,
+              actionItems: nextActionItems,
+            }
+          : current
+      );
+      await updateRecordingAnalysis(
+        selectedRecording.id,
+        normalizedSummary || null,
+        nextActionItems
+      );
+      toast("Action items refreshed from this meeting.", "success");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to refresh action items.";
+      toast(message, "error");
+    } finally {
+      setIsRefreshingActionItems(false);
     }
   };
 
@@ -489,6 +968,83 @@ export function RecordingsView() {
       totalHours: totalSeconds / 3600,
     };
   }, [meetings]);
+  const selectedTemplateOption = useMemo(
+    () => getMeetingTemplateOption(meetingTemplateId),
+    [meetingTemplateId]
+  );
+  const meetingNoteSections = useMemo(
+    () => parseMeetingNoteSections(meetingNotes, meetingTemplateId),
+    [meetingNotes, meetingTemplateId]
+  );
+
+  const updateMeetingSections = (
+    updater: (sections: MeetingNoteSection[]) => MeetingNoteSection[]
+  ) => {
+    setMeetingNotes((current) => {
+      const nextSections = updater(
+        parseMeetingNoteSections(current, meetingTemplateId)
+      );
+      return serializeMeetingNoteSections(nextSections);
+    });
+  };
+
+  const handleMeetingSectionBodyChange = (sectionIndex: number, body: string) => {
+    updateMeetingSections((sections) =>
+      sections.map((section, index) =>
+        index === sectionIndex
+          ? {
+              ...section,
+              body,
+            }
+          : section
+      )
+    );
+  };
+
+  const handleMeetingSectionTitleChange = (sectionIndex: number, title: string) => {
+    updateMeetingSections((sections) =>
+      sections.map((section, index) =>
+        index === sectionIndex
+          ? {
+              ...section,
+              title,
+            }
+          : section
+      )
+    );
+  };
+
+  const handleClearMeetingSection = (sectionIndex: number) => {
+    updateMeetingSections((sections) =>
+      sections.map((section, index) =>
+        index === sectionIndex
+          ? {
+              ...section,
+              body: "",
+              hasExplicitPlaceholder: false,
+            }
+          : section
+      )
+    );
+  };
+
+  const handleAddMeetingSection = () => {
+    updateMeetingSections((sections) => [
+      ...sections,
+      {
+        title: getNextMeetingSectionTitle(sections),
+        body: "",
+        isTemplateSection: false,
+        hasExplicitPlaceholder: true,
+      },
+    ]);
+  };
+
+  const handleRemoveMeetingSection = (sectionIndex: number) => {
+    updateMeetingSections((sections) =>
+      sections.filter((_, index) => index !== sectionIndex)
+    );
+  };
 
   const handleMarkAsDictation = async (recordingIdToUpdate: string) => {
     try {
@@ -892,7 +1448,9 @@ export function RecordingsView() {
             if (!isRecording) {
               setMeetingNotesTargetId(null);
               setMeetingNotes("");
+              setMeetingChatMessages([]);
               lastSavedMeetingNotesRef.current = "";
+              lastSavedMeetingChatRef.current = "[]";
             }
           }
         }}
@@ -900,6 +1458,9 @@ export function RecordingsView() {
         <DialogContent className="max-w-5xl h-[85vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>{selectedRecording?.title ?? "Recording"}</DialogTitle>
+            <DialogDescription>
+              Review meeting notes, grounded AI outputs, transcript edits, and audio assets for this recording.
+            </DialogDescription>
           </DialogHeader>
 
           <Tabs defaultValue="notes" className="flex-1 flex flex-col">
@@ -933,22 +1494,130 @@ export function RecordingsView() {
                           Keep the note canvas current. Summaries, action items, and meeting chat use this alongside the transcript.
                         </p>
                       </div>
-                      <div className="text-xs text-muted-foreground">
-                        {selectedRecording?.meetingTemplateId
-                          ? `Template: ${selectedRecording.meetingTemplateId}`
-                          : "Template: Auto"}
-                        {selectedRecording?.notesUpdatedAt
-                          ? ` · Updated ${new Date(selectedRecording.notesUpdatedAt).toLocaleString()}`
-                          : ""}
+                      <div className="text-xs text-muted-foreground text-right">
+                        <div>Template: {selectedTemplateOption.label}</div>
+                        <div>{selectedTemplateOption.description}</div>
+                        {selectedRecording?.notesUpdatedAt ? (
+                          <div>
+                            Updated {new Date(selectedRecording.notesUpdatedAt).toLocaleString()}
+                          </div>
+                        ) : null}
                       </div>
                     </div>
-                    <textarea
-                      value={meetingNotes}
-                      onChange={(event) => setMeetingNotes(event.target.value)}
-                      placeholder="Capture goals, names, decisions, follow-ups, and shorthand while you review the meeting."
-                      rows={18}
-                      className="mt-4 w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-active"
-                    />
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      <label className="text-xs font-medium text-muted-foreground" htmlFor="meeting-template">
+                        Format
+                      </label>
+                      <select
+                        id="meeting-template"
+                        value={meetingTemplateId}
+                        onChange={(event) => setMeetingTemplateId(event.target.value)}
+                        className="h-9 rounded-md border bg-background px-3 text-sm"
+                      >
+                        {MEETING_TEMPLATES.map((template) => (
+                          <option key={template.value} value={template.value}>
+                            {template.label}
+                          </option>
+                        ))}
+                      </select>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={handleApplyTemplateOutline}
+                      >
+                        Apply Outline
+                      </Button>
+                    </div>
+                    <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs text-muted-foreground">
+                        Edit notes by section. Everything still autosaves to the same meeting note record.
+                      </p>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={handleAddMeetingSection}
+                      >
+                        <Plus className="mr-2 h-4 w-4" />
+                        Add Section
+                      </Button>
+                    </div>
+                    <div aria-label="Meeting notes" role="group" className="mt-4 space-y-3">
+                      {meetingNoteSections.map((section, index) => (
+                        <div
+                          key={`${section.title}-${index}`}
+                          className="rounded-lg border bg-muted/20 p-3"
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              {section.isTemplateSection ? (
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <p className="text-sm font-medium">{section.title}</p>
+                                    <span className="rounded-full bg-background px-2 py-0.5 text-[11px] text-muted-foreground">
+                                      Template
+                                    </span>
+                                  </div>
+                                  <p className="text-xs text-muted-foreground">
+                                    Keeps this meeting aligned to the selected format.
+                                  </p>
+                                </div>
+                              ) : (
+                                <div className="space-y-2">
+                                  <label
+                                    className="text-xs font-medium text-muted-foreground"
+                                    htmlFor={`meeting-section-title-${index}`}
+                                  >
+                                    Section title
+                                  </label>
+                                  <Input
+                                    id={`meeting-section-title-${index}`}
+                                    value={section.title}
+                                    onChange={(event) =>
+                                      handleMeetingSectionTitleChange(
+                                        index,
+                                        event.target.value
+                                      )
+                                    }
+                                  />
+                                </div>
+                              )}
+                            </div>
+                            {section.isTemplateSection ? (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => handleClearMeetingSection(index)}
+                              >
+                                Clear
+                              </Button>
+                            ) : (
+                              <Button
+                                type="button"
+                                size="icon"
+                                variant="ghost"
+                                aria-label={`Remove section ${section.title}`}
+                                onClick={() => handleRemoveMeetingSection(index)}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            )}
+                          </div>
+                          <Textarea
+                            value={section.body}
+                            onChange={(event) =>
+                              handleMeetingSectionBodyChange(index, event.target.value)
+                            }
+                            aria-label={`${section.title} notes`}
+                            placeholder={`Capture ${section.title.toLowerCase()} here.`}
+                            rows={5}
+                            className="mt-3 min-h-[120px] resize-y bg-background/90"
+                          />
+                        </div>
+                      ))}
+                    </div>
                   </div>
 
                   <div className="space-y-4">
@@ -971,45 +1640,81 @@ export function RecordingsView() {
                       </div>
                     </div>
 
-                    {selectedRecording?.summary && (
-                      <div className="rounded-lg border border-active/30 bg-active/5 p-4 space-y-2">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-active">
-                          Summary
-                        </p>
-                        <p className="text-sm whitespace-pre-wrap leading-relaxed">
-                          {selectedRecording.summary}
-                        </p>
-                      </div>
-                    )}
-
-                    {(selectedRecording?.actionItems?.length ?? 0) > 0 && (
-                      <div className="rounded-lg border p-4 space-y-2">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                          Action Items
-                        </p>
-                        <ul className="space-y-1.5">
-                          {selectedRecording?.actionItems?.map((item, index) => (
-                            <li key={index} className="flex items-start gap-2 text-sm">
-                              <span className="mt-1 h-2 w-2 rounded-full bg-active shrink-0" />
-                              {item}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    {!selectedRecording?.summary &&
-                      (selectedRecording?.actionItems?.length ?? 0) === 0 && (
-                        <div className="rounded-lg border p-4 text-sm text-muted-foreground">
-                          Summary and action items will appear here after transcription and analysis finish.
+                    <div className="rounded-lg border border-active/30 bg-active/5 p-4 space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-wide text-active">
+                            Summary
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            Keep the meeting recap editable. Regenerate when your notes change.
+                          </p>
                         </div>
-                      )}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={handleRefreshSummary}
+                          disabled={!selectedRecording || isRefreshingSummary}
+                        >
+                          {isRefreshingSummary ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                          )}
+                          Refresh Summary
+                        </Button>
+                      </div>
+                      <textarea
+                        value={meetingSummary}
+                        onChange={(event) => setMeetingSummary(event.target.value)}
+                        aria-label="Meeting summary"
+                        placeholder="Summary will appear here after transcription and analysis finish."
+                        rows={8}
+                        className="w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-active"
+                      />
+                    </div>
+
+                    <div className="rounded-lg border p-4 space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                            Action Items
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            One line per follow-up. Owners and dates can stay inline.
+                          </p>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={handleRefreshActionItems}
+                          disabled={!selectedRecording || isRefreshingActionItems}
+                        >
+                          {isRefreshingActionItems ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                          )}
+                          Refresh Action Items
+                        </Button>
+                      </div>
+                      <textarea
+                        value={meetingActionItemsText}
+                        onChange={(event) => setMeetingActionItemsText(event.target.value)}
+                        aria-label="Meeting action items"
+                        placeholder="Action items will appear here after transcription and analysis finish."
+                        rows={8}
+                        className="w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-active"
+                      />
+                    </div>
                   </div>
                 </div>
               </ScrollArea>
             </TabsContent>
 
-            <TabsContent value="ask" className="flex-1 overflow-hidden">
+            <TabsContent value="ask" forceMount className="flex-1 overflow-hidden">
               {selectedRecording ? (
                 <ScrollArea className="h-full pr-2">
                   <div className="space-y-4">
@@ -1025,6 +1730,46 @@ export function RecordingsView() {
                       inputPlaceholder="Ask about decisions, blockers, follow-ups, or anything in this meeting..."
                       templates={MEETING_ASK_TEMPLATES}
                       emptyStateLabel="Reviewing meeting context..."
+                      analysisMode="grounded"
+                      chatMessages={meetingChatMessages}
+                      onChatMessagesChange={setMeetingChatMessages}
+                      responseActions={[
+                        {
+                          label: "Replace Summary",
+                          onAction: ({ response }) => setMeetingSummary(response),
+                        },
+                        {
+                          label: "Append to Notes",
+                          onAction: ({ response, templateId }) =>
+                            appendMeetingNotesBlock(
+                              templateId === "summary"
+                                ? "Summary refresh"
+                                : templateId === "decisions"
+                                  ? "Decisions"
+                                  : templateId === "dates"
+                                    ? "Deadlines"
+                                    : "Meeting answer",
+                              response
+                            ),
+                        },
+                      ]}
+                      actionItemActions={[
+                        {
+                          label: "Replace Action Items",
+                          onAction: ({ items }) =>
+                            setMeetingActionItemsText(
+                              actionItemsToText(items.map((item) => formatGroundedActionItem(item)))
+                            ),
+                        },
+                        {
+                          label: "Append to Notes",
+                          onAction: ({ items }) =>
+                            appendMeetingNotesBlock(
+                              "Action items",
+                              items.map((item) => `- ${formatGroundedActionItem(item)}`).join("\n")
+                            ),
+                        },
+                      ]}
                     />
                   </div>
                 </ScrollArea>

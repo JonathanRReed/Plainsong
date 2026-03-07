@@ -102,6 +102,7 @@ describe("DictationPopup", () => {
           contextSource: "none",
           insertionMode: "paste",
           appTarget: "Slack",
+          activationMatcher: "slack",
           dictationProvider: "distil_whisper",
           dictationModelId: "distil-large-v3.5",
         },
@@ -109,5 +110,6 @@ describe("DictationPopup", () => {
     });
 
     expect(await screen.findByText(/Slack Replies · Fresh dictation · Paste at cursor · Target Slack/i)).toBeInTheDocument();
+    expect(screen.getByText(/Auto for Slack via "slack"/i)).toBeInTheDocument();
   });
 });
