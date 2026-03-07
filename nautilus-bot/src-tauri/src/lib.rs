@@ -25,7 +25,9 @@ use crate::events::{
     DictationStateChangedEvent, DictationTextReadyEvent, MeetingRecordingStateChangedEvent,
     RecordingStatusChangedEvent,
 };
-use crate::store::{InsertionActionRecord, RuntimeEventRecord, TranscriptArtifactRecord};
+use crate::store::{
+    InsertionActionRecord, MeetingArtifactRecord, RuntimeEventRecord, TranscriptArtifactRecord,
+};
 use anyhow::Result;
 use commands::backup::*;
 use commands::infra::*;
@@ -2002,8 +2004,8 @@ async fn stop_recording(
                                     None
                                 }
                             };
-                            let action_items: Vec<String> = match actions_res {
-                                Ok(Ok(items)) => items.into_iter().map(|i| i.task).collect(),
+                            let structured_action_items: Vec<llm::ActionItem> = match actions_res {
+                                Ok(Ok(items)) => items,
                                 Ok(Err(e)) => {
                                     tracing::warn!("Auto action items failed: {}", e);
                                     vec![]
@@ -2013,6 +2015,14 @@ async fn stop_recording(
                                     vec![]
                                 }
                             };
+                            let action_items: Vec<String> = structured_action_items
+                                .iter()
+                                .map(|item| item.task.clone())
+                                .collect();
+                            let deadlines: Vec<String> = structured_action_items
+                                .iter()
+                                .filter_map(|item| item.deadline.clone())
+                                .collect();
 
                             // Auto-generate meeting title
                             let generated_title = match title_res {
@@ -2036,7 +2046,11 @@ async fn stop_recording(
                                 );
                             }
 
-                            if summary.is_some() || !action_items.is_empty() {
+                            if generated_title.is_some()
+                                || summary.is_some()
+                                || !action_items.is_empty()
+                            {
+                                let now = chrono::Utc::now();
                                 // Persist analysis to database
                                 {
                                     let mut db = db_for_analysis.lock().await;
@@ -2047,6 +2061,24 @@ async fn stop_recording(
                                     ) {
                                         tracing::warn!(
                                             "Failed to persist analysis to database: {}",
+                                            e
+                                        );
+                                    }
+                                    let artifact = MeetingArtifactRecord {
+                                        id: uuid::Uuid::new_v4().to_string(),
+                                        recording_id: rec_id_for_analysis.clone(),
+                                        title: generated_title.clone(),
+                                        summary: summary.clone(),
+                                        action_items: action_items.clone(),
+                                        decisions: Vec::new(),
+                                        deadlines,
+                                        template_id: template_for_analysis.clone(),
+                                        created_at: now,
+                                        updated_at: now,
+                                    };
+                                    if let Err(e) = db.save_meeting_artifact(&artifact) {
+                                        tracing::warn!(
+                                            "Failed to persist meeting artifact to database: {}",
                                             e
                                         );
                                     }

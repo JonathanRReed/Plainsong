@@ -7,8 +7,8 @@
 
 use crate::models::*;
 use crate::store::{
-    CaptureSessionRecord, ContextSnapshotRecord, InsertionActionRecord, PolicySnapshotRecord,
-    RuntimeEventRecord, TranscriptArtifactRecord,
+    CaptureSessionRecord, ContextSnapshotRecord, InsertionActionRecord, MeetingArtifactRecord,
+    PolicySnapshotRecord, RuntimeEventRecord, TranscriptArtifactRecord,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -463,6 +463,76 @@ impl Database {
         }
     }
 
+    pub fn save_meeting_artifact(&mut self, artifact: &MeetingArtifactRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meeting_artifacts (
+                id, recording_id, title, summary, action_items, decisions, deadlines,
+                template_id, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(recording_id) DO UPDATE SET
+                title = excluded.title,
+                summary = excluded.summary,
+                action_items = excluded.action_items,
+                decisions = excluded.decisions,
+                deadlines = excluded.deadlines,
+                template_id = excluded.template_id,
+                updated_at = excluded.updated_at",
+            params![
+                &artifact.id,
+                &artifact.recording_id,
+                &artifact.title,
+                &artifact.summary,
+                serde_json::to_string(&artifact.action_items)?,
+                serde_json::to_string(&artifact.decisions)?,
+                serde_json::to_string(&artifact.deadlines)?,
+                &artifact.template_id,
+                artifact.created_at.to_rfc3339(),
+                artifact.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_meeting_artifact(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<MeetingArtifactRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, recording_id, title, summary, action_items, decisions, deadlines,
+                    template_id, created_at, updated_at
+             FROM meeting_artifacts
+             WHERE recording_id = ?1",
+        )?;
+        let result = stmt.query_row([recording_id], |row| {
+            let action_items_json: String = row.get(4)?;
+            let decisions_json: String = row.get(5)?;
+            let deadlines_json: String = row.get(6)?;
+            let created_at: String = row.get(8)?;
+            let updated_at: String = row.get(9)?;
+            Ok(MeetingArtifactRecord {
+                id: row.get(0)?,
+                recording_id: row.get(1)?,
+                title: row.get(2)?,
+                summary: row.get(3)?,
+                action_items: serde_json::from_str(&action_items_json).unwrap_or_default(),
+                decisions: serde_json::from_str(&decisions_json).unwrap_or_default(),
+                deadlines: serde_json::from_str(&deadlines_json).unwrap_or_default(),
+                template_id: row.get(7)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        });
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn init_tables(&self) -> Result<()> {
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS projects (
@@ -666,6 +736,11 @@ impl Database {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_meeting_artifacts_updated_at
+             ON meeting_artifacts(updated_at DESC)",
             [],
         )?;
 
@@ -1017,8 +1092,24 @@ impl Database {
 
     pub fn get_recordings(&self, project_id: Option<&str>) -> Result<Vec<Recording>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status, summary, action_items, meeting_notes, meeting_template_id, notes_updated_at
-             FROM recordings WHERE (?1 IS NULL OR project_id = ?1) ORDER BY created_at DESC"
+            "SELECT recordings.id,
+                    COALESCE(meeting_artifacts.title, recordings.title),
+                    recordings.project_id,
+                    recordings.duration,
+                    recordings.created_at,
+                    recordings.updated_at,
+                    recordings.source_type,
+                    recordings.audio_path,
+                    recordings.status,
+                    COALESCE(meeting_artifacts.summary, recordings.summary),
+                    COALESCE(meeting_artifacts.action_items, recordings.action_items),
+                    recordings.meeting_notes,
+                    COALESCE(meeting_artifacts.template_id, recordings.meeting_template_id),
+                    recordings.notes_updated_at
+             FROM recordings
+             LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
+             WHERE (?1 IS NULL OR recordings.project_id = ?1)
+             ORDER BY recordings.created_at DESC",
         )?;
 
         let pid_param: Option<&str> = project_id;
@@ -1060,8 +1151,23 @@ impl Database {
 
     pub fn get_recording(&self, recording_id: &str) -> Result<Option<Recording>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status, summary, action_items, meeting_notes, meeting_template_id, notes_updated_at
-             FROM recordings WHERE id = ?1"
+            "SELECT recordings.id,
+                    COALESCE(meeting_artifacts.title, recordings.title),
+                    recordings.project_id,
+                    recordings.duration,
+                    recordings.created_at,
+                    recordings.updated_at,
+                    recordings.source_type,
+                    recordings.audio_path,
+                    recordings.status,
+                    COALESCE(meeting_artifacts.summary, recordings.summary),
+                    COALESCE(meeting_artifacts.action_items, recordings.action_items),
+                    recordings.meeting_notes,
+                    COALESCE(meeting_artifacts.template_id, recordings.meeting_template_id),
+                    recordings.notes_updated_at
+             FROM recordings
+             LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
+             WHERE recordings.id = ?1",
         )?;
 
         let result = stmt.query_row([recording_id], |row| {
@@ -2277,8 +2383,8 @@ fn build_fts_query(query: &str) -> String {
 mod tests {
     use super::*;
     use crate::store::{
-        CaptureSessionRecord, ContextSnapshotRecord, InsertionActionRecord, PolicySnapshotRecord,
-        RuntimeEventRecord, TranscriptArtifactRecord,
+        CaptureSessionRecord, ContextSnapshotRecord, InsertionActionRecord, MeetingArtifactRecord,
+        PolicySnapshotRecord, RuntimeEventRecord, TranscriptArtifactRecord,
     };
     use chrono::Utc;
 
@@ -2430,6 +2536,25 @@ mod tests {
             app_target: Some("Slack".to_string()),
             error: None,
             created_at: Utc::now(),
+        }
+    }
+
+    fn sample_meeting_artifact() -> MeetingArtifactRecord {
+        let now = Utc::now();
+        MeetingArtifactRecord {
+            id: "meeting-artifact-1".to_string(),
+            recording_id: "r1".to_string(),
+            title: Some("Weekly Sync".to_string()),
+            summary: Some("Reviewed roadmap and launch blockers.".to_string()),
+            action_items: vec![
+                "Ship onboarding polish".to_string(),
+                "Confirm launch checklist".to_string(),
+            ],
+            decisions: vec!["Delay referral program to Q2".to_string()],
+            deadlines: vec!["2026-03-10".to_string()],
+            template_id: Some("exec-update".to_string()),
+            created_at: now,
+            updated_at: now,
         }
     }
 
@@ -2745,6 +2870,51 @@ mod tests {
         assert_eq!(fetched.command_applied.as_deref(), Some("rewrite_shorter"));
         assert_eq!(fetched.app_target.as_deref(), Some("Slack"));
         assert!(fetched.pasted);
+    }
+
+    #[test]
+    fn test_save_and_get_meeting_artifact() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
+
+        let fetched = db.get_meeting_artifact("r1").unwrap().unwrap();
+        assert_eq!(fetched.title.as_deref(), Some("Weekly Sync"));
+        assert_eq!(
+            fetched.summary.as_deref(),
+            Some("Reviewed roadmap and launch blockers.")
+        );
+        assert_eq!(fetched.deadlines, vec!["2026-03-10".to_string()]);
+    }
+
+    #[test]
+    fn test_get_recording_prefers_meeting_artifact_values() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("r1", "inbox");
+        recording.title = "Legacy Title".to_string();
+        recording.summary = Some("Legacy summary".to_string());
+        recording.action_items = Some(vec!["Legacy action".to_string()]);
+        recording.meeting_template_id = Some("legacy-template".to_string());
+        db.create_recording(&recording).unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
+
+        let fetched = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(fetched.title, "Weekly Sync");
+        assert_eq!(
+            fetched.summary.as_deref(),
+            Some("Reviewed roadmap and launch blockers.")
+        );
+        assert_eq!(
+            fetched.action_items,
+            Some(vec![
+                "Ship onboarding polish".to_string(),
+                "Confirm launch checklist".to_string()
+            ])
+        );
+        assert_eq!(fetched.meeting_template_id.as_deref(), Some("exec-update"));
     }
 
     #[test]
