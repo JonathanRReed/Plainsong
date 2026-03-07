@@ -45,6 +45,14 @@ interface DictationStateChangedEvent {
   sessionId?: number | null;
   stopReason?: string | null;
   outcome?: string | null;
+  resolvedModePreset?: DictationModePreset | null;
+  resolvedCustomModeId?: string | null;
+  resolvedModeLabel?: string | null;
+  contextSource?: DictationContextSource | null;
+  insertionMode?: DictationInsertionMode | null;
+  appTarget?: string | null;
+  dictationProvider?: string | null;
+  dictationModelId?: string | null;
 }
 
 type DictationModePreset =
@@ -189,6 +197,8 @@ export function DictationPopup() {
   const [dictationModelId, setDictationModelId] = useState<string | null>(null);
   const [dictationInsertionMode, setDictationInsertionMode] =
     useState<DictationInsertionMode>("auto");
+  const [resolvedModeLabel, setResolvedModeLabel] = useState<string | null>(null);
+  const [runtimeAppTarget, setRuntimeAppTarget] = useState<string | null>(null);
 
   const refreshPopupSettings = async () => {
     const settings = await getSettings();
@@ -204,6 +214,29 @@ export function DictationPopup() {
     setDictationInsertionMode(
       (settings.transcription.dictationInsertionMode ?? "auto") as DictationInsertionMode
     );
+  };
+
+  const applyRuntimeMetadata = (payload: DictationStateChangedEvent) => {
+    setResolvedModeLabel(payload.resolvedModeLabel ?? null);
+    setRuntimeAppTarget(payload.appTarget ?? null);
+    if (payload.resolvedModePreset) {
+      setModePreset(payload.resolvedModePreset);
+    }
+    if (typeof payload.resolvedCustomModeId !== "undefined") {
+      setSelectedCustomModeId(payload.resolvedCustomModeId ?? null);
+    }
+    if (payload.contextSource) {
+      setContextSource(payload.contextSource);
+    }
+    if (payload.insertionMode) {
+      setDictationInsertionMode(payload.insertionMode);
+    }
+    if (typeof payload.dictationProvider !== "undefined") {
+      setDictationProvider(payload.dictationProvider ?? null);
+    }
+    if (typeof payload.dictationModelId !== "undefined") {
+      setDictationModelId(payload.dictationModelId ?? null);
+    }
   };
 
   const handleStopFromPopup = async () => {
@@ -225,6 +258,7 @@ export function DictationPopup() {
         } catch {
           // Keep default mode if settings are temporarily unavailable.
         }
+        applyRuntimeMetadata(initialState);
         setPhase(initialState.phase);
         setMessage(initialState.message ?? null);
         setPreview(initialState.preview ?? null);
@@ -241,6 +275,7 @@ export function DictationPopup() {
 
       unlisten = await listen<DictationStateChangedEvent>("dictation-state-changed", (event) => {
         const payload = event.payload;
+        applyRuntimeMetadata(payload);
         setPhase(payload.phase);
         setMessage(payload.message ?? null);
         setPreview(payload.preview ?? null);
@@ -310,6 +345,7 @@ export function DictationPopup() {
           const snapshotSessionId =
             typeof state.sessionId === "number" ? state.sessionId : null;
           if (state.phase !== phase || snapshotSessionId !== sessionId) {
+            applyRuntimeMetadata(state);
             setPhase(state.phase);
             setMessage(state.message ?? null);
             setPreview(state.preview ?? null);
@@ -336,12 +372,14 @@ export function DictationPopup() {
 
   const modeMeta = MODE_META[modePreset] ?? MODE_META.voice;
   const selectedModeLabel =
-    modePreset === "custom"
+    resolvedModeLabel ??
+    (modePreset === "custom"
       ? customModes.find((option) => option.id === selectedCustomModeId)?.name ?? modeMeta.label
-      : modeMeta.label;
+      : modeMeta.label);
   const contextMeta = CONTEXT_META[contextSource] ?? CONTEXT_META.none;
   const insertionMeta = INSERTION_META[dictationInsertionMode] ?? INSERTION_META.auto;
   const routeLabel = formatRouteLabel(dictationProvider, dictationModelId);
+  const targetDetail = runtimeAppTarget ? ` for ${runtimeAppTarget}` : "";
 
   const cycleDisplayMode = async () => {
     const next: DisplayMode =
@@ -507,7 +545,7 @@ export function DictationPopup() {
             <div>
               <p className="text-sm font-semibold">Starting dictation</p>
               <p className="text-xs text-slate-300">
-                Warming the microphone and preparing {routeLabel.toLowerCase()}…
+                Warming the microphone and preparing {routeLabel.toLowerCase()}{targetDetail}…
               </p>
             </div>
           </div>
@@ -525,6 +563,7 @@ export function DictationPopup() {
                 <>
                   <p className="mt-1 text-xs text-slate-300">
                     {selectedModeLabel} · {contextMeta.detail} · {insertionMeta.label}
+                    {runtimeAppTarget ? ` · Target ${runtimeAppTarget}` : ""}
                   </p>
                   <div className="mt-2 h-2.5 w-full max-w-[220px] rounded-full bg-slate-700/50 overflow-hidden">
                     <div
@@ -577,7 +616,7 @@ export function DictationPopup() {
             <div>
               <p className="text-sm font-semibold">Transcribing</p>
               <p className="text-xs text-slate-300">
-                {selectedModeLabel} is shaping the result for {insertionMeta.label.toLowerCase()}.
+                {selectedModeLabel} is shaping the result for {insertionMeta.label.toLowerCase()}{targetDetail}.
               </p>
             </div>
           </div>

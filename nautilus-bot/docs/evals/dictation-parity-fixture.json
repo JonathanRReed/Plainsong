@@ -1,0 +1,130 @@
+{
+  "schemaVersion": "1.0",
+  "scenarios": [
+    {
+      "appTarget": "Apple Notes",
+      "requestedProvider": "distil_whisper",
+      "actualProvider": "distil_whisper",
+      "isFallback": false,
+      "transcriptionLatencyMs": 145,
+      "endToEndMs": 260,
+      "inputText": "please schedule lunch with Maya tomorrow at noon",
+      "expectNoCommand": true,
+      "expectedOutput": "please schedule lunch with Maya tomorrow at noon",
+      "insertionOutcome": "pasted",
+      "insertionModeUsed": "paste"
+    },
+    {
+      "appTarget": "Google Docs",
+      "requestedProvider": "distil_whisper",
+      "actualProvider": "distil_whisper",
+      "isFallback": false,
+      "transcriptionLatencyMs": 132,
+      "endToEndMs": 240,
+      "inputText": "command newline",
+      "expectedCommandApplied": "newline",
+      "expectedOutput": "\n",
+      "insertionOutcome": "pasted",
+      "insertionModeUsed": "command_only"
+    },
+    {
+      "appTarget": "Google Docs",
+      "requestedProvider": "distil_whisper",
+      "actualProvider": "distil_whisper",
+      "isFallback": false,
+      "transcriptionLatencyMs": 132,
+      "endToEndMs": 244,
+      "inputText": "command paragraph",
+      "expectedCommandApplied": "paragraph",
+      "expectedOutput": "\n\n",
+      "insertionOutcome": "pasted",
+      "insertionModeUsed": "command_only"
+    },
+    {
+      "appTarget": "Slack",
+      "requestedProvider": "voxtral",
+      "actualProvider": "distil_whisper",
+      "isFallback": true,
+      "fallbackReason": "provider_unavailable",
+      "transcriptionLatencyMs": 150,
+      "endToEndMs": 286,
+      "inputText": "brb",
+      "snippets": [
+        {
+          "trigger": "brb",
+          "expansion": "be right back",
+          "appScope": "slack",
+          "enabled": true,
+          "caseSensitive": false
+        }
+      ],
+      "expectNoCommand": true,
+      "expectedSnippetAppliedCount": 1,
+      "expectedOutput": "be right back",
+      "insertionOutcome": "pasted",
+      "insertionModeUsed": "paste"
+    },
+    {
+      "appTarget": "Notion",
+      "requestedProvider": "distil_whisper",
+      "actualProvider": "distil_whisper",
+      "isFallback": false,
+      "transcriptionLatencyMs": 151,
+      "endToEndMs": 284,
+      "inputText": "brb",
+      "snippets": [
+        {
+          "trigger": "brb",
+          "expansion": "be right back",
+          "appScope": "slack",
+          "enabled": true,
+          "caseSensitive": false
+        }
+      ],
+      "expectNoCommand": true,
+      "expectedSnippetAppliedCount": 0,
+      "expectedOutput": "brb",
+      "insertionOutcome": "pasted",
+      "insertionModeUsed": "paste"
+    },
+    {
+      "appTarget": "Cursor",
+      "requestedProvider": "distil_whisper",
+      "actualProvider": "distil_whisper",
+      "isFallback": false,
+      "transcriptionLatencyMs": 164,
+      "endToEndMs": 300,
+      "inputText": "command rewrite professional thanks for the update",
+      "expectedCommandApplied": "rewrite_professional",
+      "expectedOutput": "thanks for the update",
+      "insertionOutcome": "pasted",
+      "insertionModeUsed": "command_only"
+    },
+    {
+      "appTarget": "VS Code",
+      "requestedProvider": "distil_whisper",
+      "actualProvider": "distil_whisper",
+      "isFallback": false,
+      "transcriptionLatencyMs": 166,
+      "endToEndMs": 305,
+      "inputText": "command bulletize selection roadmap, budget and owners",
+      "expectedCommandApplied": "bulletize_selection",
+      "expectedOutput": "roadmap, budget and owners",
+      "insertionOutcome": "pasted",
+      "insertionModeUsed": "command_only"
+    },
+    {
+      "appTarget": "Messages",
+      "requestedProvider": "distil_whisper",
+      "actualProvider": "distil_whisper",
+      "isFallback": false,
+      "transcriptionLatencyMs": 138,
+      "endToEndMs": 248,
+      "inputText": "please command center the image after lunch",
+      "expectNoCommand": true,
+      "expectedOutput": "please command center the image after lunch",
+      "insertionOutcome": "pasted",
+      "insertionModeUsed": "paste"
+    }
+  ]
+}
