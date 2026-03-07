@@ -2118,7 +2118,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           <div className="p-2 rounded border bg-muted/20">
                             <p className="font-medium">Automation</p>
                             <p className={permissionDiagnostics.automationReady ? "text-green-500" : "text-amber-500"}>
-                              {permissionDiagnostics.automationReady ? "Ready" : "Needs grant"}
+                              {permissionDiagnostics.automationReady ? "Ready" : "Optional fallback"}
                             </p>
                             <Button
                               variant="ghost"

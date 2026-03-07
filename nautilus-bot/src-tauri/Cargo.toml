@@ -5,6 +5,7 @@ description = "Nautilus - Verifiable Memory Layer for dictation and meeting capt
 authors = ["NautilusBot"]
 edition = "2021"
 rust-version = "1.70"
+default-run = "nautilus-bot"
 license = "MIT"
 repository = "https://github.com/nautilusbot/nautilus"
 

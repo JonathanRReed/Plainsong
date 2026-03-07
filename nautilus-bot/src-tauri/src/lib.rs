@@ -64,6 +64,7 @@ pub struct AppState {
     dictation_overlay_state: Arc<StdMutex<DictationOverlayState>>,
     recording_overlay_state: Arc<StdMutex<RecordingOverlayState>>,
     accessibility_trust_observed: Arc<AtomicBool>,
+    last_cursor_insert_status: Arc<StdMutex<Option<CursorInsertStatus>>>,
     streaming_transcriber: Arc<streaming::StreamingTranscriber>,
     dictation_stream_stop: Arc<AtomicBool>,
     dictation_inline_state: Arc<Mutex<InlineDictationState>>,
@@ -293,10 +294,31 @@ struct PermissionDiagnostics {
     speech_recognition_ready: bool,
     accessibility_ready: bool,
     automation_ready: bool,
+    cursor_insertion_observed: bool,
+    last_cursor_insert_status: Option<CursorInsertStatus>,
     running_from_disk_image: bool,
     app_bundle_path: Option<String>,
     recommended_app_bundle_path: Option<String>,
     notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CursorInsertFailureKind {
+    Automation,
+    PostEventAccess,
+    SelfTarget,
+    Unknown,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CursorInsertStatus {
+    succeeded: bool,
+    copied_only: bool,
+    failure_kind: Option<CursorInsertFailureKind>,
+    message: Option<String>,
+    observed_at_ms: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -836,6 +858,13 @@ async fn request_dictation_permissions(
                 error
             ));
         }
+
+        if !request_cursor_insertion_permission() {
+            notes.push(
+                "Cursor insertion permission is still not granted for this app copy. macOS may require you to re-enable Nautilus under Privacy & Security > Accessibility after app updates."
+                    .to_string(),
+            );
+        }
     }
 
     Ok(collect_permission_diagnostics(state.inner(), notes).await)
@@ -926,25 +955,51 @@ async fn collect_permission_diagnostics(
     let speech_recognition_ready = false;
 
     #[cfg(target_os = "macos")]
-    let (accessibility_ready, automation_ready) = {
-        let accessibility_probe_ready = check_accessibility_permission();
-        let accessibility_ready =
-            accessibility_probe_ready || state.accessibility_trust_observed.load(Ordering::Relaxed);
+    let (
+        accessibility_ready,
+        automation_ready,
+        cursor_insertion_observed,
+        last_cursor_insert_status,
+    ) = {
+        let last_cursor_insert_status = state
+            .last_cursor_insert_status
+            .lock()
+            .ok()
+            .and_then(|status| status.clone());
+        let accessibility_probe_ready = check_cursor_insertion_permission();
+        let cursor_insertion_observed = state.accessibility_trust_observed.load(Ordering::Relaxed)
+            || last_cursor_insert_status
+                .as_ref()
+                .map(|status| status.succeeded)
+                .unwrap_or(false);
+        let accessibility_ready = accessibility_probe_ready || cursor_insertion_observed;
         if !accessibility_probe_ready && accessibility_ready {
             notes.push(
-                "Accessibility was verified by a successful Nautilus cursor insert in this session. macOS trust status may be reporting stale information."
+                "Cursor insertion was verified by a successful Nautilus paste in this session. The macOS permission probe may be stale for this app copy."
                     .to_string(),
             );
+        }
+        if let Some(status) = last_cursor_insert_status.as_ref() {
+            if status.copied_only {
+                let detail = status
+                    .message
+                    .as_deref()
+                    .unwrap_or("Nautilus copied the dictation result but could not post Cmd+V.");
+                notes.push(format!(
+                    "Latest cursor insert attempt fell back to clipboard-only. {}",
+                    detail
+                ));
+            }
         }
         if !accessibility_ready {
             if running_from_disk_image {
                 notes.push(
-                    "Accessibility is being checked for the currently running DMG copy, not the installed /Applications copy."
+                    "Cursor insertion is being checked for the currently running DMG copy, not the installed /Applications copy."
                         .to_string(),
                 );
             } else {
                 notes.push(
-                    "Accessibility permission not granted yet. Enable Nautilus in Privacy & Security > Accessibility for cursor insertion."
+                    "Cursor insertion permission not granted yet. Enable Nautilus in Privacy & Security > Accessibility for event synthesis."
                         .to_string(),
                 );
             }
@@ -954,22 +1009,32 @@ async fn collect_permission_diagnostics(
             Ok(()) => true,
             Err(error) => {
                 notes.push(format!(
-                    "Automation permission not granted yet. Enable Nautilus under Privacy & Security > Automation so it can control System Events. {}",
+                    "Automation is only used for the System Events fallback path now. Direct cursor insertion should still work through macOS event posting when Accessibility is granted. {}",
                     error
                 ));
                 false
             }
         };
 
-        (accessibility_ready, automation_ready)
+        (
+            accessibility_ready,
+            automation_ready,
+            cursor_insertion_observed,
+            last_cursor_insert_status,
+        )
     };
 
     #[cfg(not(target_os = "macos"))]
-    let (accessibility_ready, automation_ready) = {
+    let (
+        accessibility_ready,
+        automation_ready,
+        cursor_insertion_observed,
+        last_cursor_insert_status,
+    ) = {
         notes.push(
             "Accessibility and automation probes are implemented for macOS first.".to_string(),
         );
-        (false, false)
+        (false, false, false, None)
     };
 
     PermissionDiagnostics {
@@ -977,6 +1042,8 @@ async fn collect_permission_diagnostics(
         speech_recognition_ready,
         accessibility_ready,
         automation_ready,
+        cursor_insertion_observed,
+        last_cursor_insert_status,
         running_from_disk_image,
         app_bundle_path,
         recommended_app_bundle_path,
@@ -6861,6 +6928,22 @@ async fn stop_dictation_session_for_session(
         }
         insert_latency_ms = Some(insert_started.elapsed().as_millis() as u64);
     }
+    if copied || pasted {
+        let status = CursorInsertStatus {
+            succeeded: pasted,
+            copied_only: copied && !pasted,
+            failure_kind: if pasted {
+                None
+            } else {
+                paste_error.as_deref().map(classify_cursor_insert_failure)
+            },
+            message: paste_error.clone(),
+            observed_at_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        if let Ok(mut last_status) = state.last_cursor_insert_status.lock() {
+            *last_status = Some(status);
+        }
+    }
     let end_to_end_ms = stop_pipeline_started.elapsed().as_millis() as u64;
 
     let payload = build_dictation_text_ready_payload(
@@ -9966,6 +10049,7 @@ pub fn run() {
             dictation_overlay_state: Arc::new(StdMutex::new(DictationOverlayState::default())),
             recording_overlay_state: Arc::new(StdMutex::new(RecordingOverlayState::default())),
             accessibility_trust_observed: Arc::new(AtomicBool::new(false)),
+            last_cursor_insert_status: Arc::new(StdMutex::new(None)),
             streaming_transcriber,
             dictation_stream_stop: Arc::new(AtomicBool::new(false)),
             dictation_inline_state: Arc::new(Mutex::new(InlineDictationState::default())),
@@ -10092,8 +10176,10 @@ pub fn run() {
 
             #[cfg(target_os = "macos")]
             {
-                if !check_accessibility_permission() {
-                    tracing::warn!("Accessibility permission not granted - dictation paste will fail");
+                if !check_cursor_insertion_permission() {
+                    tracing::warn!(
+                        "Cursor insertion permission not granted - dictation paste may fall back to clipboard"
+                    );
                     let _ = app.emit("accessibility-permission-warning", ());
                 }
             }
@@ -10916,6 +11002,26 @@ mod tests {
         assert!(script.contains("Microsoft.VisualBasic"));
         assert!(script.contains("AppActivate('Bob''s Editor')"));
         assert!(script.contains("SendWait('^v')"));
+    }
+
+    #[test]
+    fn cursor_insert_failure_classification_prefers_automation_errors() {
+        assert_eq!(
+            classify_cursor_insert_failure(
+                "macOS blocked Automation for System Events (Not authorized to send Apple events to System Events.)"
+            ),
+            CursorInsertFailureKind::Automation
+        );
+    }
+
+    #[test]
+    fn cursor_insert_failure_classification_detects_post_event_access_errors() {
+        assert_eq!(
+            classify_cursor_insert_failure(
+                "Copied to clipboard. macOS blocked keystroke paste (CoreGraphics fallback failed: Failed to create target key down event). Grant Accessibility."
+            ),
+            CursorInsertFailureKind::PostEventAccess
+        );
     }
 
     #[test]
@@ -13579,8 +13685,25 @@ unsafe extern "C" {
 }
 
 #[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGPreflightPostEventAccess() -> bool;
+    fn CGRequestPostEventAccess() -> bool;
+}
+
+#[cfg(target_os = "macos")]
 fn check_accessibility_permission() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
+}
+
+#[cfg(target_os = "macos")]
+fn check_cursor_insertion_permission() -> bool {
+    (unsafe { CGPreflightPostEventAccess() }) || check_accessibility_permission()
+}
+
+#[cfg(target_os = "macos")]
+fn request_cursor_insertion_permission() -> bool {
+    unsafe { CGRequestPostEventAccess() }
 }
 
 #[cfg(target_os = "macos")]
@@ -13652,6 +13775,24 @@ fn is_automation_permission_error(error: &str) -> bool {
     normalized.contains("not authorized to send apple events")
         || normalized.contains("1743")
         || normalized.contains("automation")
+}
+
+#[cfg(target_os = "macos")]
+fn classify_cursor_insert_failure(error: &str) -> CursorInsertFailureKind {
+    let normalized = error.to_ascii_lowercase();
+    if is_automation_permission_error(error) {
+        CursorInsertFailureKind::Automation
+    } else if normalized.contains("there was no external app to paste into") {
+        CursorInsertFailureKind::SelfTarget
+    } else if normalized.contains("accessibility")
+        || normalized.contains("keystroke paste")
+        || normalized.contains("coregraphics fallback failed")
+        || normalized.contains("event")
+    {
+        CursorInsertFailureKind::PostEventAccess
+    } else {
+        CursorInsertFailureKind::Unknown
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -13878,7 +14019,6 @@ fn read_clipboard_text() -> Result<String, String> {
 #[cfg(target_os = "macos")]
 enum PasteDispatchStatus {
     Confirmed,
-    FallbackDispatched,
 }
 
 #[cfg(target_os = "macos")]
@@ -13886,38 +14026,59 @@ fn dispatch_command_keystroke(keycode: u16) -> Result<(), String> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
-    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
-        .map_err(|_| "Failed to create event source".to_string())?;
+    const COMMAND_KEYCODE: CGKeyCode = 55;
+    const KEYSTROKE_DELAY_MS: u64 = 50;
+    const MAX_ATTEMPTS: usize = 2;
 
-    let command_keycode: CGKeyCode = 55;
-    let target_keycode: CGKeyCode = keycode;
+    let mut last_error: Option<String> = None;
 
-    let command_down = CGEvent::new_keyboard_event(source.clone(), command_keycode, true)
-        .map_err(|_| "Failed to create command key down event".to_string())?;
-    command_down.set_flags(CGEventFlags::CGEventFlagCommand);
-    command_down.post(CGEventTapLocation::HID);
+    for attempt in 1..=MAX_ATTEMPTS {
+        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+            .map_err(|_| "Failed to create event source".to_string())?;
+        let target_keycode: CGKeyCode = keycode;
 
-    std::thread::sleep(std::time::Duration::from_millis(12));
+        let result = (|| -> Result<(), String> {
+            let command_down =
+                CGEvent::new_keyboard_event(source.clone(), COMMAND_KEYCODE, true)
+                    .map_err(|_| "Failed to create command key down event".to_string())?;
+            command_down.set_flags(CGEventFlags::CGEventFlagCommand);
+            command_down.post(CGEventTapLocation::Session);
 
-    let key_down = CGEvent::new_keyboard_event(source.clone(), target_keycode, true)
-        .map_err(|_| "Failed to create target key down event".to_string())?;
-    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
-    key_down.post(CGEventTapLocation::HID);
+            std::thread::sleep(std::time::Duration::from_millis(KEYSTROKE_DELAY_MS));
 
-    std::thread::sleep(std::time::Duration::from_millis(12));
+            let key_down = CGEvent::new_keyboard_event(source.clone(), target_keycode, true)
+                .map_err(|_| "Failed to create target key down event".to_string())?;
+            key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+            key_down.post(CGEventTapLocation::Session);
 
-    let key_up = CGEvent::new_keyboard_event(source.clone(), target_keycode, false)
-        .map_err(|_| "Failed to create target key up event".to_string())?;
-    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
-    key_up.post(CGEventTapLocation::HID);
+            std::thread::sleep(std::time::Duration::from_millis(KEYSTROKE_DELAY_MS));
 
-    std::thread::sleep(std::time::Duration::from_millis(12));
+            let key_up = CGEvent::new_keyboard_event(source.clone(), target_keycode, false)
+                .map_err(|_| "Failed to create target key up event".to_string())?;
+            key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+            key_up.post(CGEventTapLocation::Session);
 
-    let command_up = CGEvent::new_keyboard_event(source, command_keycode, false)
-        .map_err(|_| "Failed to create command key up event".to_string())?;
-    command_up.post(CGEventTapLocation::HID);
+            std::thread::sleep(std::time::Duration::from_millis(KEYSTROKE_DELAY_MS));
 
-    Ok(())
+            let command_up = CGEvent::new_keyboard_event(source, COMMAND_KEYCODE, false)
+                .map_err(|_| "Failed to create command key up event".to_string())?;
+            command_up.post(CGEventTapLocation::Session);
+
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < MAX_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(KEYSTROKE_DELAY_MS));
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| "Command keystroke failed".to_string()))
 }
 
 #[cfg(target_os = "macos")]
@@ -13937,28 +14098,28 @@ fn send_native_paste_key(
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
 
+    if let Ok(()) = dispatch_command_keystroke(9) {
+        tracing::info!("Cmd+V posted via CoreGraphics session event");
+        return Ok(PasteDispatchStatus::Confirmed);
+    }
+
     let apple_script = Command::new("osascript")
         .arg("-e")
         .arg("tell application \"System Events\" to keystroke \"v\" using command down")
         .output()
         .map_err(|e| format!("Failed to invoke osascript for paste: {}", e))?;
     if apple_script.status.success() {
-        tracing::info!("Cmd+V posted via System Events");
+        tracing::info!("Cmd+V posted via System Events fallback");
         return Ok(PasteDispatchStatus::Confirmed);
     }
 
     let script_error = String::from_utf8_lossy(&apple_script.stderr)
         .trim()
         .to_string();
-
-    dispatch_command_keystroke(9)
-        .map_err(|error| format!("{} (CoreGraphics fallback failed: {})", script_error, error))?;
-
-    tracing::warn!(
-        "Cmd+V fallback posted via CoreGraphics after System Events failure: {}",
+    Err(format!(
+        "Native event paste failed, and System Events fallback failed: {}",
         script_error
-    );
-    Ok(PasteDispatchStatus::FallbackDispatched)
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -13978,6 +14139,10 @@ fn send_native_copy_key(
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
 
+    if let Ok(()) = dispatch_command_keystroke(8) {
+        return Ok(PasteDispatchStatus::Confirmed);
+    }
+
     let apple_script = Command::new("osascript")
         .arg("-e")
         .arg("tell application \"System Events\" to keystroke \"c\" using command down")
@@ -13990,10 +14155,10 @@ fn send_native_copy_key(
     let script_error = String::from_utf8_lossy(&apple_script.stderr)
         .trim()
         .to_string();
-
-    dispatch_command_keystroke(8)
-        .map_err(|error| format!("{} (CoreGraphics fallback failed: {})", script_error, error))?;
-    Ok(PasteDispatchStatus::FallbackDispatched)
+    Err(format!(
+        "Native event copy failed, and System Events fallback failed: {}",
+        script_error
+    ))
 }
 
 #[cfg(target_os = "windows")]
@@ -14015,6 +14180,10 @@ fn send_native_copy_key(
 
 #[cfg(target_os = "macos")]
 fn send_native_undo_key() -> Result<(), String> {
+    if let Ok(()) = dispatch_command_keystroke(6) {
+        return Ok(());
+    }
+
     let output = std::process::Command::new("osascript")
         .arg("-e")
         .arg("tell application \"System Events\" to keystroke \"z\" using command down")
@@ -14024,8 +14193,10 @@ fn send_native_undo_key() -> Result<(), String> {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    dispatch_command_keystroke(6)
-        .map_err(|fallback_error| format!("Undo keystroke failed: {} ({})", stderr, fallback_error))
+    Err(format!(
+        "Undo keystroke failed. Native event dispatch did not succeed, and System Events returned: {}",
+        stderr
+    ))
 }
 
 #[cfg(target_os = "windows")]
@@ -14102,8 +14273,11 @@ fn dispatch_paste_from_clipboard(
                     error
                 ))
             } else {
+                if !check_cursor_insertion_permission() {
+                    let _ = request_cursor_insertion_permission();
+                }
                 Err(format!(
-                    "macOS blocked keystroke paste ({}). Grant Accessibility in System Settings > Privacy & Security > Accessibility.",
+                    "macOS blocked keystroke paste ({}). Grant Nautilus Accessibility in System Settings > Privacy & Security > Accessibility so it can synthesize Cmd+V.",
                     error
                 ))
             }
@@ -14113,7 +14287,7 @@ fn dispatch_paste_from_clipboard(
 
 #[cfg(target_os = "macos")]
 fn capture_selected_text_via_clipboard(target_app: Option<&str>) -> Result<Option<String>, String> {
-    if !check_accessibility_permission() {
+    if !check_cursor_insertion_permission() {
         return Err(
             "Selected text capture needs Accessibility permission in System Settings > Privacy & Security > Accessibility."
                 .to_string(),
@@ -14383,13 +14557,7 @@ fn paste_text_systemwide(
             }
         }
 
-        if matches!(paste_dispatch, PasteDispatchStatus::FallbackDispatched) {
-            tracing::warn!(
-                "Paste dispatched via CoreGraphics fallback; preserving clipboard text for safety"
-            );
-        } else {
-            tracing::info!("Paste successful - text inserted at cursor");
-        }
+        tracing::info!("Paste successful - text inserted at cursor");
         PasteOutcome {
             pasted: true,
             copied: true,
@@ -14442,7 +14610,7 @@ async fn clear_inline_dictation_session(
 
     if remove_inserted_text
         && !snapshot.last_inserted_text.is_empty()
-        && check_accessibility_permission()
+        && check_cursor_insertion_permission()
     {
         if let Some(target) = snapshot.app_target.as_deref() {
             if let Err(error) = reactivate_target_application(Some(target), None) {

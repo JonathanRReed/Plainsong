@@ -201,4 +201,83 @@ describe("Platform optimization settings", () => {
     expect(screen.queryByText("macOS Apple Speech engine")).not.toBeInTheDocument();
     expect(screen.queryByText("Windows SDK dictation engine")).not.toBeInTheDocument();
   });
+
+  it("surfaces the latest clipboard-only insert fallback reason", async () => {
+    getSettingsMock.mockResolvedValue({
+      transcription: {
+        defaultProvider: "macos_apple_speech",
+        selectedModelId: "macos_apple_speech",
+        useSharedAsrSelection: true,
+        dictationProvider: "macos_apple_speech",
+        dictationModelId: "macos_apple_speech",
+        meetingProvider: "macos_apple_speech",
+        meetingModelId: "macos_apple_speech",
+        platformOptimization: {
+          mode: "auto",
+          fallbackPolicy: "local_only",
+          macos: { appleNativeEnabled: true, mlxEnabled: true },
+          windows: { foundryEnabled: false, windowsSdkDictationEnabled: false },
+          manualEnginePriority: [],
+        },
+      },
+    });
+    getPermissionDiagnosticsMock.mockResolvedValue({
+      microphoneReady: true,
+      speechRecognitionReady: true,
+      accessibilityReady: false,
+      automationReady: true,
+      lastCursorInsertStatus: {
+        succeeded: false,
+        copiedOnly: true,
+        failureKind: "post_event_access",
+        message: "Copied to clipboard. macOS blocked keystroke paste.",
+        observedAtMs: Date.now(),
+      },
+      notes: [],
+    });
+
+    render(<AsrProviderManager />);
+
+    expect(
+      await screen.findByText("Latest dictation fell back to clipboard-only.")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Copied to clipboard. macOS blocked keystroke paste.")
+    ).toBeInTheDocument();
+  });
+
+  it("treats Accessibility as the insertion gate even when Automation is unavailable", async () => {
+    getSettingsMock.mockResolvedValue({
+      transcription: {
+        defaultProvider: "macos_apple_speech",
+        selectedModelId: "macos_apple_speech",
+        useSharedAsrSelection: true,
+        dictationProvider: "macos_apple_speech",
+        dictationModelId: "macos_apple_speech",
+        meetingProvider: "macos_apple_speech",
+        meetingModelId: "macos_apple_speech",
+        platformOptimization: {
+          mode: "auto",
+          fallbackPolicy: "local_only",
+          macos: { appleNativeEnabled: true, mlxEnabled: true },
+          windows: { foundryEnabled: false, windowsSdkDictationEnabled: false },
+          manualEnginePriority: [],
+        },
+      },
+    });
+    getPermissionDiagnosticsMock.mockResolvedValue({
+      microphoneReady: true,
+      speechRecognitionReady: true,
+      accessibilityReady: true,
+      automationReady: false,
+      notes: [],
+    });
+
+    render(<AsrProviderManager />);
+
+    expect(await screen.findByText("Apple Native setup")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Cursor insertion still depends on Accessibility. Automation is only used as a fallback if direct event posting is blocked.")
+    ).not.toBeInTheDocument();
+  });
 });
