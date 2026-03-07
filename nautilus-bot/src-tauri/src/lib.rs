@@ -6,6 +6,7 @@ mod crypto;
 mod db;
 mod diarization;
 mod download;
+mod events;
 mod export;
 mod integrations;
 mod license;
@@ -19,6 +20,10 @@ mod transcription;
 pub mod update;
 
 use crate::asr::manager::RuntimeStatus;
+use crate::events::{
+    DictationStateChangedEvent, DictationTextReadyEvent, MeetingRecordingStateChangedEvent,
+    RecordingStatusChangedEvent,
+};
 use anyhow::Result;
 use commands::backup::*;
 use commands::infra::*;
@@ -7061,15 +7066,15 @@ fn emit_dictation_state(
         state.outcome = outcome.map(str::to_string);
     }
 
-    let payload = serde_json::json!({
-        "phase": phase,
-        "startedAtMs": started_at_ms,
-        "message": message,
-        "preview": preview,
-        "sessionId": session_id,
-        "stopReason": stop_reason,
-        "outcome": outcome
-    });
+    let payload = DictationStateChangedEvent {
+        phase: phase.to_string(),
+        started_at_ms,
+        message: message.map(str::to_string),
+        preview: preview.map(str::to_string),
+        session_id,
+        stop_reason: stop_reason.map(str::to_string),
+        outcome: outcome.map(str::to_string),
+    };
     if let Err(error) = app.emit("dictation-state-changed", payload) {
         tracing::warn!("Failed to emit dictation state: {}", error);
     }
@@ -7104,13 +7109,13 @@ fn emit_recording_state(
         state.message = message.map(str::to_string);
     }
 
-    let payload = serde_json::json!({
-        "phase": phase,
-        "recordingId": recording_id,
-        "startedAtMs": started_at_ms,
-        "systemAudioActive": system_audio_active,
-        "message": message
-    });
+    let payload = MeetingRecordingStateChangedEvent {
+        phase: phase.to_string(),
+        recording_id: recording_id.map(str::to_string),
+        started_at_ms,
+        system_audio_active,
+        message: message.map(str::to_string),
+    };
     if let Err(error) = app.emit("meeting-recording-state-changed", payload) {
         tracing::warn!("Failed to emit meeting recording state: {}", error);
     }
@@ -7159,16 +7164,16 @@ fn emit_recording_status_with_markers(
     transcript_first_available_at: Option<&str>,
     consent_prompt_shown: Option<bool>,
 ) {
-    let payload = serde_json::json!({
-        "recordingId": recording_id,
-        "status": status,
-        "message": message,
-        "progress": progress,
-        "updatedAt": chrono::Utc::now().to_rfc3339(),
-        "meetingProcessingStartedAt": meeting_processing_started_at,
-        "transcriptFirstAvailableAt": transcript_first_available_at,
-        "consentPromptShown": consent_prompt_shown,
-    });
+    let payload = RecordingStatusChangedEvent {
+        recording_id: recording_id.to_string(),
+        status: status.to_string(),
+        message: message.map(str::to_string),
+        progress,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        meeting_processing_started_at: meeting_processing_started_at.map(str::to_string),
+        transcript_first_available_at: transcript_first_available_at.map(str::to_string),
+        consent_prompt_shown,
+    };
     if let Err(error) = app.emit("recording-status-changed", payload) {
         tracing::warn!("Failed to emit recording status: {}", error);
     }
@@ -7888,12 +7893,48 @@ fn get_frontmost_app_bundle_id() -> Option<String> {
     None
 }
 
+#[cfg(target_os = "windows")]
+fn get_frontmost_app_name() -> Option<String> {
+    let script = r#"
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class NautilusWin32 {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+"@;
+$hwnd = [NautilusWin32]::GetForegroundWindow();
+if ($hwnd -eq [IntPtr]::Zero) { return }
+$pid = 0
+[void][NautilusWin32]::GetWindowThreadProcessId($hwnd, [ref]$pid)
+if ($pid -eq 0) { return }
+$process = Get-Process -Id $pid -ErrorAction SilentlyContinue
+if ($null -ne $process -and -not [string]::IsNullOrWhiteSpace($process.ProcessName)) {
+  $process.ProcessName
+}
+"#;
+
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    None
+}
+
 #[cfg(not(target_os = "macos"))]
 fn get_frontmost_app_bundle_id() -> Option<String> {
     None
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn get_frontmost_app_name() -> Option<String> {
     None
 }
@@ -7920,7 +7961,41 @@ fn get_frontmost_window_title() -> Option<String> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn get_frontmost_window_title() -> Option<String> {
+    let script = r#"
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class NautilusWin32 {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+}
+"@;
+$hwnd = [NautilusWin32]::GetForegroundWindow();
+if ($hwnd -eq [IntPtr]::Zero) { return }
+$builder = New-Object System.Text.StringBuilder 1024
+[void][NautilusWin32]::GetWindowText($hwnd, $builder, $builder.Capacity)
+$title = $builder.ToString().Trim()
+if (-not [string]::IsNullOrWhiteSpace($title)) { $title }
+"#;
+
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let title = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !title.is_empty() {
+            return Some(title);
+        }
+    }
+    None
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn get_frontmost_window_title() -> Option<String> {
     None
 }
@@ -8442,7 +8517,7 @@ fn build_dictation_text_ready_payload(
     app_target: Option<&str>,
     context_source: Option<&str>,
     context_chars: Option<usize>,
-) -> serde_json::Value {
+) -> DictationTextReadyEvent {
     let is_fallback = result.requested_provider != result.actual_provider
         || result
             .fallback_reason
@@ -8450,34 +8525,34 @@ fn build_dictation_text_ready_payload(
             .map(|reason| !reason.trim().is_empty())
             .unwrap_or(false);
 
-    serde_json::json!({
-        "sessionId": session_id,
-        "stopReason": stop_reason,
-        "outcome": outcome,
-        "text": result.text,
-        "pasted": pasted,
-        "copied": copied,
-        "pasteError": paste_error,
-        "requestedProvider": result.requested_provider,
-        "actualProvider": result.actual_provider,
-        "isFallback": is_fallback,
-        "requestedEngine": result.requested_engine,
-        "actualEngine": result.actual_engine,
-        "optimizationApplied": result.optimization_applied,
-        "fallbackReason": result.fallback_reason,
-        "fallbackMessage": fallback_message,
-        "modelId": result.model_id,
-        "startupLatencyMs": startup_latency_ms,
-        "latencyMs": transcription_latency_ms,
-        "insertLatencyMs": insert_latency_ms,
-        "endToEndMs": end_to_end_ms,
-        "insertionModeUsed": insertion_mode_used,
-        "commandApplied": command_applied,
-        "snippetAppliedCount": snippet_applied_count,
-        "appTarget": app_target,
-        "contextSource": context_source,
-        "contextChars": context_chars
-    })
+    DictationTextReadyEvent {
+        session_id,
+        stop_reason: stop_reason.to_string(),
+        outcome: outcome.to_string(),
+        text: result.text.clone(),
+        pasted,
+        copied,
+        paste_error: paste_error.map(str::to_string),
+        requested_provider: asr_provider_to_settings_value(result.requested_provider).to_string(),
+        actual_provider: asr_provider_to_settings_value(result.actual_provider).to_string(),
+        is_fallback,
+        requested_engine: result.requested_engine.clone(),
+        actual_engine: result.actual_engine.clone(),
+        optimization_applied: Some(result.optimization_applied),
+        fallback_reason: result.fallback_reason.clone(),
+        fallback_message: fallback_message.map(str::to_string),
+        model_id: result.model_id.clone(),
+        startup_latency_ms,
+        latency_ms: transcription_latency_ms,
+        insert_latency_ms,
+        end_to_end_ms,
+        insertion_mode_used: insertion_mode_used.to_string(),
+        command_applied: command_applied.map(str::to_string),
+        snippet_applied_count,
+        app_target: app_target.map(str::to_string),
+        context_source: context_source.map(str::to_string),
+        context_chars,
+    }
 }
 
 fn truncate_for_audit_preview(value: Option<&str>, limit: usize) -> Option<String> {
@@ -10337,6 +10412,22 @@ mod tests {
     }
 
     #[test]
+    fn windows_sendkeys_script_is_built_without_activation_by_default() {
+        let script = build_windows_sendkeys_script("^v", None);
+        assert!(script.contains("System.Windows.Forms"));
+        assert!(script.contains("SendWait('^v')"));
+        assert!(!script.contains("AppActivate"));
+    }
+
+    #[test]
+    fn windows_sendkeys_script_escapes_target_app_names() {
+        let script = build_windows_sendkeys_script("^v", Some("Bob's Editor"));
+        assert!(script.contains("Microsoft.VisualBasic"));
+        assert!(script.contains("AppActivate('Bob''s Editor')"));
+        assert!(script.contains("SendWait('^v')"));
+    }
+
+    #[test]
     fn dictation_profile_normalization_preserves_backward_compatibility() {
         assert_eq!(
             dictation_profile_to_settings_value(&dictation_profile_from_settings_value("speed")),
@@ -10446,6 +10537,7 @@ mod tests {
             Some("clipboard"),
             Some(42),
         );
+        let payload = serde_json::to_value(payload).expect("payload should serialize");
 
         for key in [
             "startupLatencyMs",
@@ -12996,6 +13088,32 @@ fn wait_for_clipboard_text(expected: &str) -> bool {
     false
 }
 
+#[cfg(any(test, target_os = "windows"))]
+fn escape_powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn build_windows_sendkeys_script(keys: &str, target_app: Option<&str>) -> String {
+    let mut statements = vec!["Add-Type -AssemblyName System.Windows.Forms".to_string()];
+
+    if let Some(app_name) = target_app.map(str::trim).filter(|value| !value.is_empty()) {
+        statements.push("Add-Type -AssemblyName Microsoft.VisualBasic".to_string());
+        statements.push(format!(
+            "[Microsoft.VisualBasic.Interaction]::AppActivate('{}') | Out-Null",
+            escape_powershell_single_quoted(app_name)
+        ));
+        statements.push("Start-Sleep -Milliseconds 60".to_string());
+    }
+
+    statements.push(format!(
+        "[System.Windows.Forms.SendKeys]::SendWait('{}')",
+        escape_powershell_single_quoted(keys)
+    ));
+
+    statements.join("; ")
+}
+
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     tracing::info!("Copying {} chars to clipboard", text.len());
 
@@ -13065,7 +13183,7 @@ fn read_clipboard_text() -> Result<String, String> {
 #[cfg(target_os = "windows")]
 fn read_clipboard_text() -> Result<String, String> {
     let output = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", "Get-Clipboard"])
+        .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
         .output()
         .map_err(|e| format!("Failed to launch Get-Clipboard: {}", e))?;
     if !output.status.success() {
@@ -13200,6 +13318,23 @@ fn send_native_copy_key(
     Ok(PasteDispatchStatus::FallbackDispatched)
 }
 
+#[cfg(target_os = "windows")]
+fn send_native_copy_key(
+    target_app: Option<&str>,
+    _target_app_bundle_id: Option<&str>,
+) -> Result<(), String> {
+    let script = build_windows_sendkeys_script("^c", target_app);
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script.as_str()])
+        .status()
+        .map_err(|e| format!("Failed to launch PowerShell for copy: {}", e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("Windows key simulation failed while sending Ctrl+C.".to_string())
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn send_native_undo_key() -> Result<(), String> {
     let output = std::process::Command::new("osascript")
@@ -13217,9 +13352,9 @@ fn send_native_undo_key() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn send_native_undo_key() -> Result<(), String> {
-    let script = "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^z')";
+    let script = build_windows_sendkeys_script("^z", None);
     let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", script])
+        .args(["-NoProfile", "-Command", script.as_str()])
         .status()
         .map_err(|e| format!("Failed to launch PowerShell for undo: {}", e))?;
     if status.success() {
@@ -13234,7 +13369,14 @@ fn send_native_undo_key() -> Result<(), String> {
     Err("Undo command is not supported on this platform.".to_string())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn send_native_copy_key(
+    _target_app: Option<&str>,
+    _target_app_bundle_id: Option<&str>,
+) -> Result<(), String> {
+    Err("Copy command is not supported on this platform.".to_string())
+}
+
 fn schedule_clipboard_restore(previous: String, inserted_text: String) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(
@@ -13331,6 +13473,35 @@ fn capture_selected_text_via_clipboard(target_app: Option<&str>) -> Result<Optio
         .filter(|text| !text.is_empty()))
 }
 
+#[cfg(target_os = "windows")]
+fn capture_selected_text_via_clipboard(target_app: Option<&str>) -> Result<Option<String>, String> {
+    let original_clipboard = read_clipboard_text().unwrap_or_default();
+    let sentinel = format!(
+        "__nautilus_context_capture_{}__",
+        chrono::Utc::now().timestamp_millis()
+    );
+    copy_to_clipboard(&sentinel)?;
+
+    send_native_copy_key(target_app, None)?;
+
+    let mut captured: Option<String> = None;
+    for _ in 0..8 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if let Ok(current) = read_clipboard_text() {
+            if current != sentinel {
+                captured = Some(current);
+                break;
+            }
+        }
+    }
+
+    let _ = copy_to_clipboard(&original_clipboard);
+
+    Ok(captured
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty()))
+}
+
 #[cfg(target_os = "macos")]
 fn capture_application_context_text(target_app: Option<&str>) -> Result<Option<String>, String> {
     let app_name = target_app
@@ -13362,6 +13533,65 @@ fn capture_application_context_text(target_app: Option<&str>) -> Result<Option<S
     }
 }
 
+#[cfg(target_os = "windows")]
+fn capture_application_context_text(target_app: Option<&str>) -> Result<Option<String>, String> {
+    let app_name = target_app
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(get_frontmost_app_name);
+    let window_title = get_frontmost_window_title();
+    let selected_text = capture_selected_text_via_clipboard(target_app)
+        .ok()
+        .flatten()
+        .filter(|value| !value.trim().is_empty());
+
+    let mut sections = Vec::new();
+    if let Some(name) = app_name {
+        sections.push(format!("Active app: {}", name));
+    }
+    if let Some(title) = window_title {
+        sections.push(format!("Window title: {}", title));
+    }
+    if let Some(selection) = selected_text {
+        sections.push(format!("Selected text:\n{}", selection));
+    }
+
+    if sections.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(sections.join("\n\n")))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn dispatch_paste_from_clipboard(
+    target_app: Option<&str>,
+    _target_app_bundle_id: Option<&str>,
+) -> Result<(), String> {
+    let script = build_windows_sendkeys_script("^v", target_app);
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script.as_str()])
+        .status()
+        .map_err(|e| format!("Failed to launch PowerShell for paste: {}", e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(
+            "Windows key simulation failed while sending Ctrl+V. Paste manually with Ctrl+V."
+                .to_string(),
+        )
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn dispatch_paste_from_clipboard(
+    _target_app: Option<&str>,
+    _target_app_bundle_id: Option<&str>,
+) -> Result<(), String> {
+    Err("System-wide paste is not implemented on this platform yet.".to_string())
+}
+
 fn capture_dictation_context_text(
     context_source: &str,
     target_app: Option<&str>,
@@ -13376,10 +13606,14 @@ fn capture_dictation_context_text(
             {
                 capture_selected_text_via_clipboard(target_app)
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            {
+                capture_selected_text_via_clipboard(target_app)
+            }
+            #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
             {
                 let _ = target_app;
-                Err("Selected text capture is currently supported on macOS only.".to_string())
+                Err("Selected text capture is not supported on this platform yet.".to_string())
             }
         }
         "application_context" => {
@@ -13387,7 +13621,11 @@ fn capture_dictation_context_text(
             {
                 capture_application_context_text(target_app)
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            {
+                capture_application_context_text(target_app)
+            }
+            #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
             {
                 let app_name = target_app
                     .map(str::trim)
@@ -13482,13 +13720,29 @@ fn paste_text_systemwide(
 
     #[cfg(not(target_os = "macos"))]
     {
-        PasteOutcome {
-            pasted: false,
-            copied: true,
-            error: Some(
-                "Copied to clipboard. System-wide paste is currently supported on macOS only."
-                    .to_string(),
-            ),
+        let paste_dispatch = match dispatch_paste_from_clipboard(target_app, target_app_bundle_id) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(error),
+        };
+
+        match paste_dispatch {
+            Ok(()) => {
+                if !keep_text_in_clipboard {
+                    if let Some(previous) = original_clipboard {
+                        schedule_clipboard_restore(previous, text.to_string());
+                    }
+                }
+                PasteOutcome {
+                    pasted: true,
+                    copied: true,
+                    error: None,
+                }
+            }
+            Err(error) => PasteOutcome {
+                pasted: false,
+                copied: true,
+                error: Some(format!("Copied to clipboard. {}", error)),
+            },
         }
     }
 }
