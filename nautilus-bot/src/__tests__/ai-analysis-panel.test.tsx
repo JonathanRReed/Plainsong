@@ -14,6 +14,16 @@ vi.mock("@/lib/tauri", () => ({
   extractActionItemsGrounded: tauriMocks.extractActionItemsGrounded,
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("AiAnalysisPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -163,5 +173,62 @@ describe("AiAnalysisPanel", () => {
       expect(onChatMessagesChange).toHaveBeenCalled();
     });
     expect(screen.getAllByText(/What slipped\?/i).length).toBeGreaterThan(0);
+  });
+
+  it("ignores stale analysis responses after the recording changes", async () => {
+    const pending = deferred<{
+      query: string;
+      response: string;
+      citations: Array<{
+        text: string;
+        startTime: number;
+        endTime: number;
+        recordingId: string;
+        certainty: number;
+      }>;
+      model: string;
+      processingTimeMs: number;
+    }>();
+    const onChatMessagesChange = vi.fn();
+    tauriMocks.analyzeRecording.mockReturnValueOnce(pending.promise);
+
+    const { rerender } = render(
+      <AiAnalysisPanel
+        recordingId="r1"
+        chatMessages={[]}
+        onChatMessagesChange={onChatMessagesChange}
+      />
+    );
+
+    fireEvent.change(screen.getByPlaceholderText(/ask a custom question/i), {
+      target: { value: "What slipped?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    rerender(
+      <AiAnalysisPanel
+        recordingId="r2"
+        chatMessages={[]}
+        onChatMessagesChange={onChatMessagesChange}
+      />
+    );
+
+    pending.resolve({
+      query: "what slipped",
+      response: "Stale response",
+      citations: [],
+      model: "test-model",
+      processingTimeMs: 500,
+    });
+
+    await waitFor(() => {
+      expect(tauriMocks.analyzeRecording).toHaveBeenCalledWith(
+        "r1",
+        expect.stringContaining("What slipped?")
+      );
+    });
+
+    expect(onChatMessagesChange).not.toHaveBeenCalled();
+    expect(screen.queryByText("Stale response")).not.toBeInTheDocument();
   });
 });

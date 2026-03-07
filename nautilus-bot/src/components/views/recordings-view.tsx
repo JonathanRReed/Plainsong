@@ -10,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useRecordings } from "@/hooks/use-recordings";
 import { useRecording } from "@/hooks/use-recording";
 import { useRecordingDetail } from "@/hooks/use-recording-detail";
+import { useScopedRequestGuard } from "@/hooks/use-scoped-request-guard";
 import { useToast } from "@/components/toast";
 import { ConsentDialog } from "@/components/recording-overlay";
 import { TranscriptViewer, TranscriptSearch } from "@/components/transcript-viewer";
@@ -299,6 +300,7 @@ export function RecordingsView() {
   const [meetingChatMessages, setMeetingChatMessages] = useState<MeetingChatMessage[]>([]);
   const [isRefreshingSummary, setIsRefreshingSummary] = useState(false);
   const [isRefreshingActionItems, setIsRefreshingActionItems] = useState(false);
+  const recordingRequestGuard = useScopedRequestGuard<string | null>();
   const lastRecordingState = useRef(false);
   const lastSavedMeetingNotesRef = useRef("");
   const lastSavedMeetingTemplateRef = useRef("auto");
@@ -503,19 +505,22 @@ export function RecordingsView() {
 
   useEffect(() => {
     if (!isRecording && !showRecordingDetail) {
+      recordingRequestGuard.setScope(null);
       setMeetingNotes("");
       setMeetingNotesTargetId(null);
       setMeetingTemplateId("auto");
       setMeetingSummary("");
       setMeetingActionItemsText("");
       setMeetingChatMessages([]);
+      setIsRefreshingSummary(false);
+      setIsRefreshingActionItems(false);
       lastSavedMeetingNotesRef.current = "";
       lastSavedMeetingTemplateRef.current = "auto";
       lastSavedMeetingSummaryRef.current = "";
       lastSavedMeetingActionItemsRef.current = "[]";
       lastSavedMeetingChatRef.current = "[]";
     }
-  }, [isRecording, showRecordingDetail]);
+  }, [isRecording, recordingRequestGuard, showRecordingDetail]);
 
   useEffect(() => {
     if (!selectedRecording) {
@@ -661,6 +666,7 @@ export function RecordingsView() {
   };
 
   const handleRecordingClick = (recording: Recording) => {
+    recordingRequestGuard.setScope(recording.id);
     setMeetingNotes(recording.meetingNotes ?? "");
     setMeetingNotesTargetId(recording.id);
     lastSavedMeetingNotesRef.current = recording.meetingNotes ?? "";
@@ -678,13 +684,22 @@ export function RecordingsView() {
     setSearchQuery("");
     setDiarizationMessage(null);
     setDiarizationError(null);
+    setIsRefreshingSummary(false);
+    setIsRefreshingActionItems(false);
     void loadRecordingDetail(recording);
+    const requestToken = recordingRequestGuard.beginRequest(recording.id);
     void getMeetingChatMessages(recording.id)
       .then((messages) => {
+        if (!recordingRequestGuard.isCurrent(requestToken)) {
+          return;
+        }
         setMeetingChatMessages(messages);
         lastSavedMeetingChatRef.current = JSON.stringify(messages);
       })
       .catch((error) => {
+        if (!recordingRequestGuard.isCurrent(requestToken)) {
+          return;
+        }
         console.error("Failed to load meeting chat:", error);
       });
   };
@@ -761,9 +776,13 @@ export function RecordingsView() {
       return;
     }
 
+    const requestToken = recordingRequestGuard.beginRequest(selectedRecording.id);
     setIsRefreshingSummary(true);
     try {
       const result = await summarizeRecordingGrounded(selectedRecording.id);
+      if (!recordingRequestGuard.isCurrent(requestToken)) {
+        return;
+      }
       const nextSummary = result.summary.trim();
       const currentActionItems = actionItemsFromText(meetingActionItemsText);
 
@@ -786,11 +805,16 @@ export function RecordingsView() {
       );
       toast("Summary refreshed from this meeting.", "success");
     } catch (error) {
+      if (!recordingRequestGuard.isCurrent(requestToken)) {
+        return;
+      }
       const message =
         error instanceof Error ? error.message : "Failed to refresh the summary.";
       toast(message, "error");
     } finally {
-      setIsRefreshingSummary(false);
+      if (recordingRequestGuard.isCurrent(requestToken)) {
+        setIsRefreshingSummary(false);
+      }
     }
   };
 
@@ -799,9 +823,13 @@ export function RecordingsView() {
       return;
     }
 
+    const requestToken = recordingRequestGuard.beginRequest(selectedRecording.id);
     setIsRefreshingActionItems(true);
     try {
       const result = await extractActionItemsGrounded(selectedRecording.id);
+      if (!recordingRequestGuard.isCurrent(requestToken)) {
+        return;
+      }
       const nextActionItems = normalizeActionItems(
         result.items.map((item) => formatGroundedActionItem(item))
       );
@@ -827,11 +855,16 @@ export function RecordingsView() {
       );
       toast("Action items refreshed from this meeting.", "success");
     } catch (error) {
+      if (!recordingRequestGuard.isCurrent(requestToken)) {
+        return;
+      }
       const message =
         error instanceof Error ? error.message : "Failed to refresh action items.";
       toast(message, "error");
     } finally {
-      setIsRefreshingActionItems(false);
+      if (recordingRequestGuard.isCurrent(requestToken)) {
+        setIsRefreshingActionItems(false);
+      }
     }
   };
 
@@ -1725,6 +1758,7 @@ export function RecordingsView() {
                       </p>
                     </div>
                     <AiAnalysisPanel
+                      key={selectedRecording.id}
                       recordingId={selectedRecording.id}
                       title="Meeting Chat"
                       inputPlaceholder="Ask about decisions, blockers, follow-ups, or anything in this meeting..."

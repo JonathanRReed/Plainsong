@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
+import { useScopedRequestGuard } from "@/hooks/use-scoped-request-guard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -107,18 +108,32 @@ export function AiAnalysisPanel({
   const [threadMessages, setThreadMessages] = useState<MeetingChatMessage[]>(
     chatMessages ?? []
   );
+  const requestGuard = useScopedRequestGuard<string | null>();
 
   useEffect(() => {
     setThreadMessages(chatMessages ?? []);
   }, [chatMessages]);
 
-  const appendThreadMessages = (messages: MeetingChatMessage[]) => {
+  useEffect(() => {
+    requestGuard.setScope(recordingId);
+    setIsAnalyzing(false);
+    setCustomQuery("");
+    setLastResult(null);
+    setActionItems(null);
+    setActionItemCitations([]);
+    setError(null);
+    setShowSetupGuide(false);
+    setLastQuery("");
+    setLastTemplateId(null);
+  }, [recordingId, requestGuard]);
+
+  const appendThreadMessages = useCallback((messages: MeetingChatMessage[]) => {
     setThreadMessages((current) => {
       const next = [...current, ...messages];
       onChatMessagesChange?.(next);
       return next;
     });
-  };
+  }, [onChatMessagesChange]);
 
   const buildThreadedCustomQuery = (query: string) => {
     if (threadMessages.length === 0) {
@@ -158,6 +173,7 @@ export function AiAnalysisPanel({
   };
 
   const handleTemplateClick = async (template: AnalysisTemplate) => {
+    const requestToken = requestGuard.beginRequest(recordingId);
     setIsAnalyzing(true);
     setError(null);
     setShowSetupGuide(false);
@@ -176,6 +192,9 @@ export function AiAnalysisPanel({
       if (template.id === "actions") {
         if (analysisMode === "grounded") {
           const result = await extractActionItemsGrounded(recordingId);
+          if (!requestGuard.isCurrent(requestToken)) {
+            return;
+          }
           setActionItems(result.items);
           setActionItemCitations(result.items.map((item) => item.citations ?? []));
           appendThreadMessages([
@@ -191,6 +210,9 @@ export function AiAnalysisPanel({
           ]);
         } else {
           const items = await extractActionItems(recordingId);
+          if (!requestGuard.isCurrent(requestToken)) {
+            return;
+          }
           setActionItems(items);
           setActionItemCitations([]);
           appendThreadMessages([
@@ -208,6 +230,9 @@ export function AiAnalysisPanel({
         setLastResult(null);
       } else {
         const result = await analyzeRecording(recordingId, template.query);
+        if (!requestGuard.isCurrent(requestToken)) {
+          return;
+        }
         setLastResult(result);
         setActionItems(null);
         setActionItemCitations([]);
@@ -224,6 +249,9 @@ export function AiAnalysisPanel({
         ]);
       }
     } catch (err) {
+      if (!requestGuard.isCurrent(requestToken)) {
+        return;
+      }
       const message = err instanceof Error ? err.message : "Analysis failed";
       let helpfulError = message;
       
@@ -239,13 +267,16 @@ export function AiAnalysisPanel({
       
       setError(helpfulError);
     } finally {
-      setIsAnalyzing(false);
+      if (requestGuard.isCurrent(requestToken)) {
+        setIsAnalyzing(false);
+      }
     }
   };
 
   const handleCustomQuery = async () => {
     if (!customQuery.trim()) return;
-    
+    const requestToken = requestGuard.beginRequest(recordingId);
+
     setIsAnalyzing(true);
     setError(null);
     setShowSetupGuide(false);
@@ -263,6 +294,9 @@ export function AiAnalysisPanel({
     
     try {
       const result = await analyzeRecording(recordingId, buildThreadedCustomQuery(rawQuery));
+      if (!requestGuard.isCurrent(requestToken)) {
+        return;
+      }
       setLastResult(result);
       setActionItems(null);
       setActionItemCitations([]);
@@ -279,6 +313,9 @@ export function AiAnalysisPanel({
       ]);
       setCustomQuery("");
     } catch (err) {
+      if (!requestGuard.isCurrent(requestToken)) {
+        return;
+      }
       const message = err instanceof Error ? err.message : "Analysis failed";
       let helpfulError = message;
       
@@ -294,7 +331,9 @@ export function AiAnalysisPanel({
       
       setError(helpfulError);
     } finally {
-      setIsAnalyzing(false);
+      if (requestGuard.isCurrent(requestToken)) {
+        setIsAnalyzing(false);
+      }
     }
   };
 

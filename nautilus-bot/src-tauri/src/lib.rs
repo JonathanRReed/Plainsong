@@ -8526,7 +8526,11 @@ end if
     }
 
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if url.is_empty() { None } else { Some(url) }
+    if url.is_empty() {
+        None
+    } else {
+        Some(url)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -9513,6 +9517,30 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
 
     let recording_key = crate::crypto::ProjectKeyManager::derive_key(password, &salt);
 
+    let recordings = {
+        let db = state.db.lock().await;
+        db.get_recordings(None).map_err(|e| e.to_string())?
+    };
+
+    let mut staged_recordings = Vec::new();
+    for recording in recordings {
+        if recording.audio_path.trim().is_empty() || recording.audio_path.ends_with(".enc") {
+            continue;
+        }
+        let original_duration = compute_wav_duration_seconds(&recording.audio_path);
+        let staged =
+            match stage_recording_encryption(Path::new(&recording.audio_path), &recording_key) {
+                Ok(value) => value,
+                Err(error) => {
+                    for (_, _, staged) in &staged_recordings {
+                        let _ = cleanup_staged_recording_encryption(staged);
+                    }
+                    return Err(error);
+                }
+            };
+        staged_recordings.push((recording.id.clone(), original_duration, staged));
+    }
+
     if !already_initialized {
         let mut db_key_bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut db_key_bytes);
@@ -9539,25 +9567,26 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
         secrets::set_internal_secret(VAULT_DB_KEY_SECRET, &db_key).map_err(|e| e.to_string())?;
     }
 
-    let recordings = {
-        let db = state.db.lock().await;
-        db.get_recordings(None).map_err(|e| e.to_string())?
-    };
-
-    for recording in recordings {
-        if recording.audio_path.trim().is_empty() || recording.audio_path.ends_with(".enc") {
-            continue;
+    let commit_result: Result<(), String> = async {
+        for (recording_id, original_duration, staged) in &staged_recordings {
+            let encrypted_path = finalize_staged_recording_encryption(staged)?;
+            let mut db = state.db.lock().await;
+            db.update_recording_path(
+                recording_id,
+                encrypted_path.to_string_lossy().as_ref(),
+                *original_duration,
+            )
+            .map_err(|e| e.to_string())?;
         }
-        let original_duration = compute_wav_duration_seconds(&recording.audio_path);
-        let encrypted_path =
-            encrypt_recording_file_in_place(Path::new(&recording.audio_path), &recording_key)?;
-        let mut db = state.db.lock().await;
-        db.update_recording_path(
-            &recording.id,
-            encrypted_path.to_string_lossy().as_ref(),
-            original_duration,
-        )
-        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = commit_result {
+        for (_, _, staged) in &staged_recordings {
+            let _ = cleanup_staged_recording_encryption(staged);
+        }
+        return Err(error);
     }
 
     {
@@ -9602,7 +9631,17 @@ fn encrypted_output_path(path: &Path) -> PathBuf {
     }
 }
 
-fn encrypt_recording_file_in_place(path: &Path, key: &[u8; 32]) -> Result<PathBuf, String> {
+#[derive(Debug)]
+struct StagedRecordingEncryption {
+    original_path: PathBuf,
+    staged_path: PathBuf,
+    final_path: PathBuf,
+}
+
+fn stage_recording_encryption(
+    path: &Path,
+    key: &[u8; 32],
+) -> Result<StagedRecordingEncryption, String> {
     let canonical = path.canonicalize().map_err(|e| {
         format!(
             "Failed to resolve recording path '{}': {}",
@@ -9617,15 +9656,6 @@ fn encrypt_recording_file_in_place(path: &Path, key: &[u8; 32]) -> Result<PathBu
         ));
     }
     ensure_path_in_approved_roots(&canonical, "recording path")?;
-
-    if canonical
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("enc"))
-        .unwrap_or(false)
-    {
-        return Ok(canonical);
-    }
 
     let plaintext = std::fs::read(&canonical).map_err(|e| {
         format!(
@@ -9642,31 +9672,71 @@ fn encrypt_recording_file_in_place(path: &Path, key: &[u8; 32]) -> Result<PathBu
         )
     })?;
 
-    let output_path = encrypted_output_path(&canonical);
-    let temp_path = output_path.with_extension("enc.tmp");
-    std::fs::write(&temp_path, ciphertext).map_err(|e| {
+    let final_path = encrypted_output_path(&canonical);
+    let staged_path = final_path.with_file_name(format!(
+        "{}.pending-{}",
+        final_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("recording.enc"),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&staged_path, ciphertext).map_err(|e| {
         format!(
             "Failed to write encrypted recording '{}' : {}",
-            temp_path.display(),
-            e
-        )
-    })?;
-    std::fs::rename(&temp_path, &output_path).map_err(|e| {
-        format!(
-            "Failed to finalize encrypted recording '{}' : {}",
-            output_path.display(),
-            e
-        )
-    })?;
-    std::fs::remove_file(&canonical).map_err(|e| {
-        format!(
-            "Failed to remove plaintext recording '{}' after encryption: {}",
-            canonical.display(),
+            staged_path.display(),
             e
         )
     })?;
 
-    Ok(output_path)
+    Ok(StagedRecordingEncryption {
+        original_path: canonical,
+        staged_path,
+        final_path,
+    })
+}
+
+fn finalize_staged_recording_encryption(
+    staged: &StagedRecordingEncryption,
+) -> Result<PathBuf, String> {
+    std::fs::rename(&staged.staged_path, &staged.final_path).map_err(|e| {
+        format!(
+            "Failed to finalize encrypted recording '{}' : {}",
+            staged.final_path.display(),
+            e
+        )
+    })?;
+    std::fs::remove_file(&staged.original_path).map_err(|e| {
+        format!(
+            "Failed to remove plaintext recording '{}' after encryption: {}",
+            staged.original_path.display(),
+            e
+        )
+    })?;
+
+    Ok(staged.final_path.clone())
+}
+
+fn cleanup_staged_recording_encryption(staged: &StagedRecordingEncryption) -> Result<(), String> {
+    if staged.staged_path.exists() {
+        std::fs::remove_file(&staged.staged_path).map_err(|e| {
+            format!(
+                "Failed to clean up staged encrypted recording '{}': {}",
+                staged.staged_path.display(),
+                e
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn encrypt_recording_file_in_place(path: &Path, key: &[u8; 32]) -> Result<PathBuf, String> {
+    let staged = stage_recording_encryption(path, key)?;
+    let result = finalize_staged_recording_encryption(&staged);
+    if result.is_err() {
+        let _ = cleanup_staged_recording_encryption(&staged);
+    }
+    result
 }
 
 async fn resolve_audio_path_for_runtime(
@@ -11350,7 +11420,10 @@ fn custom_mode_matches_context(
     browser_url: Option<&str>,
 ) -> Option<String> {
     if let Some(matcher) = mode.activation_domain_matcher.as_deref() {
-        let normalized_matcher = matcher.trim().trim_start_matches("www.").to_ascii_lowercase();
+        let normalized_matcher = matcher
+            .trim()
+            .trim_start_matches("www.")
+            .to_ascii_lowercase();
         if !normalized_matcher.is_empty() {
             if let Some(active_domain) = browser_url.and_then(extract_host_from_url) {
                 if active_domain == normalized_matcher

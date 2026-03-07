@@ -12,6 +12,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+pub(crate) fn nautilus_config_dir() -> Result<PathBuf> {
+    let config_dir = dirs::config_dir()
+        .context("Could not find config directory")?
+        .join("Nautilus");
+
+    std::fs::create_dir_all(&config_dir)?;
+
+    Ok(config_dir)
+}
+
+pub(crate) fn settings_file_path() -> Result<PathBuf> {
+    Ok(nautilus_config_dir()?.join("settings.json"))
+}
+
 /// Application settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -638,13 +652,7 @@ impl SettingsManager {
 
     /// Get config directory path
     fn config_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .context("Could not find config directory")?
-            .join("Nautilus");
-
-        std::fs::create_dir_all(&config_dir)?;
-
-        Ok(config_dir.join("settings.json"))
+        settings_file_path()
     }
 }
 

@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+const SETTINGS_BACKUP_FILENAME: &str = "settings.json";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CloudProvider {
@@ -184,9 +186,9 @@ impl BackupManager {
         }
 
         // Copy settings
-        let settings_path = data_dir.join("settings.json");
+        let settings_path = crate::settings::settings_file_path()?;
         if settings_path.exists() {
-            let settings_backup = backup_path.join("settings.json");
+            let settings_backup = backup_path.join(SETTINGS_BACKUP_FILENAME);
             tokio::fs::copy(&settings_path, settings_backup).await?;
         }
 
@@ -236,9 +238,9 @@ impl BackupManager {
         }
 
         // Restore settings
-        let settings_backup = backup_path.join("settings.json");
+        let settings_backup = backup_path.join(SETTINGS_BACKUP_FILENAME);
         if settings_backup.exists() {
-            let settings_path = data_dir.join("settings.json");
+            let settings_path = crate::settings::settings_file_path()?;
             tokio::fs::copy(&settings_backup, settings_path).await?;
         }
 

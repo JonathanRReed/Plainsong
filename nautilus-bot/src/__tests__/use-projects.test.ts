@@ -36,9 +36,8 @@ vi.mock("@/lib/tauri", () => ({
 }));
 
 describe("useProjects", () => {
-  const wrapper = ({ children }: { children: ReactNode }) => (
-    createElement(DataCacheProvider, null, children)
-  );
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    createElement(DataCacheProvider, null, children);
 
   beforeEach(() => {
     vi.clearAllMocks();
