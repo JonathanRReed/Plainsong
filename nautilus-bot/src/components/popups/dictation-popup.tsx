@@ -51,6 +51,7 @@ interface DictationStateChangedEvent {
   contextSource?: DictationContextSource | null;
   insertionMode?: DictationInsertionMode | null;
   appTarget?: string | null;
+  activationMatcher?: string | null;
   dictationProvider?: string | null;
   dictationModelId?: string | null;
 }
@@ -199,6 +200,7 @@ export function DictationPopup() {
     useState<DictationInsertionMode>("auto");
   const [resolvedModeLabel, setResolvedModeLabel] = useState<string | null>(null);
   const [runtimeAppTarget, setRuntimeAppTarget] = useState<string | null>(null);
+  const [activationMatcher, setActivationMatcher] = useState<string | null>(null);
 
   const refreshPopupSettings = async () => {
     const settings = await getSettings();
@@ -230,6 +232,9 @@ export function DictationPopup() {
     }
     if (payload.insertionMode) {
       setDictationInsertionMode(payload.insertionMode);
+    }
+    if (typeof payload.activationMatcher !== "undefined") {
+      setActivationMatcher(payload.activationMatcher ?? null);
     }
     if (typeof payload.dictationProvider !== "undefined") {
       setDictationProvider(payload.dictationProvider ?? null);
@@ -380,6 +385,12 @@ export function DictationPopup() {
   const insertionMeta = INSERTION_META[dictationInsertionMode] ?? INSERTION_META.auto;
   const routeLabel = formatRouteLabel(dictationProvider, dictationModelId);
   const targetDetail = runtimeAppTarget ? ` for ${runtimeAppTarget}` : "";
+  const autoActivationDetail =
+    activationMatcher && runtimeAppTarget
+      ? `Auto for ${runtimeAppTarget} via "${activationMatcher}"`
+      : activationMatcher
+        ? `Auto via "${activationMatcher}"`
+        : null;
 
   const cycleDisplayMode = async () => {
     const next: DisplayMode =
@@ -565,6 +576,9 @@ export function DictationPopup() {
                     {selectedModeLabel} · {contextMeta.detail} · {insertionMeta.label}
                     {runtimeAppTarget ? ` · Target ${runtimeAppTarget}` : ""}
                   </p>
+                  {autoActivationDetail && (
+                    <p className="mt-1 text-xs text-cyan-200/90">{autoActivationDetail}</p>
+                  )}
                   <div className="mt-2 h-2.5 w-full max-w-[220px] rounded-full bg-slate-700/50 overflow-hidden">
                     <div
                       className="h-full bg-linear-to-r from-emerald-500 via-orange-400 to-rose-500 transition-all duration-50 rounded-full"
@@ -618,6 +632,9 @@ export function DictationPopup() {
               <p className="text-xs text-slate-300">
                 {selectedModeLabel} is shaping the result for {insertionMeta.label.toLowerCase()}{targetDetail}.
               </p>
+              {autoActivationDetail && (
+                <p className="mt-1 text-xs text-cyan-200/90">{autoActivationDetail}</p>
+              )}
             </div>
           </div>
         )}

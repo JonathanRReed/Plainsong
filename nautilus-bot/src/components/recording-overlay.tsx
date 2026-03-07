@@ -3,16 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Mic, Monitor, AlertCircle, CheckCircle } from "lucide-react";
 import { checkSystemAudioAvailability, getLoopbackDeviceName } from "@/lib/tauri";
-
-
-const MEETING_TEMPLATES = [
-  { value: "auto", label: "Auto", description: "Let AI decide the best format" },
-  { value: "1on1", label: "1:1 Meeting", description: "Topics, feedback, goals & commitments" },
-  { value: "standup", label: "Standup", description: "Done, planned, blockers" },
-  { value: "sales", label: "Sales Call", description: "Pain points, objections, next steps" },
-  { value: "interview", label: "Interview", description: "Strengths, answers, hiring rec" },
-  { value: "brainstorm", label: "Brainstorm", description: "Ideas, top candidates, decisions" },
-] as const;
+import { MEETING_TEMPLATES } from "@/lib/meeting-templates";
 
 interface ConsentDialogProps {
   open: boolean;

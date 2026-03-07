@@ -85,6 +85,27 @@ pub struct InsertionActionRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MeetingChatCitationRecord {
+    pub text: String,
+    pub start_time: Option<f64>,
+    pub end_time: Option<f64>,
+    pub recording_id: Option<String>,
+    pub certainty: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingChatMessageRecord {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub template_id: Option<String>,
+    pub citations: Vec<MeetingChatCitationRecord>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MeetingArtifactRecord {
     pub id: String,
     pub recording_id: String,
@@ -94,6 +115,7 @@ pub struct MeetingArtifactRecord {
     pub decisions: Vec<String>,
     pub deadlines: Vec<String>,
     pub template_id: Option<String>,
+    pub chat_messages: Vec<MeetingChatMessageRecord>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

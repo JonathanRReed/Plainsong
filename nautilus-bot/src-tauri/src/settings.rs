@@ -211,6 +211,7 @@ pub struct DictationCustomMode {
     pub ai_provider: Option<String>,
     pub ai_model_id: Option<String>,
     pub activation_app_matcher: Option<String>,
+    pub activation_domain_matcher: Option<String>,
 }
 
 impl Default for TranscriptionSettings {

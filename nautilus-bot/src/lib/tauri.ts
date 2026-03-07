@@ -31,6 +31,7 @@ export interface DictationHistoryDetails {
   contextPreview: string | null;
   contextAppName: string | null;
   appTarget: string | null;
+  activationMatcher: string | null;
   commandApplied: string | null;
   promptSource: string | null;
   promptPreview: string | null;
@@ -41,6 +42,23 @@ export interface DictationHistoryDetails {
   transcriptionLatencyMs: number | null;
   insertLatencyMs: number | null;
   endToEndMs: number | null;
+}
+
+export interface MeetingChatCitation {
+  text: string;
+  startTime?: number | null;
+  endTime?: number | null;
+  recordingId?: string | null;
+  certainty?: number | null;
+}
+
+export interface MeetingChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  templateId?: string | null;
+  citations: MeetingChatCitation[];
+  createdAt: string;
 }
 
 export async function startDictation(options?: DictationStartOptions): Promise<void> {
@@ -132,6 +150,34 @@ export async function updateRecordingNotes(
   meetingNotes: string
 ): Promise<void> {
   await invoke("update_recording_notes", { recordingId, meetingNotes });
+}
+
+export async function updateRecordingAnalysis(
+  recordingId: string,
+  summary: string | null,
+  actionItems: string[]
+): Promise<void> {
+  await invoke("update_recording_analysis", { recordingId, summary, actionItems });
+}
+
+export async function updateRecordingTemplate(
+  recordingId: string,
+  meetingTemplateId: string | null
+): Promise<void> {
+  await invoke("update_recording_template", { recordingId, meetingTemplateId });
+}
+
+export async function getMeetingChatMessages(
+  recordingId: string
+): Promise<MeetingChatMessage[]> {
+  return await invoke("get_meeting_chat_messages", { recordingId });
+}
+
+export async function updateMeetingChatMessages(
+  recordingId: string,
+  messages: MeetingChatMessage[]
+): Promise<void> {
+  await invoke("update_meeting_chat_messages", { recordingId, messages });
 }
 
 export async function updateTranscriptSegment(

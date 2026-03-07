@@ -1,12 +1,17 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { analyzeRecording, extractActionItems } from "@/lib/tauri";
-import type { LlmAnalysisResult, ActionItem, AnalysisTemplate } from "@/types";
+import {
+  analyzeRecording,
+  extractActionItems,
+  extractActionItemsGrounded,
+  type MeetingChatMessage,
+} from "@/lib/tauri";
+import type { LlmAnalysisResult, ActionItem, AnalysisTemplate, LlmCitation } from "@/types";
 import { 
   Sparkles, 
   FileText, 
@@ -25,6 +30,25 @@ interface AiAnalysisPanelProps {
   inputPlaceholder?: string;
   templates?: AnalysisTemplate[];
   emptyStateLabel?: string;
+  analysisMode?: "standard" | "grounded";
+  responseActions?: Array<{
+    label: string;
+    onAction: (payload: {
+      response: string;
+      query: string;
+      templateId: string | null;
+      citations: LlmCitation[];
+    }) => void;
+  }>;
+  actionItemActions?: Array<{
+    label: string;
+    onAction: (payload: {
+      items: ActionItem[];
+      templateId: string | null;
+    }) => void;
+  }>;
+  chatMessages?: MeetingChatMessage[];
+  onChatMessagesChange?: (messages: MeetingChatMessage[]) => void;
 }
 
 const ANALYSIS_TEMPLATES: AnalysisTemplate[] = [
@@ -65,28 +89,139 @@ export function AiAnalysisPanel({
   inputPlaceholder = "Ask a custom question about this transcript...",
   templates = ANALYSIS_TEMPLATES,
   emptyStateLabel = "Analyzing transcript...",
+  analysisMode = "standard",
+  responseActions = [],
+  actionItemActions = [],
+  chatMessages,
+  onChatMessagesChange,
 }: AiAnalysisPanelProps) {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [customQuery, setCustomQuery] = useState("");
   const [lastResult, setLastResult] = useState<LlmAnalysisResult | null>(null);
   const [actionItems, setActionItems] = useState<ActionItem[] | null>(null);
+  const [actionItemCitations, setActionItemCitations] = useState<Array<LlmCitation[]>>([]);
   const [error, setError] = useState<string | null>(null);
   const [showSetupGuide, setShowSetupGuide] = useState(false);
+  const [lastQuery, setLastQuery] = useState("");
+  const [lastTemplateId, setLastTemplateId] = useState<string | null>(null);
+  const [threadMessages, setThreadMessages] = useState<MeetingChatMessage[]>(
+    chatMessages ?? []
+  );
+
+  useEffect(() => {
+    setThreadMessages(chatMessages ?? []);
+  }, [chatMessages]);
+
+  const appendThreadMessages = (messages: MeetingChatMessage[]) => {
+    setThreadMessages((current) => {
+      const next = [...current, ...messages];
+      onChatMessagesChange?.(next);
+      return next;
+    });
+  };
+
+  const buildThreadedCustomQuery = (query: string) => {
+    if (threadMessages.length === 0) {
+      return query;
+    }
+
+    const threadContext = threadMessages
+      .slice(-6)
+      .map((message) => `${message.role === "assistant" ? "Assistant" : "User"}: ${message.content}`)
+      .join("\n\n");
+
+    return [
+      "Conversation so far:",
+      threadContext,
+      "",
+      `New user question: ${query}`,
+      "Answer the newest question directly. Use the transcript and saved meeting notes as the source of truth.",
+    ].join("\n");
+  };
+
+  const buildActionItemsThreadMessage = (items: ActionItem[]) => {
+    if (items.length === 0) {
+      return "No action items found in this meeting.";
+    }
+
+    return items
+      .map((item) => {
+        const details = [
+          item.assignee ? `Owner: ${item.assignee}` : null,
+          item.deadline ? `Due: ${item.deadline}` : null,
+        ].filter(Boolean);
+        return details.length > 0
+          ? `- ${item.task} (${details.join(" · ")})`
+          : `- ${item.task}`;
+      })
+      .join("\n");
+  };
 
   const handleTemplateClick = async (template: AnalysisTemplate) => {
     setIsAnalyzing(true);
     setError(null);
     setShowSetupGuide(false);
+    setLastQuery(template.query);
+    setLastTemplateId(template.id);
+    const userMessage: MeetingChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: template.name,
+      templateId: template.id,
+      citations: [],
+      createdAt: new Date().toISOString(),
+    };
     
     try {
       if (template.id === "actions") {
-        const items = await extractActionItems(recordingId);
-        setActionItems(items);
+        if (analysisMode === "grounded") {
+          const result = await extractActionItemsGrounded(recordingId);
+          setActionItems(result.items);
+          setActionItemCitations(result.items.map((item) => item.citations ?? []));
+          appendThreadMessages([
+            userMessage,
+            {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              content: buildActionItemsThreadMessage(result.items),
+              templateId: template.id,
+              citations: result.items.flatMap((item) => item.citations ?? []),
+              createdAt: new Date().toISOString(),
+            },
+          ]);
+        } else {
+          const items = await extractActionItems(recordingId);
+          setActionItems(items);
+          setActionItemCitations([]);
+          appendThreadMessages([
+            userMessage,
+            {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              content: buildActionItemsThreadMessage(items),
+              templateId: template.id,
+              citations: [],
+              createdAt: new Date().toISOString(),
+            },
+          ]);
+        }
         setLastResult(null);
       } else {
         const result = await analyzeRecording(recordingId, template.query);
         setLastResult(result);
         setActionItems(null);
+        setActionItemCitations([]);
+        appendThreadMessages([
+          userMessage,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: result.response,
+            templateId: template.id,
+            citations: result.citations,
+            createdAt: new Date().toISOString(),
+          },
+        ]);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Analysis failed";
@@ -114,11 +249,34 @@ export function AiAnalysisPanel({
     setIsAnalyzing(true);
     setError(null);
     setShowSetupGuide(false);
+    setLastQuery(customQuery);
+    setLastTemplateId(null);
+    const rawQuery = customQuery.trim();
+    const userMessage: MeetingChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: rawQuery,
+      templateId: null,
+      citations: [],
+      createdAt: new Date().toISOString(),
+    };
     
     try {
-      const result = await analyzeRecording(recordingId, customQuery);
+      const result = await analyzeRecording(recordingId, buildThreadedCustomQuery(rawQuery));
       setLastResult(result);
       setActionItems(null);
+      setActionItemCitations([]);
+      appendThreadMessages([
+        userMessage,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: result.response,
+          templateId: null,
+          citations: result.citations,
+          createdAt: new Date().toISOString(),
+        },
+      ]);
       setCustomQuery("");
     } catch (err) {
       const message = err instanceof Error ? err.message : "Analysis failed";
@@ -218,6 +376,7 @@ export function AiAnalysisPanel({
         />
         <Button 
           size="icon" 
+          aria-label="Send"
           onClick={handleCustomQuery}
           disabled={isAnalyzing || !customQuery.trim()}
         >
@@ -228,6 +387,54 @@ export function AiAnalysisPanel({
           )}
         </Button>
       </div>
+
+      {threadMessages.length > 0 && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-medium">Conversation</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ScrollArea className="max-h-72 pr-3">
+              <div className="space-y-3">
+                {threadMessages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={cn(
+                      "rounded-lg border p-3",
+                      message.role === "assistant" ? "bg-muted/40" : "bg-background"
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        {message.role === "assistant" ? "Assistant" : "You"}
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">
+                        {new Date(message.createdAt).toLocaleTimeString()}
+                      </p>
+                    </div>
+                    <p className="mt-2 whitespace-pre-wrap text-sm">{message.content}</p>
+                    {message.citations.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {message.citations.map((citation, idx) => (
+                          <p key={`${message.id}-${idx}`} className="text-[11px] text-muted-foreground italic">
+                            &ldquo;{citation.text}&rdquo;
+                            {typeof citation.startTime === "number" &&
+                            typeof citation.endTime === "number" ? (
+                              <span className="not-italic ml-1">
+                                ({citation.startTime.toFixed(1)}s - {citation.endTime.toFixed(1)}s)
+                              </span>
+                            ) : null}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Error Display */}
       {error && (
@@ -314,6 +521,29 @@ export function AiAnalysisPanel({
                 </div>
               </div>
             )}
+
+            {responseActions.length > 0 && (
+              <div className="mt-4 flex flex-wrap gap-2 border-t pt-4">
+                {responseActions.map((action) => (
+                  <Button
+                    key={action.label}
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      action.onAction({
+                        response: lastResult.response,
+                        query: lastQuery,
+                        templateId: lastTemplateId,
+                        citations: lastResult.citations,
+                      })
+                    }
+                  >
+                    {action.label}
+                  </Button>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
@@ -343,10 +573,46 @@ export function AiAnalysisPanel({
                         )}
                       </div>
                     )}
+                    {actionItemCitations[idx]?.length ? (
+                      <div className="mt-2 space-y-1">
+                        {actionItemCitations[idx].map((citation, citationIndex) => (
+                          <p key={citationIndex} className="text-[11px] text-muted-foreground italic">
+                            &ldquo;{citation.text}&rdquo;
+                            {typeof citation.startTime === "number" &&
+                            typeof citation.endTime === "number" ? (
+                              <span className="not-italic ml-1">
+                                ({citation.startTime.toFixed(1)}s - {citation.endTime.toFixed(1)}s)
+                              </span>
+                            ) : null}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ))}
             </div>
+
+            {actionItemActions.length > 0 && (
+              <div className="mt-4 flex flex-wrap gap-2 border-t pt-4">
+                {actionItemActions.map((action) => (
+                  <Button
+                    key={action.label}
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      action.onAction({
+                        items: actionItems,
+                        templateId: lastTemplateId,
+                      })
+                    }
+                  >
+                    {action.label}
+                  </Button>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

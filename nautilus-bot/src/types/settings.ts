@@ -25,6 +25,7 @@ export interface DictationCustomMode {
   aiProvider?: string | null;
   aiModelId?: string | null;
   activationAppMatcher?: string | null;
+  activationDomainMatcher?: string | null;
 }
 
 export interface AudioSettings {

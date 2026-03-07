@@ -16,6 +16,7 @@ pub struct DictationStateChangedEvent {
     pub context_source: Option<String>,
     pub insertion_mode: Option<String>,
     pub app_target: Option<String>,
+    pub activation_matcher: Option<String>,
     pub dictation_provider: Option<String>,
     pub dictation_model_id: Option<String>,
 }
@@ -70,6 +71,7 @@ pub struct DictationTextReadyEvent {
     pub command_applied: Option<String>,
     pub snippet_applied_count: usize,
     pub app_target: Option<String>,
+    pub activation_matcher: Option<String>,
     pub context_source: Option<String>,
     pub context_chars: Option<usize>,
 }

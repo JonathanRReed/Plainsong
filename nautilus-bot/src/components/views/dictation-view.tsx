@@ -57,6 +57,7 @@ interface DictationTextReadyEvent {
   commandApplied?: string | null;
   snippetAppliedCount?: number;
   appTarget?: string | null;
+  activationMatcher?: string | null;
   contextSource?: DictationContextSource | null;
   contextChars?: number | null;
 }
@@ -88,6 +89,7 @@ type DictationCustomModeDraft = {
   name: string;
   description: string;
   activationAppMatcher: string;
+  activationDomainMatcher: string;
 };
 
 type DictationModeSummaryItem = {
@@ -216,6 +218,7 @@ function summarizeMode(mode: {
   aiProvider?: string | null;
   aiModelId?: string | null;
   activationAppMatcher?: string | null;
+  activationDomainMatcher?: string | null;
 }): DictationModeSummaryItem[] {
   return [
     { label: "Style", value: PROFILE_LABELS[mode.profile] },
@@ -242,7 +245,11 @@ function summarizeMode(mode: {
     },
     {
       label: "Auto",
-      value: mode.activationAppMatcher ? `For ${mode.activationAppMatcher}` : "Manual only",
+      value: mode.activationDomainMatcher
+        ? `Domain ${mode.activationDomainMatcher}`
+        : mode.activationAppMatcher
+          ? `App ${mode.activationAppMatcher}`
+          : "Manual only",
     },
   ];
 }
@@ -267,6 +274,7 @@ export function DictationView() {
   const [commandApplied, setCommandApplied] = useState<string | null>(null);
   const [snippetAppliedCount, setSnippetAppliedCount] = useState(0);
   const [appTarget, setAppTarget] = useState<string | null>(null);
+  const [activationMatcher, setActivationMatcher] = useState<string | null>(null);
   const [contextChars, setContextChars] = useState<number | null>(null);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const [saveToInbox, setSaveToInbox] = useState(true);
@@ -281,6 +289,7 @@ export function DictationView() {
     name: "Custom Mode",
     description: "",
     activationAppMatcher: "",
+    activationDomainMatcher: "",
   });
   const [defaultProjectId, setDefaultProjectId] = useState("inbox");
   const [dictationPushToTalk, setDictationPushToTalk] = useState(true);
@@ -355,6 +364,7 @@ export function DictationView() {
         aiProvider: currentAiProvider,
         aiModelId: currentAiModelId,
         activationAppMatcher: selectedCustomMode?.activationAppMatcher ?? null,
+        activationDomainMatcher: selectedCustomMode?.activationDomainMatcher ?? null,
       }),
     [
       currentAiModelId,
@@ -368,6 +378,7 @@ export function DictationView() {
       dictationProfile,
       saveToInbox,
       selectedCustomMode?.activationAppMatcher,
+      selectedCustomMode?.activationDomainMatcher,
     ]
   );
 
@@ -683,6 +694,9 @@ export function DictationView() {
     activationAppMatcher:
       overrides?.activationAppMatcher ??
       (customModeDraft.activationAppMatcher.trim() || null),
+    activationDomainMatcher:
+      overrides?.activationDomainMatcher ??
+      (customModeDraft.activationDomainMatcher.trim() || null),
   });
 
   const applySavedCustomMode = (mode: DictationCustomMode) => {
@@ -692,6 +706,7 @@ export function DictationView() {
       name: mode.name,
       description: mode.description,
       activationAppMatcher: mode.activationAppMatcher ?? "",
+      activationDomainMatcher: mode.activationDomainMatcher ?? "",
     });
     setDictationProfile(mode.profile);
     setDictationInsertionMode(mode.insertionMode);
@@ -743,6 +758,7 @@ export function DictationView() {
       name: nextMode.name,
       description: nextMode.description,
       activationAppMatcher: nextMode.activationAppMatcher ?? "",
+      activationDomainMatcher: nextMode.activationDomainMatcher ?? "",
     });
     await persistDictationPreferences({
       modePreset: "custom",
@@ -770,7 +786,12 @@ export function DictationView() {
     const shouldClearSelection = selectedCustomModeId === modeId;
     if (shouldClearSelection) {
       setSelectedCustomModeId(null);
-      setCustomModeDraft({ name: "Custom Mode", description: "", activationAppMatcher: "" });
+      setCustomModeDraft({
+        name: "Custom Mode",
+        description: "",
+        activationAppMatcher: "",
+        activationDomainMatcher: "",
+      });
     }
     await persistDictationPreferences({
       selectedCustomModeId: shouldClearSelection ? null : selectedCustomModeId,
@@ -784,6 +805,7 @@ export function DictationView() {
         name: selectedCustomMode.name,
         description: selectedCustomMode.description,
         activationAppMatcher: selectedCustomMode.activationAppMatcher ?? "",
+        activationDomainMatcher: selectedCustomMode.activationDomainMatcher ?? "",
       });
       return;
     }
@@ -792,6 +814,7 @@ export function DictationView() {
         name: current.name || "Custom Mode",
         description: current.description,
         activationAppMatcher: current.activationAppMatcher,
+        activationDomainMatcher: current.activationDomainMatcher,
       }));
     }
   }, [dictationModePreset, selectedCustomMode]);
@@ -862,6 +885,7 @@ export function DictationView() {
         setCommandApplied(payload?.commandApplied ?? null);
         setSnippetAppliedCount(payload?.snippetAppliedCount ?? 0);
         setAppTarget(payload?.appTarget ?? null);
+        setActivationMatcher(payload?.activationMatcher ?? null);
         setContextChars(payload?.contextChars ?? null);
         if (payload?.pasted) {
           setPasteStatus("Paste command sent (also copied to clipboard)");
@@ -1225,6 +1249,9 @@ export function DictationView() {
                                 {mode.activationAppMatcher
                                   ? ` · Auto for ${mode.activationAppMatcher}`
                                   : ""}
+                                {mode.activationDomainMatcher
+                                  ? ` · Domain ${mode.activationDomainMatcher}`
+                                  : ""}
                               </p>
                             </div>
                             {isActive && (
@@ -1345,10 +1372,31 @@ export function DictationView() {
                         mode automatically for hotkey and tray dictation.
                       </p>
                     </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Auto-activate for domain</label>
+                      <input
+                        type="text"
+                        aria-label="Auto-activate for domain"
+                        className="w-full rounded-md border bg-background p-2 text-sm"
+                        value={customModeDraft.activationDomainMatcher}
+                        onChange={(event) =>
+                          setCustomModeDraft((current) => ({
+                            ...current,
+                            activationDomainMatcher: event.target.value,
+                          }))
+                        }
+                        placeholder="docs.google.com, linear.app"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Optional. Browser-focused dictation can switch when the active tab URL
+                        host matches this domain.
+                      </p>
+                    </div>
                   </div>
                   <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                     Saving a custom mode snapshots the current dictation style, result behavior,
-                    context source, transcription route, AI route, and optional auto-activation rule.
+                    context source, transcription route, AI route, and optional app or domain
+                    auto-activation rules.
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <Button size="sm" onClick={() => void handleSaveCustomMode(false)}>
@@ -1531,6 +1579,7 @@ export function DictationView() {
                   commandApplied ||
                   snippetAppliedCount > 0 ||
                   appTarget ||
+                  activationMatcher ||
                   contextChars !== null) && (
                   <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                     {startupLatencyMs !== null && (
@@ -1572,6 +1621,7 @@ export function DictationView() {
                     {commandApplied && <span>Command: {commandApplied}</span>}
                     {snippetAppliedCount > 0 && <span>Snippets: {snippetAppliedCount}</span>}
                     {appTarget && <span>Target app: {appTarget}</span>}
+                    {activationMatcher && <span>Auto mode: {activationMatcher}</span>}
                     {contextChars !== null && contextChars > 0 && (
                       <span>Context: {contextChars} chars</span>
                     )}
@@ -2211,6 +2261,7 @@ export function DictationView() {
                     </div>
                     {(selectedHistoryDetails.contextAppName ||
                       selectedHistoryDetails.appTarget ||
+                      selectedHistoryDetails.activationMatcher ||
                       selectedHistoryDetails.commandApplied) && (
                       <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
                         {selectedHistoryDetails.contextAppName && (
@@ -2218,6 +2269,9 @@ export function DictationView() {
                         )}
                         {selectedHistoryDetails.appTarget && (
                           <span>Insert target: {selectedHistoryDetails.appTarget}</span>
+                        )}
+                        {selectedHistoryDetails.activationMatcher && (
+                          <span>Auto mode: {selectedHistoryDetails.activationMatcher}</span>
                         )}
                         {selectedHistoryDetails.commandApplied && (
                           <span>Command: {selectedHistoryDetails.commandApplied}</span>
