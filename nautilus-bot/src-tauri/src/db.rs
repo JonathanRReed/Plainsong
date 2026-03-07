@@ -1354,21 +1354,21 @@ impl Database {
         let recording = self
             .get_recording(recording_id)?
             .ok_or_else(|| anyhow::anyhow!("Recording not found: {}", recording_id))?;
-        let mut artifact = self
-            .get_meeting_artifact(recording_id)?
-            .unwrap_or(MeetingArtifactRecord {
-                id: uuid::Uuid::new_v4().to_string(),
-                recording_id: recording_id.to_string(),
-                title: Some(recording.title.clone()),
-                summary: None,
-                action_items: Vec::new(),
-                decisions: Vec::new(),
-                deadlines: Vec::new(),
-                template_id: recording.meeting_template_id.clone(),
-                chat_messages: Vec::new(),
-                created_at: now,
-                updated_at: now,
-            });
+        let mut artifact =
+            self.get_meeting_artifact(recording_id)?
+                .unwrap_or(MeetingArtifactRecord {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    recording_id: recording_id.to_string(),
+                    title: Some(recording.title.clone()),
+                    summary: None,
+                    action_items: Vec::new(),
+                    decisions: Vec::new(),
+                    deadlines: Vec::new(),
+                    template_id: recording.meeting_template_id.clone(),
+                    chat_messages: Vec::new(),
+                    created_at: now,
+                    updated_at: now,
+                });
         artifact.title = artifact.title.or(Some(recording.title));
         artifact.summary = summary.map(|value| value.to_string());
         artifact.action_items = action_items.to_vec();
@@ -1409,21 +1409,21 @@ impl Database {
         let recording = self
             .get_recording(recording_id)?
             .ok_or_else(|| anyhow::anyhow!("Recording not found: {}", recording_id))?;
-        let mut artifact = self
-            .get_meeting_artifact(recording_id)?
-            .unwrap_or(MeetingArtifactRecord {
-                id: uuid::Uuid::new_v4().to_string(),
-                recording_id: recording_id.to_string(),
-                title: Some(recording.title.clone()),
-                summary: recording.summary,
-                action_items: recording.action_items.unwrap_or_default(),
-                decisions: Vec::new(),
-                deadlines: Vec::new(),
-                template_id: recording.meeting_template_id,
-                chat_messages: Vec::new(),
-                created_at: now,
-                updated_at: now,
-            });
+        let mut artifact =
+            self.get_meeting_artifact(recording_id)?
+                .unwrap_or(MeetingArtifactRecord {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    recording_id: recording_id.to_string(),
+                    title: Some(recording.title.clone()),
+                    summary: recording.summary,
+                    action_items: recording.action_items.unwrap_or_default(),
+                    decisions: Vec::new(),
+                    deadlines: Vec::new(),
+                    template_id: recording.meeting_template_id,
+                    chat_messages: Vec::new(),
+                    created_at: now,
+                    updated_at: now,
+                });
         artifact.chat_messages = messages.to_vec();
         artifact.updated_at = now;
         self.save_meeting_artifact(&artifact)?;
@@ -3007,7 +3007,8 @@ mod tests {
         recording.summary = Some("Legacy summary".to_string());
         recording.action_items = Some(vec!["Legacy action".to_string()]);
         db.create_recording(&recording).unwrap();
-        db.save_meeting_artifact(&sample_meeting_artifact()).unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
 
         db.update_recording_analysis(
             "r1",
@@ -3018,7 +3019,10 @@ mod tests {
 
         let fetched = db.get_recording("r1").unwrap().unwrap();
         assert_eq!(fetched.summary.as_deref(), Some("Edited summary"));
-        assert_eq!(fetched.action_items, Some(vec!["Edited follow-up".to_string()]));
+        assert_eq!(
+            fetched.action_items,
+            Some(vec!["Edited follow-up".to_string()])
+        );
 
         let artifact = db.get_meeting_artifact("r1").unwrap().unwrap();
         assert_eq!(artifact.summary.as_deref(), Some("Edited summary"));
@@ -3028,8 +3032,10 @@ mod tests {
     #[test]
     fn test_update_recording_meeting_template_updates_meeting_artifact_values() {
         let mut db = in_memory_db();
-        db.create_recording(&sample_recording("r1", "inbox")).unwrap();
-        db.save_meeting_artifact(&sample_meeting_artifact()).unwrap();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
 
         db.update_recording_meeting_template("r1", Some("standup"))
             .unwrap();

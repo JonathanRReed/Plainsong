@@ -143,10 +143,33 @@ vi.mock("@/lib/tauri", () => ({
   extractActionItemsGrounded: mocks.extractActionItemsGrounded,
 }));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("RecordingsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.eventListeners.clear();
+    mocks.recordings = [
+      {
+        id: "r1",
+        title: "Weekly sync",
+        projectId: "default",
+        duration: 120,
+        createdAt: "2026-03-06T12:00:00Z",
+        updatedAt: "2026-03-06T12:00:00Z",
+        sourceType: "meeting",
+        audioPath: "/tmp/weekly-sync.wav",
+        status: "completed" as const,
+      },
+    ];
     mocks.getRecording.mockResolvedValue(mocks.recordings[0]);
     mocks.getTranscript.mockResolvedValue({
       id: "t1",
@@ -400,5 +423,85 @@ describe("RecordingsView", () => {
         },
       ]);
     });
+  });
+
+  it("ignores stale meeting chat loads after switching recordings", async () => {
+    mocks.recordings = [
+      {
+        id: "r1",
+        title: "Weekly sync",
+        projectId: "default",
+        duration: 120,
+        createdAt: "2026-03-06T12:00:00Z",
+        updatedAt: "2026-03-06T12:00:00Z",
+        sourceType: "meeting",
+        audioPath: "/tmp/weekly-sync.wav",
+        status: "completed",
+      },
+      {
+        id: "r2",
+        title: "Launch review",
+        projectId: "default",
+        duration: 90,
+        createdAt: "2026-03-06T13:00:00Z",
+        updatedAt: "2026-03-06T13:00:00Z",
+        sourceType: "meeting",
+        audioPath: "/tmp/launch-review.wav",
+        status: "completed",
+      },
+    ];
+    mocks.getRecording.mockImplementation(async (recordingId: string) =>
+      mocks.recordings.find((recording) => recording.id === recordingId) ?? null
+    );
+
+    const firstChatLoad = deferred<Awaited<ReturnType<typeof mocks.getMeetingChatMessages>>>();
+    mocks.getMeetingChatMessages
+      .mockReturnValueOnce(firstChatLoad.promise)
+      .mockResolvedValueOnce([
+        {
+          id: "r2-message",
+          role: "assistant",
+          content: "Fresh launch review answer.",
+          templateId: null,
+          citations: [],
+          createdAt: "2026-03-06T13:01:00Z",
+        },
+      ]);
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("Meeting notes");
+
+    fireEvent.click(screen.getByText("Launch review"));
+
+    await waitFor(() => {
+      expect(screen.getByText("1 chat messages")).toBeInTheDocument();
+    });
+
+    firstChatLoad.resolve([
+      {
+        id: "stale-message",
+        role: "assistant",
+        content: "Stale weekly sync answer.",
+        templateId: null,
+        citations: [],
+        createdAt: "2026-03-06T12:05:00Z",
+      },
+      {
+        id: "stale-message-2",
+        role: "assistant",
+        content: "Another stale answer.",
+        templateId: null,
+        citations: [],
+        createdAt: "2026-03-06T12:06:00Z",
+      },
+    ]);
+
+    await waitFor(() => {
+      expect(screen.getByText("1 chat messages")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("2 chat messages")).not.toBeInTheDocument();
   });
 });

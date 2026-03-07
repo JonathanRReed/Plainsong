@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   getProjects,
   createProject as tauriCreateProject,
@@ -8,22 +8,27 @@ import type { Project } from "@/types";
 
 export function useProjects() {
   const cache = useDataCache();
-  const [projects, setProjects] = useState<Project[]>(() => cache.peekProjects() ?? []);
+  const [projects, setProjects] = useState<Project[]>(
+    () => cache.peekProjects() ?? []
+  );
   const [isLoading, setIsLoading] = useState(() => !cache.peekProjects());
   const [error, setError] = useState<string | null>(null);
 
-  const fetchProjects = useCallback(async (forceRefresh = false) => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const data = await cache.getProjects(() => getProjects(), forceRefresh);
-      setProjects(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch projects");
-    } finally {
-      setIsLoading(false);
-    }
-  }, [cache]);
+  const fetchProjects = useCallback(
+    async (forceRefresh = false) => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const data = await cache.getProjects(() => getProjects(), forceRefresh);
+        setProjects(data);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to fetch projects");
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [cache]
+  );
 
   const createProject = useCallback(
     async (project: {
@@ -31,18 +36,13 @@ export function useProjects() {
       description?: string;
       parentId?: string;
     }) => {
-      try {
-        const newProject = await tauriCreateProject(project);
-        setProjects((prev) => {
-          const next = [...prev, newProject];
-          cache.setProjects(next);
-          return next;
-        });
-        return newProject;
-      } catch (err) {
-        console.error("Failed to create project:", err);
-        throw err;
-      }
+      const newProject = await tauriCreateProject(project);
+      setProjects((prev) => {
+        const next = [...prev, newProject];
+        cache.setProjects(next);
+        return next;
+      });
+      return newProject;
     },
     [cache]
   );

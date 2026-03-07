@@ -346,7 +346,7 @@ pub fn resolve_contextual_command_input(
             action_label
         ),
         _ => format!(
-            "{} needs some text to work with. Speak the text after the command or enable clipboard/selection context.",
+            "{} needs some text to work with. Speak the text after the command or Enable Text context from clipboard or selection.",
             action_label
         ),
     })

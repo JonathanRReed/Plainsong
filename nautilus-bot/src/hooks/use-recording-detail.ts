@@ -6,6 +6,7 @@ import {
   getSpeakers,
   getTranscript,
 } from "@/lib/tauri";
+import { useScopedRequestGuard } from "@/hooks/use-scoped-request-guard";
 import type { Recording, Transcript, TranscriptSegment } from "@/types";
 
 function normalizeTranscriptForViewer(
@@ -56,6 +57,7 @@ export function useRecordingDetail({
   const [waveformData, setWaveformData] = useState<number[]>([]);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const detailRequestGuard = useScopedRequestGuard<string | null>();
 
   const applyLatestRecording = useCallback(
     (recording: Recording) => {
@@ -68,26 +70,61 @@ export function useRecordingDetail({
     [onRecordingLoaded]
   );
 
+  const fetchSelectedRecording = useCallback(async (recordingIdToRefresh: string) => {
+    return await getRecording(recordingIdToRefresh);
+  }, []);
+
+  const fetchTranscript = useCallback(async (recordingId: string) => {
+    const transcript = await getTranscript(recordingId);
+    return normalizeTranscriptForViewer(transcript, recordingId);
+  }, []);
+
+  const fetchWaveform = useCallback(async (recordingId: string) => {
+    const waveform = await getRecordingWaveform(recordingId, 500);
+    return Array.isArray(waveform) ? waveform : [];
+  }, []);
+
+  const fetchSpeakerNames = useCallback(async (recordingId: string) => {
+    const rawSpeakers = await getSpeakers(recordingId);
+    const speakers = Array.isArray(rawSpeakers) ? rawSpeakers : [];
+
+    return speakers.reduce<Record<string, string>>((acc, speaker) => {
+      if (speaker.name) {
+        acc[speaker.id] = speaker.name;
+      }
+      return acc;
+    }, {});
+  }, []);
+
   const refreshSelectedRecording = useCallback(
     async (recordingIdToRefresh: string) => {
-      const latestRecording = await getRecording(recordingIdToRefresh);
-      if (latestRecording) {
-        return applyLatestRecording(latestRecording);
+      const latestRecording = await fetchSelectedRecording(recordingIdToRefresh);
+      if (
+        !latestRecording ||
+        detailRequestGuard.activeScopeRef.current !== recordingIdToRefresh
+      ) {
+        return null;
       }
-      return null;
+      return applyLatestRecording(latestRecording);
     },
-    [applyLatestRecording]
+    [applyLatestRecording, detailRequestGuard, fetchSelectedRecording]
   );
 
-  const refreshTranscript = useCallback(async (recordingId: string) => {
-    const transcript = await getTranscript(recordingId);
-    const normalized = normalizeTranscriptForViewer(transcript, recordingId);
-    setSelectedTranscript(normalized);
-    return normalized;
-  }, []);
+  const refreshTranscript = useCallback(
+    async (recordingId: string) => {
+      const transcript = await fetchTranscript(recordingId);
+      if (detailRequestGuard.activeScopeRef.current !== recordingId) {
+        return null;
+      }
+      setSelectedTranscript(transcript);
+      return transcript;
+    },
+    [detailRequestGuard, fetchTranscript]
+  );
 
   const loadRecordingDetail = useCallback(
     async (recording: Recording) => {
+      const requestToken = detailRequestGuard.beginRequest(recording.id);
       setSelectedRecording(recording);
       setIsLoadingDetail(true);
       setDetailError(null);
@@ -98,11 +135,15 @@ export function useRecordingDetail({
       try {
         const [recordingResult, transcriptResult, waveformResult, speakersResult] =
           await Promise.allSettled([
-            getRecording(recording.id),
-            refreshTranscript(recording.id),
-            getRecordingWaveform(recording.id, 500),
-            getSpeakers(recording.id),
+            fetchSelectedRecording(recording.id),
+            fetchTranscript(recording.id),
+            fetchWaveform(recording.id),
+            fetchSpeakerNames(recording.id),
           ]);
+
+        if (!detailRequestGuard.isCurrent(requestToken)) {
+          return;
+        }
 
         let hadAnyFailure = false;
 
@@ -120,23 +161,14 @@ export function useRecordingDetail({
         }
 
         if (waveformResult.status === "fulfilled") {
-          const waveform = waveformResult.value;
-          setWaveformData(Array.isArray(waveform) ? waveform : []);
+          setWaveformData(waveformResult.value);
         } else {
           hadAnyFailure = true;
           setWaveformData([]);
         }
 
         if (speakersResult.status === "fulfilled") {
-          const speakers = Array.isArray(speakersResult.value) ? speakersResult.value : [];
-          setSpeakerNames(
-            speakers.reduce<Record<string, string>>((acc, speaker) => {
-              if (speaker.name) {
-                acc[speaker.id] = speaker.name;
-              }
-              return acc;
-            }, {})
-          );
+          setSpeakerNames(speakersResult.value);
         } else {
           hadAnyFailure = true;
           setSpeakerNames({});
@@ -148,24 +180,30 @@ export function useRecordingDetail({
           );
         }
       } catch (error) {
+        if (!detailRequestGuard.isCurrent(requestToken)) {
+          return;
+        }
         setDetailError(
           error instanceof Error ? error.message : "Failed to load recording details."
         );
       } finally {
-        setIsLoadingDetail(false);
+        if (detailRequestGuard.isCurrent(requestToken)) {
+          setIsLoadingDetail(false);
+        }
       }
     },
-    [applyLatestRecording]
+    [applyLatestRecording, detailRequestGuard, fetchSelectedRecording, fetchSpeakerNames, fetchTranscript, fetchWaveform]
   );
 
   const clearRecordingDetail = useCallback(() => {
+    detailRequestGuard.setScope(null);
     setSelectedRecording(null);
     setSelectedTranscript(null);
     setSpeakerNames({});
     setWaveformData([]);
     setIsLoadingDetail(false);
     setDetailError(null);
-  }, []);
+  }, [detailRequestGuard]);
 
   useEffect(() => {
     if (!isOpen || !selectedRecording) {
