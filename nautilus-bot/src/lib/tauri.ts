@@ -586,6 +586,14 @@ export interface PermissionDiagnostics {
   speechRecognitionReady?: boolean;
   accessibilityReady: boolean;
   automationReady: boolean;
+  cursorInsertionObserved?: boolean;
+  lastCursorInsertStatus?: {
+    succeeded: boolean;
+    copiedOnly: boolean;
+    failureKind?: "automation" | "post_event_access" | "self_target" | "unknown" | null;
+    message?: string | null;
+    observedAtMs: number;
+  } | null;
   runningFromDiskImage?: boolean;
   appBundlePath?: string | null;
   recommendedAppBundlePath?: string | null;

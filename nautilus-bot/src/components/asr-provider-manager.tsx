@@ -797,7 +797,7 @@ export function AsrProviderManager({
       action: "Open Accessibility",
       onClick: () => void openPermissionSettings("accessibility"),
       detail: appleNativeUsedForDictation
-        ? "Required to insert dictation at the cursor."
+        ? "Required so macOS allows Nautilus to synthesize Cmd+V at the cursor."
         : "Needed when you later use Apple Native for dictation insertion.",
     },
     {
@@ -807,15 +807,19 @@ export function AsrProviderManager({
       action: "Open Automation",
       onClick: () => void openPermissionSettings("automation"),
       detail: appleNativeUsedForDictation
-        ? "Required so Nautilus can send paste to the frontmost app."
-        : "Needed when you later use Apple Native for dictation insertion.",
+        ? "Optional fallback if macOS blocks direct event posting and Nautilus has to use System Events."
+        : "Optional compatibility fallback for Apple Native insertion.",
     },
   ];
 
   const appleNativeReadyForMeetings = !!permissionDiagnostics?.speechRecognitionReady;
   const appleNativeTranscriptionReady = appleNativeReadyForMeetings;
-  const appleNativeCursorInsertionReady =
-    !!permissionDiagnostics?.accessibilityReady && !!permissionDiagnostics?.automationReady;
+  const appleNativeCursorInsertionReady = !!permissionDiagnostics?.accessibilityReady;
+  const lastCursorInsertStatus = permissionDiagnostics?.lastCursorInsertStatus;
+  const lastCursorInsertFailure = lastCursorInsertStatus?.copiedOnly
+    ? lastCursorInsertStatus.message ??
+      "Nautilus copied the dictation result, but macOS blocked the final paste."
+    : null;
 
   const renderAppleNativeSetupCard = () => {
     if (!selectedRouteUsesAppleNative) {
@@ -842,7 +846,7 @@ export function AsrProviderManager({
             <span className="text-sm font-medium">Apple Native setup</span>
           </div>
           <p className="text-sm text-muted-foreground">
-            {routeSummary} Nautilus will request speech access automatically, but macOS cursor insertion also needs Accessibility and Automation.
+            {routeSummary} Nautilus will request speech access automatically. For cursor insertion, the primary requirement is Accessibility so Nautilus can post Cmd+V directly into the focused app.
           </p>
         </div>
 
@@ -852,7 +856,18 @@ export function AsrProviderManager({
               Apple Native transcription is ready.
             </p>
             <p className="text-xs text-amber-100/90">
-              Cursor insertion still depends on Accessibility and Automation. If dictation is already inserting correctly, this readiness check may be stale.
+              Cursor insertion still depends on Accessibility. Automation is only used as a fallback if direct event posting is blocked.
+            </p>
+          </div>
+        ) : null}
+
+        {lastCursorInsertFailure ? (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+            <p className="text-sm font-medium text-amber-200">
+              Latest dictation fell back to clipboard-only.
+            </p>
+            <p className="text-xs text-amber-100/90">
+              {lastCursorInsertFailure}
             </p>
           </div>
         ) : null}

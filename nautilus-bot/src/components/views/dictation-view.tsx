@@ -1704,7 +1704,7 @@ export function DictationView() {
           {/* Settings */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-sm">Capture, Insert, and Automation</CardTitle>
+              <CardTitle className="text-sm">Capture and Insert</CardTitle>
               <CardDescription>
                 Modes handle the recommended defaults. These controls are here when you want to
                 tune the details.
