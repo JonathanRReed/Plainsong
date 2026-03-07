@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -8,17 +8,14 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Input } from "@/components/ui/input";
 import { useRecordings } from "@/hooks/use-recordings";
 import { useRecording } from "@/hooks/use-recording";
+import { useRecordingDetail } from "@/hooks/use-recording-detail";
 import { useToast } from "@/components/toast";
 import { ConsentDialog } from "@/components/recording-overlay";
 import { TranscriptViewer, TranscriptSearch } from "@/components/transcript-viewer";
 import { RecordingWaveform, WaveformVisualizer } from "@/components/waveform-visualizer";
 import { AiAnalysisPanel } from "@/components/ai-analysis-panel";
 import {
-  getRecording,
-  getRecordingWaveform,
   openRecordingAudio,
-  getSpeakers,
-  getTranscript,
   runDiarization,
   renameSpeaker,
   deleteRecording,
@@ -30,7 +27,7 @@ import {
   deleteTranscriptSegments,
   updateRecordingNotes,
 } from "@/lib/tauri";
-import type { Recording, Transcript, TranscriptSegment } from "@/types";
+import type { Recording } from "@/types";
 import { listen } from "@tauri-apps/api/event";
 import {
   AlertCircle,
@@ -48,34 +45,6 @@ import {
   Trash2,
 } from "lucide-react";
 import type { AnalysisTemplate } from "@/types";
-
-function normalizeTranscriptForViewer(
-  transcript: Transcript | null,
-  recordingId: string
-): Transcript | null {
-  if (!transcript) return null;
-  const normalizedSegments: TranscriptSegment[] = Array.isArray(transcript.segments)
-    ? transcript.segments
-        .filter((segment): segment is TranscriptSegment => {
-          return Boolean(
-            segment &&
-              typeof segment.text === "string" &&
-              Number.isFinite(segment.startTime) &&
-              Number.isFinite(segment.endTime)
-          );
-        })
-        .map((segment, index) => ({
-          id: segment.id || `${transcript.id ?? recordingId}-segment-${index}`,
-          startTime: Number.isFinite(segment.startTime) ? segment.startTime : 0,
-          endTime: Number.isFinite(segment.endTime) ? segment.endTime : 0,
-          text: segment.text ?? "",
-          speakerId: segment.speakerId,
-          confidence: Number.isFinite(segment.confidence) ? segment.confidence : 0,
-        }))
-    : [];
-
-  return { ...transcript, segments: normalizedSegments };
-}
 
 const MEETING_ASK_TEMPLATES: AnalysisTemplate[] = [
   {
@@ -116,17 +85,11 @@ export function RecordingsView() {
     Record<string, Recording["status"]>
   >({});
   const [showConsent, setShowConsent] = useState(false);
-  const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null);
   const [showRecordingDetail, setShowRecordingDetail] = useState(false);
-  const [selectedTranscript, setSelectedTranscript] = useState<Transcript | null>(null);
-  const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
-  const [waveformData, setWaveformData] = useState<number[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
-  const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [isRunningDiarization, setIsRunningDiarization] = useState(false);
   const [diarizationMessage, setDiarizationMessage] = useState<string | null>(null);
   const [diarizationError, setDiarizationError] = useState<string | null>(null);
-  const [detailError, setDetailError] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<Recording | null>(null);
   const [showRenameDialog, setShowRenameDialog] = useState<Recording | null>(null);
   const [renameValue, setRenameValue] = useState("");
@@ -153,6 +116,27 @@ export function RecordingsView() {
   );
   const [isBulkReclassifying, setIsBulkReclassifying] = useState(false);
 
+  const {
+    selectedRecording,
+    setSelectedRecording,
+    selectedTranscript,
+    speakerNames,
+    setSpeakerNames,
+    waveformData,
+    isLoadingDetail,
+    detailError,
+    loadRecordingDetail,
+    refreshTranscript,
+    clearRecordingDetail,
+  } = useRecordingDetail({
+    isOpen: showRecordingDetail,
+    onRecordingLoaded: (recording) => {
+      if (recording.id === meetingNotesTargetId) {
+        lastSavedMeetingNotesRef.current = recording.meetingNotes ?? "";
+      }
+    },
+  });
+
   type RecordingStatusChangedEvent = {
     recordingId: string;
     status: Recording["status"];
@@ -163,22 +147,6 @@ export function RecordingsView() {
     transcriptFirstAvailableAt?: string | null;
     consentPromptShown?: boolean | null;
   };
-
-  const refreshSelectedRecording = useCallback(
-    async (recordingIdToRefresh: string) => {
-      const latestRecording = await getRecording(recordingIdToRefresh);
-      if (latestRecording) {
-        setSelectedRecording((current) =>
-          current?.id === latestRecording.id ? latestRecording : current
-        );
-        if (latestRecording.id === meetingNotesTargetId) {
-          lastSavedMeetingNotesRef.current = latestRecording.meetingNotes ?? "";
-        }
-      }
-      return latestRecording;
-    },
-    [meetingNotesTargetId]
-  );
 
   useEffect(() => {
     if (lastRecordingState.current && !isRecording) {
@@ -275,7 +243,6 @@ export function RecordingsView() {
         setAutoNameIssue((current) =>
           current?.recordingId === updatedId ? null : current
         );
-        void refreshSelectedRecording(updatedId);
         void refetch();
         return;
       }
@@ -292,23 +259,7 @@ export function RecordingsView() {
     return () => {
       unlisten?.();
     };
-  }, [refetch, refreshSelectedRecording]);
-
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<{ recordingId: string }>("recording-analysis-ready", (event) => {
-      const updatedId = event.payload?.recordingId;
-      if (!updatedId) return;
-      void refreshSelectedRecording(updatedId);
-      void refetch();
-    }).then((fn) => {
-      unlisten = fn;
-    });
-
-    return () => {
-      unlisten?.();
-    };
-  }, [refetch, refreshSelectedRecording]);
+  }, [refetch]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -321,14 +272,7 @@ export function RecordingsView() {
         [payload.recordingId]: payload.status,
       }));
 
-      if (selectedRecording?.id === payload.recordingId) {
-        setSelectedRecording((current) =>
-          current ? { ...current, status: payload.status } : current
-        );
-      }
-
       if (payload.status === "completed" || payload.status === "error") {
-        void refreshSelectedRecording(payload.recordingId);
         void refetch();
       }
     }).then((fn) => {
@@ -338,66 +282,7 @@ export function RecordingsView() {
     return () => {
       unlisten?.();
     };
-  }, [refetch, refreshSelectedRecording, selectedRecording?.id]);
-
-  useEffect(() => {
-    if (!showRecordingDetail || !selectedRecording) {
-      return;
-    }
-
-    if (selectedRecording.status === "error") {
-      return;
-    }
-
-    const shouldPoll =
-      selectedRecording.status === "processing" ||
-      selectedTranscript == null;
-    if (!shouldPoll) {
-      return;
-    }
-
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const [latestRecording, latestTranscript] = await Promise.all([
-          refreshSelectedRecording(selectedRecording.id),
-          getTranscript(selectedRecording.id),
-        ]);
-        if (cancelled) return;
-
-        if (latestTranscript) {
-          setSelectedTranscript(
-            normalizeTranscriptForViewer(latestTranscript, selectedRecording.id)
-          );
-        }
-
-        if (
-          latestRecording &&
-          (latestRecording.status === "completed" || latestRecording.status === "error")
-        ) {
-          refetch();
-        }
-      } catch (error) {
-        console.warn("Recording detail auto-refresh failed:", error);
-      }
-    };
-
-    void poll();
-    const id = setInterval(() => {
-      void poll();
-    }, 2000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [
-    refetch,
-    refreshSelectedRecording,
-    selectedRecording,
-    selectedTranscript,
-    showRecordingDetail,
-  ]);
+  }, [refetch]);
 
   const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean; template?: string }) => {
     try {
@@ -423,83 +308,14 @@ export function RecordingsView() {
     }
   };
 
-  const loadRecordingDetail = async (recording: Recording) => {
-    setIsLoadingDetail(true);
-    setDetailError(null);
-    setSelectedTranscript(null);
-    setSpeakerNames({});
-    setWaveformData([]);
-    setSearchQuery("");
-    setDiarizationMessage(null);
-    setDiarizationError(null);
-
-    try {
-      const [recordingResult, transcriptResult, waveformResult, speakersResult] = await Promise.allSettled([
-        getRecording(recording.id),
-        getTranscript(recording.id),
-        getRecordingWaveform(recording.id, 500),
-        getSpeakers(recording.id),
-      ]);
-
-      let hadAnyFailure = false;
-
-      if (recordingResult.status === "fulfilled" && recordingResult.value) {
-        setSelectedRecording(recordingResult.value);
-        if (recordingResult.value.id === meetingNotesTargetId) {
-          lastSavedMeetingNotesRef.current = recordingResult.value.meetingNotes ?? "";
-        }
-      } else if (recordingResult.status === "rejected") {
-        hadAnyFailure = true;
-      }
-
-      if (transcriptResult.status === "fulfilled") {
-        setSelectedTranscript(normalizeTranscriptForViewer(transcriptResult.value, recording.id));
-      } else {
-        hadAnyFailure = true;
-        setSelectedTranscript(null);
-      }
-
-      if (waveformResult.status === "fulfilled") {
-        const waveform = waveformResult.value;
-        setWaveformData(Array.isArray(waveform) ? waveform : []);
-      } else {
-        hadAnyFailure = true;
-        setWaveformData([]);
-      }
-
-      if (speakersResult.status === "fulfilled") {
-        const speakers = Array.isArray(speakersResult.value) ? speakersResult.value : [];
-        setSpeakerNames(
-          speakers.reduce<Record<string, string>>((acc, speaker) => {
-            if (speaker.name) {
-              acc[speaker.id] = speaker.name;
-            }
-            return acc;
-          }, {})
-        );
-      } else {
-        hadAnyFailure = true;
-        setSpeakerNames({});
-      }
-
-      if (hadAnyFailure) {
-        setDetailError(
-          "Some recording details could not be loaded. Transcript content is still shown when available."
-        );
-      }
-    } catch (error) {
-      setDetailError(error instanceof Error ? error.message : "Failed to load recording details.");
-    } finally {
-      setIsLoadingDetail(false);
-    }
-  };
-
   const handleRecordingClick = (recording: Recording) => {
-    setSelectedRecording(recording);
     setMeetingNotes(recording.meetingNotes ?? "");
     setMeetingNotesTargetId(recording.id);
     lastSavedMeetingNotesRef.current = recording.meetingNotes ?? "";
     setShowRecordingDetail(true);
+    setSearchQuery("");
+    setDiarizationMessage(null);
+    setDiarizationError(null);
     void loadRecordingDetail(recording);
   };
 
@@ -523,8 +339,7 @@ export function RecordingsView() {
         return;
       }
 
-      const updated = await getTranscript(selectedRecording.id);
-      setSelectedTranscript(normalizeTranscriptForViewer(updated, selectedRecording.id));
+      await refreshTranscript(selectedRecording.id);
       await refetch();
       toast(
         removed === 1
@@ -1070,14 +885,10 @@ export function RecordingsView() {
         onOpenChange={(open) => {
           setShowRecordingDetail(open);
           if (!open) {
-            setSelectedRecording(null);
-            setSelectedTranscript(null);
-            setSpeakerNames({});
-            setWaveformData([]);
+            clearRecordingDetail();
             setSearchQuery("");
             setDiarizationMessage(null);
             setDiarizationError(null);
-            setDetailError(null);
             if (!isRecording) {
               setMeetingNotesTargetId(null);
               setMeetingNotes("");
@@ -1284,12 +1095,7 @@ export function RecordingsView() {
                       onEditSegment={async (segmentId, newText) => {
                         if (!selectedRecording) return;
                         await updateTranscriptSegment(selectedRecording.id, segmentId, newText);
-                        const updated = await getTranscript(selectedRecording.id);
-                        if (updated) {
-                          setSelectedTranscript(
-                            normalizeTranscriptForViewer(updated, selectedRecording.id)
-                          );
-                        }
+                        await refreshTranscript(selectedRecording.id);
                       }}
                       onDeleteSegments={handleDeleteTranscriptSegments}
                     />

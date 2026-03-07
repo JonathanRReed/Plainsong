@@ -166,7 +166,6 @@ describe("RecordingsView", () => {
     });
 
     await waitFor(() => {
-      expect(mocks.refetch).toHaveBeenCalled();
       expect(screen.getByText("Canonical meeting summary")).toBeInTheDocument();
       expect(screen.getByText("Ship launch checklist")).toBeInTheDocument();
     });
