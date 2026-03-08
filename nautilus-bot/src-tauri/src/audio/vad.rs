@@ -226,18 +226,41 @@ pub fn trim_silence(samples: &[f32], sample_rate: u32, threshold_db: f32) -> Vec
         return samples.to_vec();
     }
 
-    // Extract all speech regions
-    let mut result = Vec::new();
-    for segment in segments {
-        let start_sample = (segment.start * sample_rate as f64) as usize;
-        let end_sample = (segment.end * sample_rate as f64) as usize;
+    let Some(first_segment) = segments.first() else {
+        return samples.to_vec();
+    };
+    let Some(last_segment) = segments.last() else {
+        return samples.to_vec();
+    };
 
-        if end_sample > start_sample && end_sample <= samples.len() {
-            result.extend_from_slice(&samples[start_sample..end_sample]);
-        }
+    let start_sample = ((first_segment.start * sample_rate as f64).floor() as usize).min(samples.len());
+    let end_sample = ((last_segment.end * sample_rate as f64).ceil() as usize).min(samples.len());
+
+    if end_sample <= start_sample {
+        return samples.to_vec();
     }
 
-    result
+    let retained_len = end_sample.saturating_sub(start_sample);
+    if retained_len == 0 {
+        return samples.to_vec();
+    }
+
+    let original_len = samples.len().max(1);
+    let kept_ratio = retained_len as f32 / original_len as f32;
+    let leading_trim_seconds = start_sample as f32 / sample_rate as f32;
+    let trailing_trim_seconds =
+        (samples.len().saturating_sub(end_sample)) as f32 / sample_rate as f32;
+
+    // If VAD wants to throw away a large chunk from the front, it likely missed a quiet
+    // opening speaker. In that case keep the original audio instead of being destructive.
+    if leading_trim_seconds > 0.75
+        && leading_trim_seconds > (trailing_trim_seconds * 2.0)
+        && kept_ratio < 0.8
+    {
+        return samples.to_vec();
+    }
+
+    samples[start_sample..end_sample].to_vec()
 }
 
 /// Split audio into speech chunks based on silence
@@ -271,4 +294,37 @@ pub fn split_on_silence(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trim_silence;
+
+    fn repeated_sample(amplitude: f32, sample_rate: u32, seconds: usize) -> Vec<f32> {
+        vec![amplitude; sample_rate as usize * seconds]
+    }
+
+    #[test]
+    fn trim_silence_keeps_quiet_opening_when_vad_would_trim_too_much() {
+        let sample_rate = 16_000;
+        let mut samples = repeated_sample(0.003, sample_rate, 6);
+        samples.extend(repeated_sample(0.05, sample_rate, 4));
+
+        let trimmed = trim_silence(&samples, sample_rate, -40.0);
+
+        assert_eq!(trimmed.len(), samples.len());
+    }
+
+    #[test]
+    fn trim_silence_still_removes_clear_leading_and_trailing_dead_air() {
+        let sample_rate = 16_000;
+        let mut samples = repeated_sample(0.0, sample_rate, 1);
+        samples.extend(repeated_sample(0.06, sample_rate, 2));
+        samples.extend(repeated_sample(0.0, sample_rate, 1));
+
+        let trimmed = trim_silence(&samples, sample_rate, -40.0);
+
+        assert!(trimmed.len() < samples.len());
+        assert!(trimmed.len() > sample_rate as usize);
+    }
 }

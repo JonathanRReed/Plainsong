@@ -34,7 +34,32 @@ function normalizeTranscriptForViewer(
         }))
     : [];
 
-  return { ...transcript, segments: normalizedSegments };
+  if (normalizedSegments.length > 0) {
+    return { ...transcript, segments: normalizedSegments };
+  }
+
+  const fallbackText = transcript.fullText?.trim();
+  if (!fallbackText) {
+    return { ...transcript, segments: normalizedSegments };
+  }
+
+  const estimatedDurationSeconds = Math.max(
+    1,
+    Math.ceil(fallbackText.split(/\s+/).filter(Boolean).length / 2.5)
+  );
+
+  return {
+    ...transcript,
+    segments: [
+      {
+        id: `${transcript.id ?? recordingId}-full-text-fallback`,
+        startTime: 0,
+        endTime: estimatedDurationSeconds,
+        text: fallbackText,
+        confidence: Number.isFinite(transcript.confidence) ? transcript.confidence : 0,
+      },
+    ],
+  };
 }
 
 type RecordingStatusChangedEvent = {

@@ -3421,6 +3421,7 @@ dependencies = [
  "lazy_static",
  "libsqlite3-sys",
  "ndarray",
+ "objc2",
  "objc2-av-foundation",
  "objc2-speech",
  "ort",

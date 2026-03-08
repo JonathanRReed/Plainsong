@@ -32,6 +32,8 @@ use crate::store::{
     MeetingChatMessageRecord, RuntimeEventRecord, TranscriptArtifactRecord,
 };
 use anyhow::Result;
+#[cfg(target_os = "macos")]
+use block2::RcBlock;
 use commands::backup::*;
 use commands::infra::*;
 #[cfg(target_os = "macos")]
@@ -48,6 +50,8 @@ use core_foundation_sys::base::{Boolean, CFGetTypeID, CFRange, CFTypeRef};
 use core_foundation_sys::dictionary::CFDictionaryRef;
 #[cfg(target_os = "macos")]
 use core_foundation_sys::string::{CFStringGetTypeID, CFStringRef};
+#[cfg(target_os = "macos")]
+use objc2::runtime::Bool;
 use rand::RngCore;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -55,6 +59,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::sync::Condvar;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -111,6 +117,10 @@ const TRAY_ITEM_STOP_MEETING: &str = "tray_stop_meeting";
 const TRAY_ITEM_QUIT: &str = "tray_quit";
 const DICTATION_MAX_DURATION_SECONDS: u64 = 120;
 const DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
+const DICTATION_IDLE_RESET_SUCCESS_MS: u64 = 650;
+const DICTATION_IDLE_RESET_STARTUP_ERROR_MS: u64 = 900;
+const DICTATION_IDLE_RESET_SHORT_ERROR_MS: u64 = 900;
+const DICTATION_IDLE_RESET_ERROR_MS: u64 = 1300;
 #[cfg(target_os = "macos")]
 const HOTKEY_TARGET_MAX_AGE_MS: i64 = 5_000;
 #[cfg(target_os = "macos")]
@@ -183,6 +193,7 @@ struct DictationSessionTracker {
     next_session_id: u64,
     active_session_id: Option<u64>,
     started_at: Option<std::time::Instant>,
+    started_at_epoch_ms: Option<i64>,
     startup_latency_ms: Option<u64>,
     insertion_mode_at_start: Option<DictationInsertionMode>,
     copy_to_clipboard_at_start: Option<bool>,
@@ -912,6 +923,10 @@ async fn request_dictation_permissions(
 
     #[cfg(target_os = "macos")]
     {
+        if let Err(error) = ensure_microphone_permission(true) {
+            notes.push(format!("Microphone permission request result: {}", error));
+        }
+
         if let Err(error) = crate::asr::platform::macos_speech::ensure_speech_authorized(true) {
             notes.push(format!(
                 "Speech recognition permission request result: {}",
@@ -1120,10 +1135,6 @@ async fn collect_permission_diagnostics(
             }
         }
         let automation_ready = false;
-        notes.push(
-            "System Events automation fallback is disabled on this macOS build because Apple's AppleScript runtime is crashing inside Nautilus. Cursor insertion now relies on direct Accessibility text insertion or a native Cmd+V keyboard fallback."
-                .to_string(),
-        );
 
         let mut available_insert_strategies = Vec::new();
         if accessibility_trusted {
@@ -1615,13 +1626,37 @@ async fn start_recording(
         }
     }
 
-    let meeting_selection = {
-        let settings = state.settings_manager.lock().await.settings().clone();
-        resolve_transcription_provider_and_model(
-            &settings.transcription,
-            TranscriptionScope::Meeting,
+    let settings_snapshot = state.settings_manager.lock().await.settings().clone();
+    let meeting_selection = resolve_transcription_provider_and_model(
+        &settings_snapshot.transcription,
+        TranscriptionScope::Meeting,
+    );
+
+    #[cfg(target_os = "macos")]
+    if options.mic {
+        ensure_microphone_permission(
+            settings_snapshot
+                .transcription
+                .dictation_auto_request_permissions,
         )
-    };
+        .map_err(|error| format!("Microphone permission is not ready. {}", error))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    if meeting_selection.0 == asr::AsrProviderType::MacosAppleSpeech {
+        crate::asr::platform::macos_speech::ensure_speech_authorized(
+            settings_snapshot
+                .transcription
+                .dictation_auto_request_permissions,
+        )
+        .map_err(|error| {
+            format!(
+                "Apple Native Speech is selected for meetings, but speech recognition permission is not ready. {}",
+                error
+            )
+        })?;
+    }
+
     ensure_asr_provider_ready(state.inner(), meeting_selection.0, "meeting transcription").await?;
 
     if options.system_audio {
@@ -5710,11 +5745,14 @@ async fn start_dictation_session(
         *runtime_state = DictationSessionState::Starting;
     }
 
+    let session_started_at_ms = chrono::Utc::now().timestamp_millis();
+
     let session_id = {
         let mut tracker = state.dictation_session_tracker.lock().await;
         tracker.next_session_id += 1;
         tracker.active_session_id = Some(tracker.next_session_id);
         tracker.started_at = Some(std::time::Instant::now());
+        tracker.started_at_epoch_ms = Some(session_started_at_ms);
         tracker.startup_latency_ms = None;
         tracker.insertion_mode_at_start = Some(dictation_insertion_mode);
         tracker.copy_to_clipboard_at_start =
@@ -5734,7 +5772,7 @@ async fn start_dictation_session(
     emit_dictation_state(
         app,
         "starting",
-        None,
+        Some(session_started_at_ms),
         Some("Preparing dictation…"),
         None,
         Some(session_id),
@@ -5744,6 +5782,14 @@ async fn start_dictation_session(
     sync_dictation_overlay_visibility(state, app).await;
 
     let startup_result: Result<(), String> = async {
+        #[cfg(target_os = "macos")]
+        ensure_microphone_permission(
+            settings_snapshot
+                .transcription
+                .dictation_auto_request_permissions,
+        )
+        .map_err(|error| format!("Microphone permission is not ready. {}", error))?;
+
         #[cfg(target_os = "macos")]
         if dictation_selection.0 == asr::AsrProviderType::MacosAppleSpeech {
             crate::asr::platform::macos_speech::ensure_speech_authorized(
@@ -5799,7 +5845,7 @@ async fn start_dictation_session(
         schedule_dictation_idle_reset(
             app.clone(),
             session_id,
-            Duration::from_secs(2),
+            Duration::from_millis(DICTATION_IDLE_RESET_STARTUP_ERROR_MS),
             Some(source.to_string()),
             Some("startup_error".to_string()),
         );
@@ -5817,6 +5863,8 @@ async fn start_dictation_session(
                 let mut tracker = state.dictation_session_tracker.lock().await;
                 if tracker.active_session_id == Some(session_id) {
                     tracker.active_session_id = None;
+                    tracker.started_at = None;
+                    tracker.started_at_epoch_ms = None;
                     tracker.startup_latency_ms = None;
                 }
             }
@@ -5834,7 +5882,7 @@ async fn start_dictation_session(
             schedule_dictation_idle_reset(
                 app.clone(),
                 session_id,
-                Duration::from_secs(2),
+                Duration::from_millis(DICTATION_IDLE_RESET_STARTUP_ERROR_MS),
                 Some(source.to_string()),
                 Some("startup_error".to_string()),
             );
@@ -5853,10 +5901,15 @@ async fn start_dictation_session(
         latency
     };
 
+    let recording_started_at_ms = {
+        let tracker = state.dictation_session_tracker.lock().await;
+        tracker.started_at_epoch_ms.unwrap_or(session_started_at_ms)
+    };
+
     emit_dictation_state(
         app,
         "recording",
-        Some(chrono::Utc::now().timestamp_millis()),
+        Some(recording_started_at_ms),
         Some("Listening"),
         None,
         Some(session_id),
@@ -5877,6 +5930,8 @@ async fn start_dictation_session(
             let mut tracker = state.dictation_session_tracker.lock().await;
             if tracker.active_session_id == Some(session_id) {
                 tracker.active_session_id = None;
+                tracker.started_at = None;
+                tracker.started_at_epoch_ms = None;
                 tracker.startup_latency_ms = None;
             }
         }
@@ -5894,7 +5949,7 @@ async fn start_dictation_session(
         schedule_dictation_idle_reset(
             app.clone(),
             session_id,
-            Duration::from_secs(2),
+            Duration::from_millis(DICTATION_IDLE_RESET_STARTUP_ERROR_MS),
             Some(source.to_string()),
             Some("startup_error".to_string()),
         );
@@ -5924,6 +5979,8 @@ async fn start_dictation_session(
                     let mut tracker = state.dictation_session_tracker.lock().await;
                     if tracker.active_session_id == Some(session_id) {
                         tracker.active_session_id = None;
+                        tracker.started_at = None;
+                        tracker.started_at_epoch_ms = None;
                         tracker.startup_latency_ms = None;
                     }
                 }
@@ -5941,7 +5998,7 @@ async fn start_dictation_session(
                 schedule_dictation_idle_reset(
                     app.clone(),
                     session_id,
-                    Duration::from_secs(2),
+                    Duration::from_millis(DICTATION_IDLE_RESET_STARTUP_ERROR_MS),
                     Some(source.to_string()),
                     Some("startup_error".to_string()),
                 );
@@ -5998,6 +6055,8 @@ async fn start_dictation_session(
                 let mut tracker = state.dictation_session_tracker.lock().await;
                 if tracker.active_session_id == Some(session_id) {
                     tracker.active_session_id = None;
+                    tracker.started_at = None;
+                    tracker.started_at_epoch_ms = None;
                     tracker.startup_latency_ms = None;
                 }
             }
@@ -6018,7 +6077,7 @@ async fn start_dictation_session(
             schedule_dictation_idle_reset(
                 app.clone(),
                 session_id,
-                Duration::from_secs(2),
+                Duration::from_millis(DICTATION_IDLE_RESET_STARTUP_ERROR_MS),
                 Some(source.to_string()),
                 Some("startup_error".to_string()),
             );
@@ -6644,9 +6703,9 @@ async fn stop_dictation_session_for_session(
                     "provider_error"
                 };
                 let idle_reset_delay = if is_short_capture {
-                    Duration::from_secs(1)
+                    Duration::from_millis(DICTATION_IDLE_RESET_SHORT_ERROR_MS)
                 } else {
-                    Duration::from_secs(2)
+                    Duration::from_millis(DICTATION_IDLE_RESET_ERROR_MS)
                 };
                 {
                     let mut runtime_state = state.dictation_runtime_state.lock().await;
@@ -6828,7 +6887,7 @@ async fn stop_dictation_session_for_session(
             schedule_dictation_idle_reset(
                 app.clone(),
                 session_id,
-                Duration::from_secs(3),
+                Duration::from_millis(DICTATION_IDLE_RESET_ERROR_MS),
                 Some(stop_reason.to_string()),
                 Some("provider_error".to_string()),
             );
@@ -6991,7 +7050,7 @@ async fn stop_dictation_session_for_session(
         schedule_dictation_idle_reset(
             app.clone(),
             session_id,
-            Duration::from_secs(3),
+            Duration::from_millis(DICTATION_IDLE_RESET_ERROR_MS),
             Some(stop_reason.to_string()),
             Some(outcome.to_string()),
         );
@@ -7371,7 +7430,7 @@ async fn stop_dictation_session_for_session(
         schedule_dictation_idle_reset(
             app.clone(),
             session_id,
-            Duration::from_secs(3),
+            Duration::from_millis(DICTATION_IDLE_RESET_ERROR_MS),
             Some(stop_reason.to_string()),
             Some(outcome.to_string()),
         );
@@ -7398,7 +7457,7 @@ async fn stop_dictation_session_for_session(
         schedule_dictation_idle_reset(
             app.clone(),
             session_id,
-            Duration::from_secs(2),
+            Duration::from_millis(DICTATION_IDLE_RESET_SUCCESS_MS),
             Some(stop_reason.to_string()),
             Some(outcome.to_string()),
         );
@@ -7637,6 +7696,9 @@ async fn force_stop_dictation_session(
     {
         let mut tracker = state.dictation_session_tracker.lock().await;
         tracker.active_session_id = None;
+        tracker.started_at = None;
+        tracker.started_at_epoch_ms = None;
+        tracker.startup_latency_ms = None;
     }
     set_dictation_hotkey_flags(state, false, false).await;
 
@@ -7677,7 +7739,7 @@ async fn should_show_dictation_overlay(state: &AppState) -> bool {
     state
         .dictation_overlay_state
         .lock()
-        .map(|overlay| overlay.phase != "idle")
+        .map(|overlay| !matches!(overlay.phase.as_str(), "idle" | "done"))
         .unwrap_or(false)
 }
 
@@ -7837,6 +7899,9 @@ fn schedule_dictation_idle_reset(
                 return;
             }
             tracker.active_session_id = None;
+            tracker.started_at = None;
+            tracker.started_at_epoch_ms = None;
+            tracker.startup_latency_ms = None;
         }
         {
             let mut runtime_state = state.dictation_runtime_state.lock().await;
@@ -8439,38 +8504,48 @@ fn hide_recording_tray_icon(app: &AppHandle) {
 }
 
 fn show_dictation_overlay(app: &AppHandle) {
-    show_overlay_window(
+    ensure_overlay_window(
         app,
         DICTATION_OVERLAY_LABEL,
-        "dictation",
         "Dictation",
         430.0,
         236.0,
+        true,
     );
 }
 
 fn show_recording_overlay(app: &AppHandle) {
-    show_overlay_window(
+    ensure_overlay_window(
         app,
         RECORDING_OVERLAY_LABEL,
-        "recording",
         "Recording",
         460.0,
         220.0,
+        true,
     );
 }
 
-fn show_overlay_window(
+fn ensure_overlay_window(
     app: &AppHandle,
     label: &str,
-    _overlay_type: &str,
     title: &str,
     width: f64,
     height: f64,
+    visible: bool,
 ) {
     if let Some(window) = app.get_webview_window(label) {
-        if let Err(error) = window.show() {
-            tracing::warn!("Failed to show '{}' window: {}", label, error);
+        let result = if visible {
+            window.show()
+        } else {
+            window.hide()
+        };
+        if let Err(error) = result {
+            tracing::warn!(
+                "Failed to {} '{}' window: {}",
+                if visible { "show" } else { "hide" },
+                label,
+                error
+            );
         }
         return;
     }
@@ -8479,6 +8554,7 @@ fn show_overlay_window(
     let builder = WebviewWindowBuilder::new(app, label, url)
         .title(title)
         .inner_size(width, height)
+        .visible(visible)
         .resizable(true)
         .min_inner_size(240.0, 100.0)
         .decorations(false)
@@ -8491,6 +8567,25 @@ fn show_overlay_window(
     if let Err(error) = builder.build() {
         tracing::warn!("Failed to create '{}' window: {}", label, error);
     }
+}
+
+fn prewarm_overlay_windows(app: &AppHandle) {
+    ensure_overlay_window(
+        app,
+        DICTATION_OVERLAY_LABEL,
+        "Dictation",
+        430.0,
+        236.0,
+        false,
+    );
+    ensure_overlay_window(
+        app,
+        RECORDING_OVERLAY_LABEL,
+        "Recording",
+        460.0,
+        220.0,
+        false,
+    );
 }
 
 fn hide_overlay_window(app: &AppHandle, label: &str) {
@@ -8544,6 +8639,11 @@ fn show_main_window(app: &AppHandle) -> Result<(), String> {
 
     if let Ok(true) = window.is_minimized() {
         let _ = window.unminimize();
+    }
+
+    #[cfg(target_os = "macos")]
+    if let Ok(true) = window.is_fullscreen() {
+        let _ = window.set_fullscreen(false);
     }
 
     window.show().map_err(|e| e.to_string())?;
@@ -10846,6 +10946,8 @@ pub fn run() {
                 });
             }
 
+            prewarm_overlay_windows(app.handle());
+
             #[cfg(target_os = "macos")]
             {
                 if !can_dispatch_hotkeys() && !check_accessibility_permission() {
@@ -10859,6 +10961,11 @@ pub fn run() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = ensure_microphone_permission(false);
+                    let _ = crate::asr::platform::macos_speech::ensure_speech_authorized(false);
+                }
                 if let Err(error) = state.asr_manager.get_all_providers_info().await {
                     tracing::debug!("ASR provider cache warmup failed: {}", error);
                 }
@@ -10933,6 +11040,12 @@ pub fn run() {
                 });
                 if capture_active || keep_running_after_close {
                     api.prevent_close();
+                    #[cfg(target_os = "macos")]
+                    if let Ok(true) = window.is_fullscreen() {
+                        if let Err(error) = window.set_fullscreen(false) {
+                            tracing::warn!("Failed to exit fullscreen before hiding main window: {}", error);
+                        }
+                    }
                     if let Err(error) = window.hide() {
                         tracing::warn!("Failed to hide main window on close: {}", error);
                     }
@@ -12112,6 +12225,14 @@ mod tests {
     }
 
     #[test]
+    fn meeting_title_can_fallback_to_transcript_text() {
+        let transcript = "Design review for dictation popup performance and meeting reliability.";
+        let title =
+            build_meeting_title_from_transcript(transcript).expect("title should be built");
+        assert_eq!(title, "Design review for dictation popup performance and meeting");
+    }
+
+    #[test]
     fn repair_local_model_cache_removes_invalid_artifacts_only() {
         let root = temp_models_root();
         let parakeet_dir = root.join("parakeet");
@@ -12783,6 +12904,33 @@ fn build_meeting_title_from_summary(summary: &str) -> Option<String> {
     Some(normalized.to_string())
 }
 
+fn build_meeting_title_from_transcript(transcript_text: &str) -> Option<String> {
+    let first_sentence = transcript_text
+        .split(['\n', '.', '!', '?'])
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+
+    let compact = first_sentence
+        .split_whitespace()
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let normalized = compact
+        .trim_matches(|ch: char| {
+            ch.is_ascii_whitespace()
+                || matches!(ch, '-' | '*' | '#' | '"' | '\'' | '`' | ':' | '[' | ']')
+        })
+        .trim_end_matches(['.', ',', ';', ':'])
+        .trim();
+
+    if normalized.len() < 4 {
+        return None;
+    }
+
+    Some(normalized.to_string())
+}
+
 async fn auto_name_meeting_recording(
     state: &AppState,
     app: &AppHandle,
@@ -12826,13 +12974,28 @@ async fn auto_name_meeting_recording(
         Duration::from_secs(25),
         run_summary_with_selected_provider(state, transcript_text, model_override.as_deref()),
     )
-    .await
-    .map_err(|_| "Meeting auto-name timed out".to_string())??;
+    .await;
 
-    let Some(new_title) = build_meeting_title_from_summary(&summary) else {
+    let new_title = match summary {
+        Ok(Ok(summary_text)) => build_meeting_title_from_summary(&summary_text)
+            .or_else(|| build_meeting_title_from_transcript(transcript_text)),
+        Ok(Err(error)) => {
+            tracing::warn!(
+                "Meeting auto-name summary generation failed for '{}': {}",
+                recording_id,
+                error
+            );
+            build_meeting_title_from_transcript(transcript_text)
+        }
+        Err(_) => {
+            tracing::warn!("Meeting auto-name timed out for '{}'", recording_id);
+            build_meeting_title_from_transcript(transcript_text)
+        }
+    };
+
+    let Some(new_title) = new_title else {
         let message =
-            "Meeting auto-name could not generate a valid title from the transcript summary"
-                .to_string();
+            "Meeting auto-name could not generate a valid title from the transcript".to_string();
         let _ = app.emit(
             "recording-title-updated",
             serde_json::json!({
@@ -14542,6 +14705,93 @@ fn check_microphone_permission() -> bool {
         )
     };
     status == AVAuthorizationStatus::Authorized
+}
+
+#[cfg(target_os = "macos")]
+fn request_microphone_permission() -> Result<bool, String> {
+    use objc2_av_foundation::{AVCaptureDevice, AVMediaTypeAudio};
+
+    let state = Arc::new((StdMutex::new(None::<bool>), Condvar::new()));
+    let state_clone = Arc::clone(&state);
+    let block = RcBlock::new(move |granted: Bool| {
+        let (lock, condvar) = &*state_clone;
+        if let Ok(mut guard) = lock.lock() {
+            *guard = Some(granted.as_bool());
+            condvar.notify_one();
+        }
+    });
+
+    unsafe {
+        AVCaptureDevice::requestAccessForMediaType_completionHandler(
+            AVMediaTypeAudio.as_ref().expect("audio media type"),
+            &block,
+        );
+    }
+
+    let (lock, condvar) = &*state;
+    let guard = lock
+        .lock()
+        .map_err(|_| "Failed to acquire microphone authorization lock".to_string())?;
+    let (mut guard, wait_result) = condvar
+        .wait_timeout_while(guard, Duration::from_secs(20), |current| current.is_none())
+        .map_err(|_| "Failed while waiting for microphone authorization".to_string())?;
+
+    if wait_result.timed_out() {
+        return Err("Timed out waiting for microphone authorization response.".to_string());
+    }
+
+    guard
+        .take()
+        .ok_or_else(|| "Microphone authorization callback returned no status.".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_microphone_permission(prompt_if_needed: bool) -> Result<(), String> {
+    use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
+
+    let status = unsafe {
+        AVCaptureDevice::authorizationStatusForMediaType(
+            AVMediaTypeAudio.as_ref().expect("audio media type"),
+        )
+    };
+
+    if status == AVAuthorizationStatus::Authorized {
+        return Ok(());
+    }
+
+    if status == AVAuthorizationStatus::Denied {
+        return Err(
+            "Microphone permission denied. Enable Nautilus in Privacy & Security > Microphone."
+                .to_string(),
+        );
+    }
+
+    if status == AVAuthorizationStatus::Restricted {
+        return Err("Microphone permission is restricted by system policy.".to_string());
+    }
+
+    if status != AVAuthorizationStatus::NotDetermined {
+        return Err(format!(
+            "Unexpected microphone authorization status: {}",
+            status.0
+        ));
+    }
+
+    if !prompt_if_needed {
+        return Err(
+            "Microphone permission has not been granted yet. Enable auto-request permissions or allow Nautilus in Privacy & Security > Microphone."
+                .to_string(),
+        );
+    }
+
+    match request_microphone_permission() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(
+            "Microphone permission was not granted. Enable Nautilus in Privacy & Security > Microphone."
+                .to_string(),
+        ),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(target_os = "macos")]

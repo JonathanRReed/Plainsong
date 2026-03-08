@@ -95,7 +95,8 @@ core-foundation = "0.10"
 core-foundation-sys = "0.8"
 core-graphics = "0.24"
 block2 = "0.6.2"
-objc2-av-foundation = { version = "0.3.2", features = ["AVFCapture", "AVMediaFormat"] }
+objc2 = "0.6.3"
+objc2-av-foundation = { version = "0.3.2", features = ["AVFCapture", "AVMediaFormat", "block2"] }
 objc2-speech = "0.3.2"
 
 [features]

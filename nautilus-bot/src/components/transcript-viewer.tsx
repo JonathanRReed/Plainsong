@@ -132,30 +132,32 @@ export function TranscriptViewer({
   }, [segments]);
 
   return (
-    <div className={cn("flex flex-col h-full", className)}>
+    <div className={cn("flex h-full min-h-0 flex-col overflow-hidden", className)}>
       {/* Toolbar */}
-      <div className="flex items-center justify-between p-3 border-b bg-muted/50">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">
-            {segments.length} segments
-          </span>
-          {segments.length > 0 && (
-            <span className="text-xs text-muted-foreground">
-              ({formatTimeWithMs(segments[segments.length - 1]?.endTime || 0)} total)
+      <div className="shrink-0 border-b bg-muted/50 p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium">
+              {segments.length} segments
             </span>
-          )}
+            {segments.length > 0 && (
+              <span className="text-xs text-muted-foreground">
+                ({formatTimeWithMs(segments[segments.length - 1]?.endTime || 0)} total)
+              </span>
+            )}
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setIsEditingSpeakers(!isEditingSpeakers)}
+          >
+            {isEditingSpeakers ? "Done" : "Rename Speakers"}
+          </Button>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setIsEditingSpeakers(!isEditingSpeakers)}
-        >
-          {isEditingSpeakers ? "Done" : "Rename Speakers"}
-        </Button>
       </div>
 
       {/* Transcript */}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="h-full min-h-0 flex-1">
         <div className="p-4 space-y-4">
           {groupedSegments.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">

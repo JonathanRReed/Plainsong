@@ -258,22 +258,25 @@ export function DictationPopup() {
     const setup = async () => {
       try {
         const initialState = await invoke<DictationStateChangedEvent>("get_dictation_overlay_state");
-        try {
-          await refreshPopupSettings();
-        } catch {
-          // Keep default mode if settings are temporarily unavailable.
-        }
         applyRuntimeMetadata(initialState);
         setPhase(initialState.phase);
         setMessage(initialState.message ?? null);
         setPreview(initialState.preview ?? null);
         setOutcome(initialState.outcome ?? null);
         setSessionId(typeof initialState.sessionId === "number" ? initialState.sessionId : null);
-        if (initialState.phase === "recording") {
+        if (
+          (initialState.phase === "starting" || initialState.phase === "recording") &&
+          typeof initialState.startedAtMs === "number"
+        ) {
           setStartedAtMs(
-            typeof initialState.startedAtMs === "number" ? initialState.startedAtMs : Date.now()
+            initialState.startedAtMs
           );
+        } else {
+          setStartedAtMs(null);
         }
+        void refreshPopupSettings().catch(() => {
+          // Keep default mode if settings are temporarily unavailable.
+        });
       } catch (error) {
         console.error("Failed to load initial dictation popup state:", error);
       }
@@ -286,8 +289,13 @@ export function DictationPopup() {
         setPreview(payload.preview ?? null);
         setOutcome(payload.outcome ?? null);
         setSessionId(typeof payload.sessionId === "number" ? payload.sessionId : null);
-        if (payload.phase === "recording" && typeof payload.startedAtMs === "number") {
+        if (
+          (payload.phase === "starting" || payload.phase === "recording") &&
+          typeof payload.startedAtMs === "number"
+        ) {
           setStartedAtMs(payload.startedAtMs);
+        } else {
+          setStartedAtMs(null);
         }
       });
     };
@@ -309,7 +317,7 @@ export function DictationPopup() {
   }, [phase]);
 
   useEffect(() => {
-    if (phase !== "recording") {
+    if (phase !== "starting" && phase !== "recording") {
       setElapsed(0);
       return;
     }
@@ -349,15 +357,29 @@ export function DictationPopup() {
         .then((state) => {
           const snapshotSessionId =
             typeof state.sessionId === "number" ? state.sessionId : null;
-          if (state.phase !== phase || snapshotSessionId !== sessionId) {
+          const snapshotStartedAtMs =
+            typeof state.startedAtMs === "number" ? state.startedAtMs : null;
+          if (
+            state.phase !== phase ||
+            snapshotSessionId !== sessionId ||
+            snapshotStartedAtMs !== startedAtMs ||
+            (state.message ?? null) !== message ||
+            (state.preview ?? null) !== preview ||
+            (state.outcome ?? null) !== outcome
+          ) {
             applyRuntimeMetadata(state);
             setPhase(state.phase);
             setMessage(state.message ?? null);
             setPreview(state.preview ?? null);
             setOutcome(state.outcome ?? null);
             setSessionId(snapshotSessionId);
-            if (state.phase === "recording" && typeof state.startedAtMs === "number") {
+            if (
+              (state.phase === "starting" || state.phase === "recording") &&
+              typeof state.startedAtMs === "number"
+            ) {
               setStartedAtMs(state.startedAtMs);
+            } else {
+              setStartedAtMs(null);
             }
           }
         })
@@ -367,7 +389,7 @@ export function DictationPopup() {
     }, 2500);
 
     return () => clearInterval(id);
-  }, [phase, sessionId]);
+  }, [message, outcome, phase, preview, sessionId, startedAtMs]);
 
   const elapsedText = useMemo(() => {
     const mins = Math.floor(elapsed / 60);
@@ -556,7 +578,7 @@ export function DictationPopup() {
             <div>
               <p className="text-sm font-semibold">Starting dictation</p>
               <p className="text-xs text-slate-300">
-                Warming the microphone and preparing {routeLabel.toLowerCase()}{targetDetail}…
+                Connecting {routeLabel.toLowerCase()}{targetDetail}…
               </p>
             </div>
           </div>
@@ -653,7 +675,7 @@ export function DictationPopup() {
               {!compact && message && (
                 <p className="max-w-[330px] text-xs leading-relaxed text-slate-300">{message}</p>
               )}
-              {!compact && !message && preview && (
+              {!compact && !message && preview && outcome !== "pasted" && outcome !== "copied" && (
                 <p className="max-w-[330px] text-xs leading-relaxed text-slate-300 line-clamp-3">
                   {preview}
                 </p>

@@ -1250,14 +1250,34 @@ impl Database {
 
         let result = stmt.query_row([recording_id], |row| {
             let segments_json: String = row.get(2)?;
-            let segments: Vec<TranscriptSegment> =
+            let mut segments: Vec<TranscriptSegment> =
                 serde_json::from_str(&segments_json).unwrap_or_default();
+            let full_text: String = row.get(3)?;
+
+            if segments.is_empty() && !full_text.trim().is_empty() {
+                let duration_seconds: i64 = self
+                    .conn
+                    .query_row(
+                        "SELECT duration FROM recordings WHERE id = ?1",
+                        [recording_id],
+                        |duration_row| duration_row.get(0),
+                    )
+                    .unwrap_or(0);
+                segments.push(TranscriptSegment {
+                    id: format!("{}-full-text", recording_id),
+                    start_time: 0.0,
+                    end_time: duration_seconds.max(0) as f64,
+                    text: full_text.clone(),
+                    speaker_id: None,
+                    confidence: row.get::<_, f64>(5).unwrap_or(0.0),
+                });
+            }
 
             Ok(Transcript {
                 id: row.get(0)?,
                 recording_id: row.get(1)?,
                 segments,
-                full_text: row.get(3)?,
+                full_text,
                 language: row.get(4)?,
                 confidence: row.get(5)?,
                 model: row.get(6)?,
@@ -2711,6 +2731,36 @@ mod tests {
         let t = fetched.unwrap();
         assert_eq!(t.full_text, "Hello world");
         assert_eq!(t.segments.len(), 1);
+    }
+
+    #[test]
+    fn test_get_transcript_synthesizes_segment_from_full_text_when_segments_missing() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("r1", "inbox");
+        recording.duration = 14;
+        db.create_recording(&recording).unwrap();
+
+        let transcript = Transcript {
+            id: "t1".to_string(),
+            recording_id: "r1".to_string(),
+            segments: Vec::new(),
+            full_text: "Captured full transcript text".to_string(),
+            language: "en_US".to_string(),
+            confidence: 0.91,
+            model: "Apple Native Speech".to_string(),
+            model_id: Some("macos_apple_speech".to_string()),
+            requested_provider: Some("macos_apple_speech".to_string()),
+            actual_provider: Some("macos_apple_speech".to_string()),
+            created_at: Utc::now(),
+        };
+        db.save_transcript(&transcript).unwrap();
+
+        let fetched = db.get_transcript("r1").unwrap().unwrap();
+        assert_eq!(fetched.full_text, "Captured full transcript text");
+        assert_eq!(fetched.segments.len(), 1);
+        assert_eq!(fetched.segments[0].text, "Captured full transcript text");
+        assert_eq!(fetched.segments[0].start_time, 0.0);
+        assert_eq!(fetched.segments[0].end_time, 14.0);
     }
 
     #[test]

@@ -2,13 +2,34 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DictationPopup } from "@/components/popups/dictation-popup";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 const popupMocks = vi.hoisted(() => {
   const listeners = new Map<string, (event: { payload: any }) => void>();
   return {
     listeners,
     invoke: vi.fn(async (command: string) => {
       if (command === "get_dictation_overlay_state") {
-        return { phase: "idle", sessionId: null };
+        return {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 9,
+          resolvedModePreset: "messages",
+          resolvedModeLabel: "Messages",
+          contextSource: "application_context",
+          insertionMode: "paste",
+          appTarget: "Codex",
+          dictationProvider: "whisper",
+          dictationModelId: "base",
+        };
       }
       return null;
     }),
@@ -111,5 +132,47 @@ describe("DictationPopup", () => {
 
     expect(await screen.findByText(/Slack Replies · Fresh dictation · Paste at cursor · Target Slack/i)).toBeInTheDocument();
     expect(screen.getByText(/Auto for Slack via "slack"/i)).toBeInTheDocument();
+  });
+
+  it("renders the popup immediately without waiting for settings to load", async () => {
+    const pendingSettings = deferred<{
+      transcription: {
+        dictationPushToTalk: boolean;
+        dictationModePreset: string;
+        dictationSelectedCustomModeId: null;
+        dictationCustomModes: { id: string; name: string }[];
+        dictationContextSource: string;
+        dictationProvider: string;
+        dictationModelId: string;
+        dictationInsertionMode: string;
+      };
+    }>();
+    popupMocks.getSettings.mockReturnValueOnce(pendingSettings.promise);
+
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    expect(
+      await screen.findByText(
+        /Messages · Using the frontmost app and window · Paste at cursor · Target Codex/i
+      )
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      pendingSettings.resolve({
+        transcription: {
+          dictationPushToTalk: false,
+          dictationModePreset: "voice",
+          dictationSelectedCustomModeId: null,
+          dictationCustomModes: [{ id: "slack-replies", name: "Slack Replies" }],
+          dictationContextSource: "none",
+          dictationProvider: "distil_whisper",
+          dictationModelId: "distil-large-v3.5",
+          dictationInsertionMode: "auto",
+        },
+      });
+      await pendingSettings.promise;
+    });
   });
 });
