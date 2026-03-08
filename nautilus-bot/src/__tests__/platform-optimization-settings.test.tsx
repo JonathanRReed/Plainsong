@@ -23,6 +23,7 @@ vi.mock("@/lib/tauri", () => ({
   getPermissionDiagnostics: (...args: unknown[]) => getPermissionDiagnosticsMock(...args),
   openPermissionSettings: vi.fn(async () => {}),
   requestDictationPermissions: vi.fn(async () => ({})),
+  repairCursorInsertPermissions: vi.fn(async () => ({})),
 }));
 
 const providerFixture = [
@@ -112,6 +113,8 @@ describe("Platform optimization settings", () => {
       microphoneReady: true,
       speechRecognitionReady: false,
       accessibilityReady: true,
+      accessibilityTrusted: true,
+      postEventReady: true,
       automationReady: false,
       notes: [],
     });
@@ -225,11 +228,17 @@ describe("Platform optimization settings", () => {
       microphoneReady: true,
       speechRecognitionReady: true,
       accessibilityReady: false,
-      automationReady: true,
+      accessibilityTrusted: false,
+      postEventReady: true,
+      automationReady: false,
+      cursorInsertionReady: true,
+      preferredInsertStrategy: "simulated_typing",
       lastCursorInsertStatus: {
         succeeded: false,
         copiedOnly: true,
         failureKind: "post_event_access",
+        successfulStrategy: null,
+        attemptedStrategies: [],
         message: "Copied to clipboard. macOS blocked keystroke paste.",
         observedAtMs: Date.now(),
       },
@@ -242,8 +251,69 @@ describe("Platform optimization settings", () => {
       await screen.findByText("Latest dictation fell back to clipboard-only.")
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Copied to clipboard. macOS blocked keystroke paste.")
-    ).toBeInTheDocument();
+      screen.getAllByText("Copied to clipboard. macOS blocked keystroke paste.").length
+    ).toBeGreaterThan(0);
+    expect(screen.getByText("Direct text unverified")).toBeInTheDocument();
+  });
+
+  it("prefers live permission diagnostics over stale Apple Native provider status", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "get_asr_providers") {
+        return providerFixture.map((provider) =>
+          provider.providerType === "macos_apple_speech"
+            ? {
+                ...provider,
+                runtimeStatus: "error",
+                runtimeMessage: "Apple native speech permission has not been granted yet.",
+                runtimeDetails: {
+                  setupAction:
+                    "Grant Speech Recognition permission in macOS System Settings, or choose another ASR provider.",
+                },
+              }
+            : provider
+        );
+      }
+      if (cmd === "get_default_asr_provider") return "macos_apple_speech";
+      if (cmd === "list_asr_benchmarks") return [];
+      return null;
+    });
+    getSettingsMock.mockResolvedValue({
+      transcription: {
+        defaultProvider: "macos_apple_speech",
+        selectedModelId: "macos_apple_speech",
+        useSharedAsrSelection: true,
+        dictationProvider: "macos_apple_speech",
+        dictationModelId: "macos_apple_speech",
+        meetingProvider: "macos_apple_speech",
+        meetingModelId: "macos_apple_speech",
+        platformOptimization: {
+          mode: "auto",
+          fallbackPolicy: "local_only",
+          macos: { appleNativeEnabled: true, mlxEnabled: true },
+          windows: { foundryEnabled: false, windowsSdkDictationEnabled: false },
+          manualEnginePriority: [],
+        },
+      },
+    });
+    getPermissionDiagnosticsMock.mockResolvedValue({
+      microphoneReady: true,
+      speechRecognitionReady: true,
+      accessibilityReady: false,
+      accessibilityTrusted: false,
+      postEventReady: true,
+      automationReady: false,
+      cursorInsertionReady: true,
+      preferredInsertStrategy: "simulated_typing",
+      notes: [],
+    });
+
+    render(<AsrProviderManager />);
+
+    expect(await screen.findByText("Apple Native setup")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Shared route: Apple native speech permission has not been granted yet\./)
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Shared route: Apple Native Speech is ready.")).toBeInTheDocument();
   });
 
   it("treats Accessibility as the insertion gate even when Automation is unavailable", async () => {
@@ -269,7 +339,10 @@ describe("Platform optimization settings", () => {
       microphoneReady: true,
       speechRecognitionReady: true,
       accessibilityReady: true,
+      accessibilityTrusted: true,
+      postEventReady: true,
       automationReady: false,
+      cursorInsertionReady: true,
       notes: [],
     });
 
@@ -277,7 +350,7 @@ describe("Platform optimization settings", () => {
 
     expect(await screen.findByText("Apple Native setup")).toBeInTheDocument();
     expect(
-      screen.queryByText("Cursor insertion still depends on Accessibility. Automation is only used as a fallback if direct event posting is blocked.")
+      screen.queryByText("Cursor insertion is not ready yet. Enable Nautilus in Privacy & Security > Accessibility so it can insert text into the target app.")
     ).not.toBeInTheDocument();
   });
 });

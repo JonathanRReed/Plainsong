@@ -260,7 +260,7 @@ impl Default for TranscriptionSettings {
             dictation_context_source: "none".to_string(),
             dictation_command_mode_enabled: true,
             dictation_command_prefix: "command".to_string(),
-            dictation_insertion_mode: "auto".to_string(),
+            dictation_insertion_mode: "paste".to_string(),
             dictation_snippets_enabled: true,
             dictation_custom_prompt: None,
             meeting_custom_prompt: None,
@@ -528,6 +528,16 @@ fn normalize_keyboard_shortcuts(shortcuts: &mut KeyboardShortcuts) {
     shortcuts.toggle_dictation_alternates.clear();
 }
 
+fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSettings) {
+    // Migrate legacy Notes preset behavior away from inline insertion.
+    if transcription.dictation_mode_preset == "notes"
+        && transcription.dictation_insertion_mode == "inline"
+        && transcription.dictation_selected_custom_mode_id.is_none()
+    {
+        transcription.dictation_insertion_mode = "paste".to_string();
+    }
+}
+
 /// Update channel (stable or beta)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -607,6 +617,7 @@ impl SettingsManager {
             Settings::default()
         };
         normalize_keyboard_shortcuts(&mut settings.shortcuts);
+        normalize_loaded_transcription_settings(&mut settings.transcription);
 
         Ok(Self {
             settings,
@@ -698,7 +709,7 @@ mod tests {
         assert_eq!(settings.transcription.meeting_provider, "distil_whisper");
         assert!(settings.transcription.dictation_command_mode_enabled);
         assert_eq!(settings.transcription.dictation_command_prefix, "command");
-        assert_eq!(settings.transcription.dictation_insertion_mode, "auto");
+        assert_eq!(settings.transcription.dictation_insertion_mode, "paste");
         assert!(settings.transcription.dictation_snippets_enabled);
     }
 }

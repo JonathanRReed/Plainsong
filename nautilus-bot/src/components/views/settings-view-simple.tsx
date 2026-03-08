@@ -37,6 +37,7 @@ import {
   listDownloadedModels,
   migrateToEncryptedStorage,
   openPermissionSettings,
+  repairCursorInsertPermissions,
   requestDictationPermissions,
   saveSettings,
   saveBackupConfig,
@@ -207,6 +208,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
   const settings = draftSettings;
   const { toast } = useToast();
+  const microphonePermissionReady =
+    permissionDiagnostics?.microphonePermissionReady ?? permissionDiagnostics?.microphoneReady ?? false;
   const dictationShortcutBehaviorHint = settings?.transcription.dictationPushToTalk
     ? "Hold shortcut to record, release to stop"
     : "Press shortcut once to start, then press again to stop";
@@ -1204,26 +1207,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label>Type text at cursor automatically</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Automatically paste dictation text into active window
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationPasteToCursor}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationPasteToCursor: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
                         <Label>Copy dictation text to clipboard</Label>
                         <p className="text-sm text-muted-foreground">
                           Keep the latest dictation text available for manual paste
@@ -1729,26 +1712,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label>Type text at cursor automatically</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Automatically paste dictation text into active window
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationPasteToCursor}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationPasteToCursor: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
                         <Label>Copy dictation text to clipboard</Label>
                         <p className="text-sm text-muted-foreground">
                           Keep the latest dictation text available for manual paste
@@ -1975,26 +1938,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label>Type text at cursor automatically</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Automatically paste dictation text into active window
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationPasteToCursor}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationPasteToCursor: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
                         <Label>Copy dictation text to clipboard</Label>
                         <p className="text-sm text-muted-foreground">
                           Keep the latest dictation text available for manual paste
@@ -2063,14 +2006,24 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           >
                             Request now
                           </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={async () => {
+                              const diagnostics = await repairCursorInsertPermissions();
+                              setPermissionDiagnostics(diagnostics);
+                            }}
+                          >
+                            Repair insert
+                          </Button>
                         </div>
                       </div>
                       {permissionDiagnostics && (
                         <div className="grid grid-cols-1 md:grid-cols-4 gap-2 text-sm">
                           <div className="p-2 rounded border bg-muted/20">
                             <p className="font-medium">Microphone</p>
-                            <p className={permissionDiagnostics.microphoneReady ? "text-green-500" : "text-amber-500"}>
-                              {permissionDiagnostics.microphoneReady ? "Ready" : "Not ready"}
+                            <p className={microphonePermissionReady ? "text-green-500" : "text-amber-500"}>
+                              {microphonePermissionReady ? "Ready" : "Needs grant"}
                             </p>
                             <Button
                               variant="ghost"
@@ -2116,15 +2069,15 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             </Button>
                           </div>
                           <div className="p-2 rounded border bg-muted/20">
-                            <p className="font-medium">Automation</p>
-                            <p className={permissionDiagnostics.automationReady ? "text-green-500" : "text-amber-500"}>
-                              {permissionDiagnostics.automationReady ? "Ready" : "Optional fallback"}
+                            <p className="font-medium">Keyboard events</p>
+                            <p className={permissionDiagnostics.postEventReady ? "text-green-500" : "text-amber-500"}>
+                              {permissionDiagnostics.postEventReady ? "Ready" : "Fallback unavailable"}
                             </p>
                             <Button
                               variant="ghost"
                               size="sm"
                               className="mt-1 px-0 h-auto font-normal text-xs text-muted-foreground hover:text-foreground"
-                              onClick={() => void openPermissionSettings("automation")}
+                              onClick={() => void openPermissionSettings("accessibility")}
                             >
                               Open settings
                             </Button>
@@ -2673,26 +2626,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </p>
                     </div>
 
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Type text at cursor automatically</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Automatically paste dictation text into active window
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationPasteToCursor}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationPasteToCursor: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
                         <Label>Copy dictation text to clipboard</Label>
@@ -3312,26 +3245,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </p>
                     </div>
 
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Type text at cursor automatically</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Automatically paste dictation text into active window
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationPasteToCursor}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationPasteToCursor: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
                         <Label>Copy dictation text to clipboard</Label>

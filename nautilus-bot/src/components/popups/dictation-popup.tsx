@@ -197,7 +197,7 @@ export function DictationPopup() {
   const [dictationProvider, setDictationProvider] = useState<string | null>(null);
   const [dictationModelId, setDictationModelId] = useState<string | null>(null);
   const [dictationInsertionMode, setDictationInsertionMode] =
-    useState<DictationInsertionMode>("auto");
+    useState<DictationInsertionMode>("paste");
   const [resolvedModeLabel, setResolvedModeLabel] = useState<string | null>(null);
   const [runtimeAppTarget, setRuntimeAppTarget] = useState<string | null>(null);
   const [activationMatcher, setActivationMatcher] = useState<string | null>(null);
@@ -214,7 +214,7 @@ export function DictationPopup() {
     setDictationProvider(settings.transcription.dictationProvider ?? null);
     setDictationModelId(settings.transcription.dictationModelId ?? null);
     setDictationInsertionMode(
-      (settings.transcription.dictationInsertionMode ?? "auto") as DictationInsertionMode
+      (settings.transcription.dictationInsertionMode ?? "paste") as DictationInsertionMode
     );
   };
 
@@ -339,7 +339,7 @@ export function DictationPopup() {
           setAudioLevel(scaled);
         })
         .catch(() => setAudioLevel(0));
-    }, 50);
+    }, 120);
     return () => clearInterval(id);
   }, [phase]);
 

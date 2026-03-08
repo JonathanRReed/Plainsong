@@ -38,6 +38,13 @@ interface MeetingRecordingStateChangedEvent {
   systemAudioActive?: boolean | null;
 }
 
+interface RecordingOverlayState {
+  phase: "idle" | "recording" | "transcribing" | "error";
+  recordingId?: string | null;
+  startedAtMs?: number | null;
+  systemAudioActive?: boolean | null;
+}
+
 interface RecordingContextValue extends RecordingState {
   formattedDuration: string;
   startDictation: (options?: DictationStartOptions) => Promise<void>;
@@ -159,6 +166,35 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   }, [clearTimer]);
 
   useEffect(() => {
+    void invoke<RecordingOverlayState>("get_recording_overlay_state")
+      .then((overlayState) => {
+        if (overlayState.phase === "recording" && overlayState.recordingId) {
+          setState({
+            isRecording: true,
+            recordingId: overlayState.recordingId,
+            recordingMode: "meeting",
+            duration: 0,
+            isSystemAudioActive: Boolean(overlayState.systemAudioActive),
+          });
+          startTimer(overlayState.startedAtMs);
+          return;
+        }
+
+        if (overlayState.phase === "transcribing") {
+          clearTimer();
+          setState({
+            isRecording: false,
+            recordingId: overlayState.recordingId ?? null,
+            recordingMode: "meeting",
+            duration: 0,
+            isSystemAudioActive: Boolean(overlayState.systemAudioActive),
+          });
+        }
+      })
+      .catch(() => {
+        // Ignore initial hydration failures.
+      });
+
     let unlistenDictation: (() => void) | undefined;
     let unlistenMeeting: (() => void) | undefined;
 
@@ -247,36 +283,73 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const id = setInterval(() => {
-      if (stateRef.current.recordingMode !== "dictation") {
+      if (stateRef.current.recordingMode === "dictation") {
+        void invoke<DictationStateChangedEvent>("get_dictation_overlay_state")
+          .then((overlayState) => {
+            if (
+              overlayState.phase === "idle" ||
+              overlayState.phase === "done" ||
+              overlayState.phase === "error"
+            ) {
+              clearTimer();
+              setState(INITIAL_STATE);
+              return;
+            }
+
+            if (overlayState.phase === "recording" && !stateRef.current.isRecording) {
+              setState({
+                isRecording: true,
+                recordingId: null,
+                recordingMode: "dictation",
+                duration: 0,
+                isSystemAudioActive: false,
+              });
+              startTimer(overlayState.startedAtMs);
+            }
+          })
+          .catch(() => {
+            // Ignore transient backend polling issues.
+          });
         return;
       }
 
-      void invoke<DictationStateChangedEvent>("get_dictation_overlay_state")
-        .then((overlayState) => {
-          if (
-            overlayState.phase === "idle" ||
-            overlayState.phase === "done" ||
-            overlayState.phase === "error"
-          ) {
-            clearTimer();
-            setState(INITIAL_STATE);
-            return;
-          }
+      if (stateRef.current.recordingMode === "meeting") {
+        void invoke<RecordingOverlayState>("get_recording_overlay_state")
+          .then((overlayState) => {
+            if (overlayState.phase === "idle" || overlayState.phase === "error") {
+              clearTimer();
+              setState(INITIAL_STATE);
+              return;
+            }
 
-          if (overlayState.phase === "recording" && !stateRef.current.isRecording) {
-            setState({
-              isRecording: true,
-              recordingId: null,
-              recordingMode: "dictation",
-              duration: 0,
-              isSystemAudioActive: false,
-            });
-            startTimer(overlayState.startedAtMs);
-          }
-        })
-        .catch(() => {
-          // Ignore transient backend polling issues.
-        });
+            if (overlayState.phase === "recording" && overlayState.recordingId) {
+              if (!stateRef.current.isRecording || stateRef.current.recordingId !== overlayState.recordingId) {
+                setState({
+                  isRecording: true,
+                  recordingId: overlayState.recordingId,
+                  recordingMode: "meeting",
+                  duration: 0,
+                  isSystemAudioActive: Boolean(overlayState.systemAudioActive),
+                });
+                startTimer(overlayState.startedAtMs);
+              }
+              return;
+            }
+
+            if (overlayState.phase === "transcribing") {
+              clearTimer();
+              setState((prev) => ({
+                ...prev,
+                isRecording: false,
+                recordingMode: "meeting",
+                recordingId: overlayState.recordingId ?? prev.recordingId,
+              }));
+            }
+          })
+          .catch(() => {
+            // Ignore transient backend polling issues.
+          });
+      }
     }, 2500);
 
     return () => clearInterval(id);

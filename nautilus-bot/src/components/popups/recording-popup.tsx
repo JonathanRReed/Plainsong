@@ -50,12 +50,10 @@ export function RecordingPopup() {
   const [levels, setLevels] = useState<number[]>([]);
   const [message, setMessage] = useState<string | null>(null);
   const recordingIdRef = useRef<string | null>(null);
-  const isTranscribingRef = useRef(false);
 
   useEffect(() => {
     recordingIdRef.current = recordingId;
-    isTranscribingRef.current = phase === "transcribing";
-  }, [phase, recordingId]);
+  }, [recordingId]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -115,8 +113,7 @@ export function RecordingPopup() {
         "recording-transcription-stream",
         (event) => {
           const currentRecordingId = recordingIdRef.current;
-          const currentTranscribing = isTranscribingRef.current;
-          if (event.payload.recordingId !== currentRecordingId && !currentTranscribing) {
+          if (!currentRecordingId || event.payload.recordingId !== currentRecordingId) {
             return;
           }
           if (event.payload.text.trim()) {
