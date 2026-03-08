@@ -13,11 +13,16 @@ const tauriConfigPath = path.join(projectRoot, "src-tauri", "tauri.conf.json");
 const UPDATER_PUBKEY_PLACEHOLDER = "TODO_REPLACE_WITH_OUTPUT_OF_tauri_signer_generate";
 
 function run(command, args, options = {}) {
+  const mergedEnv = {
+    ...process.env,
+    ...(options.env ?? {}),
+  };
   const result = spawnSync(command, args, {
     cwd: projectRoot,
     stdio: "inherit",
     shell: process.platform === "win32",
     ...options,
+    env: mergedEnv,
   });
   if (result.error) {
     console.error(result.error.message);
@@ -26,6 +31,28 @@ function run(command, args, options = {}) {
   if ((result.status ?? 1) !== 0) {
     process.exit(result.status ?? 1);
   }
+}
+
+function resolveLocalMacSigningIdentity() {
+  if (process.platform !== "darwin") {
+    return null;
+  }
+
+  if (process.env.APPLE_SIGNING_IDENTITY) {
+    return process.env.APPLE_SIGNING_IDENTITY;
+  }
+
+  const result = spawnSync("security", ["find-identity", "-v", "-p", "codesigning"], {
+    cwd: projectRoot,
+    encoding: "utf8",
+  });
+  if ((result.status ?? 1) !== 0) {
+    return null;
+  }
+
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  const preferredIdentity = "Nautilus Local Dev";
+  return output.includes(`"${preferredIdentity}"`) ? preferredIdentity : null;
 }
 
 function parseBundles(args) {
@@ -171,12 +198,21 @@ const bundleTargets = bundles
 const wantsDmg = !bundleTargets || bundleTargets.includes("all") || bundleTargets.includes("dmg");
 
 if (!wantsDmg) {
-  run("tauri", args);
+  const signingIdentity = resolveLocalMacSigningIdentity();
+  run("tauri", args, {
+    env: signingIdentity ? { APPLE_SIGNING_IDENTITY: signingIdentity } : undefined,
+  });
   process.exit(0);
 }
 
 const buildArgs = removeBundleArgs(args.slice(1));
-run("tauri", ["build", "--bundles", "app", ...buildArgs]);
+const signingIdentity = resolveLocalMacSigningIdentity();
+if (signingIdentity) {
+  console.log(`Using macOS signing identity: ${signingIdentity}`);
+}
+run("tauri", ["build", "--bundles", "app", ...buildArgs], {
+  env: signingIdentity ? { APPLE_SIGNING_IDENTITY: signingIdentity } : undefined,
+});
 
 try {
   buildDmgWithApfs();

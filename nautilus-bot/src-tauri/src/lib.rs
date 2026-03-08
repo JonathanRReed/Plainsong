@@ -34,6 +34,20 @@ use crate::store::{
 use anyhow::Result;
 use commands::backup::*;
 use commands::infra::*;
+#[cfg(target_os = "macos")]
+use core_foundation::base::{CFRelease, TCFType};
+#[cfg(target_os = "macos")]
+use core_foundation::boolean::CFBoolean;
+#[cfg(target_os = "macos")]
+use core_foundation::dictionary::CFDictionary;
+#[cfg(target_os = "macos")]
+use core_foundation::string::CFString;
+#[cfg(target_os = "macos")]
+use core_foundation_sys::base::{Boolean, CFGetTypeID, CFRange, CFTypeRef};
+#[cfg(target_os = "macos")]
+use core_foundation_sys::dictionary::CFDictionaryRef;
+#[cfg(target_os = "macos")]
+use core_foundation_sys::string::{CFStringGetTypeID, CFStringRef};
 use rand::RngCore;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -61,6 +75,8 @@ pub struct AppState {
     dictation_session_tracker: Arc<Mutex<DictationSessionTracker>>,
     dictation_runtime_state: Arc<Mutex<DictationSessionState>>,
     dictation_start_options: Arc<Mutex<models::DictationStartOptions>>,
+    pending_dictation_target: Arc<StdMutex<Option<PendingDictationTarget>>>,
+    last_external_target: Arc<StdMutex<Option<PendingDictationTarget>>>,
     dictation_overlay_state: Arc<StdMutex<DictationOverlayState>>,
     recording_overlay_state: Arc<StdMutex<RecordingOverlayState>>,
     accessibility_trust_observed: Arc<AtomicBool>,
@@ -94,11 +110,15 @@ const TRAY_ITEM_START_MEETING_SYSTEM: &str = "tray_start_meeting_system";
 const TRAY_ITEM_STOP_MEETING: &str = "tray_stop_meeting";
 const TRAY_ITEM_QUIT: &str = "tray_quit";
 const DICTATION_MAX_DURATION_SECONDS: u64 = 120;
+const DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
+#[cfg(target_os = "macos")]
+const HOTKEY_TARGET_MAX_AGE_MS: i64 = 5_000;
+#[cfg(target_os = "macos")]
+const LAST_EXTERNAL_TARGET_MAX_AGE_MS: i64 = 120_000;
 const DICTATION_AI_FORMAT_TIMEOUT_MS: u64 = 1400;
 const DICTATION_AI_FORMAT_MIN_CHARS: usize = 80;
-const DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
 const DICTATION_COMMAND_PREFIX_DEFAULT: &str = "command";
-const APP_BUNDLE_IDENTIFIER: &str = "com.nautilus.app";
+const APP_BUNDLE_IDENTIFIER: &str = "com.nautilus.bot";
 const STREAMING_PREVIEW_MAX_SECONDS: f64 = 90.0;
 const MIN_SILENCE_TIMEOUT_SECONDS: f32 = 60.0;
 const MAX_SILENCE_TIMEOUT_SECONDS: f32 = 1800.0;
@@ -164,6 +184,8 @@ struct DictationSessionTracker {
     active_session_id: Option<u64>,
     started_at: Option<std::time::Instant>,
     startup_latency_ms: Option<u64>,
+    insertion_mode_at_start: Option<DictationInsertionMode>,
+    copy_to_clipboard_at_start: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -178,6 +200,7 @@ struct InlineDictationState {
 #[cfg(target_os = "macos")]
 struct AppleLiveDictationRuntime {
     session_id: u64,
+    audio_forward_task: Option<tauri::async_runtime::JoinHandle<()>>,
     final_rx: Option<
         tokio::sync::oneshot::Receiver<
             Result<crate::asr::platform::macos_speech::LiveSpeechResult, String>,
@@ -275,6 +298,22 @@ struct RecordingOverlayState {
     message: Option<String>,
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+struct PendingDictationTarget {
+    app_name: Option<String>,
+    app_bundle_id: Option<String>,
+    captured_at_ms: i64,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceFrontmostApplication {
+    name: Option<String>,
+    bundle_id: Option<String>,
+}
+
 impl Default for RecordingOverlayState {
     fn default() -> Self {
         Self {
@@ -291,10 +330,16 @@ impl Default for RecordingOverlayState {
 #[serde(rename_all = "camelCase")]
 struct PermissionDiagnostics {
     microphone_ready: bool,
+    microphone_permission_ready: bool,
     speech_recognition_ready: bool,
     accessibility_ready: bool,
+    accessibility_trusted: bool,
+    post_event_ready: bool,
     automation_ready: bool,
+    cursor_insertion_ready: bool,
     cursor_insertion_observed: bool,
+    preferred_insert_strategy: Option<CursorInsertStrategy>,
+    available_insert_strategies: Vec<CursorInsertStrategy>,
     last_cursor_insert_status: Option<CursorInsertStatus>,
     running_from_disk_image: bool,
     app_bundle_path: Option<String>,
@@ -311,12 +356,21 @@ enum CursorInsertFailureKind {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CursorInsertStrategy {
+    AccessibilityDirectText,
+    SimulatedTyping,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CursorInsertStatus {
     succeeded: bool,
     copied_only: bool,
     failure_kind: Option<CursorInsertFailureKind>,
+    successful_strategy: Option<CursorInsertStrategy>,
+    attempted_strategies: Vec<CursorInsertStrategy>,
     message: Option<String>,
     observed_at_ms: i64,
 }
@@ -692,6 +746,12 @@ fn dispatch_global_shortcut_action(
                 shortcut
             );
 
+            #[cfg(target_os = "macos")]
+            if is_pressed {
+                let state = app.state::<AppState>();
+                capture_pending_hotkey_target(state.inner());
+            }
+
             if is_pressed {
                 app.emit("dictation-hotkey-pressed", ()).ok();
             } else {
@@ -859,12 +919,65 @@ async fn request_dictation_permissions(
             ));
         }
 
-        if !request_cursor_insertion_permission() {
+        if !request_accessibility_permission() {
             notes.push(
-                "Cursor insertion permission is still not granted for this app copy. macOS may require you to re-enable Nautilus under Privacy & Security > Accessibility after app updates."
+                "Accessibility permission is still not granted for this app copy. macOS may require you to re-enable Nautilus under Privacy & Security > Accessibility after app updates."
                     .to_string(),
             );
         }
+
+        if !request_post_event_access() {
+            notes.push(
+                "macOS native keyboard-event access is still not granted for this app copy. Nautilus may need direct Accessibility text insertion instead."
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(collect_permission_diagnostics(state.inner(), notes).await)
+}
+
+#[tauri::command]
+async fn repair_cursor_insert_permissions(
+    state: tauri::State<'_, AppState>,
+) -> Result<PermissionDiagnostics, String> {
+    let mut notes = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        state
+            .accessibility_trust_observed
+            .store(false, Ordering::Relaxed);
+
+        match reset_tcc_service("Accessibility", APP_BUNDLE_IDENTIFIER) {
+            Ok(()) => notes.push(
+                "Reset the macOS Accessibility privacy decision for Nautilus. Re-enable Nautilus in Privacy & Security > Accessibility if macOS shows it turned off."
+                    .to_string(),
+            ),
+            Err(error) => notes.push(format!(
+                "Could not reset the macOS Accessibility privacy decision automatically: {}",
+                error
+            )),
+        }
+
+        if !request_accessibility_permission() {
+            notes.push(
+                "macOS still has not granted Accessibility to this Nautilus app copy. Turn Nautilus back on in Privacy & Security > Accessibility, then re-check readiness."
+                    .to_string(),
+            );
+        }
+
+        if let Err(error) = open_permission_settings("accessibility".to_string()) {
+            notes.push(format!(
+                "Could not open macOS Accessibility settings automatically: {}",
+                error
+            ));
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        notes.push("Cursor insert permission repair is supported on macOS only.".to_string());
     }
 
     Ok(collect_permission_diagnostics(state.inner(), notes).await)
@@ -878,6 +991,19 @@ async fn collect_permission_diagnostics(
         let audio = state.audio_capture.lock().await;
         audio.has_microphone_input()
     };
+
+    #[cfg(target_os = "macos")]
+    let microphone_permission_ready = check_microphone_permission();
+
+    #[cfg(not(target_os = "macos"))]
+    let microphone_permission_ready = microphone_ready;
+
+    if !microphone_permission_ready {
+        notes.push(
+            "Microphone permission not granted yet. Enable Nautilus in Privacy & Security > Microphone."
+                .to_string(),
+        );
+    }
 
     #[cfg(target_os = "macos")]
     let app_bundle_path = current_app_bundle_path().map(|path| path.to_string_lossy().to_string());
@@ -957,8 +1083,13 @@ async fn collect_permission_diagnostics(
     #[cfg(target_os = "macos")]
     let (
         accessibility_ready,
+        accessibility_trusted,
+        post_event_ready,
         automation_ready,
+        cursor_insertion_ready,
         cursor_insertion_observed,
+        preferred_insert_strategy,
+        available_insert_strategies,
         last_cursor_insert_status,
     ) = {
         let last_cursor_insert_status = state
@@ -966,16 +1097,13 @@ async fn collect_permission_diagnostics(
             .lock()
             .ok()
             .and_then(|status| status.clone());
-        let accessibility_probe_ready = check_cursor_insertion_permission();
-        let cursor_insertion_observed = state.accessibility_trust_observed.load(Ordering::Relaxed)
-            || last_cursor_insert_status
-                .as_ref()
-                .map(|status| status.succeeded)
-                .unwrap_or(false);
-        let accessibility_ready = accessibility_probe_ready || cursor_insertion_observed;
-        if !accessibility_probe_ready && accessibility_ready {
+        let accessibility_probe_ready = check_accessibility_permission();
+        let post_event_ready = check_post_event_access();
+        let cursor_insertion_observed = state.accessibility_trust_observed.load(Ordering::Relaxed);
+        let accessibility_trusted = accessibility_probe_ready || cursor_insertion_observed;
+        if !accessibility_probe_ready && accessibility_trusted {
             notes.push(
-                "Cursor insertion was verified by a successful Nautilus paste in this session. The macOS permission probe may be stale for this app copy."
+                "Direct Accessibility insertion was verified by Nautilus in this session. The macOS permission probe may be stale for this app copy."
                     .to_string(),
             );
         }
@@ -991,7 +1119,23 @@ async fn collect_permission_diagnostics(
                 ));
             }
         }
-        if !accessibility_ready {
+        let automation_ready = false;
+        notes.push(
+            "System Events automation fallback is disabled on this macOS build because Apple's AppleScript runtime is crashing inside Nautilus. Cursor insertion now relies on direct Accessibility text insertion or a native Cmd+V keyboard fallback."
+                .to_string(),
+        );
+
+        let mut available_insert_strategies = Vec::new();
+        if accessibility_trusted {
+            available_insert_strategies.push(CursorInsertStrategy::AccessibilityDirectText);
+        }
+        if accessibility_trusted || post_event_ready {
+            available_insert_strategies.push(CursorInsertStrategy::SimulatedTyping);
+        }
+        let preferred_insert_strategy = available_insert_strategies.first().copied();
+        let cursor_insertion_ready = !available_insert_strategies.is_empty();
+        let accessibility_ready = accessibility_trusted;
+        if !cursor_insertion_ready {
             if running_from_disk_image {
                 notes.push(
                     "Cursor insertion is being checked for the currently running DMG copy, not the installed /Applications copy."
@@ -999,27 +1143,26 @@ async fn collect_permission_diagnostics(
                 );
             } else {
                 notes.push(
-                    "Cursor insertion permission not granted yet. Enable Nautilus in Privacy & Security > Accessibility for event synthesis."
+                    "Cursor insertion is not ready yet. Enable Nautilus in Privacy & Security > Accessibility so it can insert text into other apps."
                         .to_string(),
                 );
             }
+        } else if !accessibility_ready && post_event_ready {
+            notes.push(
+                "Cursor insertion can still work through a native macOS Cmd+V keyboard fallback even though direct Accessibility text insertion is not currently verified."
+                    .to_string(),
+            );
         }
-
-        let automation_ready = match check_automation_permission() {
-            Ok(()) => true,
-            Err(error) => {
-                notes.push(format!(
-                    "Automation is only used for the System Events fallback path now. Direct cursor insertion should still work through macOS event posting when Accessibility is granted. {}",
-                    error
-                ));
-                false
-            }
-        };
 
         (
             accessibility_ready,
+            accessibility_trusted,
+            post_event_ready,
             automation_ready,
+            cursor_insertion_ready,
             cursor_insertion_observed,
+            preferred_insert_strategy,
+            available_insert_strategies,
             last_cursor_insert_status,
         )
     };
@@ -1027,22 +1170,43 @@ async fn collect_permission_diagnostics(
     #[cfg(not(target_os = "macos"))]
     let (
         accessibility_ready,
+        accessibility_trusted,
+        post_event_ready,
         automation_ready,
+        cursor_insertion_ready,
         cursor_insertion_observed,
+        preferred_insert_strategy,
+        available_insert_strategies,
         last_cursor_insert_status,
     ) = {
         notes.push(
             "Accessibility and automation probes are implemented for macOS first.".to_string(),
         );
-        (false, false, false, None)
+        (
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+            Vec::new(),
+            None,
+        )
     };
 
     PermissionDiagnostics {
         microphone_ready,
+        microphone_permission_ready,
         speech_recognition_ready,
         accessibility_ready,
+        accessibility_trusted,
+        post_event_ready,
         automation_ready,
+        cursor_insertion_ready,
         cursor_insertion_observed,
+        preferred_insert_strategy,
+        available_insert_strategies,
         last_cursor_insert_status,
         running_from_disk_image,
         app_bundle_path,
@@ -1384,22 +1548,7 @@ async fn stop_dictation(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
-    let (insertion_mode, copy_to_clipboard_enabled) = {
-        let settings = state.settings_manager.lock().await.settings().clone();
-        (
-            normalize_dictation_insertion_mode(&settings.transcription.dictation_insertion_mode)
-                .to_string(),
-            settings.transcription.dictation_copy_to_clipboard,
-        )
-    };
-    stop_dictation_session(
-        state.inner(),
-        &app,
-        "manual",
-        &insertion_mode,
-        copy_to_clipboard_enabled,
-    )
-    .await
+    stop_dictation_session(state.inner(), &app, "manual").await
 }
 
 #[tauri::command]
@@ -1408,6 +1557,43 @@ async fn force_stop_dictation(
     state: tauri::State<'_, AppState>,
 ) -> Result<String, String> {
     force_stop_dictation_session(state.inner(), &app, "force_stop").await
+}
+
+#[tauri::command]
+async fn smoke_test_cursor_insert(
+    state: tauri::State<'_, AppState>,
+    text: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let sample = text
+        .unwrap_or_else(|| "Nautilus cursor insert smoke test".to_string())
+        .trim()
+        .to_string();
+    if sample.is_empty() {
+        return Err("Smoke test text cannot be empty".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    let target = sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
+
+    #[cfg(not(target_os = "macos"))]
+    let target = (get_frontmost_app_name(), None);
+
+    let outcome = paste_text_systemwide(
+        state.inner(),
+        &sample,
+        true,
+        target.0.as_deref(),
+        target.1.as_deref(),
+    );
+
+    Ok(serde_json::json!({
+        "text": sample,
+        "targetApp": target.0,
+        "targetBundleId": target.1,
+        "pasted": outcome.pasted,
+        "copied": outcome.copied,
+        "error": outcome.error,
+    }))
 }
 
 #[tauri::command]
@@ -1438,6 +1624,16 @@ async fn start_recording(
     };
     ensure_asr_provider_ready(state.inner(), meeting_selection.0, "meeting transcription").await?;
 
+    if options.system_audio {
+        let audio = state.audio_capture.lock().await;
+        if !audio.is_system_audio_available() {
+            return Err(
+                "System audio capture is not available on this Mac right now. Start a mic-only meeting or configure system audio capture first."
+                    .to_string(),
+            );
+        }
+    }
+
     let mut audio = state.audio_capture.lock().await;
     let recording_id = audio
         .start_recording(options.clone())
@@ -1449,7 +1645,7 @@ async fn start_recording(
 
     // Create recording entry in database
     let mut db = state.db.lock().await;
-    db.create_recording(&models::Recording {
+    if let Err(error) = db.create_recording(&models::Recording {
         id: recording_id.clone(),
         title: format!(
             "Meeting - {}",
@@ -1476,8 +1672,12 @@ async fn start_recording(
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(|_| chrono::Utc::now()),
-    })
-    .map_err(|e| e.to_string())?;
+    }) {
+        drop(db);
+        let mut audio = state.audio_capture.lock().await;
+        let _ = audio.stop_recording(&recording_id);
+        return Err(error.to_string());
+    }
 
     // Store template for this recording if specified
     if let Some(ref template) = options.template {
@@ -1500,7 +1700,7 @@ async fn start_recording(
     // Launch live streaming transcription task (mic-only path has a sample queue)
     // (maybe_stream_info was already fetched above before releasing the audio lock)
     if let Some((stream_queue, sample_rate)) = maybe_stream_info {
-        state.recording_stream_stop.store(true, Ordering::SeqCst);
+        state.recording_stream_stop.store(false, Ordering::SeqCst);
         let stop_flag = Arc::clone(&state.recording_stream_stop);
         let streaming_transcriber = Arc::clone(&state.streaming_transcriber);
         let meeting_selection = {
@@ -1556,7 +1756,7 @@ async fn start_recording(
             let chunk_threshold = (sample_rate as usize) / 2; // 0.5-second chunks for faster partials
             let mut pending: Vec<f32> = Vec::with_capacity(chunk_threshold * 2);
 
-            while stop_flag.load(Ordering::SeqCst) {
+            while !stop_flag.load(Ordering::SeqCst) {
                 while let Some(chunk) = stream_queue.pop() {
                     pending.extend_from_slice(&chunk);
                 }
@@ -2000,184 +2200,191 @@ async fn stop_recording(
                     enabled
                 };
                 if auto_analyze && !transcript.full_text.trim().is_empty() {
-                    // Check if Ollama is available before starting analysis
-                    let ollama_available = ollama_client_clone.is_available().await;
-                    if !ollama_available {
-                        tracing::warn!(
-                            "Ollama not available for auto-analysis. Start Ollama to enable analysis features."
+                    let (provider, model) = {
+                        let sm = settings_manager_clone.lock().await;
+                        let settings = sm.settings();
+                        let provider =
+                            AnalysisProvider::from_settings_value(&settings.privacy.llm_provider);
+                        let model = settings
+                            .privacy
+                            .llm_model_id
+                            .clone()
+                            .unwrap_or_else(|| provider.default_model().to_string());
+                        (provider, model)
+                    };
+
+                    tracing::info!(
+                        "Starting auto-analysis for recording {} with provider '{}' model '{}'",
+                        recording_id_clone,
+                        provider.as_settings_value(),
+                        model
+                    );
+                    let full_text = transcript.full_text.clone();
+                    let app_for_analysis = app_handle.clone();
+                    let rec_id_for_analysis = recording_id_clone.clone();
+                    let db_for_analysis = Arc::clone(&db_clone);
+                    let ollama_for_analysis = Arc::clone(&ollama_client_clone);
+                    let remote_processing_enabled = {
+                        let sm = settings_manager_clone.lock().await;
+                        sm.settings().privacy.remote_processing_enabled
+                    };
+                    let template_for_analysis = recording_templates_clone
+                        .lock()
+                        .ok()
+                        .and_then(|t| t.get(&recording_id_clone).cloned());
+
+                    tokio::spawn(async move {
+                        const ANALYSIS_TIMEOUT_MS: u64 = 90_000;
+
+                        let meeting_notes_for_analysis = {
+                            let db = db_for_analysis.lock().await;
+                            db.get_recording(&rec_id_for_analysis)
+                                .ok()
+                                .flatten()
+                                .and_then(|recording| recording.meeting_notes)
+                        };
+                        let transcript_for_analysis = inject_meeting_notes_into_analysis_text(
+                            &full_text,
+                            meeting_notes_for_analysis.as_deref(),
                         );
-                    } else {
-                        // Get the selected AI provider and model from settings before spawning
-                        let (provider, model) = {
-                            let sm = settings_manager_clone.lock().await;
-                            let settings = sm.settings();
-                            let provider = AnalysisProvider::from_settings_value(
-                                &settings.privacy.llm_provider,
-                            );
-                            let model = settings
-                                .privacy
-                                .llm_model_id
-                                .clone()
-                                .unwrap_or_else(|| provider.default_model().to_string());
-                            (provider, model)
+                        let summary_fut = tokio::time::timeout(
+                            Duration::from_millis(ANALYSIS_TIMEOUT_MS),
+                            run_summary_with_provider(
+                                provider,
+                                remote_processing_enabled,
+                                Some(model.clone()),
+                                ollama_for_analysis.as_ref(),
+                                &transcript_for_analysis,
+                                Some(&model),
+                            ),
+                        );
+                        let actions_fut = tokio::time::timeout(
+                            Duration::from_millis(ANALYSIS_TIMEOUT_MS),
+                            run_action_items_with_provider(
+                                provider,
+                                remote_processing_enabled,
+                                Some(model.clone()),
+                                ollama_for_analysis.as_ref(),
+                                &transcript_for_analysis,
+                                Some(&model),
+                            ),
+                        );
+                        let title_fut = tokio::time::timeout(
+                            Duration::from_millis(ANALYSIS_TIMEOUT_MS),
+                            run_title_with_provider(
+                                provider,
+                                remote_processing_enabled,
+                                Some(model.clone()),
+                                ollama_for_analysis.as_ref(),
+                                &transcript_for_analysis,
+                                Some(&model),
+                            ),
+                        );
+
+                        let (summary_res, actions_res, title_res) =
+                            tokio::join!(summary_fut, actions_fut, title_fut);
+
+                        let summary = match summary_res {
+                            Ok(Ok(s)) => Some(s),
+                            Ok(Err(e)) => {
+                                tracing::warn!("Auto-summary failed: {}", e);
+                                None
+                            }
+                            Err(_) => {
+                                tracing::warn!("Auto-summary timed out");
+                                None
+                            }
+                        };
+                        let structured_action_items: Vec<llm::ActionItem> = match actions_res {
+                            Ok(Ok(items)) => items,
+                            Ok(Err(e)) => {
+                                tracing::warn!("Auto action items failed: {}", e);
+                                vec![]
+                            }
+                            Err(_) => {
+                                tracing::warn!("Auto action items timed out");
+                                vec![]
+                            }
+                        };
+                        let action_items: Vec<String> = structured_action_items
+                            .iter()
+                            .map(|item| item.task.clone())
+                            .collect();
+                        let deadlines: Vec<String> = structured_action_items
+                            .iter()
+                            .filter_map(|item| item.deadline.clone())
+                            .collect();
+
+                        // Auto-generate meeting title
+                        let generated_title = match title_res {
+                            Ok(Ok(t)) if !t.trim().is_empty() => Some(t),
+                            _ => None,
                         };
 
-                        tracing::info!(
-                            "Starting auto-analysis for recording {} with provider '{}' model '{}'",
-                            recording_id_clone,
-                            provider.as_settings_value(),
-                            model
-                        );
-                        let full_text = transcript.full_text.clone();
-                        let app_for_analysis = app_handle.clone();
-                        let rec_id_for_analysis = recording_id_clone.clone();
-                        let ollama = Arc::clone(&ollama_client_clone);
-                        let db_for_analysis = Arc::clone(&db_clone);
-                        let template_for_analysis = recording_templates_clone
-                            .lock()
-                            .ok()
-                            .and_then(|t| t.get(&recording_id_clone).cloned());
-
-                        tokio::spawn(async move {
-                            const ANALYSIS_TIMEOUT_MS: u64 = 90_000;
-
-                            let meeting_notes_for_analysis = {
-                                let db = db_for_analysis.lock().await;
-                                db.get_recording(&rec_id_for_analysis)
-                                    .ok()
-                                    .flatten()
-                                    .and_then(|recording| recording.meeting_notes)
-                            };
-                            let transcript_for_analysis = inject_meeting_notes_into_analysis_text(
-                                &full_text,
-                                meeting_notes_for_analysis.as_deref(),
-                            );
-                            let template_ref = template_for_analysis.as_deref();
-                            let summary_fut = tokio::time::timeout(
-                                Duration::from_millis(ANALYSIS_TIMEOUT_MS),
-                                ollama.summarize_with_template(
-                                    &transcript_for_analysis,
-                                    &model,
-                                    template_ref,
-                                ),
-                            );
-                            let actions_fut = tokio::time::timeout(
-                                Duration::from_millis(ANALYSIS_TIMEOUT_MS),
-                                ollama.extract_action_items(&transcript_for_analysis, &model),
-                            );
-                            let title_fut = tokio::time::timeout(
-                                Duration::from_millis(ANALYSIS_TIMEOUT_MS),
-                                ollama.generate_title(&transcript_for_analysis, &model),
-                            );
-
-                            let (summary_res, actions_res, title_res) =
-                                tokio::join!(summary_fut, actions_fut, title_fut);
-
-                            let summary = match summary_res {
-                                Ok(Ok(s)) => Some(s),
-                                Ok(Err(e)) => {
-                                    tracing::warn!("Auto-summary failed: {}", e);
-                                    None
-                                }
-                                Err(_) => {
-                                    tracing::warn!("Auto-summary timed out");
-                                    None
-                                }
-                            };
-                            let structured_action_items: Vec<llm::ActionItem> = match actions_res {
-                                Ok(Ok(items)) => items,
-                                Ok(Err(e)) => {
-                                    tracing::warn!("Auto action items failed: {}", e);
-                                    vec![]
-                                }
-                                Err(_) => {
-                                    tracing::warn!("Auto action items timed out");
-                                    vec![]
-                                }
-                            };
-                            let action_items: Vec<String> = structured_action_items
-                                .iter()
-                                .map(|item| item.task.clone())
-                                .collect();
-                            let deadlines: Vec<String> = structured_action_items
-                                .iter()
-                                .filter_map(|item| item.deadline.clone())
-                                .collect();
-
-                            // Auto-generate meeting title
-                            let generated_title = match title_res {
-                                Ok(Ok(t)) if !t.trim().is_empty() => Some(t),
-                                _ => None,
-                            };
-
-                            if let Some(ref title) = generated_title {
-                                let mut db = db_for_analysis.lock().await;
-                                if let Err(e) = db.rename_recording(&rec_id_for_analysis, title) {
-                                    tracing::warn!("Failed to save generated title: {}", e);
-                                }
-                                drop(db);
-                                let _ = app_for_analysis.emit(
-                                    "recording-title-updated",
-                                    serde_json::json!({
-                                        "recordingId": rec_id_for_analysis,
-                                        "status": "ok",
-                                        "newTitle": title,
-                                    }),
-                                );
+                        if let Some(ref title) = generated_title {
+                            let mut db = db_for_analysis.lock().await;
+                            if let Err(e) = db.rename_recording(&rec_id_for_analysis, title) {
+                                tracing::warn!("Failed to save generated title: {}", e);
                             }
+                            drop(db);
+                            let _ = app_for_analysis.emit(
+                                "recording-title-updated",
+                                serde_json::json!({
+                                    "recordingId": rec_id_for_analysis,
+                                    "status": "ok",
+                                    "newTitle": title,
+                                }),
+                            );
+                        }
 
-                            if generated_title.is_some()
-                                || summary.is_some()
-                                || !action_items.is_empty()
+                        if generated_title.is_some()
+                            || summary.is_some()
+                            || !action_items.is_empty()
+                        {
+                            let now = chrono::Utc::now();
+                            // Persist analysis to database
                             {
-                                let now = chrono::Utc::now();
-                                // Persist analysis to database
-                                {
-                                    let mut db = db_for_analysis.lock().await;
-                                    if let Err(e) = db.update_recording_analysis(
-                                        &rec_id_for_analysis,
-                                        summary.as_deref(),
-                                        &action_items,
-                                    ) {
-                                        tracing::warn!(
-                                            "Failed to persist analysis to database: {}",
-                                            e
-                                        );
-                                    }
-                                    let artifact = MeetingArtifactRecord {
-                                        id: uuid::Uuid::new_v4().to_string(),
-                                        recording_id: rec_id_for_analysis.clone(),
-                                        title: generated_title.clone(),
-                                        summary: summary.clone(),
-                                        action_items: action_items.clone(),
-                                        decisions: Vec::new(),
-                                        deadlines,
-                                        template_id: template_for_analysis.clone(),
-                                        chat_messages: Vec::new(),
-                                        created_at: now,
-                                        updated_at: now,
-                                    };
-                                    if let Err(e) = db.save_meeting_artifact(&artifact) {
-                                        tracing::warn!(
-                                            "Failed to persist meeting artifact to database: {}",
-                                            e
-                                        );
-                                    }
-                                }
-
-                                if let Err(e) = app_for_analysis.emit(
-                                    "recording-analysis-ready",
-                                    serde_json::json!({
-                                        "recordingId": rec_id_for_analysis,
-                                        "summary": summary,
-                                        "actionItems": action_items,
-                                    }),
+                                let mut db = db_for_analysis.lock().await;
+                                if let Err(e) = db.update_recording_analysis(
+                                    &rec_id_for_analysis,
+                                    summary.as_deref(),
+                                    &action_items,
                                 ) {
-                                    tracing::warn!("Failed to emit analysis-ready event: {}", e);
+                                    tracing::warn!("Failed to persist analysis to database: {}", e);
+                                }
+                                let artifact = MeetingArtifactRecord {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    recording_id: rec_id_for_analysis.clone(),
+                                    title: generated_title.clone(),
+                                    summary: summary.clone(),
+                                    action_items: action_items.clone(),
+                                    decisions: Vec::new(),
+                                    deadlines,
+                                    template_id: template_for_analysis.clone(),
+                                    chat_messages: Vec::new(),
+                                    created_at: now,
+                                    updated_at: now,
+                                };
+                                if let Err(e) = db.save_meeting_artifact(&artifact) {
+                                    tracing::warn!(
+                                        "Failed to persist meeting artifact to database: {}",
+                                        e
+                                    );
                                 }
                             }
-                        });
-                    }
+
+                            if let Err(e) = app_for_analysis.emit(
+                                "recording-analysis-ready",
+                                serde_json::json!({
+                                    "recordingId": rec_id_for_analysis,
+                                    "summary": summary,
+                                    "actionItems": action_items,
+                                }),
+                            ) {
+                                tracing::warn!("Failed to emit analysis-ready event: {}", e);
+                            }
+                        }
+                    });
                 }
 
                 let mut db = db_clone.lock().await;
@@ -3824,18 +4031,22 @@ async fn delete_recording(
 ) -> Result<(), String> {
     let mut db = state.db.lock().await;
     let audio_path = db
-        .delete_recording(&recordingId)
-        .map_err(|e| e.to_string())?;
+        .get_recording(&recordingId)
+        .map_err(|e| e.to_string())?
+        .map(|recording| recording.audio_path)
+        .unwrap_or_default();
 
-    // Try to delete the audio file from disk
     if !audio_path.is_empty() {
         let path = std::path::Path::new(&audio_path);
         if path.exists() {
             if let Err(e) = std::fs::remove_file(path) {
-                tracing::warn!("Failed to delete audio file {}: {}", audio_path, e);
+                return Err(format!("Failed to delete audio file {}: {}", audio_path, e));
             }
         }
     }
+
+    db.delete_recording(&recordingId)
+        .map_err(|e| e.to_string())?;
 
     let details = serde_json::json!({ "recording_id": &recordingId });
     if let Err(e) = db.log_audit_event("recording_deleted", Some(details), "info") {
@@ -5383,9 +5594,52 @@ async fn start_dictation_session(
         settings_manager.settings().clone()
     };
 
+    #[cfg(target_os = "macos")]
+    let pending_hotkey_target = if source == "hotkey" {
+        take_pending_hotkey_target(state)
+    } else {
+        None
+    };
+    #[cfg(target_os = "macos")]
+    let (context_target_app, context_target_bundle_id) = if let Some(target) = pending_hotkey_target
+    {
+        tracing::info!(
+            "Using pre-captured hotkey target for dictation: app={:?}, bundle_id={:?}",
+            target.app_name,
+            target.app_bundle_id
+        );
+        (target.app_name, target.app_bundle_id)
+    } else {
+        let context_target_app = tauri::async_runtime::spawn_blocking(get_frontmost_app_name)
+            .await
+            .unwrap_or(None);
+        let context_target_bundle_id =
+            tauri::async_runtime::spawn_blocking(get_frontmost_app_bundle_id)
+                .await
+                .unwrap_or(None);
+        let sanitized = sanitize_dictation_target(context_target_app, context_target_bundle_id);
+        if sanitized.0.is_some() || sanitized.1.is_some() {
+            sanitized
+        } else if source == "hotkey" {
+            if let Some(target) = take_recent_external_target(state) {
+                tracing::info!(
+                    "Using cached external target for dictation: app={:?}, bundle_id={:?}",
+                    target.app_name,
+                    target.app_bundle_id
+                );
+                (target.app_name, target.app_bundle_id)
+            } else {
+                sanitized
+            }
+        } else {
+            sanitized
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
     let context_target_app = tauri::async_runtime::spawn_blocking(get_frontmost_app_name)
         .await
         .unwrap_or(None);
+    #[cfg(not(target_os = "macos"))]
     let context_target_bundle_id =
         tauri::async_runtime::spawn_blocking(get_frontmost_app_bundle_id)
             .await
@@ -5462,6 +5716,9 @@ async fn start_dictation_session(
         tracker.active_session_id = Some(tracker.next_session_id);
         tracker.started_at = Some(std::time::Instant::now());
         tracker.startup_latency_ms = None;
+        tracker.insertion_mode_at_start = Some(dictation_insertion_mode);
+        tracker.copy_to_clipboard_at_start =
+            Some(settings_snapshot.transcription.dictation_copy_to_clipboard);
         tracker.next_session_id
     };
 
@@ -5837,16 +6094,8 @@ async fn start_dictation_session(
         let current_state = *state.dictation_runtime_state.lock().await;
         if current_state == DictationSessionState::Recording {
             tracing::warn!("Dictation watchdog forcing stop after max duration");
-            let (insertion_mode, copy_to_clipboard_enabled) = {
-                let settings = state.settings_manager.lock().await.settings().clone();
-                (
-                    normalize_dictation_insertion_mode(
-                        &settings.transcription.dictation_insertion_mode,
-                    )
-                    .to_string(),
-                    settings.transcription.dictation_copy_to_clipboard,
-                )
-            };
+            let insertion_mode = tracker_insertion_mode(state.inner()).await;
+            let copy_to_clipboard_enabled = tracker_copy_to_clipboard(state.inner()).await;
             let _ = stop_dictation_session_for_session(
                 state.inner(),
                 &app_handle,
@@ -5886,16 +6135,8 @@ async fn start_dictation_session(
                         "Dictation auto-stop on silence after {:.1}s",
                         silence_timeout_seconds
                     );
-                    let (insertion_mode, copy_to_clipboard_enabled) = {
-                        let settings = state.settings_manager.lock().await.settings().clone();
-                        (
-                            normalize_dictation_insertion_mode(
-                                &settings.transcription.dictation_insertion_mode,
-                            )
-                            .to_string(),
-                            settings.transcription.dictation_copy_to_clipboard,
-                        )
-                    };
+                    let insertion_mode = tracker_insertion_mode(state.inner()).await;
+                    let copy_to_clipboard_enabled = tracker_copy_to_clipboard(state.inner()).await;
                     let _ = stop_dictation_session_for_session(
                         state.inner(),
                         &app_handle_silence,
@@ -6034,14 +6275,6 @@ async fn start_apple_live_dictation_session(
             .await
             .map_err(|error| error.to_string())?;
 
-    {
-        let mut runtime = state.apple_live_dictation.lock().await;
-        *runtime = Some(AppleLiveDictationRuntime {
-            session_id,
-            final_rx: Some(final_rx),
-        });
-    }
-
     state.dictation_stream_stop.store(true, Ordering::SeqCst);
     let stop_flag = Arc::clone(&state.dictation_stream_stop);
     let emit_app = app.clone();
@@ -6079,7 +6312,7 @@ async fn start_apple_live_dictation_session(
         }
     });
 
-    tauri::async_runtime::spawn(async move {
+    let audio_forward_task = tauri::async_runtime::spawn(async move {
         let chunk_threshold = (sample_rate as usize / 10).max(1);
         let mut pending: Vec<f32> = Vec::with_capacity(chunk_threshold * 2);
 
@@ -6107,6 +6340,15 @@ async fn start_apple_live_dictation_session(
             let _ = audio_sink.send_chunk(pending);
         }
     });
+
+    {
+        let mut runtime = state.apple_live_dictation.lock().await;
+        *runtime = Some(AppleLiveDictationRuntime {
+            session_id,
+            audio_forward_task: Some(audio_forward_task),
+            final_rx: Some(final_rx),
+        });
+    }
 
     Ok(())
 }
@@ -6146,14 +6388,32 @@ async fn finish_apple_live_dictation_session(
     state: &AppState,
     session_id: u64,
 ) -> Option<Result<crate::asr::platform::macos_speech::LiveSpeechResult, String>> {
-    let final_rx = {
+    let (audio_forward_task, final_rx) = {
         let mut runtime = state.apple_live_dictation.lock().await;
         let live = runtime.as_mut()?;
         if live.session_id != session_id {
             return None;
         }
-        live.final_rx.take()
-    }?;
+        (live.audio_forward_task.take(), live.final_rx.take())
+    };
+    let final_rx = final_rx?;
+
+    if let Some(task) = audio_forward_task {
+        match tokio::time::timeout(Duration::from_secs(2), task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    "Apple live dictation audio forward task ended unexpectedly: {}",
+                    error
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Timed out while waiting for Apple live dictation audio stream to close"
+                );
+            }
+        }
+    }
 
     let outcome = tokio::time::timeout(Duration::from_secs(12), final_rx).await;
 
@@ -6177,25 +6437,76 @@ async fn finish_apple_live_dictation_session(
     })
 }
 
+async fn fallback_apple_dictation_transcription(
+    state: &AppState,
+    audio_data: &[u8],
+    dictation_model_id: &str,
+    live_error: &str,
+) -> Result<asr::TranscriptionResult, anyhow::Error> {
+    tracing::warn!(
+        "Apple live dictation did not finalize cleanly ({}); falling back to captured-audio transcription",
+        live_error
+    );
+
+    state
+        .asr_manager
+        .transcribe_bytes_with_provider(
+            asr::AsrProviderType::MacosAppleSpeech,
+            audio_data,
+            Some(dictation_model_id),
+        )
+        .await
+        .map_err(|fallback_error| {
+            anyhow::anyhow!(
+                "Apple Native live dictation failed: {}. Captured-audio fallback also failed: {}",
+                live_error,
+                fallback_error
+            )
+        })
+}
+
 async fn stop_dictation_session(
     state: &AppState,
     app: &AppHandle,
     stop_reason: &str,
-    insertion_mode: &str,
-    copy_to_clipboard_enabled: bool,
 ) -> Result<String, String> {
     let session_id = active_dictation_session_id(state)
         .await
         .ok_or_else(|| "No active dictation session to stop".to_string())?;
+    let (insertion_mode, copy_to_clipboard_enabled) = {
+        let tracker = state.dictation_session_tracker.lock().await;
+        (
+            tracker
+                .insertion_mode_at_start
+                .unwrap_or(DictationInsertionMode::Auto)
+                .as_settings_value()
+                .to_string(),
+            tracker.copy_to_clipboard_at_start.unwrap_or(true),
+        )
+    };
     stop_dictation_session_for_session(
         state,
         app,
         session_id,
         stop_reason,
-        insertion_mode,
+        insertion_mode.as_str(),
         copy_to_clipboard_enabled,
     )
     .await
+}
+
+async fn tracker_insertion_mode(state: &AppState) -> String {
+    let tracker = state.dictation_session_tracker.lock().await;
+    tracker
+        .insertion_mode_at_start
+        .unwrap_or(DictationInsertionMode::Auto)
+        .as_settings_value()
+        .to_string()
+}
+
+async fn tracker_copy_to_clipboard(state: &AppState) -> bool {
+    let tracker = state.dictation_session_tracker.lock().await;
+    tracker.copy_to_clipboard_at_start.unwrap_or(true)
 }
 
 #[tauri::command]
@@ -6425,25 +6736,50 @@ async fn stop_dictation_session_for_session(
         #[cfg(target_os = "macos")]
         if dictation_provider == asr::AsrProviderType::MacosAppleSpeech {
             match finish_apple_live_dictation_session(state, session_id).await {
-                Some(Ok(live_result)) => Ok(asr::TranscriptionResult {
-                    text: live_result.text,
-                    segments: Vec::new(),
-                    language: live_result.language,
-                    confidence: live_result.confidence,
-                    processing_time_ms: transcription_start.elapsed().as_millis() as u64,
-                    model_name: "Apple Native Speech".to_string(),
-                    model_id: "macos_apple_speech".to_string(),
-                    requested_provider: asr::AsrProviderType::MacosAppleSpeech,
-                    actual_provider: asr::AsrProviderType::MacosAppleSpeech,
-                    requested_engine: Some("macos_apple_speech".to_string()),
-                    actual_engine: Some("macos_apple_speech".to_string()),
-                    optimization_applied: false,
-                    fallback_reason: None,
-                }),
-                Some(Err(error)) => Err(anyhow::anyhow!(error)),
-                None => Err(anyhow::anyhow!(
-                    "Apple Native live dictation session was not available when stopping."
-                )),
+                Some(Ok(live_result)) if !live_result.text.trim().is_empty() => {
+                    Ok(asr::TranscriptionResult {
+                        text: live_result.text,
+                        segments: Vec::new(),
+                        language: live_result.language,
+                        confidence: live_result.confidence,
+                        processing_time_ms: transcription_start.elapsed().as_millis() as u64,
+                        model_name: "Apple Native Speech".to_string(),
+                        model_id: "macos_apple_speech".to_string(),
+                        requested_provider: asr::AsrProviderType::MacosAppleSpeech,
+                        actual_provider: asr::AsrProviderType::MacosAppleSpeech,
+                        requested_engine: Some("macos_apple_speech".to_string()),
+                        actual_engine: Some("macos_apple_speech".to_string()),
+                        optimization_applied: false,
+                        fallback_reason: None,
+                    })
+                }
+                Some(Ok(_)) => {
+                    fallback_apple_dictation_transcription(
+                        state,
+                        &audio_data,
+                        dictation_model_id.as_str(),
+                        "Apple live dictation returned an empty transcript.",
+                    )
+                    .await
+                }
+                Some(Err(error)) => {
+                    fallback_apple_dictation_transcription(
+                        state,
+                        &audio_data,
+                        dictation_model_id.as_str(),
+                        error.as_str(),
+                    )
+                    .await
+                }
+                None => {
+                    fallback_apple_dictation_transcription(
+                        state,
+                        &audio_data,
+                        dictation_model_id.as_str(),
+                        "Apple Native live dictation session was not available when stopping.",
+                    )
+                    .await
+                }
             }
         } else {
             state
@@ -6683,9 +7019,15 @@ async fn stop_dictation_session_for_session(
     )
     .to_string();
     let snippets_enabled = settings_snapshot.transcription.dictation_snippets_enabled;
-    let legacy_paste_to_cursor = settings_snapshot.transcription.dictation_paste_to_cursor;
     let configured_mode = DictationInsertionMode::from_settings_value(insertion_mode);
 
+    #[cfg(target_os = "macos")]
+    let (app_target, app_target_bundle_id) = resolve_insert_target(
+        state,
+        dictation_options.context_app_name.clone(),
+        dictation_options.context_app_bundle_id.clone(),
+    );
+    #[cfg(not(target_os = "macos"))]
     let app_target = if let Some(target) = dictation_options.context_app_name.clone() {
         Some(target)
     } else {
@@ -6693,6 +7035,7 @@ async fn stop_dictation_session_for_session(
             .await
             .unwrap_or(None)
     };
+    #[cfg(not(target_os = "macos"))]
     let app_target_bundle_id = if let Some(target) = dictation_options.context_app_bundle_id.clone()
     {
         Some(target)
@@ -6825,52 +7168,27 @@ async fn stop_dictation_session_for_session(
     let mut copied = false;
     let mut paste_error: Option<String> = None;
     let mut insert_latency_ms: Option<u64> = None;
+    let mut successful_insert_strategy: Option<CursorInsertStrategy> = None;
     let mut insertion_mode_used = if command_applied.is_some() && result.text.trim().is_empty() {
         "command_only".to_string()
     } else {
         "none".to_string()
     };
     if !result.text.trim().is_empty() {
+        if !matches!(configured_mode, DictationInsertionMode::ClipboardOnly) {
+            prepare_dictation_overlay_for_external_insert(
+                app,
+                app_target.as_deref(),
+                app_target_bundle_id.as_deref(),
+            )
+            .await;
+        }
+
         let insert_started = std::time::Instant::now();
         match configured_mode {
             DictationInsertionMode::Auto => {
-                if legacy_paste_to_cursor {
-                    let outcome = paste_text_systemwide(
-                        &result.text,
-                        copy_to_clipboard_enabled,
-                        app_target.as_deref(),
-                        app_target_bundle_id.as_deref(),
-                    );
-                    if outcome.pasted {
-                        state
-                            .accessibility_trust_observed
-                            .store(true, Ordering::Relaxed);
-                    }
-                    pasted = outcome.pasted;
-                    copied = outcome.copied;
-                    paste_error = outcome.error;
-                    insertion_mode_used = if pasted {
-                        "paste".to_string()
-                    } else if copied {
-                        "clipboard_only".to_string()
-                    } else {
-                        "none".to_string()
-                    };
-                } else {
-                    match copy_to_clipboard(&result.text) {
-                        Ok(_) => {
-                            copied = true;
-                            insertion_mode_used = "clipboard_only".to_string();
-                        }
-                        Err(error) => {
-                            paste_error = Some(error);
-                            insertion_mode_used = "none".to_string();
-                        }
-                    }
-                }
-            }
-            DictationInsertionMode::Paste => {
                 let outcome = paste_text_systemwide(
+                    state,
                     &result.text,
                     copy_to_clipboard_enabled,
                     app_target.as_deref(),
@@ -6879,10 +7197,36 @@ async fn stop_dictation_session_for_session(
                 if outcome.pasted {
                     state
                         .accessibility_trust_observed
-                        .store(true, Ordering::Relaxed);
+                        .store(outcome.direct_accessibility, Ordering::Relaxed);
                 }
                 pasted = outcome.pasted;
                 copied = outcome.copied;
+                successful_insert_strategy = outcome.successful_strategy;
+                paste_error = outcome.error;
+                insertion_mode_used = if pasted {
+                    "paste".to_string()
+                } else if copied {
+                    "clipboard_only".to_string()
+                } else {
+                    "none".to_string()
+                };
+            }
+            DictationInsertionMode::Paste => {
+                let outcome = paste_text_systemwide(
+                    state,
+                    &result.text,
+                    copy_to_clipboard_enabled,
+                    app_target.as_deref(),
+                    app_target_bundle_id.as_deref(),
+                );
+                if outcome.pasted {
+                    state
+                        .accessibility_trust_observed
+                        .store(outcome.direct_accessibility, Ordering::Relaxed);
+                }
+                pasted = outcome.pasted;
+                copied = outcome.copied;
+                successful_insert_strategy = outcome.successful_strategy;
                 paste_error = outcome.error;
                 insertion_mode_used = if pasted {
                     "paste".to_string()
@@ -6894,6 +7238,7 @@ async fn stop_dictation_session_for_session(
             }
             DictationInsertionMode::Inline => {
                 let outcome = paste_text_systemwide(
+                    state,
                     &result.text,
                     copy_to_clipboard_enabled,
                     app_target.as_deref(),
@@ -6902,10 +7247,11 @@ async fn stop_dictation_session_for_session(
                 if outcome.pasted {
                     state
                         .accessibility_trust_observed
-                        .store(true, Ordering::Relaxed);
+                        .store(outcome.direct_accessibility, Ordering::Relaxed);
                 }
                 pasted = outcome.pasted;
                 copied = outcome.copied;
+                successful_insert_strategy = outcome.successful_strategy;
                 paste_error = outcome.error;
                 insertion_mode_used = if pasted {
                     "inline".to_string()
@@ -6937,6 +7283,10 @@ async fn stop_dictation_session_for_session(
             } else {
                 paste_error.as_deref().map(classify_cursor_insert_failure)
             },
+            successful_strategy: successful_insert_strategy,
+            attempted_strategies: successful_insert_strategy
+                .map(|strategy| vec![strategy])
+                .unwrap_or_default(),
             message: paste_error.clone(),
             observed_at_ms: chrono::Utc::now().timestamp_millis(),
         };
@@ -7367,10 +7717,6 @@ async fn handle_global_dictation_toggle(app: AppHandle, is_press: bool) {
     let state = app.state::<AppState>();
     let settings = state.settings_manager.lock().await.settings().clone();
     let is_ptt = settings.transcription.dictation_push_to_talk;
-    let insertion_mode =
-        normalize_dictation_insertion_mode(&settings.transcription.dictation_insertion_mode)
-            .to_string();
-    let copy_to_clipboard_enabled = settings.transcription.dictation_copy_to_clipboard;
 
     let current_state = *state.dictation_runtime_state.lock().await;
 
@@ -7431,8 +7777,8 @@ async fn handle_global_dictation_toggle(app: AppHandle, is_press: bool) {
                 &app,
                 session_id,
                 if is_ptt { "ptt_release" } else { "toggle" },
-                insertion_mode.as_str(),
-                copy_to_clipboard_enabled,
+                tracker_insertion_mode(state.inner()).await.as_str(),
+                tracker_copy_to_clipboard(state.inner()).await,
             )
             .await
             {
@@ -8005,20 +8351,7 @@ async fn handle_primary_tray_action(app: AppHandle, action: String) {
         }
         TRAY_ITEM_STOP_DICTATION => {
             let state = app.state::<AppState>();
-            let settings = state.settings_manager.lock().await.settings().clone();
-            let insertion_mode = normalize_dictation_insertion_mode(
-                &settings.transcription.dictation_insertion_mode,
-            )
-            .to_string();
-            if let Err(error) = stop_dictation_session(
-                state.inner(),
-                &app,
-                "tray",
-                insertion_mode.as_str(),
-                settings.transcription.dictation_copy_to_clipboard,
-            )
-            .await
-            {
+            if let Err(error) = stop_dictation_session(state.inner(), &app, "tray").await {
                 tracing::warn!("Failed to stop dictation from tray: {}", error);
             }
         }
@@ -8166,6 +8499,30 @@ fn hide_overlay_window(app: &AppHandle, label: &str) {
             tracing::warn!("Failed to hide '{}' window: {}", label, error);
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+async fn prepare_dictation_overlay_for_external_insert(
+    app: &AppHandle,
+    target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
+) {
+    hide_overlay_window(app, DICTATION_OVERLAY_LABEL);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    if is_self_activation_target(target_app, target_app_bundle_id) {
+        tracing::info!(
+            "Dictation target still resolved to Nautilus after overlay hide; continuing with paste fallback against current frontmost app"
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn prepare_dictation_overlay_for_external_insert(
+    _app: &AppHandle,
+    _target_app: Option<&str>,
+    _target_app_bundle_id: Option<&str>,
+) {
 }
 
 fn show_main_window(app: &AppHandle) -> Result<(), String> {
@@ -8434,39 +8791,243 @@ async fn run_analysis_with_selected_provider(
 }
 
 #[cfg(target_os = "macos")]
-fn get_frontmost_app_name() -> Option<String> {
+fn workspace_frontmost_application() -> Option<WorkspaceFrontmostApplication> {
+    let script = r#"
+ObjC.import("AppKit");
+const app = $.NSWorkspace.sharedWorkspace.frontmostApplication;
+function unwrap(value) {
+  return value ? ObjC.unwrap(value) : null;
+}
+JSON.stringify({
+  name: app ? unwrap(app.localizedName) : null,
+  bundleId: app ? unwrap(app.bundleIdentifier) : null
+});
+"#;
+
     let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg("tell application \"System Events\" to get name of first application process whose frontmost is true")
+        .args(["-l", "JavaScript", "-e", script])
         .output()
         .ok()?;
 
-    if output.status.success() {
-        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !name.is_empty() {
-            return Some(name);
+    if !output.status.success() {
+        return None;
+    }
+
+    serde_json::from_slice::<WorkspaceFrontmostApplication>(&output.stdout).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn capture_hotkey_target_application() -> (Option<String>, Option<String>) {
+    if let Some(frontmost) = workspace_frontmost_application() {
+        let app_name = normalize_optional_trimmed(frontmost.name);
+        let app_bundle_id = normalize_optional_trimmed(frontmost.bundle_id);
+        let sanitized = sanitize_dictation_target(app_name, app_bundle_id);
+        if sanitized.0.is_some() || sanitized.1.is_some() {
+            return sanitized;
         }
     }
-    None
+
+    sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id())
+}
+
+#[cfg(target_os = "macos")]
+fn capture_pending_hotkey_target(state: &AppState) {
+    let (app_name, app_bundle_id) = capture_hotkey_target_application();
+    let captured_at_ms = chrono::Utc::now().timestamp_millis();
+    if let Some(target) =
+        build_pending_dictation_target(app_name.clone(), app_bundle_id.clone(), captured_at_ms)
+    {
+        if let Ok(mut pending_target) = state.pending_dictation_target.lock() {
+            *pending_target = Some(target.clone());
+        }
+        if let Ok(mut last_external_target) = state.last_external_target.lock() {
+            *last_external_target = Some(target);
+        }
+    } else if let Ok(mut pending_target) = state.pending_dictation_target.lock() {
+        *pending_target = None;
+    }
+
+    tracing::info!(
+        "Captured pending dictation target at hotkey press: app={:?}, bundle_id={:?}",
+        app_name,
+        app_bundle_id
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn take_pending_hotkey_target(state: &AppState) -> Option<PendingDictationTarget> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let pending = state
+        .pending_dictation_target
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
+
+    pending.and_then(|target| {
+        if is_pending_hotkey_target_fresh(target.captured_at_ms, now_ms) {
+            Some(target)
+        } else {
+            tracing::info!(
+                "Discarding stale pending dictation target captured {} ms ago",
+                now_ms - target.captured_at_ms
+            );
+            None
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn is_pending_hotkey_target_fresh(captured_at_ms: i64, now_ms: i64) -> bool {
+    now_ms - captured_at_ms <= HOTKEY_TARGET_MAX_AGE_MS
+}
+
+#[cfg(target_os = "macos")]
+fn build_pending_dictation_target(
+    app_name: Option<String>,
+    app_bundle_id: Option<String>,
+    captured_at_ms: i64,
+) -> Option<PendingDictationTarget> {
+    if app_name.is_none() && app_bundle_id.is_none() {
+        None
+    } else {
+        Some(PendingDictationTarget {
+            app_name,
+            app_bundle_id,
+            captured_at_ms,
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn update_last_external_target(
+    state: &AppState,
+    app_name: Option<String>,
+    app_bundle_id: Option<String>,
+) {
+    let captured_at_ms = chrono::Utc::now().timestamp_millis();
+    if let Some(target) = build_pending_dictation_target(app_name, app_bundle_id, captured_at_ms) {
+        if let Ok(mut last_external_target) = state.last_external_target.lock() {
+            *last_external_target = Some(target);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn note_frontmost_application(state: &AppState) {
+    let (app_name, app_bundle_id) = capture_hotkey_target_application();
+    update_last_external_target(state, app_name, app_bundle_id);
+}
+
+#[cfg(target_os = "macos")]
+fn take_recent_external_target(state: &AppState) -> Option<PendingDictationTarget> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let cached = state
+        .last_external_target
+        .lock()
+        .ok()
+        .and_then(|slot| slot.clone());
+
+    cached.and_then(|target| {
+        if is_recent_external_target_fresh(target.captured_at_ms, now_ms) {
+            Some(target)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn is_recent_external_target_fresh(captured_at_ms: i64, now_ms: i64) -> bool {
+    now_ms - captured_at_ms <= LAST_EXTERNAL_TARGET_MAX_AGE_MS
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_insert_target(
+    state: &AppState,
+    provided_app_name: Option<String>,
+    provided_app_bundle_id: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let provided = sanitize_dictation_target(provided_app_name, provided_app_bundle_id);
+    if provided.0.is_some() || provided.1.is_some() {
+        update_last_external_target(state, provided.0.clone(), provided.1.clone());
+        return provided;
+    }
+
+    let current = capture_hotkey_target_application();
+    if current.0.is_some() || current.1.is_some() {
+        update_last_external_target(state, current.0.clone(), current.1.clone());
+        return current;
+    }
+
+    if let Some(target) = take_recent_external_target(state) {
+        tracing::info!(
+            "Using cached external target for insertion: app={:?}, bundle_id={:?}",
+            target.app_name,
+            target.app_bundle_id
+        );
+        return (target.app_name, target.app_bundle_id);
+    }
+
+    (None, None)
+}
+
+#[cfg(target_os = "macos")]
+fn current_frontmost_app_asn() -> Option<String> {
+    let output = std::process::Command::new("lsappinfo")
+        .arg("front")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let marker = "ASN:";
+    let start = stdout.find(marker)? + marker.len();
+    let end = stdout[start..].find(':').map(|index| start + index)?;
+    let asn = stdout[start..end].trim();
+    if asn.is_empty() {
+        None
+    } else {
+        Some(format!("ASN:{}", asn))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn lsappinfo_value_for_key(asn: &str, key: &str) -> Option<String> {
+    let output = std::process::Command::new("lsappinfo")
+        .args(["info", "-only", key, asn])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value_start = stdout.find("=\"")? + 2;
+    let value_end = stdout[value_start..]
+        .find('"')
+        .map(|index| value_start + index)?;
+    let value = stdout[value_start..value_end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn get_frontmost_app_name() -> Option<String> {
+    let asn = current_frontmost_app_asn()?;
+    lsappinfo_value_for_key(&asn, "name").or_else(|| lsappinfo_value_for_key(&asn, "LSDisplayName"))
 }
 
 #[cfg(target_os = "macos")]
 fn get_frontmost_app_bundle_id() -> Option<String> {
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(
-            "tell application \"System Events\" to get bundle identifier of first application process whose frontmost is true",
-        )
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let bundle_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !bundle_id.is_empty() {
-            return Some(bundle_id);
-        }
-    }
-    None
+    let asn = current_frontmost_app_asn()?;
+    lsappinfo_value_for_key(&asn, "bundleid")
 }
 
 #[cfg(target_os = "windows")]
@@ -9378,6 +9939,25 @@ async fn run_summary_with_selected_provider(
 ) -> Result<String, String> {
     let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state).await;
+    run_summary_with_provider(
+        provider,
+        remote_processing_enabled,
+        settings_model,
+        &state.ollama_client,
+        transcript,
+        model,
+    )
+    .await
+}
+
+async fn run_summary_with_provider(
+    provider: AnalysisProvider,
+    remote_processing_enabled: bool,
+    settings_model: Option<String>,
+    ollama_client: &llm::OllamaClient,
+    transcript: &str,
+    model: Option<&str>,
+) -> Result<String, String> {
     enforce_remote_provider_policy(provider, remote_processing_enabled)?;
 
     let selected_model = model
@@ -9387,8 +9967,7 @@ async fn run_summary_with_selected_provider(
         .unwrap_or_else(|| provider.default_model());
 
     match provider {
-        AnalysisProvider::Ollama => state
-            .ollama_client
+        AnalysisProvider::Ollama => ollama_client
             .summarize(transcript, selected_model)
             .await
             .map_err(|e| e.to_string()),
@@ -9437,6 +10016,25 @@ async fn run_action_items_with_selected_provider(
 ) -> Result<Vec<llm::ActionItem>, String> {
     let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state).await;
+    run_action_items_with_provider(
+        provider,
+        remote_processing_enabled,
+        settings_model,
+        &state.ollama_client,
+        transcript,
+        model,
+    )
+    .await
+}
+
+async fn run_action_items_with_provider(
+    provider: AnalysisProvider,
+    remote_processing_enabled: bool,
+    settings_model: Option<String>,
+    ollama_client: &llm::OllamaClient,
+    transcript: &str,
+    model: Option<&str>,
+) -> Result<Vec<llm::ActionItem>, String> {
     enforce_remote_provider_policy(provider, remote_processing_enabled)?;
 
     let selected_model = model
@@ -9446,8 +10044,7 @@ async fn run_action_items_with_selected_provider(
         .unwrap_or_else(|| provider.default_model());
 
     match provider {
-        AnalysisProvider::Ollama => state
-            .ollama_client
+        AnalysisProvider::Ollama => ollama_client
             .extract_action_items(transcript, selected_model)
             .await
             .map_err(|e| e.to_string()),
@@ -9487,6 +10084,79 @@ async fn run_action_items_with_selected_provider(
                 .map_err(|e| e.to_string())
         }
     }
+}
+
+async fn run_title_with_provider(
+    provider: AnalysisProvider,
+    remote_processing_enabled: bool,
+    settings_model: Option<String>,
+    ollama_client: &llm::OllamaClient,
+    transcript: &str,
+    model: Option<&str>,
+) -> Result<String, String> {
+    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
+
+    let selected_model = model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| settings_model.as_deref().filter(|v| !v.trim().is_empty()))
+        .unwrap_or_else(|| provider.default_model());
+
+    let prompt = format!(
+        "Generate a concise, descriptive meeting title for the transcript below. Return only the title, with no quotation marks or extra commentary.\n\nTranscript:\n{}",
+        transcript
+    );
+
+    let system_prompt = "You create short, useful meeting titles. Keep titles specific, professional, and easy to scan.";
+
+    let raw = match provider {
+        AnalysisProvider::Ollama => ollama_client
+            .generate(&selected_model, &format!("{}\n\n{}", system_prompt, prompt))
+            .await
+            .map_err(|e| e.to_string())?,
+        AnalysisProvider::OpenAi => {
+            let api_key = provider_secret_for(provider)?;
+            llm::OpenAIClient::with_api_key(Some(api_key))
+                .generate(&selected_model, &prompt, Some(system_prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        AnalysisProvider::Anthropic => {
+            let api_key = provider_secret_for(provider)?;
+            llm::AnthropicClient::with_api_key(Some(api_key))
+                .generate(&selected_model, &prompt, Some(system_prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        AnalysisProvider::Gemini => {
+            let api_key = provider_secret_for(provider)?;
+            llm::GeminiClient::with_api_key(Some(api_key))
+                .generate(&selected_model, &prompt, Some(system_prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        AnalysisProvider::DeepSeek => {
+            let api_key = provider_secret_for(provider)?;
+            llm::DeepSeekClient::with_api_key(Some(api_key))
+                .generate(&selected_model, &prompt, Some(system_prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        AnalysisProvider::OllamaCloud => {
+            let api_key = provider_secret_for(provider)?;
+            llm::OllamaCloudClient::with_api_key(Some(api_key))
+                .generate(&selected_model, &format!("{}\n\n{}", system_prompt, prompt))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+    };
+
+    let title = raw.trim().trim_matches('"').trim().to_string();
+    if title.is_empty() {
+        return Err("Generated meeting title was empty".to_string());
+    }
+
+    Ok(title)
 }
 
 async fn build_security_status(state: &AppState) -> Result<SecurityStatus, String> {
@@ -10046,6 +10716,8 @@ pub fn run() {
             dictation_session_tracker: Arc::new(Mutex::new(DictationSessionTracker::default())),
             dictation_runtime_state: Arc::new(Mutex::new(DictationSessionState::Idle)),
             dictation_start_options: Arc::new(Mutex::new(initial_dictation_options)),
+            pending_dictation_target: Arc::new(StdMutex::new(None)),
+            last_external_target: Arc::new(StdMutex::new(None)),
             dictation_overlay_state: Arc::new(StdMutex::new(DictationOverlayState::default())),
             recording_overlay_state: Arc::new(StdMutex::new(RecordingOverlayState::default())),
             accessibility_trust_observed: Arc::new(AtomicBool::new(false)),
@@ -10176,9 +10848,9 @@ pub fn run() {
 
             #[cfg(target_os = "macos")]
             {
-                if !check_cursor_insertion_permission() {
+                if !can_dispatch_hotkeys() && !check_accessibility_permission() {
                     tracing::warn!(
-                        "Cursor insertion permission not granted - dictation paste may fall back to clipboard"
+                        "No cursor insertion strategy is currently available - dictation may fall back to clipboard"
                     );
                     let _ = app.emit("accessibility-permission-warning", ());
                 }
@@ -10187,6 +10859,9 @@ pub fn run() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
+                if let Err(error) = state.asr_manager.get_all_providers_info().await {
+                    tracing::debug!("ASR provider cache warmup failed: {}", error);
+                }
                 sync_dictation_overlay_visibility(state.inner(), &app_handle).await;
                 sync_recording_overlay_visibility(state.inner(), &app_handle).await;
                 if let Err(error) =
@@ -10203,6 +10878,9 @@ pub fn run() {
                 }
 
                 loop {
+                    #[cfg(target_os = "macos")]
+                    note_frontmost_application(state.inner());
+
                     tokio::time::sleep(Duration::from_secs(1800)).await;
                     if let Err(error) = enforce_dictation_retention_policy(
                         state.inner(),
@@ -10224,6 +10902,18 @@ pub fn run() {
                     }
                 }
             });
+
+            #[cfg(target_os = "macos")]
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app_handle.state::<AppState>();
+                    loop {
+                        note_frontmost_application(state.inner());
+                        tokio::time::sleep(Duration::from_millis(350)).await;
+                    }
+                });
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -10253,6 +10943,7 @@ pub fn run() {
             start_dictation,
             stop_dictation,
             force_stop_dictation,
+            smoke_test_cursor_insert,
             reprocess_dictation_text,
             get_dictation_audio_level,
             start_recording,
@@ -10333,6 +11024,7 @@ pub fn run() {
             get_loopback_device_name,
             get_permission_diagnostics,
             request_dictation_permissions,
+            repair_cursor_insert_permissions,
             open_permission_settings,
             open_installed_nautilus_app,
             run_diarization,
@@ -11022,6 +11714,75 @@ mod tests {
             ),
             CursorInsertFailureKind::PostEventAccess
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pending_hotkey_target_freshness_accepts_recent_capture() {
+        let now_ms = 2_000;
+        assert!(is_pending_hotkey_target_fresh(now_ms - 250, now_ms));
+        assert!(is_pending_hotkey_target_fresh(
+            now_ms - HOTKEY_TARGET_MAX_AGE_MS,
+            now_ms
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pending_hotkey_target_freshness_rejects_stale_capture() {
+        let now_ms = 10_000;
+        assert!(!is_pending_hotkey_target_fresh(
+            now_ms - HOTKEY_TARGET_MAX_AGE_MS - 1,
+            now_ms
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn recent_external_target_window_rejects_stale_entries() {
+        let now_ms = 50_000;
+        assert!(is_recent_external_target_fresh(
+            now_ms - LAST_EXTERNAL_TARGET_MAX_AGE_MS,
+            now_ms
+        ));
+        assert!(!is_recent_external_target_fresh(
+            now_ms - LAST_EXTERNAL_TARGET_MAX_AGE_MS - 1,
+            now_ms
+        ));
+    }
+
+    #[test]
+    fn utf16_range_replacement_inserts_at_caret() {
+        let (updated, next_range) = replace_utf16_range(
+            "hello world",
+            CFRange {
+                location: 5,
+                length: 0,
+            },
+            ", brave",
+        )
+        .expect("replacement should succeed");
+
+        assert_eq!(updated, "hello, brave world");
+        assert_eq!(next_range.location, 12);
+        assert_eq!(next_range.length, 0);
+    }
+
+    #[test]
+    fn utf16_range_replacement_handles_unicode_scalars() {
+        let (updated, next_range) = replace_utf16_range(
+            "A🙂B",
+            CFRange {
+                location: 1,
+                length: 2,
+            },
+            "世界",
+        )
+        .expect("unicode replacement should succeed");
+
+        assert_eq!(updated, "A世界B");
+        assert_eq!(next_range.location, 3);
+        assert_eq!(next_range.length, 0);
     }
 
     #[test]
@@ -13675,13 +14436,31 @@ fn open_path_in_default_app(path: &Path) -> Result<(), String> {
 struct PasteOutcome {
     pasted: bool,
     copied: bool,
+    direct_accessibility: bool,
+    successful_strategy: Option<CursorInsertStrategy>,
     error: Option<String>,
 }
+
+#[cfg(target_os = "macos")]
+type AXUIElementRef = CFTypeRef;
+
+#[cfg(target_os = "macos")]
+type AXError = i32;
+
+#[cfg(target_os = "macos")]
+const AX_ERROR_SUCCESS: AXError = 0;
+#[cfg(target_os = "macos")]
+const AX_ERROR_ATTRIBUTE_UNSUPPORTED: AXError = -25205;
+#[cfg(target_os = "macos")]
+const AX_ERROR_NO_VALUE: AXError = -25212;
+#[cfg(target_os = "macos")]
+const AX_VALUE_CF_RANGE_TYPE: u32 = 4;
 
 #[cfg(target_os = "macos")]
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> u8;
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> u8;
 }
 
 #[cfg(target_os = "macos")]
@@ -13692,18 +14471,92 @@ unsafe extern "C" {
 }
 
 #[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXUIElementCreateSystemWide() -> AXUIElementRef;
+    fn AXUIElementCopyAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: *mut CFTypeRef,
+    ) -> AXError;
+    fn AXUIElementSetAttributeValue(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: CFTypeRef,
+    ) -> AXError;
+    fn AXUIElementIsAttributeSettable(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        settable: *mut Boolean,
+    ) -> AXError;
+    fn AXValueCreate(the_type: u32, value_ptr: *const std::ffi::c_void) -> CFTypeRef;
+    fn AXValueGetType(value: CFTypeRef) -> u32;
+    fn AXValueGetValue(
+        value: CFTypeRef,
+        the_type: u32,
+        value_ptr: *mut std::ffi::c_void,
+    ) -> Boolean;
+}
+
+#[cfg(target_os = "macos")]
 fn check_accessibility_permission() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
 #[cfg(target_os = "macos")]
-fn check_cursor_insertion_permission() -> bool {
-    (unsafe { CGPreflightPostEventAccess() }) || check_accessibility_permission()
+fn request_accessibility_permission() -> bool {
+    let prompt_key = CFString::new("AXTrustedCheckOptionPrompt");
+    let prompt_value = CFBoolean::true_value();
+    let options = CFDictionary::from_CFType_pairs(&[(prompt_key, prompt_value)]);
+    unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) != 0 }
 }
 
 #[cfg(target_os = "macos")]
-fn request_cursor_insertion_permission() -> bool {
+fn reset_tcc_service(service: &str, bundle_id: &str) -> Result<(), String> {
+    let output = std::process::Command::new("tccutil")
+        .args(["reset", service, bundle_id])
+        .output()
+        .map_err(|error| format!("Failed to launch tccutil: {}", error))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        Err(format!(
+            "tccutil reset {} {} exited with status {}",
+            service, bundle_id, output.status
+        ))
+    } else {
+        Err(stderr)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn check_microphone_permission() -> bool {
+    use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
+
+    let status = unsafe {
+        AVCaptureDevice::authorizationStatusForMediaType(
+            AVMediaTypeAudio.as_ref().expect("audio media type"),
+        )
+    };
+    status == AVAuthorizationStatus::Authorized
+}
+
+#[cfg(target_os = "macos")]
+fn check_post_event_access() -> bool {
+    unsafe { CGPreflightPostEventAccess() }
+}
+
+#[cfg(target_os = "macos")]
+fn request_post_event_access() -> bool {
     unsafe { CGRequestPostEventAccess() }
+}
+
+#[cfg(target_os = "macos")]
+fn can_dispatch_hotkeys() -> bool {
+    check_accessibility_permission() || check_post_event_access()
 }
 
 #[cfg(target_os = "macos")]
@@ -13748,25 +14601,52 @@ fn is_self_activation_target(app_name: Option<&str>, app_bundle_id: Option<&str>
 }
 
 #[cfg(target_os = "macos")]
+fn is_transient_activation_target(app_name: Option<&str>, app_bundle_id: Option<&str>) -> bool {
+    let name_matches = app_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "usernotificationcenter" | "notificationcenter" | "controlcenter" | "dock"
+            )
+        })
+        .unwrap_or(false);
+    let bundle_matches = app_bundle_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            matches!(
+                value,
+                "com.apple.usernotificationcenter"
+                    | "com.apple.notificationcenterui"
+                    | "com.apple.controlcenter"
+                    | "com.apple.dock"
+            )
+        })
+        .unwrap_or(false);
+    name_matches || bundle_matches
+}
+
+#[cfg(target_os = "macos")]
+fn sanitize_dictation_target(
+    app_name: Option<String>,
+    app_bundle_id: Option<String>,
+) -> (Option<String>, Option<String>) {
+    if is_self_activation_target(app_name.as_deref(), app_bundle_id.as_deref())
+        || is_transient_activation_target(app_name.as_deref(), app_bundle_id.as_deref())
+    {
+        (None, None)
+    } else {
+        (app_name, app_bundle_id)
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn is_running_from_disk_image() -> bool {
     current_app_bundle_path()
         .map(|path| path.starts_with("/Volumes/"))
         .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-fn check_automation_permission() -> Result<(), String> {
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg("tell application \"System Events\" to get name of first process")
-        .output()
-        .map_err(|error| format!("Failed to invoke automation probe: {}", error))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -13782,6 +14662,11 @@ fn classify_cursor_insert_failure(error: &str) -> CursorInsertFailureKind {
     let normalized = error.to_ascii_lowercase();
     if is_automation_permission_error(error) {
         CursorInsertFailureKind::Automation
+    } else if normalized.contains("could not activate target")
+        || normalized.contains("failed to activate target app")
+        || normalized.contains("activate target")
+    {
+        CursorInsertFailureKind::Unknown
     } else if normalized.contains("there was no external app to paste into") {
         CursorInsertFailureKind::SelfTarget
     } else if normalized.contains("accessibility")
@@ -13793,6 +14678,340 @@ fn classify_cursor_insert_failure(error: &str) -> CursorInsertFailureKind {
     } else {
         CursorInsertFailureKind::Unknown
     }
+}
+
+#[cfg(target_os = "macos")]
+fn ax_error_description(error: AXError) -> &'static str {
+    match error {
+        AX_ERROR_SUCCESS => "success",
+        -25200 => "generic failure",
+        -25201 => "illegal argument",
+        -25202 => "invalid ui element",
+        -25203 => "invalid observer",
+        -25204 => "could not complete",
+        AX_ERROR_ATTRIBUTE_UNSUPPORTED => "attribute unsupported",
+        -25206 => "action unsupported",
+        -25208 => "not implemented",
+        -25211 => "accessibility api disabled",
+        AX_ERROR_NO_VALUE => "no value",
+        -25213 => "parameterized attribute unsupported",
+        _ => "unknown accessibility error",
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ax_attribute(name: &str) -> CFString {
+    CFString::new(name)
+}
+
+#[cfg(target_os = "macos")]
+fn ax_copy_attribute_value(
+    element: AXUIElementRef,
+    attribute: &str,
+) -> Result<Option<CFTypeRef>, String> {
+    let attribute_name = ax_attribute(attribute);
+    let mut value: CFTypeRef = std::ptr::null();
+    let error = unsafe {
+        AXUIElementCopyAttributeValue(
+            element,
+            attribute_name.as_concrete_TypeRef(),
+            &mut value as *mut CFTypeRef,
+        )
+    };
+
+    if error == AX_ERROR_SUCCESS {
+        if value.is_null() {
+            Ok(None)
+        } else {
+            Ok(Some(value))
+        }
+    } else if matches!(error, AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE) {
+        Ok(None)
+    } else {
+        Err(format!(
+            "Accessibility attribute '{}' failed ({}, AXError {}).",
+            attribute,
+            ax_error_description(error),
+            error
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ax_is_attribute_settable(element: AXUIElementRef, attribute: &str) -> Result<bool, String> {
+    let attribute_name = ax_attribute(attribute);
+    let mut settable: Boolean = 0;
+    let error = unsafe {
+        AXUIElementIsAttributeSettable(
+            element,
+            attribute_name.as_concrete_TypeRef(),
+            &mut settable as *mut Boolean,
+        )
+    };
+
+    if error == AX_ERROR_SUCCESS {
+        Ok(settable != 0)
+    } else if matches!(error, AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE) {
+        Ok(false)
+    } else {
+        Err(format!(
+            "Accessibility settable check for '{}' failed ({}, AXError {}).",
+            attribute,
+            ax_error_description(error),
+            error
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ax_copy_string_attribute(
+    element: AXUIElementRef,
+    attribute: &str,
+) -> Result<Option<String>, String> {
+    let Some(value) = ax_copy_attribute_value(element, attribute)? else {
+        return Ok(None);
+    };
+
+    let type_id = unsafe { CFGetTypeID(value) };
+    if type_id != unsafe { CFStringGetTypeID() } {
+        unsafe { CFRelease(value) };
+        return Ok(None);
+    }
+
+    let string = unsafe { CFString::wrap_under_create_rule(value as CFStringRef) }.to_string();
+    Ok(Some(string))
+}
+
+#[cfg(target_os = "macos")]
+fn ax_copy_cf_range_attribute(
+    element: AXUIElementRef,
+    attribute: &str,
+) -> Result<Option<CFRange>, String> {
+    let Some(value) = ax_copy_attribute_value(element, attribute)? else {
+        return Ok(None);
+    };
+
+    let value_type = unsafe { AXValueGetType(value) };
+    if value_type != AX_VALUE_CF_RANGE_TYPE {
+        unsafe { CFRelease(value) };
+        return Ok(None);
+    }
+
+    let mut range = CFRange {
+        location: 0,
+        length: 0,
+    };
+    let copied = unsafe {
+        AXValueGetValue(
+            value,
+            AX_VALUE_CF_RANGE_TYPE,
+            &mut range as *mut CFRange as *mut std::ffi::c_void,
+        ) != 0
+    };
+    unsafe { CFRelease(value) };
+
+    if copied {
+        Ok(Some(range))
+    } else {
+        Err(format!(
+            "Accessibility range decode for '{}' failed.",
+            attribute
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ax_set_string_attribute(
+    element: AXUIElementRef,
+    attribute: &str,
+    value: &str,
+) -> Result<(), String> {
+    let attribute_name = ax_attribute(attribute);
+    let value_string = CFString::new(value);
+    let error = unsafe {
+        AXUIElementSetAttributeValue(
+            element,
+            attribute_name.as_concrete_TypeRef(),
+            value_string.as_concrete_TypeRef() as CFTypeRef,
+        )
+    };
+
+    if error == AX_ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!(
+            "Accessibility set for '{}' failed ({}, AXError {}).",
+            attribute,
+            ax_error_description(error),
+            error
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ax_set_cf_range_attribute(
+    element: AXUIElementRef,
+    attribute: &str,
+    value: CFRange,
+) -> Result<(), String> {
+    let attribute_name = ax_attribute(attribute);
+    let ax_value = unsafe {
+        AXValueCreate(
+            AX_VALUE_CF_RANGE_TYPE,
+            &value as *const CFRange as *const std::ffi::c_void,
+        )
+    };
+    if ax_value.is_null() {
+        return Err(format!(
+            "Accessibility range wrapper creation for '{}' failed.",
+            attribute
+        ));
+    }
+
+    let error = unsafe {
+        AXUIElementSetAttributeValue(element, attribute_name.as_concrete_TypeRef(), ax_value)
+    };
+    unsafe { CFRelease(ax_value) };
+
+    if error == AX_ERROR_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!(
+            "Accessibility set for '{}' failed ({}, AXError {}).",
+            attribute,
+            ax_error_description(error),
+            error
+        ))
+    }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn replace_utf16_range(
+    value: &str,
+    range: CFRange,
+    replacement: &str,
+) -> Option<(String, CFRange)> {
+    if range.location < 0 || range.length < 0 {
+        return None;
+    }
+
+    let start = usize::try_from(range.location).ok()?;
+    let length = usize::try_from(range.length).ok()?;
+    let end = start.checked_add(length)?;
+
+    let mut utf16_value = value.encode_utf16().collect::<Vec<_>>();
+    if end > utf16_value.len() {
+        return None;
+    }
+
+    let replacement_utf16 = replacement.encode_utf16().collect::<Vec<_>>();
+    let caret_location = start.checked_add(replacement_utf16.len())?;
+    utf16_value.splice(start..end, replacement_utf16.iter().copied());
+    let next_value = String::from_utf16(&utf16_value).ok()?;
+    let next_range = CFRange {
+        location: isize::try_from(caret_location).ok()?,
+        length: 0,
+    };
+    Some((next_value, next_range))
+}
+
+#[cfg(target_os = "macos")]
+fn insert_text_via_accessibility(
+    text: &str,
+    target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
+) -> Result<(), String> {
+    reactivate_target_application(target_app, target_app_bundle_id)?;
+    std::thread::sleep(std::time::Duration::from_millis(35));
+
+    let system_wide = unsafe { AXUIElementCreateSystemWide() };
+    if system_wide.is_null() {
+        return Err(if check_accessibility_permission() {
+            "Accessibility could not create the system-wide element.".to_string()
+        } else {
+            "Accessibility could not create the system-wide element. macOS may still have direct cursor insertion disabled for this app copy."
+                .to_string()
+        });
+    }
+
+    let focused_element = match ax_copy_attribute_value(system_wide, "AXFocusedUIElement") {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            unsafe { CFRelease(system_wide) };
+            return Err(if check_accessibility_permission() {
+                "Accessibility did not find a focused text element.".to_string()
+            } else {
+                "Accessibility did not find a focused text element. macOS may still have direct cursor insertion disabled for this app copy."
+                    .to_string()
+            });
+        }
+        Err(error) => {
+            unsafe { CFRelease(system_wide) };
+            return Err(error);
+        }
+    };
+    unsafe { CFRelease(system_wide) };
+
+    let role = ax_copy_string_attribute(focused_element, "AXRole")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let selected_text_settable = ax_is_attribute_settable(focused_element, "AXSelectedText")?;
+    if selected_text_settable {
+        match ax_set_string_attribute(focused_element, "AXSelectedText", text) {
+            Ok(()) => {
+                unsafe { CFRelease(focused_element) };
+                return Ok(());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "AXSelectedText insertion failed for role '{}', trying AXValue fallback: {}",
+                    role,
+                    error
+                );
+            }
+        }
+    }
+
+    let value_settable = ax_is_attribute_settable(focused_element, "AXValue")?;
+    let selected_range_settable = ax_is_attribute_settable(focused_element, "AXSelectedTextRange")?;
+    if value_settable {
+        let current_value =
+            ax_copy_string_attribute(focused_element, "AXValue")?.ok_or_else(|| {
+                format!(
+                    "Focused element role '{}' does not expose AXValue for direct insertion.",
+                    role
+                )
+            })?;
+        let selected_range = ax_copy_cf_range_attribute(focused_element, "AXSelectedTextRange")?
+            .ok_or_else(|| {
+                format!(
+                    "Focused element role '{}' does not expose AXSelectedTextRange for direct insertion.",
+                    role
+                )
+            })?;
+        let (next_value, next_range) = replace_utf16_range(&current_value, selected_range, text)
+            .ok_or_else(|| {
+                format!(
+                    "Accessibility could not apply the selected range inside the focused '{}' element.",
+                    role
+                )
+            })?;
+
+        ax_set_string_attribute(focused_element, "AXValue", &next_value)?;
+        if selected_range_settable {
+            let _ = ax_set_cf_range_attribute(focused_element, "AXSelectedTextRange", next_range);
+        }
+        unsafe { CFRelease(focused_element) };
+        return Ok(());
+    }
+
+    unsafe { CFRelease(focused_element) };
+    Err(format!(
+        "Focused element role '{}' is not settable through macOS Accessibility, so Nautilus must fall back to paste.",
+        role
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -13813,66 +15032,44 @@ fn reactivate_target_application(
         return Ok(());
     }
 
-    let mut command = std::process::Command::new("osascript");
-    command.arg("-e").arg("on run argv");
-    if trimmed_bundle_id.is_some() {
-        command
-            .arg("-e")
-            .arg("set targetBundleId to item 1 of argv");
-    }
-    if trimmed_name.is_some() {
-        let index = if trimmed_bundle_id.is_some() { 2 } else { 1 };
-        command
-            .arg("-e")
-            .arg(format!("set targetAppName to item {} of argv", index));
-    }
-    if trimmed_bundle_id.is_some() {
-        command
-            .arg("-e")
-            .arg("try")
-            .arg("-e")
-            .arg("tell application id targetBundleId to activate")
-            .arg("-e")
-            .arg("on error");
-    }
-    if trimmed_name.is_some() {
-        command
-            .arg("-e")
-            .arg("tell application targetAppName to activate");
-    }
-    if trimmed_bundle_id.is_some() {
-        command.arg("-e").arg("end try");
-    }
-    command.arg("-e").arg("delay 0.08").arg("-e").arg("end run");
-    if let Some(bundle_id) = trimmed_bundle_id {
-        command.arg(bundle_id);
-    }
-    if let Some(name) = trimmed_name {
-        command.arg(name);
+    let frontmost_bundle_matches = trimmed_bundle_id
+        .and_then(|bundle_id| get_frontmost_app_bundle_id().map(|current| current == bundle_id))
+        .unwrap_or(false);
+    let frontmost_name_matches = trimmed_name
+        .and_then(|name| get_frontmost_app_name().map(|current| current.eq_ignore_ascii_case(name)))
+        .unwrap_or(false);
+    if frontmost_bundle_matches || frontmost_name_matches {
+        tracing::info!(
+            "Target app '{}' is already frontmost; skipping app reactivation to preserve field focus",
+            trimmed_name.or(trimmed_bundle_id).unwrap_or("unknown")
+        );
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        return Ok(());
     }
 
-    let script = command.output().map_err(|error| {
+    let mut command = std::process::Command::new("open");
+    if let Some(bundle_id) = trimmed_bundle_id {
+        command.args(["-b", bundle_id]);
+    } else if let Some(name) = trimmed_name {
+        command.args(["-a", name]);
+    }
+
+    let status = command.status().map_err(|error| {
         format!(
             "Failed to activate target app '{}': {}",
-            trimmed_name.unwrap_or("unknown"),
+            trimmed_name.or(trimmed_bundle_id).unwrap_or("unknown"),
             error
         )
     })?;
-    if !script.status.success() {
-        let stderr = String::from_utf8_lossy(&script.stderr).trim().to_string();
+    if !status.success() {
         return Err(format!(
-            "macOS could not activate target '{}': {}",
+            "macOS could not activate target '{}'.",
             trimmed_name.or(trimmed_bundle_id).unwrap_or("unknown"),
-            if stderr.is_empty() {
-                "unknown AppleScript error"
-            } else {
-                stderr.as_str()
-            }
         ));
     }
 
-    for _ in 0..8 {
-        std::thread::sleep(std::time::Duration::from_millis(35));
+    for _ in 0..18 {
+        std::thread::sleep(std::time::Duration::from_millis(40));
         let bundle_matches = trimmed_bundle_id
             .and_then(|bundle_id| get_frontmost_app_bundle_id().map(|current| current == bundle_id))
             .unwrap_or(false);
@@ -13882,29 +15079,16 @@ fn reactivate_target_application(
             })
             .unwrap_or(false);
         if bundle_matches || name_matches {
+            std::thread::sleep(std::time::Duration::from_millis(80));
             return Ok(());
         }
     }
 
     tracing::warn!(
-        "Activation for target app '{}' did not confirm as frontmost before paste dispatch",
+        "Activation for target app '{}' did not confirm before paste dispatch",
         trimmed_name.or(trimmed_bundle_id).unwrap_or("unknown")
     );
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn wait_for_clipboard_text(expected: &str) -> bool {
-    for _ in 0..8 {
-        if read_clipboard_text()
-            .map(|current| current == expected)
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    false
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -14017,11 +15201,6 @@ fn read_clipboard_text() -> Result<String, String> {
 }
 
 #[cfg(target_os = "macos")]
-enum PasteDispatchStatus {
-    Confirmed,
-}
-
-#[cfg(target_os = "macos")]
 fn dispatch_command_keystroke(keycode: u16) -> Result<(), String> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -14085,80 +15264,20 @@ fn dispatch_command_keystroke(keycode: u16) -> Result<(), String> {
 fn send_native_paste_key(
     target_app: Option<&str>,
     target_app_bundle_id: Option<&str>,
-) -> Result<PasteDispatchStatus, String> {
-    use std::process::Command;
-
-    if let Err(error) = reactivate_target_application(target_app, target_app_bundle_id) {
-        tracing::warn!(
-            "Failed to reactivate paste target '{:?}' / '{:?}': {}",
-            target_app,
-            target_app_bundle_id,
-            error
-        );
-    }
+) -> Result<(), String> {
+    reactivate_target_application(target_app, target_app_bundle_id)?;
     std::thread::sleep(std::time::Duration::from_millis(50));
-
-    if let Ok(()) = dispatch_command_keystroke(9) {
-        tracing::info!("Cmd+V posted via CoreGraphics session event");
-        return Ok(PasteDispatchStatus::Confirmed);
-    }
-
-    let apple_script = Command::new("osascript")
-        .arg("-e")
-        .arg("tell application \"System Events\" to keystroke \"v\" using command down")
-        .output()
-        .map_err(|e| format!("Failed to invoke osascript for paste: {}", e))?;
-    if apple_script.status.success() {
-        tracing::info!("Cmd+V posted via System Events fallback");
-        return Ok(PasteDispatchStatus::Confirmed);
-    }
-
-    let script_error = String::from_utf8_lossy(&apple_script.stderr)
-        .trim()
-        .to_string();
-    Err(format!(
-        "Native event paste failed, and System Events fallback failed: {}",
-        script_error
-    ))
+    dispatch_command_keystroke(9).map_err(|error| format!("CoreGraphics paste failed: {}", error))
 }
 
 #[cfg(target_os = "macos")]
 fn send_native_copy_key(
     target_app: Option<&str>,
     target_app_bundle_id: Option<&str>,
-) -> Result<PasteDispatchStatus, String> {
-    use std::process::Command;
-
-    if let Err(error) = reactivate_target_application(target_app, target_app_bundle_id) {
-        tracing::warn!(
-            "Failed to reactivate copy target '{:?}' / '{:?}': {}",
-            target_app,
-            target_app_bundle_id,
-            error
-        );
-    }
+) -> Result<(), String> {
+    reactivate_target_application(target_app, target_app_bundle_id)?;
     std::thread::sleep(std::time::Duration::from_millis(50));
-
-    if let Ok(()) = dispatch_command_keystroke(8) {
-        return Ok(PasteDispatchStatus::Confirmed);
-    }
-
-    let apple_script = Command::new("osascript")
-        .arg("-e")
-        .arg("tell application \"System Events\" to keystroke \"c\" using command down")
-        .output()
-        .map_err(|e| format!("Failed to invoke osascript for copy: {}", e))?;
-    if apple_script.status.success() {
-        return Ok(PasteDispatchStatus::Confirmed);
-    }
-
-    let script_error = String::from_utf8_lossy(&apple_script.stderr)
-        .trim()
-        .to_string();
-    Err(format!(
-        "Native event copy failed, and System Events fallback failed: {}",
-        script_error
-    ))
+    dispatch_command_keystroke(8).map_err(|error| format!("CoreGraphics copy failed: {}", error))
 }
 
 #[cfg(target_os = "windows")]
@@ -14180,23 +15299,7 @@ fn send_native_copy_key(
 
 #[cfg(target_os = "macos")]
 fn send_native_undo_key() -> Result<(), String> {
-    if let Ok(()) = dispatch_command_keystroke(6) {
-        return Ok(());
-    }
-
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg("tell application \"System Events\" to keystroke \"z\" using command down")
-        .output()
-        .map_err(|e| format!("Failed to invoke osascript for undo: {}", e))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(format!(
-        "Undo keystroke failed. Native event dispatch did not succeed, and System Events returned: {}",
-        stderr
-    ))
+    dispatch_command_keystroke(6).map_err(|error| format!("Undo keystroke failed: {}", error))
 }
 
 #[cfg(target_os = "windows")]
@@ -14226,6 +15329,7 @@ fn send_native_copy_key(
     Err("Copy command is not supported on this platform.".to_string())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn schedule_clipboard_restore(previous: String, inserted_text: String) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(
@@ -14253,43 +15357,85 @@ fn schedule_clipboard_restore(previous: String, inserted_text: String) {
 }
 
 #[cfg(target_os = "macos")]
+fn schedule_clipboard_restore(previous: String, inserted_text: String) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(
+            DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS,
+        ));
+
+        match read_clipboard_text() {
+            Ok(current) => {
+                if current != inserted_text {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+
+        if let Err(error) = copy_to_clipboard(&previous) {
+            tracing::warn!(
+                "Failed to restore previous clipboard after paste success: {}",
+                error
+            );
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
 fn dispatch_paste_from_clipboard(
+    state: &AppState,
+    text: &str,
+    keep_text_in_clipboard: bool,
     target_app: Option<&str>,
     target_app_bundle_id: Option<&str>,
-) -> Result<PasteDispatchStatus, String> {
-    let paste_result =
-        send_native_paste_key(target_app, target_app_bundle_id).or_else(|first_error| {
-            std::thread::sleep(std::time::Duration::from_millis(45));
-            send_native_paste_key(target_app, target_app_bundle_id)
-                .map_err(|retry_error| format!("{} (retry failed: {})", first_error, retry_error))
-        });
+) -> Result<CursorInsertStrategy, String> {
+    let _ = state;
+    let previous_clipboard = read_clipboard_text().ok();
+    copy_to_clipboard(text)
+        .map_err(|error| format!("Failed to stage clipboard paste: {}", error))?;
 
-    match paste_result {
-        Ok(status) => Ok(status),
-        Err(error) => {
-            if is_automation_permission_error(&error) {
-                Err(format!(
-                    "macOS blocked Automation for System Events ({}). Enable Nautilus under System Settings > Privacy & Security > Automation, or paste manually with Cmd+V.",
-                    error
-                ))
-            } else {
-                if !check_cursor_insertion_permission() {
-                    let _ = request_cursor_insertion_permission();
+    match send_native_paste_key(target_app, target_app_bundle_id) {
+        Ok(()) => {
+            if !keep_text_in_clipboard {
+                if let Some(previous) = previous_clipboard {
+                    schedule_clipboard_restore(previous, text.to_string());
                 }
-                Err(format!(
-                    "macOS blocked keystroke paste ({}). Grant Nautilus Accessibility in System Settings > Privacy & Security > Accessibility so it can synthesize Cmd+V.",
-                    error
-                ))
             }
+            Ok(CursorInsertStrategy::SimulatedTyping)
+        }
+        Err(error) => {
+            if !keep_text_in_clipboard {
+                if let Some(previous) = previous_clipboard {
+                    let _ = copy_to_clipboard(&previous);
+                }
+            }
+            Err(
+                if !(check_accessibility_permission() || check_post_event_access()) {
+                    format!(
+                    "Direct macOS text insertion is not enabled for Nautilus, and macOS also blocked the native Cmd+V fallback ({}). Grant Accessibility for this app copy.",
+                    error
+                )
+                } else if error.to_ascii_lowercase().contains("activate target") {
+                    format!(
+                    "Nautilus copied to the clipboard, but macOS could not reactivate the target app before sending Cmd+V ({}). Click back into the destination app and press Cmd+V manually.",
+                    error
+                )
+                } else {
+                    format!(
+                    "macOS could not send Cmd+V at the cursor ({}). Click back into the target app and press Cmd+V manually if needed.",
+                    error
+                )
+                },
+            )
         }
     }
 }
 
 #[cfg(target_os = "macos")]
 fn capture_selected_text_via_clipboard(target_app: Option<&str>) -> Result<Option<String>, String> {
-    if !check_cursor_insertion_permission() {
+    if !can_dispatch_hotkeys() {
         return Err(
-            "Selected text capture needs Accessibility permission in System Settings > Privacy & Security > Accessibility."
+            "Selected text capture needs either macOS post-event access or Automation for System Events."
                 .to_string(),
         );
     }
@@ -14419,16 +15565,19 @@ fn capture_application_context_text(target_app: Option<&str>) -> Result<Option<S
 
 #[cfg(target_os = "windows")]
 fn dispatch_paste_from_clipboard(
+    _state: &AppState,
+    _text: &str,
+    _keep_text_in_clipboard: bool,
     target_app: Option<&str>,
     _target_app_bundle_id: Option<&str>,
-) -> Result<(), String> {
+) -> Result<CursorInsertStrategy, String> {
     let script = build_windows_sendkeys_script("^v", target_app);
     let status = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", script.as_str()])
         .status()
         .map_err(|e| format!("Failed to launch PowerShell for paste: {}", e))?;
     if status.success() {
-        Ok(())
+        Ok(CursorInsertStrategy::SimulatedTyping)
     } else {
         Err(
             "Windows key simulation failed while sending Ctrl+V. Paste manually with Ctrl+V."
@@ -14439,9 +15588,12 @@ fn dispatch_paste_from_clipboard(
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn dispatch_paste_from_clipboard(
+    _state: &AppState,
+    _text: &str,
+    _keep_text_in_clipboard: bool,
     _target_app: Option<&str>,
     _target_app_bundle_id: Option<&str>,
-) -> Result<(), String> {
+) -> Result<CursorInsertStrategy, String> {
     Err("System-wide paste is not implemented on this platform yet.".to_string())
 }
 
@@ -14494,6 +15646,7 @@ fn capture_dictation_context_text(
 }
 
 fn paste_text_systemwide(
+    state: &AppState,
     text: &str,
     keep_text_in_clipboard: bool,
     target_app: Option<&str>,
@@ -14501,79 +15654,141 @@ fn paste_text_systemwide(
 ) -> PasteOutcome {
     tracing::info!("paste_text_systemwide called with {} chars", text.len());
 
-    let original_clipboard = {
-        #[cfg(target_os = "macos")]
-        {
-            read_clipboard_text().ok()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            None::<String>
-        }
-    };
-
-    if let Err(error) = copy_to_clipboard(text) {
-        tracing::error!("Failed to copy to clipboard: {}", error);
-        return PasteOutcome {
-            pasted: false,
-            copied: false,
-            error: Some(error),
-        };
-    }
-    tracing::info!("Text copied to clipboard successfully");
-
     #[cfg(target_os = "macos")]
     {
-        if is_self_activation_target(target_app, target_app_bundle_id) {
-            return PasteOutcome {
-                pasted: false,
-                copied: true,
-                error: Some(
-                    "Copied to clipboard. Dictation was started while Nautilus was frontmost, so there was no external app to paste into. Trigger dictation from the app you want to type into."
-                        .to_string(),
-                ),
+        let (target_app, target_app_bundle_id) =
+            if is_self_activation_target(target_app, target_app_bundle_id) {
+                (None, None)
+            } else {
+                (target_app, target_app_bundle_id)
             };
-        }
 
-        if !wait_for_clipboard_text(text) {
-            tracing::warn!("Clipboard did not confirm injected dictation text before paste");
-        }
-
-        let paste_dispatch = match dispatch_paste_from_clipboard(target_app, target_app_bundle_id) {
-            Ok(status) => status,
-            Err(error) => {
-                tracing::error!("Paste key simulation failed: {}", error);
+        match insert_text_via_accessibility(text, target_app, target_app_bundle_id) {
+            Ok(()) => {
+                let copied = if keep_text_in_clipboard {
+                    match copy_to_clipboard(text) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            tracing::warn!(
+                                "Direct Accessibility insertion succeeded but clipboard update failed: {}",
+                                error
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+                tracing::info!("Accessibility text insertion succeeded");
                 return PasteOutcome {
-                    pasted: false,
-                    copied: true,
-                    error: Some(format!("Copied to clipboard. {}", error)),
+                    pasted: true,
+                    copied,
+                    direct_accessibility: true,
+                    successful_strategy: Some(CursorInsertStrategy::AccessibilityDirectText),
+                    error: None,
                 };
             }
-        };
-
-        if !keep_text_in_clipboard && matches!(paste_dispatch, PasteDispatchStatus::Confirmed) {
-            if let Some(previous) = original_clipboard {
-                schedule_clipboard_restore(previous, text.to_string());
+            Err(error) => {
+                tracing::warn!(
+                    "Direct Accessibility insertion failed, falling back to native Cmd+V dispatch: {}",
+                    error
+                );
             }
         }
 
-        tracing::info!("Paste successful - text inserted at cursor");
-        PasteOutcome {
-            pasted: true,
-            copied: true,
-            error: None,
+        match dispatch_paste_from_clipboard(
+            state,
+            text,
+            keep_text_in_clipboard,
+            target_app,
+            target_app_bundle_id,
+        ) {
+            Ok(strategy) => {
+                let copied = if keep_text_in_clipboard {
+                    match copy_to_clipboard(text) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            tracing::warn!(
+                                "Native Cmd+V fallback succeeded but clipboard update failed: {}",
+                                error
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+
+                tracing::info!("Native Cmd+V fallback succeeded");
+                PasteOutcome {
+                    pasted: true,
+                    copied,
+                    direct_accessibility: false,
+                    successful_strategy: Some(strategy),
+                    error: None,
+                }
+            }
+            Err(insert_error) => {
+                if let Err(error) = copy_to_clipboard(text) {
+                    tracing::error!(
+                        "Failed to copy to clipboard after insert failure: {}",
+                        error
+                    );
+                    return PasteOutcome {
+                        pasted: false,
+                        copied: false,
+                        direct_accessibility: false,
+                        successful_strategy: None,
+                        error: Some(error),
+                    };
+                }
+                tracing::info!("Text copied to clipboard successfully after insert failure");
+                PasteOutcome {
+                    pasted: false,
+                    copied: true,
+                    direct_accessibility: false,
+                    successful_strategy: None,
+                    error: Some(format!("Copied to clipboard. {}", insert_error)),
+                }
+            }
         }
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        let paste_dispatch = match dispatch_paste_from_clipboard(target_app, target_app_bundle_id) {
-            Ok(()) => Ok(()),
-            Err(error) => Err(error),
+        let original_clipboard = {
+            #[cfg(target_os = "windows")]
+            {
+                read_clipboard_text().ok()
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                None::<String>
+            }
         };
 
+        if let Err(error) = copy_to_clipboard(text) {
+            tracing::error!("Failed to copy to clipboard: {}", error);
+            return PasteOutcome {
+                pasted: false,
+                copied: false,
+                direct_accessibility: false,
+                successful_strategy: None,
+                error: Some(error),
+            };
+        }
+        tracing::info!("Text copied to clipboard successfully");
+
+        let paste_dispatch = dispatch_paste_from_clipboard(
+            state,
+            text,
+            keep_text_in_clipboard,
+            target_app,
+            target_app_bundle_id,
+        );
+
         match paste_dispatch {
-            Ok(()) => {
+            Ok(strategy) => {
                 if !keep_text_in_clipboard {
                     if let Some(previous) = original_clipboard {
                         schedule_clipboard_restore(previous, text.to_string());
@@ -14582,12 +15797,16 @@ fn paste_text_systemwide(
                 PasteOutcome {
                     pasted: true,
                     copied: true,
+                    direct_accessibility: false,
+                    successful_strategy: Some(strategy),
                     error: None,
                 }
             }
             Err(error) => PasteOutcome {
                 pasted: false,
                 copied: true,
+                direct_accessibility: false,
+                successful_strategy: None,
                 error: Some(format!("Copied to clipboard. {}", error)),
             },
         }
@@ -14608,10 +15827,7 @@ async fn clear_inline_dictation_session(
         inline_state.clone()
     };
 
-    if remove_inserted_text
-        && !snapshot.last_inserted_text.is_empty()
-        && check_cursor_insertion_permission()
-    {
+    if remove_inserted_text && !snapshot.last_inserted_text.is_empty() && can_dispatch_hotkeys() {
         if let Some(target) = snapshot.app_target.as_deref() {
             if let Err(error) = reactivate_target_application(Some(target), None) {
                 tracing::warn!(

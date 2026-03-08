@@ -109,6 +109,13 @@ vi.mock("@/lib/tauri", () => ({
     automationReady: true,
     notes: [],
   })),
+  repairCursorInsertPermissions: vi.fn(async () => ({
+    microphoneReady: true,
+    speechRecognitionReady: true,
+    accessibilityReady: true,
+    automationReady: true,
+    notes: [],
+  })),
   getBackupSetupReport: vi.fn(),
   getOllamaStatus: vi.fn(async () => true),
   getSecurityStatus: vi.fn(async () => ({

@@ -35,6 +35,7 @@ pub struct AsrManager {
     silence_skip_enabled: RwLock<bool>,
     platform_optimization: RwLock<crate::settings::PlatformOptimizationSettings>,
     last_runtime_errors: RwLock<HashMap<AsrProviderType, String>>,
+    provider_info_cache: RwLock<Option<Vec<ProviderInfo>>>,
     models_dir: PathBuf,
 }
 
@@ -77,6 +78,7 @@ impl AsrManager {
             ),
             provider_model_ids: RwLock::new(provider_model_ids),
             last_runtime_errors: RwLock::new(HashMap::new()),
+            provider_info_cache: RwLock::new(None),
             models_dir,
         }
     }
@@ -130,6 +132,7 @@ impl AsrManager {
             .await
             .insert(default_provider, normalized.clone());
         *self.selected_model_id.write().await = normalized;
+        self.invalidate_provider_info_cache().await;
     }
 
     pub async fn selected_model_id(&self) -> String {
@@ -146,6 +149,7 @@ impl AsrManager {
         if self.get_default_provider().await == provider_type {
             *self.selected_model_id.write().await = normalized;
         }
+        self.invalidate_provider_info_cache().await;
     }
 
     pub async fn provider_model_id(&self, provider_type: AsrProviderType) -> String {
@@ -181,6 +185,7 @@ impl AsrManager {
 
         *self.provider_model_ids.write().await = std::mem::take(&mut merged);
         *self.selected_model_id.write().await = default_selected;
+        self.invalidate_provider_info_cache().await;
     }
 
     pub async fn set_silence_skip_enabled(&self, enabled: bool) {
@@ -196,6 +201,7 @@ impl AsrManager {
         settings: crate::settings::PlatformOptimizationSettings,
     ) {
         *self.platform_optimization.write().await = settings;
+        self.invalidate_provider_info_cache().await;
     }
 
     pub async fn platform_optimization(&self) -> crate::settings::PlatformOptimizationSettings {
@@ -204,6 +210,11 @@ impl AsrManager {
 
     pub async fn clear_runtime_errors(&self) {
         self.last_runtime_errors.write().await.clear();
+        self.invalidate_provider_info_cache().await;
+    }
+
+    pub async fn invalidate_provider_info_cache(&self) {
+        *self.provider_info_cache.write().await = None;
     }
 
     /// Get a provider by type - creates fresh instance each time
@@ -229,6 +240,7 @@ impl AsrManager {
         *self.default_provider.write().await = provider_type;
         let selected = self.provider_model_id(provider_type).await;
         *self.selected_model_id.write().await = selected;
+        self.invalidate_provider_info_cache().await;
     }
 
     pub async fn get_runtime_diagnostics(
@@ -635,6 +647,10 @@ impl AsrManager {
 
     /// Get info for all providers (Parallelized)
     pub async fn get_all_providers_info(&self) -> Result<Vec<ProviderInfo>, String> {
+        if let Some(cached) = self.provider_info_cache.read().await.clone() {
+            return Ok(cached);
+        }
+
         let provider_models = self.provider_model_map().await;
         let last_errors = self.last_runtime_errors.read().await.clone();
         let optimization = self.platform_optimization().await;
@@ -693,6 +709,7 @@ impl AsrManager {
             }
         }
 
+        *self.provider_info_cache.write().await = Some(infos.clone());
         Ok(infos)
     }
 
@@ -749,7 +766,9 @@ impl AsrManager {
     ) -> Result<()> {
         let selected_model = self.provider_model_id(provider_type).await;
         let provider = Self::provider_with_model(provider_type, Some(selected_model.as_str()));
-        provider.download_models(progress_cb).await
+        let result = provider.download_models(progress_cb).await;
+        self.invalidate_provider_info_cache().await;
+        result
     }
 
     /// Get models directory

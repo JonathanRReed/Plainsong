@@ -438,7 +438,7 @@ function PermissionsStep({
                 <PermRow
                     label="Microphone"
                     icon={<Mic className="h-4 w-4" />}
-                    ready={perms?.microphoneReady}
+                    ready={perms?.microphonePermissionReady ?? perms?.microphoneReady}
                     loading={loading}
                     onFix={() => void openPermissionSettings("microphone")}
                 />
@@ -455,6 +455,13 @@ function PermissionsStep({
                     ready={perms?.accessibilityReady}
                     loading={loading || requestBusy}
                     onFix={() => void openPermissionSettings("accessibility")}
+                />
+                <PermRow
+                    label="Automation (System Events fallback)"
+                    icon={<ShieldCheck className="h-4 w-4" />}
+                    ready={perms?.automationReady}
+                    loading={loading || requestBusy}
+                    onFix={() => void openPermissionSettings("automation")}
                 />
             </div>
 

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key>
-  <string>com.nautilus.app.macos-speech-helper</string>
+  <string>com.nautilus.bot.macos-speech-helper</string>
   <key>CFBundleName</key>
   <string>Nautilus Speech Helper</string>
   <key>NSSpeechRecognitionUsageDescription</key>

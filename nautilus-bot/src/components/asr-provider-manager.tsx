@@ -11,6 +11,7 @@ import {
   openPermissionSettings,
   openInstalledNautilusApp,
   requestDictationPermissions,
+  repairCursorInsertPermissions,
   type PermissionDiagnostics,
 } from "@/lib/tauri";
 import { invoke } from "@tauri-apps/api/core";
@@ -231,6 +232,12 @@ export function AsrProviderManager({
       console.error("Failed to load permission diagnostics:", error);
       return null;
     }
+  };
+
+  const refreshAppleNativeReadiness = async () => {
+    const diagnostics = await refreshPermissionDiagnostics();
+    await Promise.all([loadProviders(), loadSelectionSettings()]);
+    return diagnostics;
   };
 
   const loadPlatformSettings = async () => {
@@ -640,6 +647,13 @@ export function AsrProviderManager({
   const renderRouteStatus = (label: string, providerType: AsrProviderType) => {
     const provider = providerByType(providerType);
     if (!provider) return null;
+    if (providerType === "macos_apple_speech" && permissionDiagnostics?.speechRecognitionReady) {
+      return (
+        <p className="text-xs text-muted-foreground">
+          {label}: {provider.name} is ready.
+        </p>
+      );
+    }
     const selection = getProviderSelectionStatus(provider);
     if (selection.reason === null) {
       return (
@@ -723,17 +737,13 @@ export function AsrProviderManager({
     autoPromptedNativePermissionRef.current = promptKey;
     setPermissionActionBusy(true);
     void (async () => {
-      try {
-        await requestDictationPermissions();
-        await Promise.all([
-          refreshPermissionDiagnostics(),
-          loadProviders(),
-          loadSelectionSettings(),
-        ]);
-      } catch (error) {
-        console.error("Failed to auto-request Apple native permissions:", error);
-      } finally {
-        setPermissionActionBusy(false);
+              try {
+                await requestDictationPermissions();
+                await refreshAppleNativeReadiness();
+              } catch (error) {
+                console.error("Failed to auto-request Apple native permissions:", error);
+              } finally {
+                setPermissionActionBusy(false);
       }
     })();
   }, [
@@ -797,29 +807,50 @@ export function AsrProviderManager({
       action: "Open Accessibility",
       onClick: () => void openPermissionSettings("accessibility"),
       detail: appleNativeUsedForDictation
-        ? "Required so macOS allows Nautilus to synthesize Cmd+V at the cursor."
+        ? "Preferred direct path so Nautilus can insert text directly into the focused field."
         : "Needed when you later use Apple Native for dictation insertion.",
     },
     {
-      key: "automation",
-      label: "Automation",
-      ready: permissionDiagnostics?.automationReady ?? false,
-      action: "Open Automation",
-      onClick: () => void openPermissionSettings("automation"),
+      key: "keyboardEvents",
+      label: "Keyboard Events",
+      ready: permissionDiagnostics?.postEventReady ?? false,
+      action: "Open Accessibility",
+      onClick: () => void openPermissionSettings("accessibility"),
       detail: appleNativeUsedForDictation
-        ? "Optional fallback if macOS blocks direct event posting and Nautilus has to use System Events."
-        : "Optional compatibility fallback for Apple Native insertion.",
+        ? "Fallback native Cmd+V path when direct Accessibility insertion cannot be used."
+        : "Optional fallback for native Cmd+V insertion when you later use Apple Native dictation.",
     },
   ];
 
   const appleNativeReadyForMeetings = !!permissionDiagnostics?.speechRecognitionReady;
   const appleNativeTranscriptionReady = appleNativeReadyForMeetings;
-  const appleNativeCursorInsertionReady = !!permissionDiagnostics?.accessibilityReady;
+  const appleNativeAccessibilityReady = !!permissionDiagnostics?.accessibilityReady;
+  const appleNativeAccessibilityTrusted =
+    permissionDiagnostics?.accessibilityTrusted ?? appleNativeAccessibilityReady;
+  const postEventReady = !!permissionDiagnostics?.postEventReady;
+  const appleNativeCursorInsertionReady = !!permissionDiagnostics?.cursorInsertionReady;
+  const preferredInsertStrategy = permissionDiagnostics?.preferredInsertStrategy ?? null;
   const lastCursorInsertStatus = permissionDiagnostics?.lastCursorInsertStatus;
   const lastCursorInsertFailure = lastCursorInsertStatus?.copiedOnly
     ? lastCursorInsertStatus.message ??
       "Nautilus copied the dictation result, but macOS blocked the final paste."
     : null;
+  const needsInsertRepair =
+    !permissionDiagnostics?.runningFromDiskImage &&
+    (!!lastCursorInsertFailure || !appleNativeAccessibilityTrusted) &&
+    (!appleNativeCursorInsertionReady ||
+      /grant accessibility|not enabled for nautilus|re-enable nautilus|this app copy/i.test(
+        lastCursorInsertFailure ?? ""
+      ));
+  const permissionBadgeLabel = (key: string, ready: boolean) => {
+    if (ready) return "Ready";
+    if (key === "speech") return "Needs grant";
+    if (key === "keyboardEvents") return appleNativeUsedForDictation ? "Fallback off" : "Optional";
+    if (key === "accessibility" && appleNativeCursorInsertionReady && postEventReady) {
+      return "Direct text unverified";
+    }
+    return appleNativeUsedForDictation ? "Needed for insert" : "Optional";
+  };
 
   const renderAppleNativeSetupCard = () => {
     if (!selectedRouteUsesAppleNative) {
@@ -846,7 +877,7 @@ export function AsrProviderManager({
             <span className="text-sm font-medium">Apple Native setup</span>
           </div>
           <p className="text-sm text-muted-foreground">
-            {routeSummary} Nautilus will request speech access automatically. For cursor insertion, the primary requirement is Accessibility so Nautilus can post Cmd+V directly into the focused app.
+            {routeSummary} Nautilus will request speech access automatically. For cursor insertion, Nautilus first tries direct Accessibility text insertion and can fall back to a native Cmd+V keyboard path when macOS allows it for this app copy.
           </p>
         </div>
 
@@ -856,7 +887,22 @@ export function AsrProviderManager({
               Apple Native transcription is ready.
             </p>
             <p className="text-xs text-amber-100/90">
-              Cursor insertion still depends on Accessibility. Automation is only used as a fallback if direct event posting is blocked.
+              Cursor insertion is not ready yet. Enable Nautilus in Privacy & Security &gt; Accessibility so it can insert text into the target app.
+            </p>
+          </div>
+        ) : null}
+
+        {appleNativeTranscriptionReady &&
+        appleNativeUsedForDictation &&
+        appleNativeCursorInsertionReady &&
+        !appleNativeAccessibilityTrusted &&
+        preferredInsertStrategy === "simulated_typing" ? (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
+            <p className="text-sm font-medium text-amber-200">
+              Apple Native transcription is ready.
+            </p>
+            <p className="text-xs text-amber-100/90">
+              Native Cmd+V fallback is available. Direct Accessibility text insertion is not currently verified for this app copy.
             </p>
           </div>
         ) : null}
@@ -899,13 +945,7 @@ export function AsrProviderManager({
               <div className="flex items-center justify-between gap-2">
                 <p className="text-sm font-medium">{row.label}</p>
                 <Badge variant={row.ready ? "default" : "secondary"} className={row.ready ? "bg-green-600" : ""}>
-                  {row.ready
-                    ? "Ready"
-                    : row.key === "speech"
-                      ? "Needs grant"
-                      : appleNativeUsedForDictation
-                        ? "Needed for insert"
-                        : "Optional"}
+                  {permissionBadgeLabel(row.key, row.ready)}
                 </Badge>
               </div>
               <p className="text-xs text-muted-foreground">{row.detail}</p>
@@ -927,11 +967,7 @@ export function AsrProviderManager({
               setPermissionActionBusy(true);
               try {
                 await requestDictationPermissions();
-                await Promise.all([
-                  refreshPermissionDiagnostics(),
-                  loadProviders(),
-                  loadSelectionSettings(),
-                ]);
+                await refreshAppleNativeReadiness();
               } catch (error) {
                 console.error("Failed to request Apple native permissions:", error);
               } finally {
@@ -941,10 +977,31 @@ export function AsrProviderManager({
           >
             {permissionActionBusy ? "Requesting..." : "Request Apple permissions"}
           </Button>
+          {needsInsertRepair ? (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={permissionActionBusy}
+              onClick={async () => {
+                setPermissionActionBusy(true);
+                try {
+                  const diagnostics = await repairCursorInsertPermissions();
+                  setPermissionDiagnostics(diagnostics);
+                  await Promise.all([loadProviders(), loadSelectionSettings()]);
+                } catch (error) {
+                  console.error("Failed to repair insert permissions:", error);
+                } finally {
+                  setPermissionActionBusy(false);
+                }
+              }}
+            >
+              {permissionActionBusy ? "Repairing..." : "Repair insert permissions"}
+            </Button>
+          ) : null}
           <Button
             size="sm"
             variant="outline"
-            onClick={() => void refreshPermissionDiagnostics()}
+            onClick={() => void refreshAppleNativeReadiness()}
           >
             Re-check readiness
           </Button>
@@ -959,6 +1016,65 @@ export function AsrProviderManager({
             ))}
           </div>
         ) : null}
+      </div>
+    );
+  };
+
+  const renderCursorInsertToolsCard = () => {
+    if (!permissionDiagnostics) {
+      return null;
+    }
+
+    const insertReady = !!permissionDiagnostics.cursorInsertionReady;
+    const insertDetail = lastCursorInsertFailure
+      ? lastCursorInsertFailure
+      : insertReady
+        ? "Nautilus is currently reporting that auto-insert can target the active app."
+        : "macOS is not currently exposing a working auto-insert path for this app copy.";
+
+    return (
+      <div className="rounded-lg border border-border bg-muted/10 p-4 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <Badge variant={insertReady ? "default" : "secondary"} className={insertReady ? "bg-green-600" : ""}>
+                {insertReady ? "Auto-insert ready" : "Auto-insert needs attention"}
+              </Badge>
+              <span className="text-sm font-medium">Cursor Insert</span>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              This repair path is shared by Whisper, Apple Native, and every other dictation provider on macOS.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={permissionActionBusy}
+              onClick={async () => {
+                setPermissionActionBusy(true);
+                try {
+                  const diagnostics = await repairCursorInsertPermissions();
+                  setPermissionDiagnostics(diagnostics);
+                  await Promise.all([loadProviders(), loadSelectionSettings()]);
+                } catch (error) {
+                  console.error("Failed to repair insert permissions:", error);
+                } finally {
+                  setPermissionActionBusy(false);
+                }
+              }}
+            >
+              {permissionActionBusy ? "Repairing..." : "Repair insert permissions"}
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => void openPermissionSettings("accessibility")}>
+              Open Accessibility
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => void refreshAppleNativeReadiness()}>
+              Re-check readiness
+            </Button>
+          </div>
+        </div>
+        <p className="text-xs text-amber-200">{insertDetail}</p>
       </div>
     );
   };
@@ -1101,6 +1217,7 @@ export function AsrProviderManager({
               </div>
 
               {renderAppleNativeSetupCard()}
+              {renderCursorInsertToolsCard()}
 
               <div className="space-y-1">
                 {useSharedAsrSelection

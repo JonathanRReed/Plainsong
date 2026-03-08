@@ -26,6 +26,7 @@
       "exceptionDomain": "",
       "frameworks": [],
       "infoPlist": "../src-tauri/macos-info.plist",
+      "minimumSystemVersion": "10.15",
       "providerShortName": null,
       "signingIdentity": null
     },
@@ -39,7 +40,7 @@
   },
   "productName": "Nautilus",
   "version": "1.0.0",
-  "identifier": "com.nautilus.app",
+  "identifier": "com.nautilus.bot",
   "plugins": {
     "updater": {
       "active": true,

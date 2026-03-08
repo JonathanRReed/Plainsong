@@ -583,14 +583,28 @@ export async function getLoopbackDeviceName(): Promise<string | null> {
 
 export interface PermissionDiagnostics {
   microphoneReady: boolean;
+  microphonePermissionReady?: boolean;
   speechRecognitionReady?: boolean;
   accessibilityReady: boolean;
+  accessibilityTrusted?: boolean;
+  postEventReady?: boolean;
   automationReady: boolean;
+  cursorInsertionReady?: boolean;
   cursorInsertionObserved?: boolean;
+  preferredInsertStrategy?:
+    | "accessibility_direct_text"
+    | "simulated_typing"
+    | null;
+  availableInsertStrategies?: Array<"accessibility_direct_text" | "simulated_typing">;
   lastCursorInsertStatus?: {
     succeeded: boolean;
     copiedOnly: boolean;
     failureKind?: "automation" | "post_event_access" | "self_target" | "unknown" | null;
+    successfulStrategy?:
+      | "accessibility_direct_text"
+      | "simulated_typing"
+      | null;
+    attemptedStrategies?: Array<"accessibility_direct_text" | "simulated_typing">;
     message?: string | null;
     observedAtMs: number;
   } | null;
@@ -616,6 +630,10 @@ export async function openInstalledNautilusApp(): Promise<void> {
 
 export async function requestDictationPermissions(): Promise<PermissionDiagnostics> {
   return await invoke("request_dictation_permissions");
+}
+
+export async function repairCursorInsertPermissions(): Promise<PermissionDiagnostics> {
+  return await invoke("repair_cursor_insert_permissions");
 }
 
 // Model Download APIs
