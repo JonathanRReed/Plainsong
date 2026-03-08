@@ -390,10 +390,9 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByRole("tab", { name: "Ask" });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Push meeting chat", hidden: true })
-    );
+    await screen.findByText("Meeting notes");
+    fireEvent.click(await screen.findByRole("tab", { name: "Ask" }));
+    fireEvent.click(await screen.findByText("Push meeting chat"));
 
     await waitFor(() => {
       expect(mocks.updateMeetingChatMessages).toHaveBeenCalledWith("r1", [
@@ -474,6 +473,7 @@ describe("RecordingsView", () => {
     await screen.findByText("Meeting notes");
 
     fireEvent.click(screen.getByText("Launch review"));
+    fireEvent.click(await screen.findByRole("tab", { name: "Ask" }));
 
     await waitFor(() => {
       expect(screen.getByText("1 chat messages")).toBeInTheDocument();

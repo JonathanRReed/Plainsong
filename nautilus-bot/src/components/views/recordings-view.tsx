@@ -1488,7 +1488,7 @@ export function RecordingsView() {
           }
         }}
       >
-        <DialogContent className="max-w-5xl h-[85vh] flex flex-col">
+        <DialogContent className="flex h-[85vh] max-h-[85vh] min-h-0 max-w-5xl flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle>{selectedRecording?.title ?? "Recording"}</DialogTitle>
             <DialogDescription>
@@ -1496,7 +1496,7 @@ export function RecordingsView() {
             </DialogDescription>
           </DialogHeader>
 
-          <Tabs defaultValue="notes" className="flex-1 flex flex-col">
+          <Tabs defaultValue="notes" className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <TabsList className="grid w-full grid-cols-4">
               <TabsTrigger value="notes" className="flex items-center gap-2">
                 <Edit3 className="h-4 w-4" />
@@ -1516,8 +1516,8 @@ export function RecordingsView() {
               </TabsTrigger>
             </TabsList>
 
-            <TabsContent value="notes" className="flex-1 overflow-hidden">
-              <ScrollArea className="h-full pr-2">
+            <TabsContent value="notes" className="mt-2 min-h-0 flex-1 overflow-hidden">
+              <ScrollArea className="h-full min-h-0 pr-2">
                 <div className="grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)]">
                   <div className="rounded-lg border p-4">
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1747,9 +1747,9 @@ export function RecordingsView() {
               </ScrollArea>
             </TabsContent>
 
-            <TabsContent value="ask" forceMount className="flex-1 overflow-hidden">
+            <TabsContent value="ask" forceMount className="mt-2 min-h-0 flex-1 overflow-hidden">
               {selectedRecording ? (
-                <ScrollArea className="h-full pr-2">
+                <ScrollArea className="h-full min-h-0 pr-2">
                   <div className="space-y-4">
                     <div className="rounded-lg border bg-muted/20 p-4">
                       <p className="text-sm font-medium">Ask this meeting</p>
@@ -1814,7 +1814,7 @@ export function RecordingsView() {
               )}
             </TabsContent>
 
-            <TabsContent value="transcript" className="flex-1 flex flex-col">
+            <TabsContent value="transcript" className="mt-2 flex min-h-0 flex-1 flex-col overflow-hidden">
               {isLoadingDetail ? (
                 <div className="flex-1 flex items-center justify-center text-muted-foreground">
                   <Loader2 className="h-5 w-5 mr-2 animate-spin" />
@@ -1826,7 +1826,7 @@ export function RecordingsView() {
                   {detailError}
                 </div>
               ) : selectedTranscript ? (
-                <>
+                <div className="flex min-h-0 flex-1 flex-col">
                   {!hasSpeakerLabels && (
                     <div className="mb-3 rounded-lg border p-3 bg-muted/40">
                       <div className="flex items-start justify-between gap-3">
@@ -1864,9 +1864,9 @@ export function RecordingsView() {
                   </div>
                   <TranscriptSearch
                     onSearch={setSearchQuery}
-                    className="mb-4"
+                    className="mb-4 shrink-0"
                   />
-                  <div className="flex-1 border rounded-lg overflow-hidden">
+                  <div className="min-h-0 flex-1 rounded-lg border overflow-hidden">
                     <TranscriptViewer
                       segments={filteredSegments}
                       speakerNames={speakerNames}
@@ -1879,7 +1879,7 @@ export function RecordingsView() {
                       onDeleteSegments={handleDeleteTranscriptSegments}
                     />
                   </div>
-                </>
+                </div>
               ) : (
                 <div className="flex-1 flex items-center justify-center text-muted-foreground">
                   {selectedRecording?.status === "processing" ? (
@@ -1894,49 +1894,51 @@ export function RecordingsView() {
               )}
             </TabsContent>
 
-            <TabsContent value="assets" className="flex-1 flex flex-col">
+            <TabsContent value="assets" className="mt-2 flex min-h-0 flex-1 flex-col overflow-hidden">
               {isLoadingDetail ? (
                 <div className="flex-1 flex items-center justify-center text-muted-foreground">
                   <Loader2 className="h-5 w-5 mr-2 animate-spin" />
                   Loading meeting assets...
                 </div>
               ) : (
-                <div className="space-y-4">
-                  <div className="rounded-lg border p-4">
-                    <h3 className="font-medium mb-2">Waveform</h3>
-                    <WaveformVisualizer data={waveformData} height={100} />
-                  </div>
+                <ScrollArea className="h-full min-h-0 pr-2">
+                  <div className="space-y-4">
+                    <div className="rounded-lg border p-4">
+                      <h3 className="font-medium mb-2">Waveform</h3>
+                      <WaveformVisualizer data={waveformData} height={100} />
+                    </div>
 
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="p-3 bg-muted rounded-lg text-sm">
-                      <span className="text-muted-foreground">Duration:</span>{" "}
-                      <span className="font-medium">
-                        {Math.floor((selectedRecording?.duration || 0) / 60)}:
-                        {((selectedRecording?.duration || 0) % 60).toString().padStart(2, "0")}
-                      </span>
-                    </div>
-                    <div className="p-3 bg-muted rounded-lg text-sm">
-                      <span className="text-muted-foreground">Status:</span>{" "}
-                      <span className="font-medium capitalize">
-                        {selectedRecording?.status ?? "unknown"}
-                      </span>
-                    </div>
-                    <div className="p-3 bg-muted rounded-lg text-sm">
-                      <span className="text-muted-foreground">Created:</span>{" "}
-                      <span className="font-medium">
-                        {selectedRecording?.createdAt
-                          ? new Date(selectedRecording.createdAt).toLocaleString()
-                          : "Unknown"}
-                      </span>
-                    </div>
-                    <div className="p-3 bg-muted rounded-lg text-sm">
-                      <span className="text-muted-foreground">Audio:</span>{" "}
-                      <span className="font-medium">
-                        {selectedRecording?.audioPath ? "Available" : "Not saved"}
-                      </span>
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="p-3 bg-muted rounded-lg text-sm">
+                        <span className="text-muted-foreground">Duration:</span>{" "}
+                        <span className="font-medium">
+                          {Math.floor((selectedRecording?.duration || 0) / 60)}:
+                          {((selectedRecording?.duration || 0) % 60).toString().padStart(2, "0")}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-muted rounded-lg text-sm">
+                        <span className="text-muted-foreground">Status:</span>{" "}
+                        <span className="font-medium capitalize">
+                          {selectedRecording?.status ?? "unknown"}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-muted rounded-lg text-sm">
+                        <span className="text-muted-foreground">Created:</span>{" "}
+                        <span className="font-medium">
+                          {selectedRecording?.createdAt
+                            ? new Date(selectedRecording.createdAt).toLocaleString()
+                            : "Unknown"}
+                        </span>
+                      </div>
+                      <div className="p-3 bg-muted rounded-lg text-sm">
+                        <span className="text-muted-foreground">Audio:</span>{" "}
+                        <span className="font-medium">
+                          {selectedRecording?.audioPath ? "Available" : "Not saved"}
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
+                </ScrollArea>
               )}
             </TabsContent>
           </Tabs>

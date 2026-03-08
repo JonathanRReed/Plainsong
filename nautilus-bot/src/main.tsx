@@ -1,7 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import App from "./App";
 import "./index.css";
 
 function detectOverlayMode(): "dictation" | "recording" | null {
@@ -32,8 +31,25 @@ if (import.meta.env.DEV && typeof performance !== "undefined") {
   console.debug("[perf] app-bootstrap-start");
 }
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+async function bootstrap() {
+  const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
+
+  if (overlayMode) {
+    const { OverlayRoot } = await import("./overlay-root");
+    root.render(
+      <React.StrictMode>
+        <OverlayRoot overlayMode={overlayMode} />
+      </React.StrictMode>
+    );
+    return;
+  }
+
+  const { default: App } = await import("./App");
+  root.render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  );
+}
+
+void bootstrap();

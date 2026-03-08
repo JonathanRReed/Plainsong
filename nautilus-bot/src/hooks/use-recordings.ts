@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { getRecordings } from "@/lib/tauri";
 import { useDataCache } from "@/hooks/data-cache-context";
 import type { Recording } from "@/types";
@@ -29,6 +30,37 @@ export function useRecordings(projectId?: string) {
   useEffect(() => {
     void fetchRecordings();
   }, [fetchRecordings]);
+
+  useEffect(() => {
+    let unlistenStatus: (() => void) | undefined;
+    let unlistenAnalysis: (() => void) | undefined;
+    let unlistenTitle: (() => void) | undefined;
+
+    const refresh = () => {
+      cache.invalidateRecordings(projectId);
+      void fetchRecordings(true);
+    };
+
+    const setup = async () => {
+      unlistenStatus = await listen("recording-status-changed", () => {
+        refresh();
+      });
+      unlistenAnalysis = await listen("recording-analysis-ready", () => {
+        refresh();
+      });
+      unlistenTitle = await listen("recording-title-updated", () => {
+        refresh();
+      });
+    };
+
+    void setup();
+
+    return () => {
+      unlistenStatus?.();
+      unlistenAnalysis?.();
+      unlistenTitle?.();
+    };
+  }, [cache, fetchRecordings, projectId]);
 
   return {
     recordings,

@@ -845,12 +845,24 @@ export function AsrProviderManager({
   const permissionBadgeLabel = (key: string, ready: boolean) => {
     if (ready) return "Ready";
     if (key === "speech") return "Needs grant";
-    if (key === "keyboardEvents") return appleNativeUsedForDictation ? "Fallback off" : "Optional";
+    if (key === "keyboardEvents") {
+      return appleNativeAccessibilityTrusted ? "Optional" : appleNativeUsedForDictation ? "Fallback off" : "Optional";
+    }
     if (key === "accessibility" && appleNativeCursorInsertionReady && postEventReady) {
       return "Direct text unverified";
     }
     return appleNativeUsedForDictation ? "Needed for insert" : "Optional";
   };
+  const visibleAppleNativeNotes =
+    permissionDiagnostics?.notes?.filter((note) => {
+      if (
+        appleNativeAccessibilityTrusted &&
+        note.includes("System Events automation fallback is disabled")
+      ) {
+        return false;
+      }
+      return true;
+    }) ?? [];
 
   const renderAppleNativeSetupCard = () => {
     if (!selectedRouteUsesAppleNative) {
@@ -949,7 +961,7 @@ export function AsrProviderManager({
                 </Badge>
               </div>
               <p className="text-xs text-muted-foreground">{row.detail}</p>
-              {!row.ready ? (
+              {!row.ready && !(row.key === "keyboardEvents" && appleNativeAccessibilityTrusted) ? (
                 <Button size="sm" variant="outline" onClick={row.onClick}>
                   {row.action}
                 </Button>
@@ -1007,9 +1019,9 @@ export function AsrProviderManager({
           </Button>
         </div>
 
-        {permissionDiagnostics?.notes?.length ? (
+        {visibleAppleNativeNotes.length ? (
           <div className="space-y-1">
-            {permissionDiagnostics.notes.map((note) => (
+            {visibleAppleNativeNotes.map((note) => (
               <p key={note} className="text-xs text-amber-300">
                 {note}
               </p>
