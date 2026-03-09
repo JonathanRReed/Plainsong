@@ -1627,12 +1627,11 @@ async fn start_recording(
     }
 
     let settings_snapshot = state.settings_manager.lock().await.settings().clone();
-    let meeting_selection = resolve_transcription_provider_and_model(
-        &settings_snapshot.transcription,
-        TranscriptionScope::Meeting,
-    );
-
-    ensure_meeting_route_supported(meeting_selection.0, &meeting_selection.1)?;
+    let meeting_selection =
+        resolve_ready_meeting_selection(state.inner(), &settings_snapshot.transcription).await?;
+    if let Some(warning) = &meeting_selection.2 {
+        let _ = app.emit("asr-provider-warning", warning);
+    }
 
     #[cfg(target_os = "macos")]
     if options.mic {
@@ -5650,6 +5649,105 @@ async fn ensure_asr_route_ready(
     ))
 }
 
+async fn persist_repaired_meeting_route(
+    state: &AppState,
+    provider_type: asr::AsrProviderType,
+    model_id: &str,
+) -> Result<String, String> {
+    state
+        .asr_manager
+        .set_provider_model_id(provider_type, model_id.to_string())
+        .await;
+    let normalized_model_id = state.asr_manager.provider_model_id(provider_type).await;
+    let provider_key = asr_provider_to_settings_value(provider_type).to_string();
+
+    let mut settings_manager = state.settings_manager.lock().await;
+    let transcription = &mut settings_manager.settings_mut().transcription;
+
+    if transcription.use_shared_asr_selection {
+        transcription.use_shared_asr_selection = false;
+        transcription.dictation_provider = transcription.default_provider.clone();
+        transcription.dictation_model_id = transcription.selected_model_id.clone();
+    }
+
+    transcription
+        .provider_model_ids
+        .insert(provider_key.clone(), normalized_model_id.clone());
+    transcription.meeting_provider = provider_key;
+    transcription.meeting_model_id = normalized_model_id.clone();
+    normalize_contextual_asr_settings(transcription);
+    settings_manager.save().map_err(|e| e.to_string())?;
+
+    Ok(normalized_model_id)
+}
+
+async fn resolve_ready_meeting_selection(
+    state: &AppState,
+    transcription: &settings::TranscriptionSettings,
+) -> Result<(asr::AsrProviderType, String, Option<String>), String> {
+    let requested_selection =
+        resolve_transcription_provider_and_model(transcription, TranscriptionScope::Meeting);
+
+    ensure_meeting_route_supported(requested_selection.0, &requested_selection.1)?;
+
+    match ensure_asr_route_ready(
+        state,
+        requested_selection.0,
+        &requested_selection.1,
+        "meeting transcription",
+    )
+    .await
+    {
+        Ok(()) => Ok((requested_selection.0, requested_selection.1, None)),
+        Err(requested_error) => {
+            let default_provider =
+                asr_provider_from_settings_value(&transcription.default_provider)
+                    .unwrap_or(asr::AsrProviderType::DistilWhisper);
+            let dictation_provider =
+                asr_provider_from_settings_value(&transcription.dictation_provider)
+                    .unwrap_or(default_provider);
+            let meeting_provider =
+                asr_provider_from_settings_value(&transcription.meeting_provider);
+
+            let provider_infos = state
+                .asr_manager
+                .get_all_providers_info()
+                .await
+                .unwrap_or_default();
+
+            let preferred_candidates = preferred_meeting_provider_candidates(
+                default_provider,
+                dictation_provider,
+                meeting_provider,
+            );
+            let repaired_candidate =
+                select_ready_meeting_candidate(&provider_infos, &preferred_candidates);
+
+            if let Some((provider_type, model_id)) = repaired_candidate {
+                if provider_type != requested_selection.0 || model_id != requested_selection.1 {
+                    let persisted_model_id =
+                        persist_repaired_meeting_route(state, provider_type, &model_id).await?;
+                    let warning = format!(
+                        "Meeting route '{}' / '{}' was not ready. Switched meetings to '{}' / '{}'.",
+                        requested_selection.0.display_name(),
+                        requested_selection.1,
+                        provider_type.display_name(),
+                        persisted_model_id
+                    );
+                    return Ok((provider_type, persisted_model_id, Some(warning)));
+                }
+
+                return Ok((provider_type, model_id, None));
+            }
+
+            Err(format!(
+                "No meeting-capable ASR route is ready. {} Open Settings -> Storage -> Guided setup -> Set up meetings, or download a meeting model in Settings -> ASR / Providers.",
+                requested_error
+            ))
+        }
+    }
+}
+
 async fn start_dictation_session(
     state: &AppState,
     app: &AppHandle,
@@ -8567,6 +8665,10 @@ fn ensure_overlay_window(
     visible: bool,
 ) {
     if let Some(window) = app.get_webview_window(label) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = window.set_visible_on_all_workspaces(true);
+        }
         let result = if visible {
             window.show()
         } else {
@@ -8592,6 +8694,7 @@ fn ensure_overlay_window(
         .min_inner_size(240.0, 100.0)
         .decorations(false)
         .always_on_top(true)
+        .visible_on_all_workspaces(true)
         .focused(false)
         .transparent(true)
         .shadow(false)
@@ -12359,6 +12462,76 @@ mod tests {
         assert_eq!(transcription.meeting_model_id, "distil-large-v3.5");
     }
 
+    fn provider_info_for_test(
+        provider_type: asr::AsrProviderType,
+        model_id: &str,
+        runtime_status: asr::manager::RuntimeStatus,
+        is_available: bool,
+    ) -> asr::manager::ProviderInfo {
+        asr::manager::ProviderInfo {
+            provider_type,
+            name: provider_type.display_name().to_string(),
+            description: "test".to_string(),
+            is_available,
+            inference_enabled: true,
+            model_info: asr::ModelInfo {
+                name: "test".to_string(),
+                version: model_id.to_string(),
+                size_mb: 0.0,
+                parameters: "test".to_string(),
+                languages: vec!["en".to_string()],
+                word_error_rate: None,
+                real_time_factor: None,
+                license: "test".to_string(),
+                source_url: "test".to_string(),
+            },
+            selected_model_id: model_id.to_string(),
+            model_options: provider_type.model_options(),
+            download_status: asr::DownloadStatus::Downloaded,
+            runtime_status,
+            runtime_message: None,
+            runtime_details: asr::manager::RuntimeDetails::default(),
+            engine_diagnostics: asr::platform::EngineDiagnostics::default(),
+        }
+    }
+
+    #[test]
+    fn ready_meeting_candidate_prefers_supported_ready_route() {
+        let providers = vec![
+            provider_info_for_test(
+                asr::AsrProviderType::DistilWhisper,
+                "distil-large-v3.5",
+                asr::manager::RuntimeStatus::MissingModel,
+                true,
+            ),
+            provider_info_for_test(
+                asr::AsrProviderType::Parakeet,
+                "parakeet-tdt-ctc-110m",
+                asr::manager::RuntimeStatus::Ready,
+                true,
+            ),
+            provider_info_for_test(
+                asr::AsrProviderType::Whisper,
+                "base.en",
+                asr::manager::RuntimeStatus::Ready,
+                true,
+            ),
+        ];
+
+        let selection = select_ready_meeting_candidate(
+            &providers,
+            &[
+                asr::AsrProviderType::DistilWhisper,
+                asr::AsrProviderType::Parakeet,
+                asr::AsrProviderType::Whisper,
+            ],
+        )
+        .expect("meeting candidate should be selected");
+
+        assert_eq!(selection.0, asr::AsrProviderType::Parakeet);
+        assert_eq!(selection.1, "parakeet-tdt-ctc-110m");
+    }
+
     #[test]
     fn repair_local_model_cache_removes_invalid_artifacts_only() {
         let root = temp_models_root();
@@ -13953,11 +14126,12 @@ fn ensure_meeting_route_supported(
     ))
 }
 
-fn preferred_meeting_provider(
+fn preferred_meeting_provider_candidates(
     default_provider: asr::AsrProviderType,
     dictation_provider: asr::AsrProviderType,
     meeting_provider: Option<asr::AsrProviderType>,
-) -> asr::AsrProviderType {
+) -> Vec<asr::AsrProviderType> {
+    let mut candidates = Vec::new();
     for candidate in [
         meeting_provider,
         Some(default_provider),
@@ -13971,13 +14145,48 @@ fn preferred_meeting_provider(
         Some(asr::AsrProviderType::Groq),
     ] {
         if let Some(provider) = candidate {
-            if meeting_provider_is_supported(provider) {
-                return provider;
+            if meeting_provider_is_supported(provider) && !candidates.contains(&provider) {
+                candidates.push(provider);
             }
         }
     }
+    candidates
+}
+
+fn preferred_meeting_provider(
+    default_provider: asr::AsrProviderType,
+    dictation_provider: asr::AsrProviderType,
+    meeting_provider: Option<asr::AsrProviderType>,
+) -> asr::AsrProviderType {
+    for provider in preferred_meeting_provider_candidates(
+        default_provider,
+        dictation_provider,
+        meeting_provider,
+    ) {
+        return provider;
+    }
 
     asr::AsrProviderType::DistilWhisper
+}
+
+fn select_ready_meeting_candidate(
+    provider_infos: &[asr::manager::ProviderInfo],
+    preferred_candidates: &[asr::AsrProviderType],
+) -> Option<(asr::AsrProviderType, String)> {
+    preferred_candidates.iter().find_map(|candidate_provider| {
+        provider_infos
+            .iter()
+            .find(|info| {
+                info.provider_type == *candidate_provider
+                    && matches!(info.runtime_status, asr::manager::RuntimeStatus::Ready)
+                    && info.is_available
+                    && meeting_route_is_shared_compatible(
+                        info.provider_type,
+                        &info.selected_model_id,
+                    )
+            })
+            .map(|info| (info.provider_type, info.selected_model_id.clone()))
+    })
 }
 
 fn normalize_contextual_asr_settings(transcription: &mut settings::TranscriptionSettings) {

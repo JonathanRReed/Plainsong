@@ -456,9 +456,18 @@ mod tests {
 
     #[test]
     fn resolve_target_sample_rate_accepts_matching_sources() {
-        assert_eq!(resolve_target_sample_rate(Some(48_000), Some(48_000)).unwrap(), 48_000);
-        assert_eq!(resolve_target_sample_rate(Some(44_100), None).unwrap(), 44_100);
-        assert_eq!(resolve_target_sample_rate(None, Some(48_000)).unwrap(), 48_000);
+        assert_eq!(
+            resolve_target_sample_rate(Some(48_000), Some(48_000)).unwrap(),
+            48_000
+        );
+        assert_eq!(
+            resolve_target_sample_rate(Some(44_100), None).unwrap(),
+            44_100
+        );
+        assert_eq!(
+            resolve_target_sample_rate(None, Some(48_000)).unwrap(),
+            48_000
+        );
     }
 
     #[test]
