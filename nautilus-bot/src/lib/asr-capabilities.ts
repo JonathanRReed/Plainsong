@@ -57,12 +57,27 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
     return false;
   }
 
-  const normalizedModelId = modelId.trim();
+  const normalizedModelId = modelId.trim().toLowerCase();
   if (!normalizedModelId) {
     return true;
   }
 
-  return true;
+  switch (providerType) {
+    case "distil_whisper":
+      return normalizedModelId.startsWith("distil");
+    case "parakeet":
+      return normalizedModelId.startsWith("parakeet");
+    case "canary":
+      return normalizedModelId.startsWith("canary");
+    case "voxtral":
+      return normalizedModelId.startsWith("voxtral");
+    case "groq":
+    case "openai_cloud":
+    case "elevenlabs_scribe":
+      return true;
+    default:
+      return false;
+  }
 }
 
 export function isSharedMeetingCompatible(providerType: AsrProviderType, modelId: string) {

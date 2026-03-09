@@ -22,6 +22,13 @@ pub struct MixedAudioCapture {
     dropped_mixed_chunks: Arc<AtomicU64>,
 }
 
+pub struct MixedAudioCaptureStart {
+    pub mixed_receiver: crossbeam::channel::Receiver<Vec<f32>>,
+    pub mic_receiver: Option<crossbeam::channel::Receiver<Vec<f32>>>,
+    pub system_receiver: Option<crossbeam::channel::Receiver<Vec<f32>>>,
+    pub sample_rate: u32,
+}
+
 impl SystemAudioCapture {
     pub fn new() -> Self {
         Self {
@@ -87,7 +94,7 @@ impl MixedAudioCapture {
         capture_system: bool,
         waveform_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
         streaming_queue: Option<Arc<crossbeam::queue::ArrayQueue<Vec<f32>>>>,
-    ) -> Result<(crossbeam::channel::Receiver<Vec<f32>>, u32)> {
+    ) -> Result<MixedAudioCaptureStart> {
         if !capture_mic && !capture_system {
             return Err(anyhow::anyhow!("Must capture at least one audio source"));
         }
@@ -101,7 +108,19 @@ impl MixedAudioCapture {
         self.dropped_system_samples.store(0, Ordering::SeqCst);
         self.dropped_mixed_chunks.store(0, Ordering::SeqCst);
 
-        let (sender, receiver) = crossbeam::channel::bounded::<Vec<f32>>(100);
+        let (mixed_sender, mixed_receiver) = crossbeam::channel::bounded::<Vec<f32>>(100);
+        let (mic_sender, mic_receiver) = if capture_mic {
+            let (sender, receiver) = crossbeam::channel::bounded::<Vec<f32>>(100);
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
+        let (system_sender, system_receiver) = if capture_system {
+            let (sender, receiver) = crossbeam::channel::bounded::<Vec<f32>>(100);
+            (Some(sender), Some(receiver))
+        } else {
+            (None, None)
+        };
         let (ready_tx, ready_rx) =
             crossbeam::channel::bounded::<std::result::Result<u32, String>>(1);
         let is_capturing = Arc::clone(&self.is_capturing);
@@ -268,6 +287,8 @@ impl MixedAudioCapture {
             let _ = ready_tx.send(Ok(target_sample_rate));
 
             let mut output = Vec::with_capacity(512);
+            let mut mic_output = Vec::with_capacity(512);
+            let mut system_output = Vec::with_capacity(512);
             while is_capturing.load(Ordering::SeqCst) {
                 let mut made_progress = false;
 
@@ -278,6 +299,8 @@ impl MixedAudioCapture {
                     } else {
                         None
                     };
+                    let mic_sample_for_track = mic_sample;
+                    let sys_sample_for_track = sys_sample;
 
                     let mixed_sample = match (mic_sample, sys_sample) {
                         (Some(mic), Some(sys)) => {
@@ -293,6 +316,12 @@ impl MixedAudioCapture {
                     };
 
                     output.push(sample);
+                    if let Some(mic) = mic_sample_for_track {
+                        mic_output.push(mic);
+                    }
+                    if let Some(sys) = sys_sample_for_track {
+                        system_output.push(sys);
+                    }
                     made_progress = true;
 
                     if let Ok(mut waveform) = waveform_buffer.lock() {
@@ -311,7 +340,7 @@ impl MixedAudioCapture {
                                 let _ = queue.push(chunk.clone());
                             }
                         }
-                        match sender.try_send(chunk) {
+                        match mixed_sender.try_send(chunk) {
                             Ok(()) => {}
                             Err(TrySendError::Disconnected(_)) => {
                                 is_capturing.store(false, Ordering::SeqCst);
@@ -319,6 +348,37 @@ impl MixedAudioCapture {
                             }
                             Err(TrySendError::Full(_)) => {
                                 dropped_mixed_chunks.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+
+                        if let (Some(sender), false) = (mic_sender.as_ref(), mic_output.is_empty())
+                        {
+                            let mic_chunk = std::mem::take(&mut mic_output);
+                            match sender.try_send(mic_chunk) {
+                                Ok(()) => {}
+                                Err(TrySendError::Disconnected(_)) => {
+                                    is_capturing.store(false, Ordering::SeqCst);
+                                    break;
+                                }
+                                Err(TrySendError::Full(_)) => {
+                                    dropped_mixed_chunks.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+
+                        if let (Some(sender), false) =
+                            (system_sender.as_ref(), system_output.is_empty())
+                        {
+                            let system_chunk = std::mem::take(&mut system_output);
+                            match sender.try_send(system_chunk) {
+                                Ok(()) => {}
+                                Err(TrySendError::Disconnected(_)) => {
+                                    is_capturing.store(false, Ordering::SeqCst);
+                                    break;
+                                }
+                                Err(TrySendError::Full(_)) => {
+                                    dropped_mixed_chunks.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                         }
                     }
@@ -336,13 +396,21 @@ impl MixedAudioCapture {
                         let _ = queue.push(output.clone());
                     }
                 }
-                match sender.try_send(output) {
+                match mixed_sender.try_send(output) {
                     Ok(()) => {}
                     Err(TrySendError::Disconnected(_)) => {}
                     Err(TrySendError::Full(_)) => {
                         dropped_mixed_chunks.fetch_add(1, Ordering::Relaxed);
                     }
                 }
+            }
+
+            if let (Some(sender), false) = (mic_sender.as_ref(), mic_output.is_empty()) {
+                let _ = sender.try_send(mic_output);
+            }
+
+            if let (Some(sender), false) = (system_sender.as_ref(), system_output.is_empty()) {
+                let _ = sender.try_send(system_output);
             }
 
             let dropped_mic = dropped_mic_samples.load(Ordering::Relaxed);
@@ -366,7 +434,12 @@ impl MixedAudioCapture {
                     capture_system,
                     sample_rate
                 );
-                Ok((receiver, sample_rate))
+                Ok(MixedAudioCaptureStart {
+                    mixed_receiver,
+                    mic_receiver,
+                    system_receiver,
+                    sample_rate,
+                })
             }
             Ok(Err(message)) => {
                 self.stop();

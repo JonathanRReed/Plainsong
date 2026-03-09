@@ -25,12 +25,13 @@ import {
   getDictationAudioLevel,
   stopDictation,
 } from "@/lib/tauri";
+import { cn } from "@/lib/utils";
 import type { DictationCustomMode } from "@/types/settings";
 
 type DisplayMode = "full" | "compact" | "minimal";
 type DictationPhase =
   | "idle"
-  | "starting"
+  | "primed"
   | "recording"
   | "stopping"
   | "transcribing"
@@ -253,7 +254,7 @@ export function DictationPopup() {
     const nextStartedAtMs =
       typeof payload.startedAtMs === "number" ? payload.startedAtMs : null;
     const isActiveCapturePhase =
-      payload.phase === "starting" || payload.phase === "recording";
+      payload.phase === "primed" || payload.phase === "recording";
 
     setPhase(payload.phase);
     setMessage(payload.message ?? null);
@@ -272,10 +273,8 @@ export function DictationPopup() {
       lastSessionIdRef.current = nextSessionId;
       const nextClockStart =
         nextStartedAtMs ??
-        lastActiveStartedAtRef.current ??
-        sessionClockStartedAtRef.current ??
         (isActiveCapturePhase ? Date.now() : null);
-      lastActiveStartedAtRef.current = nextClockStart;
+      lastActiveStartedAtRef.current = isActiveCapturePhase ? nextClockStart : null;
       sessionClockStartedAtRef.current = nextClockStart;
       setStartedAtMs(nextClockStart);
       setElapsed(0);
@@ -286,7 +285,11 @@ export function DictationPopup() {
       lastSessionIdRef.current = nextSessionId;
     }
 
-    if (isActiveCapturePhase && nextStartedAtMs !== null && lastActiveStartedAtRef.current === null) {
+    if (
+      isActiveCapturePhase &&
+      nextStartedAtMs !== null &&
+      lastActiveStartedAtRef.current === null
+    ) {
       lastActiveStartedAtRef.current = nextStartedAtMs;
     }
 
@@ -393,7 +396,7 @@ export function DictationPopup() {
       : activationMatcher
         ? `Auto via "${activationMatcher}"`
         : null;
-  const isCapturePhase = phase === "starting" || phase === "recording";
+  const isCapturePhase = phase === "primed" || phase === "recording";
 
   const cycleDisplayMode = async () => {
     const next: DisplayMode =
@@ -449,7 +452,7 @@ export function DictationPopup() {
     const dotColor =
       phase === "recording"
         ? "bg-orange-400"
-        : phase === "starting" || phase === "transcribing" || phase === "stopping"
+        : phase === "primed" || phase === "transcribing" || phase === "stopping"
           ? "bg-cyan-400"
           : phase === "done"
             ? "bg-emerald-400"
@@ -563,10 +566,17 @@ export function DictationPopup() {
           <div className="flex items-center gap-3 text-white">
             <div className="relative rounded-full bg-orange-500/15 p-3 ring-1 ring-orange-300/25">
               <div className="absolute inset-0 rounded-full bg-orange-400/10 blur-md" />
-              <Mic className="relative h-5 w-5 text-orange-300 animate-pulse" />
+              <Mic
+                className={cn(
+                  "relative h-5 w-5 text-orange-300",
+                  phase === "recording" ? "animate-pulse" : "opacity-90"
+                )}
+              />
             </div>
             <div className="flex-1">
-              <p className="text-sm font-semibold">Listening</p>
+              <p className="text-sm font-semibold">
+                {phase === "primed" ? "Mic primed" : "Listening"}
+              </p>
               {!compact ? (
                 <>
                   <p className="mt-1 text-xs text-slate-300">
@@ -576,25 +586,35 @@ export function DictationPopup() {
                   {autoActivationDetail && (
                     <p className="mt-1 text-xs text-cyan-200/90">{autoActivationDetail}</p>
                   )}
-                  <div className="mt-2 h-2.5 w-full max-w-[220px] rounded-full bg-slate-700/50 overflow-hidden">
-                    <div
-                      className="h-full bg-linear-to-r from-emerald-500 via-orange-400 to-rose-500 transition-all duration-50 rounded-full"
-                      style={{ width: `${Math.min(100, audioLevel * 100)}%` }}
-                    />
-                  </div>
-                  <p className="text-xs text-slate-300 mt-1.5">
-                    {pushToTalk
-                      ? `Release hotkey to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`
-                      : `Press the hotkey again to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`}
-                  </p>
+                  {phase === "recording" ? (
+                    <>
+                      <div className="mt-2 h-2.5 w-full max-w-[220px] rounded-full bg-slate-700/50 overflow-hidden">
+                        <div
+                          className="h-full bg-linear-to-r from-emerald-500 via-orange-400 to-rose-500 transition-all duration-50 rounded-full"
+                          style={{ width: `${Math.min(100, audioLevel * 100)}%` }}
+                        />
+                      </div>
+                      <p className="text-xs text-slate-300 mt-1.5">
+                        {pushToTalk
+                          ? `Release hotkey to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`
+                          : `Press the hotkey again to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-xs text-slate-300 mt-1.5">
+                      Preparing the capture path now. Start speaking immediately.
+                    </p>
+                  )}
                 </>
               ) : (
                 <p className="mt-1 text-xs text-slate-300">
-                  {routeLabel} ready{targetDetail}.
+                  {phase === "primed" ? "Getting ready." : `${routeLabel} ready${targetDetail}.`}
                 </p>
               )}
             </div>
-            <span className="font-mono text-sm text-orange-200">{elapsedText}</span>
+            <span className="font-mono text-sm text-orange-200">
+              {phase === "recording" ? elapsedText : "--:--"}
+            </span>
             <button
               type="button"
               className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-rose-500/90 text-white hover:bg-rose-500"

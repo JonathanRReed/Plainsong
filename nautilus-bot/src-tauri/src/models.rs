@@ -154,6 +154,21 @@ pub struct DictationHistoryDetails {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MeetingTranscriptDetails {
+    pub segment_count: u64,
+    pub model: Option<String>,
+    pub model_id: Option<String>,
+    pub requested_provider: Option<String>,
+    pub actual_provider: Option<String>,
+    pub quality_score: Option<f64>,
+    pub transcription_latency_ms: Option<u64>,
+    pub source_mode: String,
+    pub has_source_aware_speakers: bool,
+    pub has_speaker_labels: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuditLogEntry {
     pub id: String,
     pub timestamp: DateTime<Utc>,

@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
   getRecording: vi.fn(),
   getTranscript: vi.fn(),
+  getMeetingTranscriptDetails: vi.fn(),
   getRecordingWaveform: vi.fn(async () => []),
   getSpeakers: vi.fn(async () => []),
   getMeetingChatMessages: vi.fn(),
@@ -125,6 +126,7 @@ vi.mock("@/lib/tauri", () => ({
   openRecordingAudio: vi.fn(),
   getSpeakers: mocks.getSpeakers,
   getTranscript: mocks.getTranscript,
+  getMeetingTranscriptDetails: mocks.getMeetingTranscriptDetails,
   runDiarization: vi.fn(),
   renameSpeaker: vi.fn(),
   deleteRecording: vi.fn(),
@@ -187,6 +189,18 @@ describe("RecordingsView", () => {
       language: "en",
       confidence: 0.9,
       model: "distil-whisper",
+    });
+    mocks.getMeetingTranscriptDetails.mockResolvedValue({
+      segmentCount: 1,
+      model: "Distil Whisper",
+      modelId: "distil-large-v3",
+      requestedProvider: "distil_whisper",
+      actualProvider: "distil_whisper",
+      qualityScore: 0.92,
+      transcriptionLatencyMs: 880,
+      sourceMode: "me_them",
+      hasSourceAwareSpeakers: true,
+      hasSpeakerLabels: true,
     });
     mocks.getMeetingChatMessages.mockResolvedValue([]);
     mocks.updateMeetingChatMessages.mockResolvedValue(undefined);
@@ -264,6 +278,17 @@ describe("RecordingsView", () => {
     await waitFor(() => {
       expect(screen.getByText("Canonical meeting summary")).toBeInTheDocument();
       expect(screen.getByText("Ship launch checklist")).toBeInTheDocument();
+    });
+  });
+
+  it("loads meeting transcript details when opening a recording", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("Meeting notes");
+
+    await waitFor(() => {
+      expect(mocks.getMeetingTranscriptDetails).toHaveBeenCalledWith("r1");
     });
   });
 

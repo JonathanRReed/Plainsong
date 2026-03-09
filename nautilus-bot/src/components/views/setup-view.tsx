@@ -96,10 +96,14 @@ export function SetupView() {
     providers,
     systemAudioAvailable,
     loopbackDevice,
+    meetingCaptureMode,
+    meetingRoutePolicy,
     dictationRoute,
     meetingRoute,
     dictationReady,
     meetingReady,
+    dictationBlockers,
+    meetingBlockers,
   } = useSetupStatus();
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -220,6 +224,16 @@ export function SetupView() {
                     Dictation is ready. If something drifts, rerun guided setup or refresh permissions here.
                   </p>
                 )}
+                {dictationBlockers.length > 0 ? (
+                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-current opacity-90">
+                    <p className="mb-1 font-medium">Current blockers</p>
+                    <ul className="space-y-1">
+                      {dictationBlockers.map((blocker) => (
+                        <li key={blocker}>• {blocker}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap gap-2">
                   <Button
                     variant="secondary"
@@ -274,6 +288,12 @@ export function SetupView() {
                   <span>Active route</span>
                   <span className="font-medium">{meetingRoute.summary}</span>
                 </div>
+                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                  <span>Meeting policy</span>
+                  <span className="font-medium">
+                    {meetingRoutePolicy === "best_available" ? "Best available" : "Prefer local"}
+                  </span>
+                </div>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
                     <div className="text-xs text-current opacity-70">System audio</div>
@@ -290,6 +310,23 @@ export function SetupView() {
                     <div className="mt-1 font-medium">{loopbackDevice ?? "Not found"}</div>
                   </div>
                 </div>
+                <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                  <div className="text-xs text-current opacity-70">Meeting capture mode</div>
+                  <div className="mt-1 font-medium">
+                    {meetingCaptureMode === "me_and_them"
+                      ? "Me + Them"
+                      : meetingCaptureMode === "mic_only"
+                        ? "Mic only"
+                        : "Checking"}
+                  </div>
+                  <p className="mt-1 text-xs text-current opacity-70">
+                    {meetingCaptureMode === "me_and_them"
+                      ? "Separate mic and system audio sources are available for source-aware meetings."
+                      : meetingCaptureMode === "mic_only"
+                        ? "Only microphone capture is ready. Remote participants may be missed until system audio is configured."
+                        : "Verifying whether source-aware meeting capture is available."}
+                  </p>
+                </div>
                 {meetingRoute.reason ? (
                   <p className="text-sm text-current opacity-90">{meetingRoute.reason}</p>
                 ) : systemAudioAvailable ? (
@@ -301,6 +338,16 @@ export function SetupView() {
                     Meeting transcription route is ready, but system audio still needs attention.
                   </p>
                 )}
+                {meetingBlockers.length > 0 ? (
+                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-current opacity-90">
+                    <p className="mb-1 font-medium">Current blockers</p>
+                    <ul className="space-y-1">
+                      {meetingBlockers.map((blocker) => (
+                        <li key={blocker}>• {blocker}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap gap-2">
                   <Button variant="secondary" onClick={() => requestOnboarding("meetings")}>
                     Guided meeting setup

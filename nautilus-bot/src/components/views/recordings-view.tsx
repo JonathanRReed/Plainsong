@@ -36,7 +36,7 @@ import {
   extractActionItemsGrounded,
 } from "@/lib/tauri";
 import type { MeetingChatMessage } from "@/lib/tauri";
-import type { Recording } from "@/types";
+import type { MeetingTranscriptDetails, Recording } from "@/types";
 import {
   buildMeetingTemplateOutline,
   getMeetingTemplateOption,
@@ -275,6 +275,47 @@ function getNextMeetingSectionTitle(sections: MeetingNoteSection[]): string {
   return `${baseTitle} ${index}`;
 }
 
+function formatTranscriptQuality(details: MeetingTranscriptDetails | null): {
+  label: string;
+  tone: "good" | "warn" | "muted";
+} {
+  const score = details?.qualityScore;
+  if (typeof score !== "number") {
+    return { label: "Not scored yet", tone: "muted" };
+  }
+  if (score >= 0.85) {
+    return { label: "Strong", tone: "good" };
+  }
+  if (score >= 0.6) {
+    return { label: "Needs review", tone: "warn" };
+  }
+  return { label: "Low confidence", tone: "warn" };
+}
+
+function formatSourceMode(details: MeetingTranscriptDetails | null): string {
+  switch (details?.sourceMode) {
+    case "me_them":
+      return "Me + Them";
+    case "speaker_labels":
+      return "Speaker labels";
+    case "single_source":
+      return "Single track";
+    default:
+      return "Unknown";
+  }
+}
+
+function qualityToneClasses(tone: "good" | "warn" | "muted"): string {
+  switch (tone) {
+    case "good":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+    case "warn":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-100";
+    default:
+      return "border-border bg-muted/40 text-muted-foreground";
+  }
+}
+
 export function RecordingsView() {
   const { recordings, refetch } = useRecordings();
   const { startMeeting, stopMeeting, isRecording, recordingId, formattedDuration } = useRecording();
@@ -329,6 +370,7 @@ export function RecordingsView() {
     selectedRecording,
     setSelectedRecording,
     selectedTranscript,
+    selectedTranscriptDetails,
     speakerNames,
     setSpeakerNames,
     waveformData,
@@ -336,6 +378,7 @@ export function RecordingsView() {
     detailError,
     loadRecordingDetail,
     refreshTranscript,
+    refreshTranscriptDetails,
     clearRecordingDetail,
   } = useRecordingDetail({
     isOpen: showRecordingDetail,
@@ -755,6 +798,7 @@ export function RecordingsView() {
       }
 
       await refreshTranscript(selectedRecording.id);
+      await refreshTranscriptDetails(selectedRecording.id);
       await refetch();
       toast(
         removed === 1
@@ -962,6 +1006,10 @@ export function RecordingsView() {
   const hasSpeakerLabels = useMemo(
     () => Boolean(selectedTranscript?.segments.some((segment) => Boolean(segment.speakerId))),
     [selectedTranscript]
+  );
+  const transcriptQuality = useMemo(
+    () => formatTranscriptQuality(selectedTranscriptDetails),
+    [selectedTranscriptDetails]
   );
   const effectiveRecordings = useMemo(
     () =>
@@ -1820,13 +1868,14 @@ export function RecordingsView() {
                   <Loader2 className="h-5 w-5 mr-2 animate-spin" />
                   Loading transcript...
                 </div>
-              ) : detailError ? (
-                <div className="flex-1 flex items-center justify-center text-destructive">
-                  <AlertCircle className="h-5 w-5 mr-2" />
-                  {detailError}
-                </div>
               ) : selectedTranscript ? (
                 <div className="flex min-h-0 flex-1 flex-col">
+                  {detailError && (
+                    <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+                      <AlertCircle className="h-4 w-4 shrink-0" />
+                      {detailError}
+                    </div>
+                  )}
                   {!hasSpeakerLabels && (
                     <div className="mb-3 rounded-lg border p-3 bg-muted/40">
                       <div className="flex items-start justify-between gap-3">
@@ -1862,6 +1911,60 @@ export function RecordingsView() {
                   <div className="mb-3 rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
                     Edit transcript paragraphs in place, or remove a paragraph if it should not be part of the meeting record.
                   </div>
+                  <div className="mb-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded-lg border bg-muted/20 p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                        Transcript quality
+                      </p>
+                      <div className="mt-2 flex items-center gap-2">
+                        <span
+                          className={`inline-flex rounded-full border px-2 py-1 text-[11px] font-medium ${qualityToneClasses(
+                            transcriptQuality.tone
+                          )}`}
+                        >
+                          {transcriptQuality.label}
+                        </span>
+                        {typeof selectedTranscriptDetails?.qualityScore === "number" && (
+                          <span className="text-xs text-muted-foreground">
+                            {Math.round(selectedTranscriptDetails.qualityScore * 100)}%
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border bg-muted/20 p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                        Source attribution
+                      </p>
+                      <p className="mt-2 text-sm font-medium">
+                        {formatSourceMode(selectedTranscriptDetails)}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border bg-muted/20 p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                        Provider
+                      </p>
+                      <p className="mt-2 text-sm font-medium">
+                        {selectedTranscriptDetails?.actualProvider ??
+                          selectedTranscript?.actualProvider ??
+                          "Unknown"}
+                      </p>
+                      {(selectedTranscriptDetails?.modelId ?? selectedTranscript?.modelId) && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {selectedTranscriptDetails?.modelId ?? selectedTranscript?.modelId}
+                        </p>
+                      )}
+                    </div>
+                    <div className="rounded-lg border bg-muted/20 p-3">
+                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                        Transcription latency
+                      </p>
+                      <p className="mt-2 text-sm font-medium">
+                        {selectedTranscriptDetails?.transcriptionLatencyMs != null
+                          ? `${(selectedTranscriptDetails.transcriptionLatencyMs / 1000).toFixed(1)}s`
+                          : "Unavailable"}
+                      </p>
+                    </div>
+                  </div>
                   <TranscriptSearch
                     onSearch={setSearchQuery}
                     className="mb-4 shrink-0"
@@ -1875,10 +1978,16 @@ export function RecordingsView() {
                         if (!selectedRecording) return;
                         await updateTranscriptSegment(selectedRecording.id, segmentId, newText);
                         await refreshTranscript(selectedRecording.id);
+                        await refreshTranscriptDetails(selectedRecording.id);
                       }}
                       onDeleteSegments={handleDeleteTranscriptSegments}
                     />
                   </div>
+                </div>
+              ) : detailError ? (
+                <div className="flex-1 flex items-center justify-center text-destructive">
+                  <AlertCircle className="h-5 w-5 mr-2" />
+                  {detailError}
                 </div>
               ) : (
                 <div className="flex-1 flex items-center justify-center text-muted-foreground">

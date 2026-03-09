@@ -15,6 +15,7 @@ import type {
   GroundedActionItemsResult,
   SearchHit,
   AsrBenchmarkEntry,
+  MeetingTranscriptDetails,
 } from "@/types";
 import type { Settings } from "@/types/settings";
 
@@ -135,6 +136,12 @@ export async function getRecording(recordingId: string): Promise<Recording | nul
 
 export async function getTranscript(recordingId: string): Promise<Transcript | null> {
   return await invoke("get_transcript", { recordingId });
+}
+
+export async function getMeetingTranscriptDetails(
+  recordingId: string
+): Promise<MeetingTranscriptDetails | null> {
+  return await invoke("get_meeting_transcript_details", { recordingId });
 }
 
 export async function deleteRecording(recordingId: string): Promise<void> {

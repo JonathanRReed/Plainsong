@@ -48,6 +48,7 @@ export interface TranscriptionSettings {
   dictationModelId?: string;
   meetingProvider?: string;
   meetingModelId?: string;
+  meetingRoutePolicy?: "prefer_local" | "best_available";
   providerModelIds?: Record<string, string>;
   autoTranscribe: boolean;
   enableDiarization: boolean;
