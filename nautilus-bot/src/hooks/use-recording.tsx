@@ -145,7 +145,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         return recordingId;
       } catch (error) {
         console.error("Failed to start meeting:", error);
-        throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(message);
       }
     },
     [startTimer]
