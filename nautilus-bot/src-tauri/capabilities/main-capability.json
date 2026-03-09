@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/schema.json",
   "identifier": "main-capability",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": ["main", "dictation-overlay", "recording-overlay"],
   "permissions": [
     "core:default",
     "dialog:allow-open",
