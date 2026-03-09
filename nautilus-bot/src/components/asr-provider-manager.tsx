@@ -3,6 +3,10 @@ import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
 import {
+  isMeetingEligibleModel as sharedIsMeetingEligibleModel,
+  isMeetingEligibleProvider as sharedIsMeetingEligibleProvider,
+} from "@/lib/asr-capabilities";
+import {
   refreshAsrRuntimeProbes,
   repairLocalModelCache,
   getSettings,
@@ -91,16 +95,19 @@ export function AsrProviderManager({
   ]);
 
   const isMeetingEligibleProvider = (providerType: AsrProviderType) =>
-    !dictationOnlyProviders.has(providerType);
+    !dictationOnlyProviders.has(providerType) &&
+    sharedIsMeetingEligibleProvider(providerType);
 
   const isMeetingEligibleModel = (providerType: AsrProviderType, modelId: string) => {
-    if (!isMeetingEligibleProvider(providerType)) {
+    if (!sharedIsMeetingEligibleModel(providerType, modelId)) {
       return false;
     }
+
     const normalizedModelId = modelId.trim();
     if (!normalizedModelId) {
       return true;
     }
+
     return modelOptionsForProvider(providerType).some((option) => option.id === normalizedModelId);
   };
 
@@ -541,6 +548,7 @@ export function AsrProviderManager({
 
     try {
       await invoke("download_asr_models", { providerType });
+      await refreshAsrRuntimeProbes();
       await loadProviders();
     } catch (error) {
       console.error("Failed to download models:", error);

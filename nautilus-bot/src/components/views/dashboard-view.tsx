@@ -9,6 +9,9 @@ import { useRecordings } from "@/hooks/use-recordings";
 import { analyzeRecordings, askMemory, searchTranscripts, validateLicense } from "@/lib/tauri";
 import type { LicenseInfo } from "@/lib/tauri";
 import { deriveEntitlement } from "@/hooks/use-license-features";
+import { useSetupStatus } from "@/hooks/use-setup-status";
+import { requestMainView } from "@/lib/navigation";
+import { requestOnboarding } from "@/lib/onboarding";
 import { Folder, FileAudio, Clock, Activity, Brain, Loader2 } from "lucide-react";
 import { TierBadge } from "@/components/tier-badge";
 
@@ -49,6 +52,7 @@ export function DashboardView() {
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [license, setLicense] = useState<LicenseInfo | null>(null);
+  const { dictationReady, meetingReady, loading: setupLoading } = useSetupStatus();
 
   const entitlement = deriveEntitlement(license);
 
@@ -122,6 +126,43 @@ export function DashboardView() {
       
       <ScrollArea className="flex-1">
         <div className="p-6 space-y-6">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle>Setup status</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-3 md:grid-cols-2">
+                <div className="rounded-lg border px-4 py-3">
+                  <div className="text-sm text-muted-foreground">Dictation</div>
+                  <div className="mt-1 text-lg font-semibold">
+                    {setupLoading ? "Checking…" : dictationReady ? "Ready" : "Needs setup"}
+                  </div>
+                </div>
+                <div className="rounded-lg border px-4 py-3">
+                  <div className="text-sm text-muted-foreground">Meetings</div>
+                  <div className="mt-1 text-lg font-semibold">
+                    {setupLoading ? "Checking…" : meetingReady ? "Ready" : "Needs setup"}
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" onClick={() => requestMainView("setup")}>
+                  Open setup
+                </Button>
+                {!dictationReady ? (
+                  <Button variant="outline" onClick={() => requestOnboarding("dictation")}>
+                    Fix dictation setup
+                  </Button>
+                ) : null}
+                {!meetingReady ? (
+                  <Button variant="outline" onClick={() => requestOnboarding("meetings")}>
+                    Set up meetings
+                  </Button>
+                ) : null}
+              </div>
+            </CardContent>
+          </Card>
+
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">

@@ -30,6 +30,7 @@ import {
   OPEN_ONBOARDING_EVENT,
   type OnboardingMode,
 } from "@/lib/onboarding";
+import { OPEN_MAIN_VIEW_EVENT, type MainViewId } from "@/lib/navigation";
 import type { LicenseInfo } from "@/lib/tauri";
 import { usePeriodicLicenseCheck } from "@/hooks/use-periodic-license-check";
 
@@ -43,7 +44,8 @@ export type ViewId =
   | "recordings"
   | "dictation"
   | "exports"
-  | "settings";
+  | "settings"
+  | "setup";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -67,6 +69,9 @@ const ExportsView = lazy(async () => ({
 }));
 const SettingsView = lazy(async () => ({
   default: (await import("@/components/views/settings-view-simple")).SettingsView,
+}));
+const SetupView = lazy(async () => ({
+  default: (await import("@/components/views/setup-view")).SetupView,
 }));
 
 class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
@@ -111,6 +116,7 @@ const VIEW_COMPONENTS: Record<ViewId, ComponentType> = {
   dictation: DictationView,
   exports: ExportsView,
   settings: SettingsView,
+  setup: SetupView,
 };
 
 type OverlayMode = "dictation" | "recording" | null;
@@ -265,7 +271,8 @@ function App() {
         requestedView === "recordings" ||
         requestedView === "dictation" ||
         requestedView === "exports" ||
-        requestedView === "settings"
+        requestedView === "settings" ||
+        requestedView === "setup"
       ) {
         setActiveView(requestedView);
       }
@@ -286,6 +293,21 @@ function App() {
     window.addEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding as EventListener);
     return () => {
       window.removeEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleOpenMainView = (event: Event) => {
+      const detail = (event as CustomEvent<{ view?: MainViewId }>).detail;
+      if (!detail?.view) {
+        return;
+      }
+      setActiveView(detail.view as ViewId);
+    };
+
+    window.addEventListener(OPEN_MAIN_VIEW_EVENT, handleOpenMainView as EventListener);
+    return () => {
+      window.removeEventListener(OPEN_MAIN_VIEW_EVENT, handleOpenMainView as EventListener);
     };
   }, []);
 

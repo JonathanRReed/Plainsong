@@ -455,7 +455,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     step === "welcome"
       ? "Set up Nautilus the way you actually plan to use it."
       : step === "meeting-setup"
-        ? "Meetings can be configured now or revisited later from Settings."
+        ? "Meetings can be configured now or revisited later from Setup."
         : `Step ${stepIndex + 1} of ${steps.length} — ${STEP_LABELS[step]}`;
 
   const nextLabel =
@@ -627,7 +627,7 @@ function WelcomeStep({ onChoose }: { onChoose(includeMeetings: boolean): void })
         />
       </div>
       <div className="rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-        You can always reopen guided setup later from Settings if you only want to configure meetings after the app is already working for dictation.
+        You can always reopen guided setup later from Setup if you only want to configure meetings after the app is already working for dictation.
       </div>
     </div>
   );
@@ -888,7 +888,7 @@ function DictationModelStep({
       ) : null}
 
       <p className="text-xs text-muted-foreground">
-        You can keep moving even if you want to configure models later in Settings → ASR / Providers.
+        You can keep moving even if you want to configure models later in Setup or Settings → ASR / Providers.
       </p>
     </div>
   );
@@ -1176,7 +1176,7 @@ function MeetingSetupStep({
           Re-check meeting setup
         </Button>
         <span className="text-xs text-muted-foreground self-center">
-          You can reopen this flow anytime from Settings if system audio or meeting models change later.
+          You can reopen this flow anytime from Setup if system audio or meeting models change later.
         </span>
       </div>
     </div>
