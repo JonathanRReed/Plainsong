@@ -51,6 +51,19 @@ export interface TranscriptSegment {
   confidence: number;
 }
 
+export interface MeetingTranscriptDetails {
+  segmentCount: number;
+  model?: string | null;
+  modelId?: string | null;
+  requestedProvider?: string | null;
+  actualProvider?: string | null;
+  qualityScore?: number | null;
+  transcriptionLatencyMs?: number | null;
+  sourceMode: "me_them" | "speaker_labels" | "single_source" | "unknown" | string;
+  hasSourceAwareSpeakers: boolean;
+  hasSpeakerLabels: boolean;
+}
+
 export interface Project {
   id: string;
   name: string;

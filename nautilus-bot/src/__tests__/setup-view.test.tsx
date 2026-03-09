@@ -15,6 +15,8 @@ const setupStatusMock = vi.hoisted(() => ({
   },
   systemAudioAvailable: false,
   loopbackDevice: null as string | null,
+  meetingCaptureMode: "mic_only" as "me_and_them" | "mic_only" | "unknown",
+  meetingRoutePolicy: "prefer_local" as "prefer_local" | "best_available",
   dictationRoute: {
     providerType: "distil_whisper",
     modelId: "distil-large-v3",
@@ -33,6 +35,11 @@ const setupStatusMock = vi.hoisted(() => ({
   },
   dictationReady: true,
   meetingReady: false,
+  dictationBlockers: [] as string[],
+  meetingBlockers: [
+    "System audio capture is not available yet.",
+    "No loopback device was detected for meeting capture.",
+  ],
   providers: [
     {
       providerType: "parakeet",
@@ -116,7 +123,14 @@ describe("SetupView", () => {
     setupStatusMock.error = null;
     setupStatusMock.systemAudioAvailable = false;
     setupStatusMock.loopbackDevice = null;
+    setupStatusMock.meetingCaptureMode = "mic_only";
+    setupStatusMock.meetingRoutePolicy = "prefer_local";
     setupStatusMock.meetingReady = false;
+    setupStatusMock.dictationBlockers = [];
+    setupStatusMock.meetingBlockers = [
+      "System audio capture is not available yet.",
+      "No loopback device was detected for meeting capture.",
+    ];
   });
 
   it("surfaces guided setup actions in a permanent setup workspace", async () => {
@@ -139,5 +153,25 @@ describe("SetupView", () => {
       expect(tauriMocks.refreshAsrRuntimeProbes).toHaveBeenCalled();
       expect(setupStatusMock.refresh).toHaveBeenCalled();
     });
+  });
+
+  it("shows the active meeting routing policy", async () => {
+    setupStatusMock.meetingRoutePolicy = "best_available";
+
+    render(<SetupView />);
+
+    expect(screen.getByText("Meeting policy")).toBeInTheDocument();
+    expect(screen.getByText("Best available")).toBeInTheDocument();
+  });
+
+  it("shows meeting capture mode and current blockers", async () => {
+    render(<SetupView />);
+
+    expect(screen.getByText("Meeting capture mode")).toBeInTheDocument();
+    expect(screen.getByText("Mic only")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Only microphone capture is ready/i)
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Current blockers").length).toBeGreaterThan(0);
   });
 });

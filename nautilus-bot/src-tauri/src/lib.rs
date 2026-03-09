@@ -1357,8 +1357,13 @@ async fn run_diarization(
                 .get(&speaker.id)
                 .and_then(|(name, _, _)| name.as_deref());
             let inferred_name = inferred_aliases.get(&speaker.id).map(String::as_str);
-            let resolved_name =
-                resolve_speaker_name(existing_name, inferred_name, speaker.name.as_deref(), index);
+            let resolved_name = resolve_speaker_name(
+                &speaker.id,
+                existing_name,
+                inferred_name,
+                speaker.name.as_deref(),
+                index,
+            );
             db.upsert_speaker_alias(
                 &recordingId,
                 &speaker.id,
@@ -1406,6 +1411,7 @@ async fn get_speakers(
             let alias = aliases.get(&speaker_id);
             let name = alias
                 .and_then(|(name, _, _)| name.clone())
+                .or_else(|| default_source_speaker_name(&speaker_id).map(str::to_string))
                 .or_else(|| Some(format!("Speaker {}", idx + 1)));
             let color = alias
                 .and_then(|(_, color, _)| color.clone())
@@ -1890,6 +1896,8 @@ async fn stop_recording(
     let details = serde_json::json!({
         "recording_id": &recordingId,
         "audio_path": &audio_path,
+        "mic_audio_path": &stop_result.mic_audio_path,
+        "system_audio_path": &stop_result.system_audio_path,
         "content_hash": &content_hash,
         "duration_seconds": duration_seconds,
         "dropped_stream_chunks": stop_result.dropped_stream_chunks,
@@ -1955,6 +1963,8 @@ async fn stop_recording(
     let recording_templates_clone = Arc::clone(&state.recording_templates);
     let recording_id_clone = recordingId.clone();
     let audio_path_clone = audio_path.clone();
+    let mic_audio_path_clone = stop_result.mic_audio_path.clone();
+    let system_audio_path_clone = stop_result.system_audio_path.clone();
 
     tokio::spawn(async move {
         tracing::info!(
@@ -2024,21 +2034,30 @@ async fn stop_recording(
             })
         };
 
-        match transcribe_recording_in_chunks(
+        let meeting_transcription_started_at = std::time::Instant::now();
+        match transcribe_meeting_recording(
             &app_handle,
             Arc::clone(&asr_manager),
             &recording_id_clone,
             &path,
+            mic_audio_path_clone.as_deref(),
+            system_audio_path_clone.as_deref(),
             meeting_provider,
             meeting_model_id.clone(),
         )
         .await
         {
-            Ok(result) => {
-                if result.text.trim().is_empty() && wav_file_has_non_silent_audio(&path, 0.003) {
+            Ok(output) => {
+                let meeting_transcription_latency_ms =
+                    meeting_transcription_started_at.elapsed().as_millis() as i64;
+                let mut transcript = output.transcript;
+                enrich_meeting_transcript(&mut transcript);
+                if transcript.full_text.trim().is_empty()
+                    && wav_file_has_non_silent_audio(&path, 0.003)
+                {
                     let error = format!(
                         "{} returned an empty transcript for recording '{}'.",
-                        result.actual_provider.display_name(),
+                        output.actual_provider.display_name(),
                         recording_id_clone
                     );
                     tracing::error!("{}", error);
@@ -2081,17 +2100,21 @@ async fn stop_recording(
                 tracing::info!("Transcription completed for {}", recording_id_clone);
                 tracing::info!(
                     "Transcript has {} segments, {} chars",
-                    result.segments.len(),
-                    result.text.len()
+                    transcript.segments.len(),
+                    transcript.full_text.len()
                 );
+                let meeting_transcript_quality_score =
+                    compute_meeting_transcript_quality_score(&transcript);
 
-                // Clone values before moving into struct
-                let model_name_clone = result.model_name.clone();
-                let model_id_clone = result.model_id.clone();
-                let language_clone = result.language.clone();
-                let requested_provider_clone = result.requested_provider;
-                let actual_provider_clone = result.actual_provider;
-                let fallback_reason_clone = result.fallback_reason.clone();
+                let model_name_clone = transcript.model.clone();
+                let model_id_clone = transcript.model_id.clone().unwrap_or_default();
+                let language_clone = transcript.language.clone();
+                let requested_provider_clone = output.requested_provider;
+                let actual_provider_clone = output.actual_provider;
+                let requested_engine_clone = output.requested_engine.clone();
+                let actual_engine_clone = output.actual_engine.clone();
+                let optimization_applied_clone = output.optimization_applied;
+                let fallback_reason_clone = output.fallback_reason.clone();
                 if let Some(fallback_warning) = build_provider_fallback_message(
                     requested_provider_clone,
                     actual_provider_clone,
@@ -2100,34 +2123,6 @@ async fn stop_recording(
                     tracing::warn!("{}", fallback_warning);
                     let _ = app_handle.emit("asr-provider-warning", fallback_warning);
                 }
-                let mut transcript = models::Transcript {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    recording_id: recording_id_clone.clone(),
-                    segments: result
-                        .segments
-                        .into_iter()
-                        .map(|s| models::TranscriptSegment {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            start_time: s.start_time,
-                            end_time: s.end_time,
-                            text: s.text,
-                            speaker_id: None,
-                            confidence: s.confidence,
-                        })
-                        .collect(),
-                    full_text: result.text,
-                    language: result.language,
-                    confidence: result.confidence,
-                    model: result.model_name,
-                    model_id: Some(result.model_id),
-                    requested_provider: Some(
-                        asr_provider_to_settings_value(result.requested_provider).to_string(),
-                    ),
-                    actual_provider: Some(
-                        asr_provider_to_settings_value(result.actual_provider).to_string(),
-                    ),
-                    created_at: chrono::Utc::now(),
-                };
 
                 let enable_diarization = {
                     let settings_manager = settings_manager_clone.lock().await;
@@ -2136,8 +2131,15 @@ async fn stop_recording(
                     enabled
                 };
 
+                let has_source_aware_speakers =
+                    transcript_has_source_aware_speakers(&transcript.segments);
                 let mut diarization_result: Option<diarization::DiarizationResult> = None;
-                if enable_diarization {
+                if has_source_aware_speakers {
+                    println!(
+                        "[NAUTILUS] Skipping automatic diarization for {} because transcript already contains source-aware speakers",
+                        recording_id_clone
+                    );
+                } else if enable_diarization {
                     let diarization_available = diarization::DiarizationEngine::is_real_available();
                     println!(
                         "[NAUTILUS] Diarization enabled, model available: {}",
@@ -2176,7 +2178,9 @@ async fn stop_recording(
                     println!("[NAUTILUS] Diarization disabled in settings");
                 }
 
-                let inferred_aliases = if !transcript.full_text.trim().is_empty() {
+                let inferred_aliases = if has_source_aware_speakers {
+                    source_aware_speaker_aliases_from_segments(&transcript.segments)
+                } else if !transcript.full_text.trim().is_empty() {
                     // Use LLM to identify speaker names from transcript
                     let ollama_available = ollama_client_clone.is_available().await;
                     if ollama_available {
@@ -2214,8 +2218,25 @@ async fn stop_recording(
 
                 // Save transcript to database
                 let mut db = db_clone.lock().await;
+                let transcript_artifact = TranscriptArtifactRecord {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    recording_id: recording_id_clone.clone(),
+                    transcript_id: Some(transcript.id.clone()),
+                    segment_count: transcript.segments.len() as i64,
+                    model_id: transcript.model_id.clone(),
+                    requested_provider: transcript.requested_provider.clone(),
+                    actual_provider: transcript.actual_provider.clone(),
+                    quality_score: Some(meeting_transcript_quality_score),
+                    startup_latency_ms: None,
+                    transcription_latency_ms: Some(meeting_transcription_latency_ms),
+                    insert_latency_ms: None,
+                    end_to_end_ms: None,
+                    created_at: chrono::Utc::now(),
+                };
                 if let Err(e) = db.save_transcript(&transcript) {
                     tracing::error!("Failed to save transcript: {}", e);
+                } else if let Err(e) = db.save_transcript_artifact(&transcript_artifact) {
+                    tracing::warn!("Failed to save meeting transcript artifact: {}", e);
                 }
                 drop(db);
 
@@ -2435,6 +2456,7 @@ async fn stop_recording(
                             .and_then(|(name, _, _)| name.as_deref());
                         let inferred_name = inferred_aliases.get(&speaker.id).map(String::as_str);
                         let resolved_name = resolve_speaker_name(
+                            &speaker.id,
                             existing_name,
                             inferred_name,
                             speaker.name.as_deref(),
@@ -2452,6 +2474,58 @@ async fn stop_recording(
                                 "Failed to save speaker alias for {}:{}: {}",
                                 recording_id_clone,
                                 speaker.id,
+                                error
+                            );
+                        }
+                    }
+                } else if !inferred_aliases.is_empty() {
+                    let existing_aliases = match db.get_speaker_aliases(&recording_id_clone) {
+                        Ok(aliases) => aliases,
+                        Err(error) => {
+                            tracing::warn!(
+                                "Failed to load speaker aliases for {}: {}",
+                                recording_id_clone,
+                                error
+                            );
+                            std::collections::HashMap::new()
+                        }
+                    };
+                    let mut sample_counts = std::collections::BTreeMap::<String, usize>::new();
+                    for segment in &transcript.segments {
+                        if let Some(speaker_id) = segment.speaker_id.as_ref() {
+                            *sample_counts.entry(speaker_id.clone()).or_insert(0) += 1;
+                        }
+                    }
+
+                    for (index, (speaker_id, sample_count)) in sample_counts.into_iter().enumerate()
+                    {
+                        let existing_name = existing_aliases
+                            .get(&speaker_id)
+                            .and_then(|(name, _, _)| name.as_deref());
+                        let inferred_name = inferred_aliases.get(&speaker_id).map(String::as_str);
+                        let resolved_name = resolve_speaker_name(
+                            &speaker_id,
+                            existing_name,
+                            inferred_name,
+                            None,
+                            index,
+                        );
+                        let color = existing_aliases
+                            .get(&speaker_id)
+                            .and_then(|(_, color, _)| color.clone())
+                            .unwrap_or_else(|| default_speaker_color(index));
+
+                        if let Err(error) = db.upsert_speaker_alias(
+                            &recording_id_clone,
+                            &speaker_id,
+                            resolved_name.as_deref(),
+                            Some(&color),
+                            sample_count as i64,
+                        ) {
+                            tracing::warn!(
+                                "Failed to save inferred speaker alias for {}:{}: {}",
+                                recording_id_clone,
+                                speaker_id,
                                 error
                             );
                         }
@@ -2651,9 +2725,9 @@ async fn stop_recording(
                     "language": &language_clone,
                     "requested_provider": asr_provider_to_settings_value(requested_provider_clone),
                     "actual_provider": asr_provider_to_settings_value(actual_provider_clone),
-                    "requested_engine": result.requested_engine,
-                    "actual_engine": result.actual_engine,
-                    "optimization_applied": result.optimization_applied,
+                    "requested_engine": requested_engine_clone,
+                    "actual_engine": actual_engine_clone,
+                    "optimization_applied": optimization_applied_clone,
                     "fallback_reason": fallback_reason_clone,
                 });
                 if let Err(e) = db.log_audit_event("transcription_completed", Some(details), "info")
@@ -4765,6 +4839,24 @@ async fn get_dictation_history_details(
     }
 }
 
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn get_meeting_transcript_details(
+    state: tauri::State<'_, AppState>,
+    recordingId: String,
+) -> Result<Option<models::MeetingTranscriptDetails>, String> {
+    let db = state.db.lock().await;
+    let transcript = db.get_transcript(&recordingId).map_err(|e| e.to_string())?;
+    let transcript_artifact = db
+        .get_latest_transcript_artifact(&recordingId)
+        .map_err(|e| e.to_string())?;
+
+    Ok(build_meeting_transcript_details(
+        transcript.as_ref(),
+        transcript_artifact.as_ref(),
+    ))
+}
+
 fn dictation_history_details_from_audit(
     details: &serde_json::Value,
 ) -> models::DictationHistoryDetails {
@@ -4877,6 +4969,59 @@ fn dictation_history_details_is_empty(details: &models::DictationHistoryDetails)
         && details.transcription_latency_ms.is_none()
         && details.insert_latency_ms.is_none()
         && details.end_to_end_ms.is_none()
+}
+
+fn build_meeting_transcript_details(
+    transcript: Option<&models::Transcript>,
+    transcript_artifact: Option<&TranscriptArtifactRecord>,
+) -> Option<models::MeetingTranscriptDetails> {
+    if transcript.is_none() && transcript_artifact.is_none() {
+        return None;
+    }
+
+    let segments = transcript
+        .map(|value| value.segments.as_slice())
+        .unwrap_or(&[]);
+    let has_source_aware_speakers = transcript_has_source_aware_speakers(segments);
+    let has_speaker_labels = segments.iter().any(|segment| {
+        segment
+            .speaker_id
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    });
+    let source_mode = if has_source_aware_speakers {
+        "me_them"
+    } else if has_speaker_labels {
+        "speaker_labels"
+    } else if transcript.is_some() {
+        "single_source"
+    } else {
+        "unknown"
+    };
+    let segment_count = transcript_artifact
+        .map(|artifact| artifact.segment_count.max(0) as u64)
+        .unwrap_or_else(|| segments.len() as u64);
+
+    Some(models::MeetingTranscriptDetails {
+        segment_count,
+        model: transcript.map(|value| value.model.clone()),
+        model_id: transcript_artifact
+            .and_then(|artifact| artifact.model_id.clone())
+            .or_else(|| transcript.and_then(|value| value.model_id.clone())),
+        requested_provider: transcript_artifact
+            .and_then(|artifact| artifact.requested_provider.clone())
+            .or_else(|| transcript.and_then(|value| value.requested_provider.clone())),
+        actual_provider: transcript_artifact
+            .and_then(|artifact| artifact.actual_provider.clone())
+            .or_else(|| transcript.and_then(|value| value.actual_provider.clone())),
+        quality_score: transcript_artifact.and_then(|artifact| artifact.quality_score),
+        transcription_latency_ms: transcript_artifact
+            .and_then(|artifact| artifact.transcription_latency_ms.map(|value| value as u64)),
+        source_mode: source_mode.to_string(),
+        has_source_aware_speakers,
+        has_speaker_labels,
+    })
 }
 
 // Settings commands
@@ -5700,6 +5845,8 @@ async fn resolve_ready_meeting_selection(
     {
         Ok(()) => Ok((requested_selection.0, requested_selection.1, None)),
         Err(requested_error) => {
+            let meeting_policy =
+                meeting_route_policy_from_settings(&transcription.meeting_route_policy);
             let default_provider =
                 asr_provider_from_settings_value(&transcription.default_provider)
                     .unwrap_or(asr::AsrProviderType::DistilWhisper);
@@ -5716,6 +5863,7 @@ async fn resolve_ready_meeting_selection(
                 .unwrap_or_default();
 
             let preferred_candidates = preferred_meeting_provider_candidates(
+                meeting_policy,
                 default_provider,
                 dictation_provider,
                 meeting_provider,
@@ -5901,9 +6049,9 @@ async fn start_dictation_session(
 
     emit_dictation_state(
         app,
-        "starting",
+        "primed",
         Some(session_started_at_ms),
-        None,
+        Some("Preparing dictation"),
         None,
         Some(session_id),
         None,
@@ -9655,6 +9803,120 @@ fn sanitize_dictation_output(candidate: &str, fallback: &str) -> String {
     cleaned
 }
 
+fn sanitize_meeting_segment_text(text: &str) -> String {
+    let cleaned = strip_non_speech_placeholder(text);
+    if cleaned.is_empty() {
+        return String::new();
+    }
+
+    let collapsed = collapse_repeated_sentence_runs(&cleaned);
+    if collapsed.trim().is_empty() {
+        return String::new();
+    }
+
+    if looks_repetitive_hallucination(&collapsed) {
+        return dedupe_sentence_inventory(&collapsed);
+    }
+
+    collapsed.trim().to_string()
+}
+
+fn merge_meeting_segment_text(existing: &str, incoming: &str) -> String {
+    let existing_trimmed = existing.trim();
+    let incoming_trimmed = incoming.trim();
+    if existing_trimmed.is_empty() {
+        return incoming_trimmed.to_string();
+    }
+    if incoming_trimmed.is_empty() {
+        return existing_trimmed.to_string();
+    }
+
+    if normalize_sentence_for_compare(existing_trimmed)
+        == normalize_sentence_for_compare(incoming_trimmed)
+    {
+        return existing_trimmed.to_string();
+    }
+
+    format!("{} {}", existing_trimmed, incoming_trimmed)
+}
+
+fn enrich_meeting_transcript(transcript: &mut models::Transcript) {
+    let mut cleaned_segments: Vec<models::TranscriptSegment> = Vec::new();
+
+    for segment in transcript.segments.drain(..) {
+        let cleaned_text = sanitize_meeting_segment_text(&segment.text);
+        if cleaned_text.is_empty() {
+            continue;
+        }
+
+        if let Some(previous) = cleaned_segments.last_mut() {
+            let same_speaker = previous.speaker_id == segment.speaker_id;
+            let gap_seconds = (segment.start_time - previous.end_time).max(0.0);
+            if same_speaker && gap_seconds <= 0.6 {
+                let previous_chars = previous.text.chars().count().max(1) as f64;
+                let next_chars = cleaned_text.chars().count().max(1) as f64;
+                previous.end_time = previous.end_time.max(segment.end_time);
+                previous.text = merge_meeting_segment_text(&previous.text, &cleaned_text);
+                previous.confidence = ((previous.confidence * previous_chars)
+                    + (segment.confidence * next_chars))
+                    / (previous_chars + next_chars);
+                continue;
+            }
+        }
+
+        cleaned_segments.push(models::TranscriptSegment {
+            text: cleaned_text,
+            ..segment
+        });
+    }
+
+    transcript.full_text = cleaned_segments
+        .iter()
+        .map(|segment| segment.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    transcript.segments = cleaned_segments;
+}
+
+fn compute_meeting_transcript_quality_score(transcript: &models::Transcript) -> f64 {
+    let full_text = transcript.full_text.trim();
+    if full_text.is_empty() || transcript.segments.is_empty() {
+        return 0.0;
+    }
+
+    let meaningful_chars = full_text.chars().count();
+    let mut score = transcript.confidence.clamp(0.0, 1.0);
+
+    if meaningful_chars < 20 {
+        score *= 0.55;
+    } else if meaningful_chars < 80 {
+        score *= 0.75;
+    }
+
+    if transcript.segments.len() == 1 && meaningful_chars < 12 {
+        score *= 0.4;
+    }
+
+    if looks_repetitive_hallucination(full_text) {
+        score *= 0.35;
+    }
+
+    let distinct_source_speakers = transcript
+        .segments
+        .iter()
+        .filter_map(|segment| segment.speaker_id.as_deref())
+        .filter(|speaker_id| default_source_speaker_name(speaker_id).is_some())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
+    if distinct_source_speakers >= 2 {
+        score = (score + 0.05).min(1.0);
+    }
+
+    score.clamp(0.0, 1.0)
+}
+
 fn parse_dictation_command(
     raw_text: &str,
     prefix: &str,
@@ -11261,6 +11523,7 @@ pub fn run() {
             list_asr_benchmarks,
             get_audit_log,
             get_dictation_history_details,
+            get_meeting_transcript_details,
             download_whisper_model,
             list_downloaded_models,
             delete_model,
@@ -11439,6 +11702,7 @@ fn infer_speaker_aliases_from_segments(
 }
 
 fn resolve_speaker_name(
+    speaker_id: &str,
     existing_name: Option<&str>,
     inferred_name: Option<&str>,
     fallback_name: Option<&str>,
@@ -11448,6 +11712,10 @@ fn resolve_speaker_name(
         if !is_generic_speaker_name(name) {
             return Some(name.trim().to_string());
         }
+    }
+
+    if let Some(name) = default_source_speaker_name(speaker_id) {
+        return Some(name.to_string());
     }
 
     if let Some(name) = inferred_name {
@@ -11679,6 +11947,187 @@ mod tests {
         ];
         let aliases = infer_speaker_aliases_from_segments(&segments);
         assert_eq!(aliases.get("S2").map(String::as_str), Some("Ro Khanan"));
+    }
+
+    #[test]
+    fn source_aware_helpers_detect_and_name_me_and_them() {
+        let segments = vec![seg("me", "I opened the meeting."), seg("them", "Thanks.")];
+
+        assert!(transcript_has_source_aware_speakers(&segments));
+
+        let aliases = source_aware_speaker_aliases_from_segments(&segments);
+        assert_eq!(aliases.get("me").map(String::as_str), Some("Me"));
+        assert_eq!(aliases.get("them").map(String::as_str), Some("Them"));
+    }
+
+    #[test]
+    fn resolve_speaker_name_prefers_source_aware_defaults() {
+        assert_eq!(
+            resolve_speaker_name("me", Some("Speaker 1"), None, None, 0).as_deref(),
+            Some("Me")
+        );
+        assert_eq!(
+            resolve_speaker_name("them", None, None, None, 1).as_deref(),
+            Some("Them")
+        );
+    }
+
+    #[test]
+    fn enrich_meeting_transcript_merges_adjacent_source_segments() {
+        let now = chrono::Utc::now();
+        let mut transcript = models::Transcript {
+            id: "t1".to_string(),
+            recording_id: "r1".to_string(),
+            segments: vec![
+                models::TranscriptSegment {
+                    id: "a".to_string(),
+                    start_time: 0.0,
+                    end_time: 0.8,
+                    text: "Hello there.".to_string(),
+                    speaker_id: Some("me".to_string()),
+                    confidence: 0.8,
+                },
+                models::TranscriptSegment {
+                    id: "b".to_string(),
+                    start_time: 0.95,
+                    end_time: 1.5,
+                    text: "How are you?".to_string(),
+                    speaker_id: Some("me".to_string()),
+                    confidence: 0.9,
+                },
+                models::TranscriptSegment {
+                    id: "c".to_string(),
+                    start_time: 1.7,
+                    end_time: 2.3,
+                    text: "[blank audio]".to_string(),
+                    speaker_id: Some("them".to_string()),
+                    confidence: 0.2,
+                },
+            ],
+            full_text: "Hello there. How are you? [blank audio]".to_string(),
+            language: "en".to_string(),
+            confidence: 0.85,
+            model: "test".to_string(),
+            model_id: Some("test-model".to_string()),
+            requested_provider: Some("distil_whisper".to_string()),
+            actual_provider: Some("distil_whisper".to_string()),
+            created_at: now,
+        };
+
+        enrich_meeting_transcript(&mut transcript);
+
+        assert_eq!(transcript.segments.len(), 1);
+        assert_eq!(transcript.segments[0].speaker_id.as_deref(), Some("me"));
+        assert_eq!(transcript.segments[0].text, "Hello there. How are you?");
+        assert_eq!(transcript.full_text, "Hello there. How are you?");
+    }
+
+    #[test]
+    fn meeting_transcript_quality_penalizes_repetitive_hallucinations() {
+        let now = chrono::Utc::now();
+        let transcript = models::Transcript {
+            id: "t2".to_string(),
+            recording_id: "r2".to_string(),
+            segments: vec![models::TranscriptSegment {
+                id: "s1".to_string(),
+                start_time: 0.0,
+                end_time: 10.0,
+                text: "this is the best i've ever seen. this is the best i've ever seen. this is the best i've ever seen. this is the best i've ever seen.".to_string(),
+                speaker_id: Some("them".to_string()),
+                confidence: 0.92,
+            }],
+            full_text: "this is the best i've ever seen. this is the best i've ever seen. this is the best i've ever seen. this is the best i've ever seen.".to_string(),
+            language: "en".to_string(),
+            confidence: 0.92,
+            model: "test".to_string(),
+            model_id: Some("test-model".to_string()),
+            requested_provider: Some("distil_whisper".to_string()),
+            actual_provider: Some("distil_whisper".to_string()),
+            created_at: now,
+        };
+
+        assert!(compute_meeting_transcript_quality_score(&transcript) < 0.5);
+    }
+
+    #[test]
+    fn build_meeting_transcript_details_prefers_me_them_source_mode() {
+        let now = chrono::Utc::now();
+        let transcript = models::Transcript {
+            id: "t-source".to_string(),
+            recording_id: "r-source".to_string(),
+            segments: vec![models::TranscriptSegment {
+                id: "seg-1".to_string(),
+                start_time: 0.0,
+                end_time: 1.0,
+                text: "Opening remarks".to_string(),
+                speaker_id: Some("me".to_string()),
+                confidence: 0.91,
+            }],
+            full_text: "Opening remarks".to_string(),
+            language: "en".to_string(),
+            confidence: 0.91,
+            model: "Distil Whisper".to_string(),
+            model_id: Some("distil-large-v3".to_string()),
+            requested_provider: Some("distil_whisper".to_string()),
+            actual_provider: Some("distil_whisper".to_string()),
+            created_at: now,
+        };
+        let artifact = TranscriptArtifactRecord {
+            id: "artifact-1".to_string(),
+            recording_id: "r-source".to_string(),
+            transcript_id: Some("t-source".to_string()),
+            segment_count: 1,
+            model_id: Some("distil-large-v3".to_string()),
+            requested_provider: Some("distil_whisper".to_string()),
+            actual_provider: Some("distil_whisper".to_string()),
+            quality_score: Some(0.88),
+            startup_latency_ms: None,
+            transcription_latency_ms: Some(640),
+            insert_latency_ms: None,
+            end_to_end_ms: None,
+            created_at: now,
+        };
+
+        let details = build_meeting_transcript_details(Some(&transcript), Some(&artifact)).unwrap();
+
+        assert_eq!(details.source_mode, "me_them");
+        assert!(details.has_source_aware_speakers);
+        assert!(details.has_speaker_labels);
+        assert_eq!(details.segment_count, 1);
+        assert_eq!(details.quality_score, Some(0.88));
+    }
+
+    #[test]
+    fn build_meeting_transcript_details_falls_back_to_single_source() {
+        let now = chrono::Utc::now();
+        let transcript = models::Transcript {
+            id: "t-single".to_string(),
+            recording_id: "r-single".to_string(),
+            segments: vec![models::TranscriptSegment {
+                id: "seg-1".to_string(),
+                start_time: 0.0,
+                end_time: 2.0,
+                text: "Only one unlabeled paragraph".to_string(),
+                speaker_id: None,
+                confidence: 0.82,
+            }],
+            full_text: "Only one unlabeled paragraph".to_string(),
+            language: "en".to_string(),
+            confidence: 0.82,
+            model: "Parakeet".to_string(),
+            model_id: Some("parakeet-tdt-0.6b-v2".to_string()),
+            requested_provider: Some("parakeet".to_string()),
+            actual_provider: Some("parakeet".to_string()),
+            created_at: now,
+        };
+
+        let details = build_meeting_transcript_details(Some(&transcript), None).unwrap();
+
+        assert_eq!(details.source_mode, "single_source");
+        assert!(!details.has_source_aware_speakers);
+        assert!(!details.has_speaker_labels);
+        assert_eq!(details.segment_count, 1);
+        assert_eq!(details.actual_provider.as_deref(), Some("parakeet"));
     }
 
     #[test]
@@ -12530,6 +12979,107 @@ mod tests {
 
         assert_eq!(selection.0, asr::AsrProviderType::Parakeet);
         assert_eq!(selection.1, "parakeet-tdt-ctc-110m");
+    }
+
+    #[test]
+    fn source_aware_transcript_labels_me_and_them_segments() {
+        let me = asr::TranscriptionResult {
+            text: "I opened the roadmap".to_string(),
+            segments: vec![asr::TranscriptSegment {
+                start_time: 0.0,
+                end_time: 1.0,
+                text: "I opened the roadmap".to_string(),
+                confidence: 0.9,
+            }],
+            language: "en".to_string(),
+            confidence: 0.9,
+            processing_time_ms: 10,
+            model_name: "Parakeet".to_string(),
+            model_id: "parakeet-tdt-ctc-110m".to_string(),
+            requested_provider: asr::AsrProviderType::Parakeet,
+            actual_provider: asr::AsrProviderType::Parakeet,
+            requested_engine: None,
+            actual_engine: None,
+            optimization_applied: false,
+            fallback_reason: None,
+        };
+        let them = asr::TranscriptionResult {
+            text: "Let's ship this Friday".to_string(),
+            segments: vec![asr::TranscriptSegment {
+                start_time: 1.2,
+                end_time: 2.1,
+                text: "Let's ship this Friday".to_string(),
+                confidence: 0.85,
+            }],
+            language: "en".to_string(),
+            confidence: 0.85,
+            processing_time_ms: 10,
+            model_name: "Parakeet".to_string(),
+            model_id: "parakeet-tdt-ctc-110m".to_string(),
+            requested_provider: asr::AsrProviderType::Parakeet,
+            actual_provider: asr::AsrProviderType::Parakeet,
+            requested_engine: None,
+            actual_engine: None,
+            optimization_applied: false,
+            fallback_reason: None,
+        };
+
+        let transcript = build_source_aware_models_transcript(
+            "recording-1",
+            asr::AsrProviderType::Parakeet,
+            "parakeet-tdt-ctc-110m",
+            vec![("me", me), ("them", them)],
+        );
+
+        assert_eq!(transcript.segments.len(), 2);
+        assert_eq!(transcript.segments[0].speaker_id.as_deref(), Some("me"));
+        assert_eq!(transcript.segments[1].speaker_id.as_deref(), Some("them"));
+        assert_eq!(
+            transcript.full_text,
+            "I opened the roadmap Let's ship this Friday"
+        );
+    }
+
+    #[test]
+    fn meeting_policy_prefer_local_orders_local_routes_before_cloud_routes() {
+        let candidates = preferred_meeting_provider_candidates(
+            MeetingRoutePolicy::PreferLocal,
+            asr::AsrProviderType::DistilWhisper,
+            asr::AsrProviderType::Parakeet,
+            Some(asr::AsrProviderType::OpenAiCloud),
+        );
+
+        let first_local_index = candidates
+            .iter()
+            .position(|provider| *provider == asr::AsrProviderType::DistilWhisper)
+            .expect("local provider should be present");
+        let first_cloud_index = candidates
+            .iter()
+            .position(|provider| *provider == asr::AsrProviderType::ElevenLabsScribe)
+            .expect("cloud provider should be present");
+
+        assert!(first_local_index < first_cloud_index);
+    }
+
+    #[test]
+    fn meeting_policy_best_available_orders_cloud_routes_before_local_defaults() {
+        let candidates = preferred_meeting_provider_candidates(
+            MeetingRoutePolicy::BestAvailable,
+            asr::AsrProviderType::Whisper,
+            asr::AsrProviderType::Moonshine,
+            None,
+        );
+
+        let first_cloud_index = candidates
+            .iter()
+            .position(|provider| *provider == asr::AsrProviderType::ElevenLabsScribe)
+            .expect("cloud provider should be present");
+        let first_local_index = candidates
+            .iter()
+            .position(|provider| *provider == asr::AsrProviderType::DistilWhisper)
+            .expect("local provider should be present");
+
+        assert!(first_cloud_index < first_local_index);
     }
 
     #[test]
@@ -13860,6 +14410,38 @@ fn wav_file_has_non_silent_audio(path: &Path, threshold: f32) -> bool {
     }
 }
 
+fn default_source_speaker_name(speaker_id: &str) -> Option<&'static str> {
+    match speaker_id.trim().to_ascii_lowercase().as_str() {
+        "me" => Some("Me"),
+        "them" => Some("Them"),
+        _ => None,
+    }
+}
+
+fn transcript_has_source_aware_speakers(segments: &[models::TranscriptSegment]) -> bool {
+    segments.iter().any(|segment| {
+        segment
+            .speaker_id
+            .as_deref()
+            .and_then(default_source_speaker_name)
+            .is_some()
+    })
+}
+
+fn source_aware_speaker_aliases_from_segments(
+    segments: &[models::TranscriptSegment],
+) -> std::collections::HashMap<String, String> {
+    let mut aliases = std::collections::HashMap::new();
+    for segment in segments {
+        if let Some(speaker_id) = segment.speaker_id.as_deref() {
+            if let Some(name) = default_source_speaker_name(speaker_id) {
+                aliases.insert(speaker_id.to_string(), name.to_string());
+            }
+        }
+    }
+    aliases
+}
+
 async fn persist_benchmark_results(state: &AppState, results: &[asr::BenchmarkResult]) {
     if results.is_empty() {
         return;
@@ -14065,6 +14647,19 @@ enum TranscriptionScope {
     Meeting,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MeetingRoutePolicy {
+    PreferLocal,
+    BestAvailable,
+}
+
+fn meeting_route_policy_from_settings(value: &str) -> MeetingRoutePolicy {
+    match value.trim() {
+        "best_available" => MeetingRoutePolicy::BestAvailable,
+        _ => MeetingRoutePolicy::PreferLocal,
+    }
+}
+
 fn provider_is_dictation_only(provider: asr::AsrProviderType) -> bool {
     !meeting_provider_is_supported(provider)
 }
@@ -14127,23 +14722,43 @@ fn ensure_meeting_route_supported(
 }
 
 fn preferred_meeting_provider_candidates(
+    policy: MeetingRoutePolicy,
     default_provider: asr::AsrProviderType,
     dictation_provider: asr::AsrProviderType,
     meeting_provider: Option<asr::AsrProviderType>,
 ) -> Vec<asr::AsrProviderType> {
     let mut candidates = Vec::new();
-    for candidate in [
+    let explicit_candidates = [
         meeting_provider,
         Some(default_provider),
         Some(dictation_provider),
+    ];
+    let local_defaults = [
         Some(asr::AsrProviderType::DistilWhisper),
         Some(asr::AsrProviderType::Parakeet),
         Some(asr::AsrProviderType::Canary),
         Some(asr::AsrProviderType::Voxtral),
+    ];
+    let cloud_defaults = [
         Some(asr::AsrProviderType::ElevenLabsScribe),
         Some(asr::AsrProviderType::OpenAiCloud),
         Some(asr::AsrProviderType::Groq),
-    ] {
+    ];
+
+    let mut ordered_candidates = Vec::new();
+    ordered_candidates.extend(explicit_candidates);
+    match policy {
+        MeetingRoutePolicy::PreferLocal => {
+            ordered_candidates.extend(local_defaults);
+            ordered_candidates.extend(cloud_defaults);
+        }
+        MeetingRoutePolicy::BestAvailable => {
+            ordered_candidates.extend(cloud_defaults);
+            ordered_candidates.extend(local_defaults);
+        }
+    }
+
+    for candidate in ordered_candidates {
         if let Some(provider) = candidate {
             if meeting_provider_is_supported(provider) && !candidates.contains(&provider) {
                 candidates.push(provider);
@@ -14154,11 +14769,13 @@ fn preferred_meeting_provider_candidates(
 }
 
 fn preferred_meeting_provider(
+    policy: MeetingRoutePolicy,
     default_provider: asr::AsrProviderType,
     dictation_provider: asr::AsrProviderType,
     meeting_provider: Option<asr::AsrProviderType>,
 ) -> asr::AsrProviderType {
     for provider in preferred_meeting_provider_candidates(
+        policy,
         default_provider,
         dictation_provider,
         meeting_provider,
@@ -14190,6 +14807,7 @@ fn select_ready_meeting_candidate(
 }
 
 fn normalize_contextual_asr_settings(transcription: &mut settings::TranscriptionSettings) {
+    let meeting_policy = meeting_route_policy_from_settings(&transcription.meeting_route_policy);
     let default_provider = asr_provider_from_settings_value(&transcription.default_provider)
         .unwrap_or(asr::AsrProviderType::DistilWhisper);
     transcription.default_provider = asr_provider_to_settings_value(default_provider).to_string();
@@ -14227,6 +14845,7 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
     let requested_meeting_provider =
         asr_provider_from_settings_value(&transcription.meeting_provider);
     let meeting_provider = preferred_meeting_provider(
+        meeting_policy,
         default_provider,
         dictation_provider,
         requested_meeting_provider.or(Some(default_provider)),
@@ -14246,6 +14865,7 @@ fn resolve_transcription_provider_and_model(
     transcription: &settings::TranscriptionSettings,
     scope: TranscriptionScope,
 ) -> (asr::AsrProviderType, String) {
+    let meeting_policy = meeting_route_policy_from_settings(&transcription.meeting_route_policy);
     let (provider_value, model_value) = if transcription.use_shared_asr_selection {
         (
             transcription.default_provider.as_str(),
@@ -14269,6 +14889,7 @@ fn resolve_transcription_provider_and_model(
     let provider =
         if matches!(scope, TranscriptionScope::Meeting) && provider_is_dictation_only(provider) {
             preferred_meeting_provider(
+                meeting_policy,
                 asr_provider_from_settings_value(&transcription.default_provider)
                     .unwrap_or(asr::AsrProviderType::DistilWhisper),
                 asr_provider_from_settings_value(&transcription.dictation_provider)
@@ -14306,6 +14927,252 @@ fn build_provider_fallback_message(
         actual_provider.display_name(),
         reason
     ))
+}
+
+fn build_models_transcript_from_asr_result(
+    recording_id: &str,
+    result: asr::TranscriptionResult,
+) -> models::Transcript {
+    models::Transcript {
+        id: uuid::Uuid::new_v4().to_string(),
+        recording_id: recording_id.to_string(),
+        segments: result
+            .segments
+            .into_iter()
+            .map(|s| models::TranscriptSegment {
+                id: uuid::Uuid::new_v4().to_string(),
+                start_time: s.start_time,
+                end_time: s.end_time,
+                text: s.text,
+                speaker_id: None,
+                confidence: s.confidence,
+            })
+            .collect(),
+        full_text: result.text,
+        language: result.language,
+        confidence: result.confidence,
+        model: result.model_name,
+        model_id: Some(result.model_id),
+        requested_provider: Some(
+            asr_provider_to_settings_value(result.requested_provider).to_string(),
+        ),
+        actual_provider: Some(asr_provider_to_settings_value(result.actual_provider).to_string()),
+        created_at: chrono::Utc::now(),
+    }
+}
+
+struct MeetingTranscriptionOutput {
+    transcript: models::Transcript,
+    requested_provider: asr::AsrProviderType,
+    actual_provider: asr::AsrProviderType,
+    requested_engine: Option<String>,
+    actual_engine: Option<String>,
+    optimization_applied: bool,
+    fallback_reason: Option<String>,
+}
+
+fn build_source_aware_models_transcript(
+    recording_id: &str,
+    provider: asr::AsrProviderType,
+    model_id: &str,
+    mut source_transcripts: Vec<(&str, asr::TranscriptionResult)>,
+) -> models::Transcript {
+    let mut segments: Vec<models::TranscriptSegment> = Vec::new();
+    let mut full_text_parts: Vec<(f64, String)> = Vec::new();
+    let mut language = "en".to_string();
+    let mut model_name = provider.display_name().to_string();
+    let mut requested_provider = provider;
+    let mut actual_provider = provider;
+    let mut weighted_confidence_sum = 0.0_f64;
+    let mut weighted_confidence_count = 0.0_f64;
+
+    for (speaker_id, result) in source_transcripts.drain(..) {
+        if language == "en" && !result.language.trim().is_empty() {
+            language = result.language.clone();
+        }
+        if model_name == provider.display_name() && !result.model_name.trim().is_empty() {
+            model_name = result.model_name.clone();
+        }
+        requested_provider = result.requested_provider;
+        actual_provider = result.actual_provider;
+
+        let text_weight = result.text.chars().count().max(1) as f64;
+        weighted_confidence_sum += result.confidence * text_weight;
+        weighted_confidence_count += text_weight;
+
+        for segment in result.segments {
+            let text = segment.text.trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            full_text_parts.push((segment.start_time, text.clone()));
+            segments.push(models::TranscriptSegment {
+                id: uuid::Uuid::new_v4().to_string(),
+                start_time: segment.start_time,
+                end_time: segment.end_time,
+                text,
+                speaker_id: Some(speaker_id.to_string()),
+                confidence: segment.confidence,
+            });
+        }
+    }
+
+    segments.sort_by(|left, right| {
+        left.start_time
+            .partial_cmp(&right.start_time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    full_text_parts.sort_by(|left, right| {
+        left.0
+            .partial_cmp(&right.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let full_text = full_text_parts
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    models::Transcript {
+        id: uuid::Uuid::new_v4().to_string(),
+        recording_id: recording_id.to_string(),
+        segments,
+        full_text,
+        language,
+        confidence: if weighted_confidence_count > 0.0 {
+            weighted_confidence_sum / weighted_confidence_count
+        } else {
+            0.0
+        },
+        model: model_name,
+        model_id: Some(model_id.to_string()),
+        requested_provider: Some(asr_provider_to_settings_value(requested_provider).to_string()),
+        actual_provider: Some(asr_provider_to_settings_value(actual_provider).to_string()),
+        created_at: chrono::Utc::now(),
+    }
+}
+
+async fn transcribe_meeting_recording(
+    app: &AppHandle,
+    asr_manager: Arc<asr::AsrManager>,
+    recording_id: &str,
+    mixed_audio_path: &Path,
+    mic_audio_path: Option<&str>,
+    system_audio_path: Option<&str>,
+    provider: asr::AsrProviderType,
+    model_id: String,
+) -> Result<MeetingTranscriptionOutput, String> {
+    let mic_path = mic_audio_path
+        .map(PathBuf::from)
+        .filter(|path| path.exists());
+    let system_path = system_audio_path
+        .map(PathBuf::from)
+        .filter(|path| path.exists());
+
+    if mic_path.is_none() || system_path.is_none() {
+        let result = transcribe_recording_in_chunks(
+            app,
+            asr_manager,
+            recording_id,
+            mixed_audio_path,
+            provider,
+            model_id,
+        )
+        .await?;
+        let requested_provider = result.requested_provider;
+        let actual_provider = result.actual_provider;
+        let requested_engine = result.requested_engine.clone();
+        let actual_engine = result.actual_engine.clone();
+        let optimization_applied = result.optimization_applied;
+        let fallback_reason = result.fallback_reason.clone();
+        return Ok(MeetingTranscriptionOutput {
+            transcript: build_models_transcript_from_asr_result(recording_id, result),
+            requested_provider,
+            actual_provider,
+            requested_engine,
+            actual_engine,
+            optimization_applied,
+            fallback_reason,
+        });
+    }
+
+    let mic_result = transcribe_recording_in_chunks(
+        app,
+        Arc::clone(&asr_manager),
+        recording_id,
+        mic_path.as_ref().expect("checked above"),
+        provider,
+        model_id.clone(),
+    )
+    .await;
+    let system_result = transcribe_recording_in_chunks(
+        app,
+        Arc::clone(&asr_manager),
+        recording_id,
+        system_path.as_ref().expect("checked above"),
+        provider,
+        model_id.clone(),
+    )
+    .await;
+
+    let mut source_results = Vec::new();
+    match mic_result {
+        Ok(result) => source_results.push(("me", result)),
+        Err(error) => tracing::warn!(
+            "Microphone-side meeting transcription failed for {}: {}",
+            recording_id,
+            error
+        ),
+    }
+    match system_result {
+        Ok(result) => source_results.push(("them", result)),
+        Err(error) => tracing::warn!(
+            "System-audio-side meeting transcription failed for {}: {}",
+            recording_id,
+            error
+        ),
+    }
+
+    if source_results.is_empty() {
+        let result = transcribe_recording_in_chunks(
+            app,
+            Arc::clone(&asr_manager),
+            recording_id,
+            mixed_audio_path,
+            provider,
+            model_id,
+        )
+        .await?;
+        let requested_provider = result.requested_provider;
+        let actual_provider = result.actual_provider;
+        let requested_engine = result.requested_engine.clone();
+        let actual_engine = result.actual_engine.clone();
+        let optimization_applied = result.optimization_applied;
+        let fallback_reason = result.fallback_reason.clone();
+        return Ok(MeetingTranscriptionOutput {
+            transcript: build_models_transcript_from_asr_result(recording_id, result),
+            requested_provider,
+            actual_provider,
+            requested_engine,
+            actual_engine,
+            optimization_applied,
+            fallback_reason,
+        });
+    }
+
+    let transcript =
+        build_source_aware_models_transcript(recording_id, provider, &model_id, source_results);
+
+    Ok(MeetingTranscriptionOutput {
+        transcript,
+        requested_provider: provider,
+        actual_provider: provider,
+        requested_engine: None,
+        actual_engine: None,
+        optimization_applied: false,
+        fallback_reason: None,
+    })
 }
 
 fn normalize_silence_timeout_seconds(value: f32) -> f32 {

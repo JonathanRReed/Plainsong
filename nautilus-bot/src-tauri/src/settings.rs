@@ -124,6 +124,8 @@ pub struct TranscriptionSettings {
     pub meeting_provider: String,
     /// Dedicated model identifier for meetings when shared selection is disabled.
     pub meeting_model_id: String,
+    /// Meeting route policy: prefer_local or best_available.
+    pub meeting_route_policy: String,
     /// Provider-specific model identifiers (keyed by provider value, e.g. "whisper")
     pub provider_model_ids: HashMap<String, String>,
     /// Auto-transcribe after recording
@@ -239,6 +241,7 @@ impl Default for TranscriptionSettings {
             dictation_model_id: "distil-large-v3.5".to_string(),
             meeting_provider: "distil_whisper".to_string(),
             meeting_model_id: "distil-large-v3.5".to_string(),
+            meeting_route_policy: "prefer_local".to_string(),
             provider_model_ids: HashMap::new(),
             auto_transcribe: true,
             enable_diarization: true,
@@ -536,6 +539,11 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
     {
         transcription.dictation_insertion_mode = "paste".to_string();
     }
+
+    transcription.meeting_route_policy = match transcription.meeting_route_policy.trim() {
+        "best_available" => "best_available".to_string(),
+        _ => "prefer_local".to_string(),
+    };
 }
 
 /// Update channel (stable or beta)

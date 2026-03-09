@@ -29,10 +29,14 @@ export interface SetupStatusSnapshot {
   permissions: PermissionDiagnostics | null;
   systemAudioAvailable: boolean | null;
   loopbackDevice: string | null;
+  meetingCaptureMode: "me_and_them" | "mic_only" | "unknown";
+  meetingRoutePolicy: "prefer_local" | "best_available";
   dictationRoute: SetupRouteStatus;
   meetingRoute: SetupRouteStatus;
   dictationReady: boolean;
   meetingReady: boolean;
+  dictationBlockers: string[];
+  meetingBlockers: string[];
 }
 
 function resolveSharedSelection(settings: Settings | null, kind: "dictation" | "meeting") {
@@ -147,6 +151,10 @@ function buildSnapshot(
 ): SetupStatusSnapshot {
   const dictationRoute = buildRouteStatus("dictation", settings, providers, permissions);
   const meetingRoute = buildRouteStatus("meeting", settings, providers, permissions);
+  const meetingRoutePolicy =
+    settings?.transcription.meetingRoutePolicy === "best_available"
+      ? "best_available"
+      : "prefer_local";
   const dictationReady = Boolean(
     permissions?.microphoneReady &&
       dictationRoute.ready &&
@@ -157,6 +165,32 @@ function buildSnapshot(
       meetingRoute.ready &&
       (systemAudioAvailable ?? false)
   );
+  const dictationBlockers = [
+    !permissions?.microphoneReady ? "Microphone permission is still required." : null,
+    !(permissions?.speechRecognitionReady ?? true)
+      ? "Speech Recognition permission is still required for Apple Native dictation."
+      : null,
+    !(permissions?.accessibilityReady ?? true)
+      ? "Accessibility is still required for reliable cursor insertion."
+      : null,
+    !dictationRoute.ready ? dictationRoute.reason : null,
+  ].filter((value): value is string => Boolean(value));
+  const meetingBlockers = [
+    !permissions?.microphoneReady ? "Microphone permission is still required." : null,
+    !meetingRoute.ready ? meetingRoute.reason : null,
+    systemAudioAvailable === false
+      ? "System audio capture is not available yet."
+      : null,
+    !loopbackDevice && systemAudioAvailable === false
+      ? "No loopback device was detected for meeting capture."
+      : null,
+  ].filter((value): value is string => Boolean(value));
+  const meetingCaptureMode =
+    systemAudioAvailable === null
+      ? "unknown"
+      : systemAudioAvailable
+        ? "me_and_them"
+        : "mic_only";
 
   return {
     settings,
@@ -164,10 +198,14 @@ function buildSnapshot(
     permissions,
     systemAudioAvailable,
     loopbackDevice,
+    meetingCaptureMode,
+    meetingRoutePolicy,
     dictationRoute,
     meetingRoute,
     dictationReady,
     meetingReady,
+    dictationBlockers,
+    meetingBlockers,
   };
 }
 

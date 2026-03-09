@@ -55,6 +55,9 @@ interface AsrProviderManagerProps {
 export function AsrProviderManager({
   className,
 }: AsrProviderManagerProps) {
+  const [meetingRoutePolicy, setMeetingRoutePolicy] = useState<"prefer_local" | "best_available">(
+    "prefer_local"
+  );
   const [providers, setProviders] = useState<AsrProviderInfo[]>([]);
   const [defaultProvider, setDefaultProvider] = useState<AsrProviderType>("whisper");
   const [defaultModelId, setDefaultModelId] = useState("distil-large-v3.5");
@@ -385,6 +388,10 @@ export function AsrProviderManager({
         (settings.transcription.meetingProvider as AsrProviderType) ?? loadedDefaultProvider;
       const loadedMeetingModelId =
         settings.transcription.meetingModelId ?? loadedDefaultModelId;
+      const loadedMeetingRoutePolicy =
+        settings.transcription.meetingRoutePolicy === "best_available"
+          ? "best_available"
+          : "prefer_local";
       const sharedProviderEligible = !dictationOnlyProviders.has(loadedDefaultProvider);
       const sharedModelEligible =
         !loadedDefaultModelId.trim() ||
@@ -420,6 +427,7 @@ export function AsrProviderManager({
       setDictationModelId(sanitizedDictationModelId);
       setMeetingProvider(sanitizedMeetingProvider);
       setMeetingModelId(sanitizedMeetingModelId);
+      setMeetingRoutePolicy(loadedMeetingRoutePolicy);
     } catch (error) {
       console.error("Failed to load ASR selection settings:", error);
     }
@@ -433,6 +441,7 @@ export function AsrProviderManager({
     dictationModelId?: string;
     meetingProvider?: AsrProviderType;
     meetingModelId?: string;
+    meetingRoutePolicy?: "prefer_local" | "best_available";
   }) => {
     const settings = await getSettings();
     const nextUseShared = updates.useSharedAsrSelection ?? useSharedAsrSelection;
@@ -442,6 +451,7 @@ export function AsrProviderManager({
     const nextDictationModelId = updates.dictationModelId ?? dictationModelId;
     const nextMeetingProvider = updates.meetingProvider ?? meetingProvider;
     const nextMeetingModelId = updates.meetingModelId ?? meetingModelId;
+    const nextMeetingRoutePolicy = updates.meetingRoutePolicy ?? meetingRoutePolicy;
     const sanitizedShared =
       nextUseShared && isSharedMeetingCompatible(nextDefaultProvider, nextSelectedModelId);
     const splittingSharedSelection = nextUseShared && !sanitizedShared;
@@ -478,6 +488,7 @@ export function AsrProviderManager({
         dictationModelId: sanitizedDictationModelId,
         meetingProvider: sanitizedMeetingProvider,
         meetingModelId: sanitizedMeetingModelId,
+        meetingRoutePolicy: nextMeetingRoutePolicy,
       },
     });
 
@@ -488,6 +499,7 @@ export function AsrProviderManager({
     setDictationModelId(sanitizedDictationModelId);
     setMeetingProvider(sanitizedMeetingProvider);
     setMeetingModelId(sanitizedMeetingModelId);
+    setMeetingRoutePolicy(nextMeetingRoutePolicy);
     await loadProviders();
   };
 
@@ -1253,6 +1265,27 @@ export function AsrProviderManager({
                   separate stronger model instead.
                 </p>
               ) : null}
+              <label className="space-y-1 text-sm">
+                <span className="text-muted-foreground">Meeting quality policy</span>
+                <select
+                  className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                  value={meetingRoutePolicy}
+                  onChange={(event) => {
+                    void persistSelectionSettings({
+                      meetingRoutePolicy: event.target.value as "prefer_local" | "best_available",
+                    }).catch((error) => {
+                      console.error("Failed to update meeting route policy:", error);
+                    });
+                  }}
+                >
+                  <option value="prefer_local">Prefer local</option>
+                  <option value="best_available">Best available</option>
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  Prefer local keeps meetings on-device when a meeting-grade model is ready. Best
+                  available prefers the strongest configured meeting route, including cloud.
+                </p>
+              </label>
 
               <div className={cn("grid gap-4", useSharedAsrSelection ? "md:grid-cols-2" : "md:grid-cols-4")}>
                 <label className="space-y-1 text-sm">

@@ -68,7 +68,9 @@ pub struct RecordingSession {
 struct ActiveRecordingSession {
     id: String,
     audio_path: PathBuf,
-    writer_handle: Option<JoinHandle<()>>,
+    mic_audio_path: Option<PathBuf>,
+    system_audio_path: Option<PathBuf>,
+    writer_handles: Vec<JoinHandle<()>>,
     capture_stop_flag: Arc<AtomicBool>,
     capture_handle: Option<JoinHandle<()>>,
     mixed_capture: Option<MixedAudioCapture>,
@@ -84,6 +86,8 @@ struct ActiveRecordingSession {
 
 pub struct RecordingStopResult {
     pub audio_path: String,
+    pub mic_audio_path: Option<String>,
+    pub system_audio_path: Option<String>,
     pub content_hash: String,
     pub dropped_stream_chunks: u64,
     pub dropped_writer_chunks: u64,
@@ -607,7 +611,7 @@ impl AudioCapture {
         // Use MixedAudioCapture if system audio is requested
         if options.system_audio {
             let mut mixed_capture = MixedAudioCapture::new();
-            let (receiver, sample_rate) = mixed_capture
+            let capture_start = mixed_capture
                 .start(
                     options.mic,
                     options.system_audio,
@@ -615,19 +619,56 @@ impl AudioCapture {
                     Some(Arc::clone(&streaming_queue)),
                 )
                 .context("Failed to start mixed audio capture")?;
+            let sample_rate = capture_start.sample_rate;
+            let mixed_receiver = capture_start.mixed_receiver;
+            let mic_receiver = capture_start.mic_receiver;
+            let system_receiver = capture_start.system_receiver;
+
+            let audio_stem = audio_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("recording")
+                .to_string();
+            let mic_audio_path = options
+                .mic
+                .then(|| self.recordings_dir.join(format!("{}_mic.wav", audio_stem)));
+            let system_audio_path = options.system_audio.then(|| {
+                self.recordings_dir
+                    .join(format!("{}_system.wav", audio_stem))
+            });
+
+            let mut writer_handles = Vec::new();
 
             // Spawn writer thread for mixed audio
             let audio_path_clone = audio_path.clone();
-            let writer_handle = std::thread::spawn(move || {
-                if let Err(e) = write_wav_file(&audio_path_clone, receiver, sample_rate) {
+            writer_handles.push(std::thread::spawn(move || {
+                if let Err(e) = write_wav_file(&audio_path_clone, mixed_receiver, sample_rate) {
                     tracing::error!("Failed to write WAV file: {}", e);
                 }
-            });
+            }));
+
+            if let (Some(path), Some(receiver)) = (mic_audio_path.clone(), mic_receiver) {
+                writer_handles.push(std::thread::spawn(move || {
+                    if let Err(e) = write_wav_file(&path, receiver, sample_rate) {
+                        tracing::error!("Failed to write microphone sidecar WAV file: {}", e);
+                    }
+                }));
+            }
+
+            if let (Some(path), Some(receiver)) = (system_audio_path.clone(), system_receiver) {
+                writer_handles.push(std::thread::spawn(move || {
+                    if let Err(e) = write_wav_file(&path, receiver, sample_rate) {
+                        tracing::error!("Failed to write system-audio sidecar WAV file: {}", e);
+                    }
+                }));
+            }
 
             self.active_recording = Some(ActiveRecordingSession {
                 id: id.clone(),
                 audio_path,
-                writer_handle: Some(writer_handle),
+                mic_audio_path,
+                system_audio_path,
+                writer_handles,
                 capture_stop_flag: Arc::new(AtomicBool::new(false)),
                 capture_handle: None,
                 mixed_capture: Some(mixed_capture),
@@ -809,7 +850,9 @@ impl AudioCapture {
             self.active_recording = Some(ActiveRecordingSession {
                 id: id.clone(),
                 audio_path,
-                writer_handle: Some(writer_handle),
+                mic_audio_path: None,
+                system_audio_path: None,
+                writer_handles: vec![writer_handle],
                 capture_stop_flag,
                 capture_handle: Some(capture_handle),
                 mixed_capture: None,
@@ -861,7 +904,7 @@ impl AudioCapture {
             dropped_mixed_chunks = mixed_chunks;
         }
 
-        if let Some(handle) = session.writer_handle.take() {
+        for handle in session.writer_handles.drain(..) {
             join_thread_with_timeout(handle, Duration::from_secs(20), "wav writer thread")?;
         }
 
@@ -899,6 +942,14 @@ impl AudioCapture {
 
         Ok(RecordingStopResult {
             audio_path: path.to_string_lossy().to_string(),
+            mic_audio_path: session
+                .mic_audio_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            system_audio_path: session
+                .system_audio_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
             content_hash: hash,
             dropped_stream_chunks,
             dropped_writer_chunks,

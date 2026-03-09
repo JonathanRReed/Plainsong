@@ -2,12 +2,18 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   getRecording,
+  getMeetingTranscriptDetails,
   getRecordingWaveform,
   getSpeakers,
   getTranscript,
 } from "@/lib/tauri";
 import { useScopedRequestGuard } from "@/hooks/use-scoped-request-guard";
-import type { Recording, Transcript, TranscriptSegment } from "@/types";
+import type {
+  MeetingTranscriptDetails,
+  Recording,
+  Transcript,
+  TranscriptSegment,
+} from "@/types";
 
 function normalizeTranscriptForViewer(
   transcript: Transcript | null,
@@ -78,6 +84,8 @@ export function useRecordingDetail({
 }: UseRecordingDetailOptions) {
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null);
   const [selectedTranscript, setSelectedTranscript] = useState<Transcript | null>(null);
+  const [selectedTranscriptDetails, setSelectedTranscriptDetails] =
+    useState<MeetingTranscriptDetails | null>(null);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [waveformData, setWaveformData] = useState<number[]>([]);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
@@ -102,6 +110,10 @@ export function useRecordingDetail({
   const fetchTranscript = useCallback(async (recordingId: string) => {
     const transcript = await getTranscript(recordingId);
     return normalizeTranscriptForViewer(transcript, recordingId);
+  }, []);
+
+  const fetchTranscriptDetails = useCallback(async (recordingId: string) => {
+    return await getMeetingTranscriptDetails(recordingId);
   }, []);
 
   const fetchWaveform = useCallback(async (recordingId: string) => {
@@ -147,6 +159,18 @@ export function useRecordingDetail({
     [detailRequestGuard, fetchTranscript]
   );
 
+  const refreshTranscriptDetails = useCallback(
+    async (recordingId: string) => {
+      const details = await fetchTranscriptDetails(recordingId);
+      if (detailRequestGuard.activeScopeRef.current !== recordingId) {
+        return null;
+      }
+      setSelectedTranscriptDetails(details);
+      return details;
+    },
+    [detailRequestGuard, fetchTranscriptDetails]
+  );
+
   const loadRecordingDetail = useCallback(
     async (recording: Recording) => {
       const requestToken = detailRequestGuard.beginRequest(recording.id);
@@ -154,14 +178,22 @@ export function useRecordingDetail({
       setIsLoadingDetail(true);
       setDetailError(null);
       setSelectedTranscript(null);
+      setSelectedTranscriptDetails(null);
       setSpeakerNames({});
       setWaveformData([]);
 
       try {
-        const [recordingResult, transcriptResult, waveformResult, speakersResult] =
+        const [
+          recordingResult,
+          transcriptResult,
+          transcriptDetailsResult,
+          waveformResult,
+          speakersResult,
+        ] =
           await Promise.allSettled([
             fetchSelectedRecording(recording.id),
             fetchTranscript(recording.id),
+            fetchTranscriptDetails(recording.id),
             fetchWaveform(recording.id),
             fetchSpeakerNames(recording.id),
           ]);
@@ -183,6 +215,13 @@ export function useRecordingDetail({
         } else {
           hadAnyFailure = true;
           setSelectedTranscript(null);
+        }
+
+        if (transcriptDetailsResult.status === "fulfilled") {
+          setSelectedTranscriptDetails(transcriptDetailsResult.value);
+        } else {
+          hadAnyFailure = true;
+          setSelectedTranscriptDetails(null);
         }
 
         if (waveformResult.status === "fulfilled") {
@@ -217,13 +256,22 @@ export function useRecordingDetail({
         }
       }
     },
-    [applyLatestRecording, detailRequestGuard, fetchSelectedRecording, fetchSpeakerNames, fetchTranscript, fetchWaveform]
+    [
+      applyLatestRecording,
+      detailRequestGuard,
+      fetchSelectedRecording,
+      fetchSpeakerNames,
+      fetchTranscript,
+      fetchTranscriptDetails,
+      fetchWaveform,
+    ]
   );
 
   const clearRecordingDetail = useCallback(() => {
     detailRequestGuard.setScope(null);
     setSelectedRecording(null);
     setSelectedTranscript(null);
+    setSelectedTranscriptDetails(null);
     setSpeakerNames({});
     setWaveformData([]);
     setIsLoadingDetail(false);
@@ -245,6 +293,8 @@ export function useRecordingDetail({
         (event) => {
           if (event.payload?.recordingId === selectedRecording.id) {
             void refreshSelectedRecording(selectedRecording.id);
+            void refreshTranscript(selectedRecording.id);
+            void refreshTranscriptDetails(selectedRecording.id);
           }
         }
       );
@@ -258,6 +308,7 @@ export function useRecordingDetail({
           event.payload.recordingId === selectedRecording.id
         ) {
           void refreshSelectedRecording(selectedRecording.id);
+          void refreshTranscriptDetails(selectedRecording.id);
         }
       });
 
@@ -277,6 +328,8 @@ export function useRecordingDetail({
             event.payload.status === "error"
           ) {
             void refreshSelectedRecording(selectedRecording.id);
+            void refreshTranscript(selectedRecording.id);
+            void refreshTranscriptDetails(selectedRecording.id);
           }
         }
       );
@@ -288,7 +341,13 @@ export function useRecordingDetail({
       unlistenTitle?.();
       unlistenStatus?.();
     };
-  }, [isOpen, refreshSelectedRecording, selectedRecording]);
+  }, [
+    isOpen,
+    refreshSelectedRecording,
+    refreshTranscript,
+    refreshTranscriptDetails,
+    selectedRecording,
+  ]);
 
   useEffect(() => {
     if (!isOpen || !selectedRecording) {
@@ -311,6 +370,7 @@ export function useRecordingDetail({
         const [latestRecording] = await Promise.all([
           refreshSelectedRecording(selectedRecording.id),
           refreshTranscript(selectedRecording.id),
+          refreshTranscriptDetails(selectedRecording.id),
         ]);
         if (cancelled) return;
 
@@ -334,12 +394,20 @@ export function useRecordingDetail({
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [isOpen, refreshSelectedRecording, refreshTranscript, selectedRecording, selectedTranscript]);
+  }, [
+    isOpen,
+    refreshSelectedRecording,
+    refreshTranscript,
+    refreshTranscriptDetails,
+    selectedRecording,
+    selectedTranscript,
+  ]);
 
   return {
     selectedRecording,
     setSelectedRecording,
     selectedTranscript,
+    selectedTranscriptDetails,
     setSelectedTranscript,
     speakerNames,
     setSpeakerNames,
@@ -349,6 +417,7 @@ export function useRecordingDetail({
     loadRecordingDetail,
     refreshSelectedRecording,
     refreshTranscript,
+    refreshTranscriptDetails,
     clearRecordingDetail,
   };
 }

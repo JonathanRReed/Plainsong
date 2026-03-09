@@ -136,6 +136,7 @@ describe("Platform optimization settings", () => {
         dictationModelId: "distil-large-v3.5",
         meetingProvider: "distil_whisper",
         meetingModelId: "distil-large-v3.5",
+        meetingRoutePolicy: "prefer_local",
         platformOptimization: {
           mode: "auto",
           fallbackPolicy: "local_only",
@@ -220,6 +221,7 @@ describe("Platform optimization settings", () => {
         dictationModelId: "macos_apple_speech",
         meetingProvider: "macos_apple_speech",
         meetingModelId: "macos_apple_speech",
+        meetingRoutePolicy: "prefer_local",
         platformOptimization: {
           mode: "auto",
           fallbackPolicy: "local_only",
@@ -275,6 +277,7 @@ describe("Platform optimization settings", () => {
         dictationModelId: "macos_apple_speech",
         meetingProvider: "macos_apple_speech",
         meetingModelId: "macos_apple_speech",
+        meetingRoutePolicy: "prefer_local",
         platformOptimization: {
           mode: "auto",
           fallbackPolicy: "local_only",
@@ -346,6 +349,7 @@ describe("Platform optimization settings", () => {
         dictationModelId: "macos_apple_speech",
         meetingProvider: "macos_apple_speech",
         meetingModelId: "macos_apple_speech",
+        meetingRoutePolicy: "prefer_local",
         platformOptimization: {
           mode: "auto",
           fallbackPolicy: "local_only",
@@ -390,6 +394,7 @@ describe("Platform optimization settings", () => {
         dictationModelId: "base.en",
         meetingProvider: "whisper",
         meetingModelId: "small.en",
+        meetingRoutePolicy: "prefer_local",
         platformOptimization: {
           mode: "auto",
           fallbackPolicy: "local_only",
@@ -412,6 +417,21 @@ describe("Platform optimization settings", () => {
     ).map((option) => option.getAttribute("value") ?? "");
     expect(optionValues).not.toContain("whisper");
     expect(optionValues).toContain("distil_whisper");
+  });
+
+  it("persists meeting route policy changes", async () => {
+    render(<AsrProviderManager />);
+
+    const meetingPolicySelect = await screen.findByDisplayValue("Prefer local");
+    fireEvent.change(meetingPolicySelect, { target: { value: "best_available" } });
+
+    await waitFor(() => {
+      expect(saveSettingsMock).toHaveBeenCalled();
+    });
+
+    const savedPayload =
+      saveSettingsMock.mock.calls[saveSettingsMock.mock.calls.length - 1]?.[0];
+    expect(savedPayload.transcription.meetingRoutePolicy).toBe("best_available");
   });
 
   it("treats Accessibility as the insertion gate even when Automation is unavailable", async () => {

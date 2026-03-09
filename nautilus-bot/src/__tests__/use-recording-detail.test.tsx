@@ -27,6 +27,18 @@ const tauriMocks = vi.hoisted(() => ({
     model: "Apple Native Speech",
     segments: [],
   })),
+  getMeetingTranscriptDetails: vi.fn(async () => ({
+    segmentCount: 1,
+    model: "Distil Whisper",
+    modelId: "distil-large-v3",
+    requestedProvider: "distil_whisper",
+    actualProvider: "distil_whisper",
+    qualityScore: 0.91,
+    transcriptionLatencyMs: 640,
+    sourceMode: "me_them",
+    hasSourceAwareSpeakers: true,
+    hasSpeakerLabels: true,
+  })),
   getRecordingWaveform: vi.fn(async () => [0.1, 0.5, 0.2]),
   getSpeakers: vi.fn(async () => []),
 }));
@@ -34,6 +46,7 @@ const tauriMocks = vi.hoisted(() => ({
 vi.mock("@/lib/tauri", () => ({
   getRecording: tauriMocks.getRecording,
   getTranscript: tauriMocks.getTranscript,
+  getMeetingTranscriptDetails: tauriMocks.getMeetingTranscriptDetails,
   getRecordingWaveform: tauriMocks.getRecordingWaveform,
   getSpeakers: tauriMocks.getSpeakers,
 }));
@@ -72,5 +85,7 @@ describe("useRecordingDetail", () => {
       "dictation popup lag"
     );
     expect(result.current.selectedTranscript?.segments[0]?.endTime).toBeGreaterThan(0);
+    expect(result.current.selectedTranscriptDetails?.sourceMode).toBe("me_them");
+    expect(result.current.selectedTranscriptDetails?.qualityScore).toBe(0.91);
   });
 });

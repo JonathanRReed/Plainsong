@@ -235,4 +235,101 @@ describe("DictationPopup", () => {
 
     expect(screen.getByText("00:02")).toBeInTheDocument();
   });
+
+  it("resets the timer cleanly when a new session starts after idle", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-09T12:00:00.000Z"));
+
+    popupMocks.invoke.mockResolvedValueOnce({
+      phase: "recording",
+      startedAtMs: Date.now(),
+      sessionId: 22,
+      resolvedModePreset: "voice",
+      resolvedModeLabel: "Voice",
+      contextSource: "none",
+      insertionMode: "paste",
+      appTarget: "Codex",
+      dictationProvider: "distil_whisper",
+      dictationModelId: "distil-large-v3.5",
+    });
+
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      vi.advanceTimersByTime(2100);
+    });
+
+    expect(screen.getByText("00:02")).toBeInTheDocument();
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+    expect(handler).toBeDefined();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "idle",
+          sessionId: 22,
+        },
+      });
+    });
+
+    await act(async () => {
+      vi.setSystemTime(new Date("2026-03-09T12:00:10.000Z"));
+      handler?.({
+        payload: {
+          phase: "primed",
+          startedAtMs: Date.now(),
+          sessionId: 23,
+          resolvedModePreset: "voice",
+          resolvedModeLabel: "Voice",
+          contextSource: "none",
+          insertionMode: "paste",
+          appTarget: "Codex",
+          dictationProvider: "distil_whisper",
+          dictationModelId: "distil-large-v3.5",
+        },
+      });
+      handler?.({
+        payload: {
+          phase: "recording",
+          sessionId: 23,
+          resolvedModePreset: "voice",
+          resolvedModeLabel: "Voice",
+          contextSource: "none",
+          insertionMode: "paste",
+          appTarget: "Codex",
+          dictationProvider: "distil_whisper",
+          dictationModelId: "distil-large-v3.5",
+        },
+      });
+      vi.advanceTimersByTime(1100);
+    });
+
+    expect(screen.getByText("00:01")).toBeInTheDocument();
+  });
+
+  it("shows the primed state without faking active recording time", async () => {
+    popupMocks.invoke.mockResolvedValueOnce({
+      phase: "primed",
+      startedAtMs: Date.now(),
+      sessionId: 30,
+      resolvedModePreset: "voice",
+      resolvedModeLabel: "Voice",
+      contextSource: "none",
+      insertionMode: "paste",
+      appTarget: "Codex",
+      dictationProvider: "distil_whisper",
+      dictationModelId: "distil-large-v3.5",
+    });
+
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    expect(await screen.findByText("Mic primed")).toBeInTheDocument();
+    expect(screen.getByText("--:--")).toBeInTheDocument();
+  });
 });

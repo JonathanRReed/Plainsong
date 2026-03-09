@@ -27,8 +27,9 @@ interface RecordingState {
 }
 
 interface DictationStateChangedEvent {
-  phase: "idle" | "starting" | "recording" | "stopping" | "transcribing" | "done" | "error";
+  phase: "idle" | "primed" | "recording" | "stopping" | "transcribing" | "done" | "error";
   startedAtMs?: number | null;
+  sessionId?: number | null;
 }
 
 interface MeetingRecordingStateChangedEvent {
@@ -205,6 +206,12 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
         (event) => {
           const payload = event.payload;
           if (payload.phase === "recording") {
+            if (
+              stateRef.current.recordingMode === "dictation" &&
+              stateRef.current.isRecording
+            ) {
+              return;
+            }
             setState({
               isRecording: true,
               recordingId: null,
@@ -216,11 +223,18 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
             return;
           }
 
-          if (payload.phase === "starting") {
+          if (payload.phase === "primed") {
+            if (
+              stateRef.current.recordingMode === "dictation" &&
+              stateRef.current.isRecording
+            ) {
+              return;
+            }
             setState((prev) => ({
               ...prev,
               isRecording: true,
               recordingMode: "dictation",
+              duration: 0,
               isSystemAudioActive: false,
             }));
             return;

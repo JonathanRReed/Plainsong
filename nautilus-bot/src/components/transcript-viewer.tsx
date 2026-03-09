@@ -25,9 +25,24 @@ interface SpeakerBadgeProps {
   onRename?: (newName: string) => void;
 }
 
+function defaultSpeakerLabel(speakerId: string) {
+  const normalized = speakerId.trim().toLowerCase();
+  if (normalized === "me") {
+    return "Me";
+  }
+  if (normalized === "them") {
+    return "Them";
+  }
+  return speakerId;
+}
+
 const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEditing, onRename }: SpeakerBadgeProps) {
   const [isEditMode, setIsEditMode] = useState(false);
-  const [editValue, setEditValue] = useState(speakerName || speakerId);
+  const [editValue, setEditValue] = useState(speakerName || defaultSpeakerLabel(speakerId));
+
+  useEffect(() => {
+    setEditValue(speakerName || defaultSpeakerLabel(speakerId));
+  }, [speakerId, speakerName]);
 
   const handleSave = () => {
     if (onRename && editValue.trim()) {
@@ -65,7 +80,7 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
     <div className="flex items-center gap-1 group">
       <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-trusted/10 text-trusted text-xs font-medium">
         <User className="h-3 w-3" />
-        <span>{speakerName || speakerId}</span>
+        <span>{speakerName || defaultSpeakerLabel(speakerId)}</span>
       </div>
       {isEditing && (
         <Button
