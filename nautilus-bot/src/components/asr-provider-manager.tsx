@@ -83,6 +83,59 @@ export function AsrProviderManager({
     { value: "windows_foundry_local", label: "Windows Foundry Local" },
   ] as const;
 
+  const dictationOnlyProviders = new Set<AsrProviderType>([
+    "macos_apple_speech",
+    "windows_sdk_dictation",
+    "moonshine",
+    "whisper",
+  ]);
+
+  const isMeetingEligibleProvider = (providerType: AsrProviderType) =>
+    !dictationOnlyProviders.has(providerType);
+
+  const isMeetingEligibleModel = (providerType: AsrProviderType, modelId: string) => {
+    if (!isMeetingEligibleProvider(providerType)) {
+      return false;
+    }
+    const normalizedModelId = modelId.trim();
+    if (!normalizedModelId) {
+      return true;
+    }
+    return modelOptionsForProvider(providerType).some((option) => option.id === normalizedModelId);
+  };
+
+  const isSharedMeetingCompatible = (providerType: AsrProviderType, modelId: string) =>
+    isMeetingEligibleProvider(providerType) && isMeetingEligibleModel(providerType, modelId);
+
+  const fallbackMeetingProvider = (preferred?: AsrProviderType) => {
+    if (preferred && isMeetingEligibleProvider(preferred)) {
+      return preferred;
+    }
+
+    const providerFromList = providers.find((provider) =>
+      isMeetingEligibleProvider(provider.providerType)
+    )?.providerType;
+
+    return providerFromList ?? "distil_whisper";
+  };
+
+  const meetingModelOptionsForProvider = (providerType: AsrProviderType) =>
+    modelOptionsForProvider(providerType).filter((option) =>
+      isMeetingEligibleModel(providerType, option.id)
+    );
+
+  const fallbackMeetingModel = (providerType: AsrProviderType, preferred?: string) => {
+    if (preferred && isMeetingEligibleModel(providerType, preferred)) {
+      return preferred;
+    }
+
+    return (
+      meetingModelOptionsForProvider(providerType)[0]?.id ??
+      modelOptionsForProvider(providerType)[0]?.id ??
+      providerType
+    );
+  };
+
   const defaultPlatformSettings = (): PlatformOptimizationSettings => ({
     mode: "auto",
     fallbackPolicy: "local_only",
@@ -204,11 +257,15 @@ export function AsrProviderManager({
   ]);
 
   useEffect(() => {
-    loadProviders();
-    loadSelectionSettings();
-    loadBenchmarkHistory();
-    loadPlatformSettings();
-    void refreshPermissionDiagnostics();
+    const bootstrap = async () => {
+      const loadedProviders = await loadProviders();
+      await loadSelectionSettings(loadedProviders);
+      await loadBenchmarkHistory();
+      await loadPlatformSettings();
+      await refreshPermissionDiagnostics();
+    };
+
+    void bootstrap();
 
     // Listen for download progress events
     void listen<[AsrProviderType, number]>("asr-download-progress", (event) => {
@@ -236,7 +293,8 @@ export function AsrProviderManager({
 
   const refreshAppleNativeReadiness = async () => {
     const diagnostics = await refreshPermissionDiagnostics();
-    await Promise.all([loadProviders(), loadSelectionSettings()]);
+    const loadedProviders = await loadProviders();
+    await loadSelectionSettings(loadedProviders);
     return diagnostics;
   };
 
@@ -295,37 +353,66 @@ export function AsrProviderManager({
       const data = await invoke<AsrProviderInfo[]>("get_asr_providers");
       // Model options are already included in provider info - no need for extra API calls
       setProviders(data);
+      return data;
     } catch (error) {
       console.error("Failed to load ASR providers:", error);
+      return [];
     }
   };
 
-  const loadSelectionSettings = async () => {
+  const loadSelectionSettings = async (providerListOverride?: AsrProviderInfo[]) => {
     try {
+      const providerList = providerListOverride ?? providers;
+      const modelOptionsForProviderFromList = (providerType: AsrProviderType) =>
+        providerList.find((provider) => provider.providerType === providerType)?.modelOptions ?? [];
       const settings = await getSettings();
-      setDefaultProvider((settings.transcription.defaultProvider as AsrProviderType) ?? "distil_whisper");
-      setDefaultModelId(settings.transcription.selectedModelId ?? "distil-large-v3.5");
-      setUseSharedAsrSelection(settings.transcription.useSharedAsrSelection ?? true);
-      setDictationProvider(
+      const loadedDefaultProvider =
+        (settings.transcription.defaultProvider as AsrProviderType) ?? "distil_whisper";
+      const loadedDefaultModelId = settings.transcription.selectedModelId ?? "distil-large-v3.5";
+      const loadedDictationProvider =
         (settings.transcription.dictationProvider as AsrProviderType) ??
-          (settings.transcription.defaultProvider as AsrProviderType) ??
-          "distil_whisper"
-      );
-      setDictationModelId(
-        settings.transcription.dictationModelId ??
-          settings.transcription.selectedModelId ??
-          "distil-large-v3.5"
-      );
-      setMeetingProvider(
-        (settings.transcription.meetingProvider as AsrProviderType) ??
-          (settings.transcription.defaultProvider as AsrProviderType) ??
-          "distil_whisper"
-      );
-      setMeetingModelId(
-        settings.transcription.meetingModelId ??
-          settings.transcription.selectedModelId ??
-          "distil-large-v3.5"
-      );
+        loadedDefaultProvider;
+      const loadedDictationModelId =
+        settings.transcription.dictationModelId ?? loadedDefaultModelId;
+      const loadedMeetingProvider =
+        (settings.transcription.meetingProvider as AsrProviderType) ?? loadedDefaultProvider;
+      const loadedMeetingModelId =
+        settings.transcription.meetingModelId ?? loadedDefaultModelId;
+      const sharedProviderEligible = !dictationOnlyProviders.has(loadedDefaultProvider);
+      const sharedModelEligible =
+        !loadedDefaultModelId.trim() ||
+        modelOptionsForProviderFromList(loadedDefaultProvider).some(
+          (option) => option.id === loadedDefaultModelId.trim()
+        );
+      const sanitizedShared =
+        (settings.transcription.useSharedAsrSelection ?? true) &&
+        sharedProviderEligible &&
+        sharedModelEligible;
+      const splittingSharedSelection =
+        (settings.transcription.useSharedAsrSelection ?? true) && !sanitizedShared;
+      const sanitizedDictationProvider = splittingSharedSelection
+        ? loadedDefaultProvider
+        : loadedDictationProvider;
+      const sanitizedDictationModelId = splittingSharedSelection
+        ? loadedDefaultModelId
+        : loadedDictationModelId;
+      const sanitizedMeetingProvider = sanitizedShared
+        ? loadedDefaultProvider
+        : fallbackMeetingProvider(loadedMeetingProvider);
+      const sanitizedMeetingModelId = sanitizedShared
+        ? loadedDefaultModelId
+        : fallbackMeetingModel(
+            sanitizedMeetingProvider,
+            loadedMeetingProvider === sanitizedMeetingProvider ? loadedMeetingModelId : undefined
+          );
+
+      setDefaultProvider(loadedDefaultProvider);
+      setDefaultModelId(loadedDefaultModelId);
+      setUseSharedAsrSelection(sanitizedShared);
+      setDictationProvider(sanitizedDictationProvider);
+      setDictationModelId(sanitizedDictationModelId);
+      setMeetingProvider(sanitizedMeetingProvider);
+      setMeetingModelId(sanitizedMeetingModelId);
     } catch (error) {
       console.error("Failed to load ASR selection settings:", error);
     }
@@ -348,28 +435,52 @@ export function AsrProviderManager({
     const nextDictationModelId = updates.dictationModelId ?? dictationModelId;
     const nextMeetingProvider = updates.meetingProvider ?? meetingProvider;
     const nextMeetingModelId = updates.meetingModelId ?? meetingModelId;
+    const sanitizedShared =
+      nextUseShared && isSharedMeetingCompatible(nextDefaultProvider, nextSelectedModelId);
+    const splittingSharedSelection = nextUseShared && !sanitizedShared;
+    const sanitizedMeetingProvider = sanitizedShared
+      ? nextDefaultProvider
+      : fallbackMeetingProvider(nextMeetingProvider);
+    const sanitizedMeetingModelId = sanitizedShared
+      ? nextSelectedModelId
+      : fallbackMeetingModel(
+          sanitizedMeetingProvider,
+          sanitizedMeetingProvider === nextMeetingProvider ? nextMeetingModelId : undefined
+        );
+    const sanitizedDictationProvider =
+      splittingSharedSelection && !updates.dictationProvider
+        ? nextDefaultProvider
+        : sanitizedShared
+          ? nextDefaultProvider
+          : nextDictationProvider;
+    const sanitizedDictationModelId =
+      splittingSharedSelection && !updates.dictationModelId
+        ? nextSelectedModelId
+        : sanitizedShared
+          ? nextSelectedModelId
+          : nextDictationModelId;
 
     await saveSettings({
       ...settings,
       transcription: {
         ...settings.transcription,
-        useSharedAsrSelection: nextUseShared,
+        useSharedAsrSelection: sanitizedShared,
         defaultProvider: nextDefaultProvider,
         selectedModelId: nextSelectedModelId,
-        dictationProvider: nextUseShared ? nextDefaultProvider : nextDictationProvider,
-        dictationModelId: nextUseShared ? nextSelectedModelId : nextDictationModelId,
-        meetingProvider: nextUseShared ? nextDefaultProvider : nextMeetingProvider,
-        meetingModelId: nextUseShared ? nextSelectedModelId : nextMeetingModelId,
+        dictationProvider: sanitizedDictationProvider,
+        dictationModelId: sanitizedDictationModelId,
+        meetingProvider: sanitizedMeetingProvider,
+        meetingModelId: sanitizedMeetingModelId,
       },
     });
 
-    setUseSharedAsrSelection(nextUseShared);
+    setUseSharedAsrSelection(sanitizedShared);
     setDefaultProvider(nextDefaultProvider);
     setDefaultModelId(nextSelectedModelId);
-    setDictationProvider(nextUseShared ? nextDefaultProvider : nextDictationProvider);
-    setDictationModelId(nextUseShared ? nextSelectedModelId : nextDictationModelId);
-    setMeetingProvider(nextUseShared ? nextDefaultProvider : nextMeetingProvider);
-    setMeetingModelId(nextUseShared ? nextSelectedModelId : nextMeetingModelId);
+    setDictationProvider(sanitizedDictationProvider);
+    setDictationModelId(sanitizedDictationModelId);
+    setMeetingProvider(sanitizedMeetingProvider);
+    setMeetingModelId(sanitizedMeetingModelId);
     await loadProviders();
   };
 
@@ -378,6 +489,10 @@ export function AsrProviderManager({
 
   const modelOptionsForProvider = (providerType: AsrProviderType) =>
     providerByType(providerType)?.modelOptions ?? [];
+
+  const meetingProviders = providers.filter((provider) =>
+    isMeetingEligibleProvider(provider.providerType)
+  );
 
   const providerUsesManagedModel = (providerType: AsrProviderType) =>
     providerType === "macos_apple_speech" || providerType === "windows_sdk_dictation";
@@ -760,7 +875,8 @@ export function AsrProviderManager({
     label: string,
     providerType: AsrProviderType,
     value: string,
-    onChange: (modelId: string) => void
+    onChange: (modelId: string) => void,
+    options?: Array<{ id: string; label: string }>
   ) => {
     if (providerUsesManagedModel(providerType)) {
       return (
@@ -781,7 +897,7 @@ export function AsrProviderManager({
           value={value}
           onChange={(event) => onChange(event.target.value)}
         >
-          {modelOptionsForProvider(providerType).map((option) => (
+          {(options ?? modelOptionsForProvider(providerType)).map((option) => (
             <option key={`${label}-${option.id}`} value={option.id}>
               {option.label}
             </option>
@@ -1122,6 +1238,13 @@ export function AsrProviderManager({
                   }}
                 />
               </label>
+              {!isSharedMeetingCompatible(defaultProvider, defaultModelId) ? (
+                <p className="text-xs text-amber-300">
+                  Meetings use meeting-grade ASR only. Apple Native Speech, Windows Native Speech,
+                  Moonshine, and standard Whisper are dictation-only, so meetings will use a
+                  separate stronger model instead.
+                </p>
+              ) : null}
 
               <div className={cn("grid gap-4", useSharedAsrSelection ? "md:grid-cols-2" : "md:grid-cols-4")}>
                 <label className="space-y-1 text-sm">
@@ -1189,27 +1312,22 @@ export function AsrProviderManager({
                       className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                       value={meetingProvider}
                       onChange={(event) => {
-                        const providerType = event.target.value as AsrProviderType;
-                        const nextModelId =
-                          modelOptionsForProvider(providerType)[0]?.id ?? providerType;
-                        void (async () => {
-                          try {
-                            await persistSelectionSettings({
-                              meetingProvider: providerType,
-                              meetingModelId: nextModelId,
-                            });
-                            if (providerType === "macos_apple_speech") {
-                              await requestDictationPermissions();
-                              await loadProviders();
-                              await loadSelectionSettings();
-                            }
-                          } catch (error) {
-                            console.error("Failed to update meeting ASR provider:", error);
-                          }
-                        })();
+                      const providerType = event.target.value as AsrProviderType;
+                      const nextModelId =
+                        meetingModelOptionsForProvider(providerType)[0]?.id ?? providerType;
+                      void (async () => {
+                        try {
+                          await persistSelectionSettings({
+                            meetingProvider: providerType,
+                            meetingModelId: nextModelId,
+                          });
+                        } catch (error) {
+                          console.error("Failed to update meeting ASR provider:", error);
+                        }
+                      })();
                       }}
                     >
-                      {providers.map((provider) => (
+                      {meetingProviders.map((provider) => (
                         <option key={`meeting-${provider.providerType}`} value={provider.providerType}>
                           {provider.name}
                         </option>
@@ -1224,7 +1342,7 @@ export function AsrProviderManager({
                       }).catch((error) => {
                         console.error("Failed to update meeting ASR model:", error);
                       });
-                    })
+                    }, meetingModelOptionsForProvider(meetingProvider))
                   : null}
               </div>
 

@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsView } from "@/components/views/settings-view-simple";
 import { ToastProvider } from "@/components/toast";
+import { OPEN_ONBOARDING_EVENT } from "@/lib/onboarding";
 
 const baseSettings = {
   audio: {
@@ -313,5 +314,31 @@ describe("SettingsView performance behavior", () => {
     const calls = vi.mocked(tauri.saveSettings).mock.calls;
     const lastCall = calls[calls.length - 1];
     expect(lastCall?.[0]?.ui?.colorScheme).toBe("rose-pine");
+  });
+
+  it("reopens the modular onboarding flows from guided setup", async () => {
+    const events: Array<string | undefined> = [];
+    const handler = (event: Event) => {
+      events.push((event as CustomEvent<{ mode?: string }>).detail?.mode);
+    };
+    window.addEventListener(OPEN_ONBOARDING_EVENT, handler as EventListener);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Storage"));
+    await screen.findByText("Guided setup");
+
+    fireEvent.click(screen.getByRole("button", { name: /rerun onboarding/i }));
+    fireEvent.click(screen.getByRole("button", { name: /fix dictation setup/i }));
+    fireEvent.click(screen.getByRole("button", { name: /set up meetings/i }));
+
+    expect(events).toEqual(["full", "dictation", "meetings"]);
+
+    window.removeEventListener(OPEN_ONBOARDING_EVENT, handler as EventListener);
   });
 });

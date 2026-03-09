@@ -607,18 +607,19 @@ impl AudioCapture {
         // Use MixedAudioCapture if system audio is requested
         if options.system_audio {
             let mut mixed_capture = MixedAudioCapture::new();
-            let receiver = mixed_capture
+            let (receiver, sample_rate) = mixed_capture
                 .start(
                     options.mic,
                     options.system_audio,
                     Arc::clone(&waveform_buffer),
+                    Some(Arc::clone(&streaming_queue)),
                 )
                 .context("Failed to start mixed audio capture")?;
 
             // Spawn writer thread for mixed audio
             let audio_path_clone = audio_path.clone();
             let writer_handle = std::thread::spawn(move || {
-                if let Err(e) = write_wav_file(&audio_path_clone, receiver, 44100) {
+                if let Err(e) = write_wav_file(&audio_path_clone, receiver, sample_rate) {
                     tracing::error!("Failed to write WAV file: {}", e);
                 }
             });
@@ -632,7 +633,7 @@ impl AudioCapture {
                 mixed_capture: Some(mixed_capture),
                 waveform_buffer,
                 streaming_queue,
-                sample_rate: 44100,
+                sample_rate,
                 dropped_stream_chunks: Arc::new(AtomicU64::new(0)),
                 dropped_writer_chunks: Arc::new(AtomicU64::new(0)),
             });

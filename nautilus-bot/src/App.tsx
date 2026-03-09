@@ -24,6 +24,12 @@ import { NagModal, shouldShowNag } from "@/components/nag-modal";
 import { FirstRunWizard } from "@/components/first-run-wizard";
 import { ToastProvider, useToast } from "@/components/toast";
 import { validateLicense } from "@/lib/tauri";
+import {
+  MEETING_ONBOARDING_STORAGE_KEY,
+  ONBOARDING_STORAGE_KEY,
+  OPEN_ONBOARDING_EVENT,
+  type OnboardingMode,
+} from "@/lib/onboarding";
 import type { LicenseInfo } from "@/lib/tauri";
 import { usePeriodicLicenseCheck } from "@/hooks/use-periodic-license-check";
 
@@ -127,8 +133,6 @@ function getOverlayMode(): OverlayMode {
   return null;
 }
 
-export const ONBOARDING_STORAGE_KEY = "nautilus_onboarding_complete";
-
 function OverlayBackgroundFix() {
   useEffect(() => {
     const overlay = getOverlayMode();
@@ -188,7 +192,7 @@ function App() {
 
   // UI overlays
   const [showActivationModal, setShowActivationModal] = useState(false);
-  const [showWizard, setShowWizard] = useState(false);
+  const [wizardMode, setWizardMode] = useState<OnboardingMode | null>(null);
   const [showNag, setShowNag] = useState(false);
 
   // Check license on startup (skip for overlay windows)
@@ -248,7 +252,7 @@ function App() {
       return;
     }
     const alreadyOnboarded = localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
-    setShowWizard(!alreadyOnboarded);
+    setWizardMode(alreadyOnboarded ? null : "full");
   }, [overlayMode, licenseChecked]);
 
   useEffect(() => {
@@ -273,15 +277,35 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const handleOpenOnboarding = (event: Event) => {
+      const detail = (event as CustomEvent<{ mode?: OnboardingMode }>).detail;
+      setWizardMode(detail?.mode ?? "full");
+    };
+
+    window.addEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding as EventListener);
+    return () => {
+      window.removeEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding as EventListener);
+    };
+  }, []);
+
   const handleActivated = (info: LicenseInfo) => {
     setLicense(info);
     setShowActivationModal(false);
     setShowNag(false);
   };
 
-  const handleWizardComplete = () => {
-    localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
-    setShowWizard(false);
+  const handleWizardComplete = (result?: {
+    markOnboardingComplete?: boolean;
+    meetingsCompleted?: boolean;
+  }) => {
+    if (result?.markOnboardingComplete ?? wizardMode === "full") {
+      localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
+    }
+    if (result?.meetingsCompleted) {
+      localStorage.setItem(MEETING_ONBOARDING_STORAGE_KEY, "true");
+    }
+    setWizardMode(null);
   };
 
   // ── Overlay windows (dictation popup, recording popup) ───────────────────
@@ -358,7 +382,7 @@ function App() {
                 )}
 
                 {/* First-run wizard (shown once after first activation) */}
-                {showWizard && <FirstRunWizard onComplete={handleWizardComplete} />}
+                {wizardMode && <FirstRunWizard mode={wizardMode} onComplete={handleWizardComplete} />}
               </DataCacheProvider>
             </RecordingProvider>
           </ErrorBoundary>

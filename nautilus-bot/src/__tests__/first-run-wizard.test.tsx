@@ -1,8 +1,55 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FirstRunWizard } from "@/components/first-run-wizard";
+import { MEETING_ONBOARDING_STORAGE_KEY } from "@/lib/onboarding";
+import type { AsrProviderInfo } from "@/types";
 
-const baseSettings = {
+const providers: AsrProviderInfo[] = [
+  {
+    providerType: "macos_apple_speech",
+    name: "Apple Native",
+    description: "Native dictation",
+    isAvailable: true,
+    inferenceEnabled: true,
+    modelInfo: {
+      name: "Apple Native",
+      version: "1",
+      sizeMb: 0,
+      parameters: "n/a",
+      languages: ["en"],
+      license: "Apple",
+      sourceUrl: "https://developer.apple.com",
+    },
+    selectedModelId: "apple-default",
+    modelOptions: [{ id: "apple-default", label: "Apple Native" }],
+    downloadStatus: "Downloaded",
+    runtimeStatus: "ready",
+    runtimeDetails: {},
+  },
+  {
+    providerType: "distil_whisper",
+    name: "Distil Whisper",
+    description: "Meeting-grade",
+    isAvailable: true,
+    inferenceEnabled: true,
+    modelInfo: {
+      name: "Distil Whisper",
+      version: "1",
+      sizeMb: 756,
+      parameters: "large-v3-distilled",
+      languages: ["en"],
+      license: "MIT",
+      sourceUrl: "https://huggingface.co",
+    },
+    selectedModelId: "distil-large-v3",
+    modelOptions: [{ id: "distil-large-v3", label: "Large V3" }],
+    downloadStatus: "Downloaded",
+    runtimeStatus: "ready",
+    runtimeDetails: {},
+  },
+];
+
+const createSettings = () => ({
   audio: {
     sampleRate: 16000,
     channels: 1,
@@ -15,8 +62,13 @@ const baseSettings = {
     manualGainDb: 0,
   },
   transcription: {
-    defaultProvider: "whisper",
-    selectedModelId: "base.en",
+    defaultProvider: "macos_apple_speech",
+    selectedModelId: "apple-default",
+    useSharedAsrSelection: true,
+    dictationProvider: "macos_apple_speech",
+    dictationModelId: "apple-default",
+    meetingProvider: "macos_apple_speech",
+    meetingModelId: "apple-default",
     providerModelIds: {},
     autoTranscribe: true,
     enableDiarization: true,
@@ -28,6 +80,7 @@ const baseSettings = {
     silenceSkipEnabled: false,
     dictationPasteToCursor: true,
     dictationCopyToClipboard: true,
+    dictationAutoRequestPermissions: true,
     dictationPushToTalk: true,
     dictationAiFormatting: false,
     dictationCustomPrompt: null,
@@ -91,103 +144,143 @@ const baseSettings = {
     focusSearch: "Ctrl+Shift+F",
   },
   updates: {
-    channel: "stable",
+    channel: "stable" as const,
     autoCheck: true,
     lastCheckAt: null,
     lastSeenVersion: null,
   },
   defaultTemplate: "meeting",
   theme: "system" as const,
-};
+});
+
+let currentSettings = createSettings();
+const storage = new Map<string, string>();
 
 vi.mock("@/lib/tauri", () => ({
+  checkSystemAudioAvailability: vi.fn(async () => true),
+  downloadWhisperModel: vi.fn(async () => {}),
+  getAsrProviders: vi.fn(async () => providers),
+  getLoopbackDeviceName: vi.fn(async () => "BlackHole 2ch"),
   getPermissionDiagnostics: vi.fn(async () => ({
     microphoneReady: true,
+    microphonePermissionReady: true,
     speechRecognitionReady: true,
     accessibilityReady: true,
     automationReady: true,
     notes: [],
+    runningFromDiskImage: false,
   })),
+  getSettings: vi.fn(async () => structuredClone(currentSettings)),
+  openInstalledNautilusApp: vi.fn(async () => {}),
+  openPermissionSettings: vi.fn(async () => {}),
   requestDictationPermissions: vi.fn(async () => ({
     microphoneReady: true,
+    microphonePermissionReady: true,
     speechRecognitionReady: true,
     accessibilityReady: true,
     automationReady: true,
     notes: [],
+    runningFromDiskImage: false,
   })),
-  openPermissionSettings: vi.fn(),
-  downloadWhisperModel: vi.fn(async () => {}),
-  getSettings: vi.fn(async () => structuredClone(baseSettings)),
-  saveSettings: vi.fn(async () => {}),
+  saveSettings: vi.fn(async (nextSettings) => {
+    currentSettings = structuredClone(nextSettings);
+  }),
 }));
+
+async function clickPrimary(label: RegExp) {
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: label }));
+  });
+}
 
 describe("FirstRunWizard", () => {
   beforeEach(() => {
+    currentSettings = createSettings();
+    storage.clear();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        storage.set(key, value);
+      },
+      removeItem: (key: string) => {
+        storage.delete(key);
+      },
+      clear: () => {
+        storage.clear();
+      },
+    });
     vi.clearAllMocks();
   });
 
-  it("persists power-user meeting retention and transcript-only settings", async () => {
+  it("completes the full onboarding in dictation-only mode", async () => {
     const onComplete = vi.fn();
     const tauri = await import("@/lib/tauri");
     const saveSettings = vi.mocked(tauri.saveSettings);
 
     render(<FirstRunWizard onComplete={onComplete} />);
-    fireEvent.click(screen.getByRole("button", { name: /Power User/i }));
 
-    const clickContinue = async () => {
-      await act(async () => {
-        fireEvent.click(screen.getByRole("button", { name: /Continue|Finish/i }));
-      });
-    };
-
-    await clickContinue(); // permissions -> model-choice
-    await clickContinue(); // model-choice -> hotkey
-    await clickContinue(); // hotkey save -> privacy
-
-    await screen.findByText("Meeting storage defaults");
-    const selects = screen.getAllByRole("combobox");
-    const meetingAudioSelect = selects[0];
-    const retentionSelect = selects[1];
-    const deleteModeSelect = selects[2];
-    fireEvent.change(meetingAudioSelect, { target: { value: "transcript_only" } });
-    fireEvent.change(retentionSelect, { target: { value: "custom" } });
-    const monthsInput = screen.getByRole("spinbutton");
-    fireEvent.change(monthsInput, { target: { value: "5" } });
-    fireEvent.change(deleteModeSelect, { target: { value: "audio_and_transcript" } });
-    await clickContinue(); // finish
+    await clickPrimary(/start with dictation/i);
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+    await clickPrimary(/finish/i);
 
     await waitFor(() => {
-      expect(onComplete).toHaveBeenCalled();
+      expect(onComplete).toHaveBeenCalledWith({
+        markOnboardingComplete: true,
+        meetingsCompleted: false,
+      });
     });
-    const lastSaved = saveSettings.mock.calls[saveSettings.mock.calls.length - 1]?.[0];
-    expect(lastSaved?.transcription.meetingAudioStorageMode).toBe("transcript_only");
-    expect(lastSaved?.transcription.meetingRetentionPreset).toBe("custom");
-    expect(lastSaved?.transcription.meetingRetentionCustomMonths).toBe(5);
-    expect(lastSaved?.transcription.meetingRetentionDeleteMode).toBe("audio_and_transcript");
+
+    expect(saveSettings).toHaveBeenCalledTimes(1);
+    expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+Space");
+    expect(currentSettings.transcription.dictationPushToTalk).toBe(true);
   });
 
-  it("keeps normal onboarding lightweight (no privacy-step save)", async () => {
+  it("repairs the meetings route in meetings-only onboarding", async () => {
     const onComplete = vi.fn();
-    const tauri = await import("@/lib/tauri");
-    const saveSettings = vi.mocked(tauri.saveSettings);
 
-    render(<FirstRunWizard onComplete={onComplete} />);
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Normal/i }));
+    render(<FirstRunWizard mode="meetings" onComplete={onComplete} />);
+
+    await screen.findByText(/meeting transcription route/i);
+    expect(
+      screen.getByText(/meetings need a meeting-grade asr route/i)
+    ).toBeInTheDocument();
+
+    await clickPrimary(/use recommended route/i);
+    await waitFor(() => {
+      expect(currentSettings.transcription.meetingProvider).toBe("distil_whisper");
     });
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Continue/i }));
-    }); // permissions -> model
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Continue/i }));
-    }); // model -> hotkey
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Finish/i }));
-    }); // hotkey -> finish
+
+    await clickPrimary(/finish meeting setup/i);
 
     await waitFor(() => {
-      expect(onComplete).toHaveBeenCalled();
+      expect(onComplete).toHaveBeenCalledWith({
+        markOnboardingComplete: false,
+        meetingsCompleted: true,
+      });
     });
-    expect(saveSettings).toHaveBeenCalledTimes(1);
+
+    expect(currentSettings.transcription.useSharedAsrSelection).toBe(false);
+    expect(currentSettings.transcription.meetingModelId).toBe("distil-large-v3");
+    expect(storage.get(MEETING_ONBOARDING_STORAGE_KEY)).toBe("true");
+  });
+
+  it("runs the dictation repair flow without marking full onboarding complete", async () => {
+    const onComplete = vi.fn();
+
+    render(<FirstRunWizard mode="dictation" onComplete={onComplete} />);
+
+    expect(screen.queryByText(/choose your setup/i)).not.toBeInTheDocument();
+
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+    await clickPrimary(/finish/i);
+
+    await waitFor(() => {
+      expect(onComplete).toHaveBeenCalledWith({
+        markOnboardingComplete: false,
+        meetingsCompleted: false,
+      });
+    });
   });
 });
