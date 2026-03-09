@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "@/lib/utils";
 import type { AsrProviderType } from "@/types/asr";
-import { downloadPlatformAssets } from "@/lib/tauri";
+import { downloadPlatformAssets, refreshAsrRuntimeProbes } from "@/lib/tauri";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -149,6 +149,7 @@ export function ModelDownloader({ className }: ModelDownloaderProps) {
       }, 500);
 
       await invoke("download_whisper_model", { modelName });
+      await refreshAsrRuntimeProbes();
       
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
@@ -186,6 +187,7 @@ export function ModelDownloader({ className }: ModelDownloaderProps) {
       } else if (platformEngine) {
         await downloadPlatformAssets(platformEngine);
       }
+      await refreshAsrRuntimeProbes();
       await loadDownloadedModels();
       await loadAvailableSpace();
     } catch (error) {

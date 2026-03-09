@@ -202,6 +202,7 @@ export function DictationPopup() {
   const [activationMatcher, setActivationMatcher] = useState<string | null>(null);
   const lastSessionIdRef = useRef<number | null>(null);
   const lastActiveStartedAtRef = useRef<number | null>(null);
+  const sessionClockStartedAtRef = useRef<number | null>(null);
 
   const refreshPopupSettings = async () => {
     const settings = await getSettings();
@@ -261,6 +262,7 @@ export function DictationPopup() {
     if (payload.phase === "idle") {
       lastSessionIdRef.current = null;
       lastActiveStartedAtRef.current = null;
+      sessionClockStartedAtRef.current = null;
       setStartedAtMs(null);
       setElapsed(0);
       return;
@@ -268,8 +270,14 @@ export function DictationPopup() {
 
     if (nextSessionId !== null && nextSessionId !== lastSessionIdRef.current) {
       lastSessionIdRef.current = nextSessionId;
-      lastActiveStartedAtRef.current = isActiveCapturePhase ? nextStartedAtMs : null;
-      setStartedAtMs(isActiveCapturePhase ? nextStartedAtMs : null);
+      const nextClockStart =
+        nextStartedAtMs ??
+        lastActiveStartedAtRef.current ??
+        sessionClockStartedAtRef.current ??
+        (isActiveCapturePhase ? Date.now() : null);
+      lastActiveStartedAtRef.current = nextClockStart;
+      sessionClockStartedAtRef.current = nextClockStart;
+      setStartedAtMs(nextClockStart);
       setElapsed(0);
       return;
     }
@@ -278,18 +286,20 @@ export function DictationPopup() {
       lastSessionIdRef.current = nextSessionId;
     }
 
-    if (payload.phase === "recording" && nextStartedAtMs !== null) {
+    if (isActiveCapturePhase && nextStartedAtMs !== null && lastActiveStartedAtRef.current === null) {
       lastActiveStartedAtRef.current = nextStartedAtMs;
-      setStartedAtMs(nextStartedAtMs);
-      return;
     }
 
-    if (lastActiveStartedAtRef.current !== null) {
-      setStartedAtMs(lastActiveStartedAtRef.current);
-      return;
-    }
+    const effectiveStartedAt =
+      lastActiveStartedAtRef.current ??
+      sessionClockStartedAtRef.current ??
+      nextStartedAtMs ??
+      (isActiveCapturePhase ? Date.now() : null);
 
-    setStartedAtMs(nextStartedAtMs);
+    if (effectiveStartedAt !== null) {
+      sessionClockStartedAtRef.current = effectiveStartedAt;
+      setStartedAtMs(effectiveStartedAt);
+    }
   };
 
   const handleStopFromPopup = async () => {
@@ -329,13 +339,12 @@ export function DictationPopup() {
       return;
     }
 
-    if (phase !== "recording") {
+    if (phase !== "recording" || startedAtMs === null) {
       return;
     }
 
     const tick = () => {
-      const start = startedAtMs ?? Date.now();
-      setElapsed(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+      setElapsed(Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000)));
     };
     tick();
     const id = setInterval(tick, 1000);
@@ -401,6 +410,12 @@ export function DictationPopup() {
 
   useEffect(() => {
     if (phase !== "idle") {
+      const showWindow = (window as typeof window & { show?: () => Promise<void> }).show;
+      if (typeof showWindow === "function") {
+        void showWindow.call(window).catch((error) => {
+          console.error("Failed to show dictation popup:", error);
+        });
+      }
       return;
     }
 

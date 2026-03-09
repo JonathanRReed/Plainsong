@@ -1,5 +1,5 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DictationPopup } from "@/components/popups/dictation-popup";
 
 function deferred<T>() {
@@ -49,6 +49,7 @@ const popupMocks = vi.hoisted(() => {
     stopDictation: vi.fn(async () => {}),
     windowHandle: {
       setSize: vi.fn(async () => {}),
+      show: vi.fn(async () => {}),
       hide: vi.fn(async () => {}),
       startDragging: vi.fn(async () => {}),
     },
@@ -96,8 +97,13 @@ describe("DictationPopup", () => {
     popupMocks.getDictationAudioLevel.mockClear();
     popupMocks.stopDictation.mockClear();
     popupMocks.windowHandle.setSize.mockClear();
+    popupMocks.windowHandle.show.mockClear();
     popupMocks.windowHandle.hide.mockClear();
     popupMocks.windowHandle.startDragging.mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("renders resolved runtime mode metadata from dictation state events", async () => {
@@ -174,5 +180,59 @@ describe("DictationPopup", () => {
       });
       await pendingSettings.promise;
     });
+  });
+
+  it("keeps the same session timer when recording updates omit startedAtMs", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-09T12:00:00.000Z"));
+
+    popupMocks.invoke.mockResolvedValueOnce({
+      phase: "recording",
+      startedAtMs: Date.now(),
+      sessionId: 22,
+      resolvedModePreset: "voice",
+      resolvedModeLabel: "Voice",
+      contextSource: "none",
+      insertionMode: "paste",
+      appTarget: "Codex",
+      dictationProvider: "distil_whisper",
+      dictationModelId: "distil-large-v3.5",
+    });
+
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      vi.advanceTimersByTime(1100);
+    });
+
+    expect(screen.getByText("00:01")).toBeInTheDocument();
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+    expect(handler).toBeDefined();
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "recording",
+          sessionId: 22,
+          preview: "still listening",
+          resolvedModePreset: "voice",
+          resolvedModeLabel: "Voice",
+          contextSource: "none",
+          insertionMode: "paste",
+          appTarget: "Codex",
+          dictationProvider: "distil_whisper",
+          dictationModelId: "distil-large-v3.5",
+        },
+      });
+      vi.advanceTimersByTime(1000);
+    });
+
+    expect(screen.getByText("00:02")).toBeInTheDocument();
   });
 });

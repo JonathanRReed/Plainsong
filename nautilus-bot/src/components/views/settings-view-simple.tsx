@@ -56,6 +56,7 @@ import type { Settings } from "@/types/settings";
 import { normalizeThemeSchemeForAccess, themeSchemesForAccess } from "@/lib/theme-schemes";
 import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
 import { ONBOARDING_STORAGE_KEY, requestOnboarding } from "@/lib/onboarding";
+import { requestMainView } from "@/lib/navigation";
 import {
   AlertCircle,
   CheckCircle2,
@@ -2464,10 +2465,13 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   <div className="space-y-1">
                     <Label>Guided setup</Label>
                     <p className="text-sm text-muted-foreground">
-                      Reopen the onboarding flows any time. Use dictation setup to re-check permissions and hotkeys, or the meetings flow to revisit system-audio and meeting model guidance.
+                      Guided setup now lives in the dedicated Setup workspace so normal users always have one obvious place to fix permissions, models, and meetings.
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
+                    <Button variant="secondary" onClick={() => requestMainView("setup")}>
+                      Open Setup
+                    </Button>
                     <Button variant="outline" onClick={() => requestOnboarding("full")}>
                       Rerun onboarding
                     </Button>

@@ -13,6 +13,7 @@ import {
   Star,
   Clock,
   KeyRound,
+  Sparkles,
 } from "lucide-react";
 import type { ViewId } from "@/App";
 import { getSettings, type LicenseInfo } from "@/lib/tauri";
@@ -40,6 +41,7 @@ const primaryNavItems = [
 ];
 
 const utilityNavItems = [
+  { id: "setup", label: "Setup", icon: Sparkles },
   { id: "exports", label: "Exports", icon: FileOutput },
   { id: "settings", label: "Settings", icon: Settings },
 ];
