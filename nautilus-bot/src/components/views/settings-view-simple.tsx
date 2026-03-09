@@ -55,6 +55,7 @@ import { isFeatureAllowed, canUseFormattingAssistant, getThemeAccessLevel } from
 import type { Settings } from "@/types/settings";
 import { normalizeThemeSchemeForAccess, themeSchemesForAccess } from "@/lib/theme-schemes";
 import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
+import { ONBOARDING_STORAGE_KEY, requestOnboarding } from "@/lib/onboarding";
 import {
   AlertCircle,
   CheckCircle2,
@@ -107,8 +108,6 @@ const SHORTCUT_FIELD_CONFIG: Array<{ key: ShortcutFieldKey; label: string }> = [
 ];
 
 const SETTINGS_SAVE_DEBOUNCE_MS = 350;
-const ONBOARDING_STORAGE_KEY = "nautilus_onboarding_complete";
-
 function markSettingsPerf(markName: string) {
   if (!import.meta.env.DEV || typeof performance === "undefined") {
     return;
@@ -2459,6 +2458,26 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     <option value="audio_only">Delete audio only</option>
                     <option value="audio_and_transcript">Delete audio and transcript</option>
                   </select>
+                </div>
+
+                <div className="rounded-lg border p-4 space-y-3">
+                  <div className="space-y-1">
+                    <Label>Guided setup</Label>
+                    <p className="text-sm text-muted-foreground">
+                      Reopen the onboarding flows any time. Use dictation setup to re-check permissions and hotkeys, or the meetings flow to revisit system-audio and meeting model guidance.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" onClick={() => requestOnboarding("full")}>
+                      Rerun onboarding
+                    </Button>
+                    <Button variant="outline" onClick={() => requestOnboarding("dictation")}>
+                      Fix dictation setup
+                    </Button>
+                    <Button variant="outline" onClick={() => requestOnboarding("meetings")}>
+                      Set up meetings
+                    </Button>
+                  </div>
                 </div>
 
                 <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-3">

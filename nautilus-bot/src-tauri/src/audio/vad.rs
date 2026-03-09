@@ -233,7 +233,8 @@ pub fn trim_silence(samples: &[f32], sample_rate: u32, threshold_db: f32) -> Vec
         return samples.to_vec();
     };
 
-    let start_sample = ((first_segment.start * sample_rate as f64).floor() as usize).min(samples.len());
+    let start_sample =
+        ((first_segment.start * sample_rate as f64).floor() as usize).min(samples.len());
     let end_sample = ((last_segment.end * sample_rate as f64).ceil() as usize).min(samples.len());
 
     if end_sample <= start_sample {

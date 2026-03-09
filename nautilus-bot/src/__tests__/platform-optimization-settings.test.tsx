@@ -28,6 +28,43 @@ vi.mock("@/lib/tauri", () => ({
 
 const providerFixture = [
   {
+    providerType: "whisper",
+    name: "Whisper",
+    description: "Local Whisper provider",
+    isAvailable: true,
+    inferenceEnabled: true,
+    modelInfo: {
+      name: "Whisper",
+      version: "base.en",
+      sizeMb: 142,
+      parameters: "74M",
+      languages: ["en"],
+      license: "MIT",
+      sourceUrl: "https://example.com",
+    },
+    selectedModelId: "base.en",
+    modelOptions: [
+      { id: "tiny", label: "tiny (fastest)" },
+      { id: "tiny.en", label: "tiny.en (fastest, English)" },
+      { id: "base", label: "base (balanced)" },
+      { id: "base.en", label: "base.en (balanced, English)" },
+      { id: "small", label: "small (better accuracy)" },
+      { id: "small.en", label: "small.en (better accuracy, English)" },
+      { id: "medium", label: "medium (high accuracy)" },
+      { id: "medium.en", label: "medium.en (high accuracy, English)" },
+      { id: "large-v3-turbo", label: "large-v3-turbo (fast + accurate)" },
+      { id: "large-v3", label: "large-v3 (best accuracy)" },
+    ],
+    downloadStatus: "Downloaded",
+    runtimeStatus: "ready",
+    runtimeDetails: {},
+    engineDiagnostics: {
+      activeEngine: "provider_default",
+      availableEngines: ["provider_default"],
+      notes: [],
+    },
+  },
+  {
     providerType: "distil_whisper",
     name: "Distil-Whisper",
     description: "Local provider",
@@ -205,6 +242,29 @@ describe("Platform optimization settings", () => {
     expect(screen.queryByText("Windows SDK dictation engine")).not.toBeInTheDocument();
   });
 
+  it("treats Apple Native as dictation-only when persisting transcription route settings", async () => {
+    render(<AsrProviderManager />);
+
+    const sharedProviderSelect = (await screen.findByText("Shared provider"))
+      .parentElement?.querySelector("select");
+    expect(sharedProviderSelect).toBeTruthy();
+
+    fireEvent.change(sharedProviderSelect as HTMLSelectElement, {
+      target: { value: "macos_apple_speech" },
+    });
+
+    await waitFor(() => {
+      expect(saveSettingsMock).toHaveBeenCalled();
+    });
+
+    const savedPayload =
+      saveSettingsMock.mock.calls[saveSettingsMock.mock.calls.length - 1]?.[0];
+    expect(savedPayload.transcription.defaultProvider).toBe("macos_apple_speech");
+    expect(savedPayload.transcription.dictationProvider).toBe("macos_apple_speech");
+    expect(savedPayload.transcription.useSharedAsrSelection).toBe(false);
+    expect(savedPayload.transcription.meetingProvider).toBe("distil_whisper");
+  });
+
   it("surfaces the latest clipboard-only insert fallback reason", async () => {
     getSettingsMock.mockResolvedValue({
       transcription: {
@@ -313,7 +373,45 @@ describe("Platform optimization settings", () => {
     expect(
       screen.queryByText(/Shared route: Apple native speech permission has not been granted yet\./)
     ).not.toBeInTheDocument();
-    expect(screen.getByText("Shared route: Apple Native Speech is ready.")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Meetings use meeting-grade ASR only. Apple Native Speech, Windows Native Speech, Moonshine, and standard Whisper are dictation-only, so meetings will use a separate stronger model instead."
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("keeps Whisper out of the meeting provider choices", async () => {
+    getSettingsMock.mockResolvedValue({
+      transcription: {
+        defaultProvider: "whisper",
+        selectedModelId: "base.en",
+        useSharedAsrSelection: false,
+        dictationProvider: "whisper",
+        dictationModelId: "base.en",
+        meetingProvider: "whisper",
+        meetingModelId: "small.en",
+        platformOptimization: {
+          mode: "auto",
+          fallbackPolicy: "local_only",
+          macos: { appleNativeEnabled: false, mlxEnabled: true },
+          windows: { foundryEnabled: false, windowsSdkDictationEnabled: false },
+          manualEnginePriority: [],
+        },
+      },
+    });
+
+    render(<AsrProviderManager />);
+
+    expect(await screen.findByText("Meeting provider")).toBeInTheDocument();
+    const meetingProviderSelect = screen
+      .getByText("Meeting provider")
+      .parentElement?.querySelector("select");
+    expect(meetingProviderSelect).toBeTruthy();
+    const optionValues = Array.from(
+      (meetingProviderSelect as HTMLSelectElement).querySelectorAll("option")
+    ).map((option) => option.getAttribute("value") ?? "");
+    expect(optionValues).not.toContain("whisper");
+    expect(optionValues).toContain("distil_whisper");
   });
 
   it("treats Accessibility as the insertion gate even when Automation is unavailable", async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { LogicalSize } from "@tauri-apps/api/dpi";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -187,7 +187,6 @@ export function DictationPopup() {
   const [preview, setPreview] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<string | null>(null);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("full");
-  const [sessionId, setSessionId] = useState<number | null>(null);
   const [pushToTalk, setPushToTalk] = useState(true);
   const [audioLevel, setAudioLevel] = useState(0);
   const [modePreset, setModePreset] = useState<DictationModePreset>("voice");
@@ -201,6 +200,8 @@ export function DictationPopup() {
   const [resolvedModeLabel, setResolvedModeLabel] = useState<string | null>(null);
   const [runtimeAppTarget, setRuntimeAppTarget] = useState<string | null>(null);
   const [activationMatcher, setActivationMatcher] = useState<string | null>(null);
+  const lastSessionIdRef = useRef<number | null>(null);
+  const lastActiveStartedAtRef = useRef<number | null>(null);
 
   const refreshPopupSettings = async () => {
     const settings = await getSettings();
@@ -244,6 +245,53 @@ export function DictationPopup() {
     }
   };
 
+  const applyOverlaySnapshot = (payload: DictationStateChangedEvent) => {
+    applyRuntimeMetadata(payload);
+
+    const nextSessionId = typeof payload.sessionId === "number" ? payload.sessionId : null;
+    const nextStartedAtMs =
+      typeof payload.startedAtMs === "number" ? payload.startedAtMs : null;
+    const isActiveCapturePhase =
+      payload.phase === "starting" || payload.phase === "recording";
+
+    setPhase(payload.phase);
+    setMessage(payload.message ?? null);
+    setPreview(payload.preview ?? null);
+    setOutcome(payload.outcome ?? null);
+    if (payload.phase === "idle") {
+      lastSessionIdRef.current = null;
+      lastActiveStartedAtRef.current = null;
+      setStartedAtMs(null);
+      setElapsed(0);
+      return;
+    }
+
+    if (nextSessionId !== null && nextSessionId !== lastSessionIdRef.current) {
+      lastSessionIdRef.current = nextSessionId;
+      lastActiveStartedAtRef.current = isActiveCapturePhase ? nextStartedAtMs : null;
+      setStartedAtMs(isActiveCapturePhase ? nextStartedAtMs : null);
+      setElapsed(0);
+      return;
+    }
+
+    if (nextSessionId !== null) {
+      lastSessionIdRef.current = nextSessionId;
+    }
+
+    if (payload.phase === "recording" && nextStartedAtMs !== null) {
+      lastActiveStartedAtRef.current = nextStartedAtMs;
+      setStartedAtMs(nextStartedAtMs);
+      return;
+    }
+
+    if (lastActiveStartedAtRef.current !== null) {
+      setStartedAtMs(lastActiveStartedAtRef.current);
+      return;
+    }
+
+    setStartedAtMs(nextStartedAtMs);
+  };
+
   const handleStopFromPopup = async () => {
     try {
       await stopDictation();
@@ -258,22 +306,7 @@ export function DictationPopup() {
     const setup = async () => {
       try {
         const initialState = await invoke<DictationStateChangedEvent>("get_dictation_overlay_state");
-        applyRuntimeMetadata(initialState);
-        setPhase(initialState.phase);
-        setMessage(initialState.message ?? null);
-        setPreview(initialState.preview ?? null);
-        setOutcome(initialState.outcome ?? null);
-        setSessionId(typeof initialState.sessionId === "number" ? initialState.sessionId : null);
-        if (
-          (initialState.phase === "starting" || initialState.phase === "recording") &&
-          typeof initialState.startedAtMs === "number"
-        ) {
-          setStartedAtMs(
-            initialState.startedAtMs
-          );
-        } else {
-          setStartedAtMs(null);
-        }
+        applyOverlaySnapshot(initialState);
         void refreshPopupSettings().catch(() => {
           // Keep default mode if settings are temporarily unavailable.
         });
@@ -282,21 +315,7 @@ export function DictationPopup() {
       }
 
       unlisten = await listen<DictationStateChangedEvent>("dictation-state-changed", (event) => {
-        const payload = event.payload;
-        applyRuntimeMetadata(payload);
-        setPhase(payload.phase);
-        setMessage(payload.message ?? null);
-        setPreview(payload.preview ?? null);
-        setOutcome(payload.outcome ?? null);
-        setSessionId(typeof payload.sessionId === "number" ? payload.sessionId : null);
-        if (
-          (payload.phase === "starting" || payload.phase === "recording") &&
-          typeof payload.startedAtMs === "number"
-        ) {
-          setStartedAtMs(payload.startedAtMs);
-        } else {
-          setStartedAtMs(null);
-        }
+        applyOverlaySnapshot(event.payload);
       });
     };
 
@@ -305,20 +324,12 @@ export function DictationPopup() {
   }, []);
 
   useEffect(() => {
-    const id = setInterval(() => {
-      if (phase === "idle") {
-        void refreshPopupSettings().catch(() => {
-          // Ignore intermittent settings fetch issues while idle.
-        });
-      }
-    }, 2500);
-
-    return () => clearInterval(id);
-  }, [phase]);
-
-  useEffect(() => {
-    if (phase !== "starting" && phase !== "recording") {
+    if (phase === "idle") {
       setElapsed(0);
+      return;
+    }
+
+    if (phase !== "recording") {
       return;
     }
 
@@ -351,46 +362,6 @@ export function DictationPopup() {
     return () => clearInterval(id);
   }, [phase]);
 
-  useEffect(() => {
-    const id = setInterval(() => {
-      void invoke<DictationStateChangedEvent>("get_dictation_overlay_state")
-        .then((state) => {
-          const snapshotSessionId =
-            typeof state.sessionId === "number" ? state.sessionId : null;
-          const snapshotStartedAtMs =
-            typeof state.startedAtMs === "number" ? state.startedAtMs : null;
-          if (
-            state.phase !== phase ||
-            snapshotSessionId !== sessionId ||
-            snapshotStartedAtMs !== startedAtMs ||
-            (state.message ?? null) !== message ||
-            (state.preview ?? null) !== preview ||
-            (state.outcome ?? null) !== outcome
-          ) {
-            applyRuntimeMetadata(state);
-            setPhase(state.phase);
-            setMessage(state.message ?? null);
-            setPreview(state.preview ?? null);
-            setOutcome(state.outcome ?? null);
-            setSessionId(snapshotSessionId);
-            if (
-              (state.phase === "starting" || state.phase === "recording") &&
-              typeof state.startedAtMs === "number"
-            ) {
-              setStartedAtMs(state.startedAtMs);
-            } else {
-              setStartedAtMs(null);
-            }
-          }
-        })
-        .catch(() => {
-          // Ignore intermittent overlay polling failures.
-        });
-    }, 2500);
-
-    return () => clearInterval(id);
-  }, [message, outcome, phase, preview, sessionId, startedAtMs]);
-
   const elapsedText = useMemo(() => {
     const mins = Math.floor(elapsed / 60);
     const secs = elapsed % 60;
@@ -413,6 +384,7 @@ export function DictationPopup() {
       : activationMatcher
         ? `Auto via "${activationMatcher}"`
         : null;
+  const isCapturePhase = phase === "starting" || phase === "recording";
 
   const cycleDisplayMode = async () => {
     const next: DisplayMode =
@@ -572,19 +544,7 @@ export function DictationPopup() {
           </div>
         )}
 
-        {phase === "starting" && (
-          <div className="flex items-center gap-3 text-white">
-            <Loader2 className="h-5 w-5 animate-spin text-cyan-300" />
-            <div>
-              <p className="text-sm font-semibold">Starting dictation</p>
-              <p className="text-xs text-slate-300">
-                Connecting {routeLabel.toLowerCase()}{targetDetail}…
-              </p>
-            </div>
-          </div>
-        )}
-
-        {phase === "recording" && (
+        {isCapturePhase && (
           <div className="flex items-center gap-3 text-white">
             <div className="relative rounded-full bg-orange-500/15 p-3 ring-1 ring-orange-300/25">
               <div className="absolute inset-0 rounded-full bg-orange-400/10 blur-md" />
@@ -592,7 +552,7 @@ export function DictationPopup() {
             </div>
             <div className="flex-1">
               <p className="text-sm font-semibold">Listening</p>
-              {!compact && (
+              {!compact ? (
                 <>
                   <p className="mt-1 text-xs text-slate-300">
                     {selectedModeLabel} · {contextMeta.detail} · {insertionMeta.label}
@@ -613,6 +573,10 @@ export function DictationPopup() {
                       : `Press the hotkey again to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`}
                   </p>
                 </>
+              ) : (
+                <p className="mt-1 text-xs text-slate-300">
+                  {routeLabel} ready{targetDetail}.
+                </p>
               )}
             </div>
             <span className="font-mono text-sm text-orange-200">{elapsedText}</span>

@@ -14,7 +14,7 @@ interface ConsentDialogProps {
 export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProps) {
   const [options, setOptions] = useState({
     mic: true,
-    systemAudio: false,
+    systemAudio: true,
   });
   const [template, setTemplate] = useState("auto");
   const [systemAudioAvailable, setSystemAudioAvailable] = useState<boolean | null>(null);
@@ -26,6 +26,16 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
       getLoopbackDeviceName().then(setLoopbackDevice).catch(() => setLoopbackDevice(null));
     }
   }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    if (systemAudioAvailable === false && options.systemAudio) {
+      setOptions(prev => ({ ...prev, systemAudio: false }));
+    }
+  }, [open, options.systemAudio, systemAudioAvailable]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

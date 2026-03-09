@@ -86,7 +86,8 @@ impl MixedAudioCapture {
         capture_mic: bool,
         capture_system: bool,
         waveform_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
-    ) -> Result<crossbeam::channel::Receiver<Vec<f32>>> {
+        streaming_queue: Option<Arc<crossbeam::queue::ArrayQueue<Vec<f32>>>>,
+    ) -> Result<(crossbeam::channel::Receiver<Vec<f32>>, u32)> {
         if !capture_mic && !capture_system {
             return Err(anyhow::anyhow!("Must capture at least one audio source"));
         }
@@ -102,7 +103,7 @@ impl MixedAudioCapture {
 
         let (sender, receiver) = crossbeam::channel::bounded::<Vec<f32>>(100);
         let (ready_tx, ready_rx) =
-            crossbeam::channel::bounded::<std::result::Result<(), String>>(1);
+            crossbeam::channel::bounded::<std::result::Result<u32, String>>(1);
         let is_capturing = Arc::clone(&self.is_capturing);
         let dropped_mic_samples = Arc::clone(&self.dropped_mic_samples);
         let dropped_system_samples = Arc::clone(&self.dropped_system_samples);
@@ -118,13 +119,16 @@ impl MixedAudioCapture {
 
             let mut _mic_stream = None;
             let mut _sys_stream = None;
+            let mut mic_sample_rate = None;
+            let mut system_sample_rate = None;
 
             if capture_mic {
-                let setup = || -> Result<cpal::Stream> {
+                let mut setup = || -> Result<cpal::Stream> {
                     let device = host
                         .default_input_device()
                         .context("No microphone available")?;
                     let config = device.default_input_config()?;
+                    mic_sample_rate = Some(config.sample_rate().0);
                     let mic_buf = Arc::clone(&mic_buffer);
                     let is_cap = Arc::clone(&is_capturing);
                     let dropped_samples_f32 = Arc::clone(&dropped_mic_samples);
@@ -184,13 +188,14 @@ impl MixedAudioCapture {
             }
 
             if capture_system {
-                let setup = || -> Result<cpal::Stream> {
+                let mut setup = || -> Result<cpal::Stream> {
                     let sys_capture = SystemAudioCapture::new();
                     let loopback_device = sys_capture
                         .find_loopback_device()?
                         .ok_or_else(|| anyhow::anyhow!("Loopback device not found"))?;
 
                     let config = loopback_device.default_input_config()?;
+                    system_sample_rate = Some(config.sample_rate().0);
                     let sys_buf = Arc::clone(&system_buffer);
                     let is_cap = Arc::clone(&is_capturing);
                     let dropped_samples_f32 = Arc::clone(&dropped_system_samples);
@@ -249,20 +254,49 @@ impl MixedAudioCapture {
                 }
             }
 
-            let _ = ready_tx.send(Ok(()));
+            let target_sample_rate =
+                match resolve_target_sample_rate(mic_sample_rate, system_sample_rate) {
+                    Ok(sample_rate) => sample_rate,
+                    Err(message) => {
+                        tracing::error!("{}", message);
+                        let _ = ready_tx.send(Err(message));
+                        is_capturing.store(false, Ordering::SeqCst);
+                        return;
+                    }
+                };
+
+            let _ = ready_tx.send(Ok(target_sample_rate));
 
             let mut output = Vec::with_capacity(512);
             while is_capturing.load(Ordering::SeqCst) {
                 let mut made_progress = false;
 
-                while let Some(mic_sample) = mic_buffer.pop() {
-                    let sys_sample = system_buffer.pop().unwrap_or(0.0);
-                    let mixed = ((mic_sample * 0.7) + (sys_sample * 0.7)).clamp(-1.0, 1.0);
-                    output.push(mixed);
+                loop {
+                    let mic_sample = if capture_mic { mic_buffer.pop() } else { None };
+                    let sys_sample = if capture_system {
+                        system_buffer.pop()
+                    } else {
+                        None
+                    };
+
+                    let mixed_sample = match (mic_sample, sys_sample) {
+                        (Some(mic), Some(sys)) => {
+                            Some(((mic * 0.7) + (sys * 0.7)).clamp(-1.0, 1.0))
+                        }
+                        (Some(mic), None) => Some(mic),
+                        (None, Some(sys)) => Some(sys),
+                        (None, None) => None,
+                    };
+
+                    let Some(sample) = mixed_sample else {
+                        break;
+                    };
+
+                    output.push(sample);
                     made_progress = true;
 
                     if let Ok(mut waveform) = waveform_buffer.lock() {
-                        waveform.push(mixed);
+                        waveform.push(sample);
                         if waveform.len() > 4410 {
                             let drop_count = waveform.len() - 4410;
                             waveform.drain(0..drop_count);
@@ -271,6 +305,12 @@ impl MixedAudioCapture {
 
                     if output.len() >= 512 {
                         let chunk = std::mem::take(&mut output);
+                        if let Some(queue) = streaming_queue.as_ref() {
+                            if queue.push(chunk.clone()).is_err() {
+                                let _ = queue.pop();
+                                let _ = queue.push(chunk.clone());
+                            }
+                        }
                         match sender.try_send(chunk) {
                             Ok(()) => {}
                             Err(TrySendError::Disconnected(_)) => {
@@ -284,41 +324,18 @@ impl MixedAudioCapture {
                     }
                 }
 
-                if capture_system && !capture_mic {
-                    while let Some(sys_sample) = system_buffer.pop() {
-                        output.push(sys_sample);
-                        made_progress = true;
-
-                        if let Ok(mut waveform) = waveform_buffer.lock() {
-                            waveform.push(sys_sample);
-                            if waveform.len() > 4410 {
-                                let drop_count = waveform.len() - 4410;
-                                waveform.drain(0..drop_count);
-                            }
-                        }
-
-                        if output.len() >= 512 {
-                            let chunk = std::mem::take(&mut output);
-                            match sender.try_send(chunk) {
-                                Ok(()) => {}
-                                Err(TrySendError::Disconnected(_)) => {
-                                    is_capturing.store(false, Ordering::SeqCst);
-                                    break;
-                                }
-                                Err(TrySendError::Full(_)) => {
-                                    dropped_mixed_chunks.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
-                        }
-                    }
-                }
-
                 if !made_progress {
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
             }
 
             if !output.is_empty() {
+                if let Some(queue) = streaming_queue.as_ref() {
+                    if queue.push(output.clone()).is_err() {
+                        let _ = queue.pop();
+                        let _ = queue.push(output.clone());
+                    }
+                }
                 match sender.try_send(output) {
                     Ok(()) => {}
                     Err(TrySendError::Disconnected(_)) => {}
@@ -342,25 +359,26 @@ impl MixedAudioCapture {
         }));
 
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => {}
+            Ok(Ok(sample_rate)) => {
+                tracing::info!(
+                    "Mixed audio capture started (mic: {}, system: {}, sample_rate: {} Hz)",
+                    capture_mic,
+                    capture_system,
+                    sample_rate
+                );
+                Ok((receiver, sample_rate))
+            }
             Ok(Err(message)) => {
                 self.stop();
-                return Err(anyhow::anyhow!(message));
+                Err(anyhow::anyhow!(message))
             }
             Err(_) => {
                 self.stop();
-                return Err(anyhow::anyhow!(
+                Err(anyhow::anyhow!(
                     "Timed out waiting for audio capture streams to initialize"
-                ));
+                ))
             }
         }
-
-        tracing::info!(
-            "Mixed audio capture started (mic: {}, system: {})",
-            capture_mic,
-            capture_system
-        );
-        Ok(receiver)
     }
 
     pub fn stop(&mut self) {
@@ -407,6 +425,24 @@ impl Default for MixedAudioCapture {
     }
 }
 
+fn resolve_target_sample_rate(
+    mic_sample_rate: Option<u32>,
+    system_sample_rate: Option<u32>,
+) -> std::result::Result<u32, String> {
+    match (mic_sample_rate, system_sample_rate) {
+        (Some(mic_rate), Some(system_rate)) if mic_rate != system_rate => Err(format!(
+            "Microphone and system audio are using different sample rates (mic: {} Hz, system: {} Hz). Align both sources to the same rate before starting a mixed meeting recording.",
+            mic_rate, system_rate
+        )),
+        (Some(mic_rate), Some(_)) => Ok(mic_rate),
+        (Some(mic_rate), None) => Ok(mic_rate),
+        (None, Some(system_rate)) => Ok(system_rate),
+        (None, None) => {
+            Err("Unable to determine a sample rate for the requested audio capture sources.".to_string())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +452,18 @@ mod tests {
         let capture = SystemAudioCapture::new();
         let available = capture.is_available();
         tracing::info!("System audio available: {}", available);
+    }
+
+    #[test]
+    fn resolve_target_sample_rate_accepts_matching_sources() {
+        assert_eq!(resolve_target_sample_rate(Some(48_000), Some(48_000)).unwrap(), 48_000);
+        assert_eq!(resolve_target_sample_rate(Some(44_100), None).unwrap(), 44_100);
+        assert_eq!(resolve_target_sample_rate(None, Some(48_000)).unwrap(), 48_000);
+    }
+
+    #[test]
+    fn resolve_target_sample_rate_rejects_mismatched_sources() {
+        let error = resolve_target_sample_rate(Some(44_100), Some(48_000)).unwrap_err();
+        assert!(error.contains("different sample rates"));
     }
 }

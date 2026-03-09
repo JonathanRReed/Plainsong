@@ -71,8 +71,10 @@ fn stage_macos_speech_input(audio_path: &Path) -> Result<(PathBuf, bool)> {
         return Ok((audio_path.to_path_buf(), false));
     }
 
-    let staged_path =
-        std::env::temp_dir().join(format!("nautilus-macos-speech-staged-{}.wav", uuid::Uuid::new_v4()));
+    let staged_path = std::env::temp_dir().join(format!(
+        "nautilus-macos-speech-staged-{}.wav",
+        uuid::Uuid::new_v4()
+    ));
     let mut writer = hound::WavWriter::create(&staged_path, spec).with_context(|| {
         format!(
             "Failed to create staged macOS Speech audio file '{}'",
@@ -191,10 +193,17 @@ mod tests {
         assert!(cleanup);
 
         let mut reader = hound::WavReader::open(&staged_path).unwrap();
-        let samples: Vec<i16> = reader.samples::<i16>().map(|sample| sample.unwrap()).collect();
+        let samples: Vec<i16> = reader
+            .samples::<i16>()
+            .map(|sample| sample.unwrap())
+            .collect();
         let prepended = (spec.sample_rate as usize * 750) / 1000;
         assert!(samples.iter().take(prepended).all(|sample| *sample == 0));
-        assert!(samples.iter().skip(prepended).take(32).all(|sample| *sample == 1200));
+        assert!(samples
+            .iter()
+            .skip(prepended)
+            .take(32)
+            .all(|sample| *sample == 1200));
 
         let _ = std::fs::remove_file(input_path);
         let _ = std::fs::remove_file(staged_path);

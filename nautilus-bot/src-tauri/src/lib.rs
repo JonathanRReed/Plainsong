@@ -1632,6 +1632,8 @@ async fn start_recording(
         TranscriptionScope::Meeting,
     );
 
+    ensure_meeting_route_supported(meeting_selection.0, &meeting_selection.1)?;
+
     #[cfg(target_os = "macos")]
     if options.mic {
         ensure_microphone_permission(
@@ -1642,22 +1644,13 @@ async fn start_recording(
         .map_err(|error| format!("Microphone permission is not ready. {}", error))?;
     }
 
-    #[cfg(target_os = "macos")]
-    if meeting_selection.0 == asr::AsrProviderType::MacosAppleSpeech {
-        crate::asr::platform::macos_speech::ensure_speech_authorized(
-            settings_snapshot
-                .transcription
-                .dictation_auto_request_permissions,
-        )
-        .map_err(|error| {
-            format!(
-                "Apple Native Speech is selected for meetings, but speech recognition permission is not ready. {}",
-                error
-            )
-        })?;
-    }
-
-    ensure_asr_provider_ready(state.inner(), meeting_selection.0, "meeting transcription").await?;
+    ensure_asr_route_ready(
+        state.inner(),
+        meeting_selection.0,
+        &meeting_selection.1,
+        "meeting transcription",
+    )
+    .await?;
 
     if options.system_audio {
         let audio = state.audio_capture.lock().await;
@@ -4548,6 +4541,7 @@ async fn set_default_asr_provider(
             .transcription
             .meeting_model_id = selected_model.clone();
     }
+    normalize_contextual_asr_settings(&mut settings_manager.settings_mut().transcription);
     settings_manager.save().map_err(|e| e.to_string())?;
 
     Ok(())
@@ -4613,6 +4607,7 @@ async fn set_asr_provider_model(
         }
     }
 
+    normalize_contextual_asr_settings(&mut settings_manager.settings_mut().transcription);
     settings_manager.save().map_err(|e| e.to_string())
 }
 
@@ -5618,6 +5613,43 @@ async fn ensure_asr_provider_ready(
     ))
 }
 
+async fn ensure_asr_route_ready(
+    state: &AppState,
+    provider_type: asr::AsrProviderType,
+    model_id: &str,
+    context: &str,
+) -> Result<(), String> {
+    let diagnostics = state
+        .asr_manager
+        .get_runtime_diagnostics(provider_type)
+        .await;
+    let provider_available =
+        asr::AsrProviderFactory::create_with_model(provider_type, Some(model_id)).is_available();
+
+    if matches!(
+        diagnostics.runtime_status,
+        asr::manager::RuntimeStatus::Ready
+    ) && provider_available
+    {
+        return Ok(());
+    }
+
+    let runtime_message = diagnostics
+        .runtime_message
+        .unwrap_or_else(|| "Runtime is not ready for the selected provider/model.".to_string());
+    let setup_action = diagnostics.runtime_details.setup_action.unwrap_or_else(|| {
+        "Open Settings -> ASR Models and complete the required runtime/model setup.".to_string()
+    });
+    Err(format!(
+        "ASR route '{} / {}' is not ready for {}. {} {}",
+        provider_type.display_name(),
+        model_id,
+        context,
+        runtime_message,
+        setup_action
+    ))
+}
+
 async fn start_dictation_session(
     state: &AppState,
     app: &AppHandle,
@@ -5773,7 +5805,7 @@ async fn start_dictation_session(
         app,
         "starting",
         Some(session_started_at_ms),
-        Some("Preparing dictation…"),
+        None,
         None,
         Some(session_id),
         None,
@@ -7454,6 +7486,7 @@ async fn stop_dictation_session_for_session(
             Some(stop_reason),
             Some(outcome),
         );
+        hide_overlay_window(app, DICTATION_OVERLAY_LABEL);
         schedule_dictation_idle_reset(
             app.clone(),
             session_id,
@@ -11187,13 +11220,38 @@ pub fn run() {
             can_use_beta_channel,
             get_update_lock_reason,
         ])
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!());
 
-    if let Err(error) = app_run_result {
-        report_startup_failure(&format!(
-            "Tauri application runtime exited with an error: {}",
-            error
-        ));
+    match app_run_result {
+        Ok(app) => {
+            app.run(|app_handle, event| {
+                #[cfg(target_os = "macos")]
+                if let tauri::RunEvent::Reopen { .. } = event {
+                    let should_restore = app_handle
+                        .get_webview_window("main")
+                        .map(|window| {
+                            let visible = window.is_visible().unwrap_or(false);
+                            let minimized = window.is_minimized().unwrap_or(false);
+                            !visible || minimized
+                        })
+                        .unwrap_or(true);
+                    if should_restore {
+                        if let Err(error) = show_main_window(app_handle) {
+                            tracing::warn!(
+                                "Failed to reopen main window from dock activation: {}",
+                                error
+                            );
+                        }
+                    }
+                }
+            });
+        }
+        Err(error) => {
+            report_startup_failure(&format!(
+                "Tauri application runtime exited with an error: {}",
+                error
+            ));
+        }
     }
 }
 
@@ -12227,9 +12285,78 @@ mod tests {
     #[test]
     fn meeting_title_can_fallback_to_transcript_text() {
         let transcript = "Design review for dictation popup performance and meeting reliability.";
-        let title =
-            build_meeting_title_from_transcript(transcript).expect("title should be built");
-        assert_eq!(title, "Design review for dictation popup performance and meeting");
+        let title = build_meeting_title_from_transcript(transcript).expect("title should be built");
+        assert_eq!(
+            title,
+            "Design review for dictation popup performance and meeting"
+        );
+    }
+
+    #[test]
+    fn native_providers_are_dictation_only_for_meetings() {
+        let mut transcription = settings::TranscriptionSettings::default();
+        transcription.use_shared_asr_selection = true;
+        transcription.default_provider = "macos_apple_speech".to_string();
+        transcription.selected_model_id = "macos_apple_speech".to_string();
+        transcription.dictation_provider = "macos_apple_speech".to_string();
+        transcription.dictation_model_id = "macos_apple_speech".to_string();
+        transcription.meeting_provider = "macos_apple_speech".to_string();
+        transcription.meeting_model_id = "macos_apple_speech".to_string();
+
+        normalize_contextual_asr_settings(&mut transcription);
+
+        assert!(!transcription.use_shared_asr_selection);
+        assert_eq!(transcription.dictation_provider, "macos_apple_speech");
+        assert_eq!(transcription.meeting_provider, "distil_whisper");
+
+        let (meeting_provider, meeting_model_id) =
+            resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting);
+        assert_eq!(meeting_provider, asr::AsrProviderType::DistilWhisper);
+        assert_eq!(meeting_model_id, "distil-large-v3.5");
+    }
+
+    #[test]
+    fn whisper_is_dictation_only_for_shared_meeting_routes() {
+        let mut transcription = settings::TranscriptionSettings::default();
+        transcription.use_shared_asr_selection = true;
+        transcription.default_provider = "whisper".to_string();
+        transcription.selected_model_id = "base.en".to_string();
+        transcription.dictation_provider = "whisper".to_string();
+        transcription.dictation_model_id = "base.en".to_string();
+        transcription.meeting_provider = "whisper".to_string();
+        transcription.meeting_model_id = "base.en".to_string();
+
+        normalize_contextual_asr_settings(&mut transcription);
+
+        assert!(!transcription.use_shared_asr_selection);
+        assert_eq!(transcription.dictation_provider, "whisper");
+        assert_eq!(transcription.dictation_model_id, "base.en");
+        assert_eq!(transcription.meeting_provider, "distil_whisper");
+        assert_eq!(transcription.meeting_model_id, "distil-large-v3.5");
+
+        let (meeting_provider, meeting_model_id) =
+            resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting);
+        assert_eq!(meeting_provider, asr::AsrProviderType::DistilWhisper);
+        assert_eq!(meeting_model_id, "distil-large-v3.5");
+    }
+
+    #[test]
+    fn moonshine_is_dictation_only_for_meetings() {
+        let mut transcription = settings::TranscriptionSettings::default();
+        transcription.use_shared_asr_selection = true;
+        transcription.default_provider = "moonshine".to_string();
+        transcription.selected_model_id = "moonshine".to_string();
+        transcription.dictation_provider = "moonshine".to_string();
+        transcription.dictation_model_id = "moonshine".to_string();
+        transcription.meeting_provider = "moonshine".to_string();
+        transcription.meeting_model_id = "moonshine".to_string();
+
+        normalize_contextual_asr_settings(&mut transcription);
+
+        assert!(!transcription.use_shared_asr_selection);
+        assert_eq!(transcription.dictation_provider, "moonshine");
+        assert_eq!(transcription.meeting_provider, "distil_whisper");
+        assert_eq!(transcription.meeting_model_id, "distil-large-v3.5");
     }
 
     #[test]
@@ -13765,6 +13892,94 @@ enum TranscriptionScope {
     Meeting,
 }
 
+fn provider_is_dictation_only(provider: asr::AsrProviderType) -> bool {
+    !meeting_provider_is_supported(provider)
+}
+
+fn meeting_provider_is_supported(provider: asr::AsrProviderType) -> bool {
+    matches!(
+        provider,
+        asr::AsrProviderType::Parakeet
+            | asr::AsrProviderType::Canary
+            | asr::AsrProviderType::DistilWhisper
+            | asr::AsrProviderType::Voxtral
+            | asr::AsrProviderType::ElevenLabsScribe
+            | asr::AsrProviderType::OpenAiCloud
+            | asr::AsrProviderType::Groq
+    )
+}
+
+fn meeting_model_is_supported(provider: asr::AsrProviderType, model_id: &str) -> bool {
+    if !meeting_provider_is_supported(provider) {
+        return false;
+    }
+
+    let candidate = normalize_asr_model_id(provider, model_id);
+    provider
+        .model_options()
+        .iter()
+        .any(|option| option.id == candidate)
+}
+
+fn default_meeting_model_id(provider: asr::AsrProviderType) -> &'static str {
+    provider.default_model_id()
+}
+
+fn normalize_meeting_model_id(provider: asr::AsrProviderType, model_id: &str) -> String {
+    let normalized = normalize_asr_model_id(provider, model_id);
+    if meeting_model_is_supported(provider, &normalized) {
+        normalized
+    } else {
+        default_meeting_model_id(provider).to_string()
+    }
+}
+
+fn meeting_route_is_shared_compatible(provider: asr::AsrProviderType, model_id: &str) -> bool {
+    meeting_provider_is_supported(provider) && meeting_model_is_supported(provider, model_id)
+}
+
+fn ensure_meeting_route_supported(
+    provider: asr::AsrProviderType,
+    model_id: &str,
+) -> Result<(), String> {
+    if meeting_route_is_shared_compatible(provider, model_id) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Distil Whisper, Parakeet, Canary, Voxtral, ElevenLabs, OpenAI, or Groq in Settings -> ASR / Providers.",
+        provider.display_name(),
+        model_id
+    ))
+}
+
+fn preferred_meeting_provider(
+    default_provider: asr::AsrProviderType,
+    dictation_provider: asr::AsrProviderType,
+    meeting_provider: Option<asr::AsrProviderType>,
+) -> asr::AsrProviderType {
+    for candidate in [
+        meeting_provider,
+        Some(default_provider),
+        Some(dictation_provider),
+        Some(asr::AsrProviderType::DistilWhisper),
+        Some(asr::AsrProviderType::Parakeet),
+        Some(asr::AsrProviderType::Canary),
+        Some(asr::AsrProviderType::Voxtral),
+        Some(asr::AsrProviderType::ElevenLabsScribe),
+        Some(asr::AsrProviderType::OpenAiCloud),
+        Some(asr::AsrProviderType::Groq),
+    ] {
+        if let Some(provider) = candidate {
+            if meeting_provider_is_supported(provider) {
+                return provider;
+            }
+        }
+    }
+
+    asr::AsrProviderType::DistilWhisper
+}
+
 fn normalize_contextual_asr_settings(transcription: &mut settings::TranscriptionSettings) {
     let default_provider = asr_provider_from_settings_value(&transcription.default_provider)
         .unwrap_or(asr::AsrProviderType::DistilWhisper);
@@ -13785,10 +14000,30 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
         },
     );
 
-    let meeting_provider = asr_provider_from_settings_value(&transcription.meeting_provider)
-        .unwrap_or(default_provider);
+    if transcription.use_shared_asr_selection {
+        if meeting_route_is_shared_compatible(default_provider, &transcription.selected_model_id) {
+            transcription.dictation_provider = transcription.default_provider.clone();
+            transcription.dictation_model_id = transcription.selected_model_id.clone();
+            transcription.meeting_provider = transcription.default_provider.clone();
+            transcription.meeting_model_id =
+                normalize_meeting_model_id(default_provider, &transcription.selected_model_id);
+            return;
+        } else {
+            transcription.use_shared_asr_selection = false;
+            transcription.dictation_provider = transcription.default_provider.clone();
+            transcription.dictation_model_id = transcription.selected_model_id.clone();
+        }
+    }
+
+    let requested_meeting_provider =
+        asr_provider_from_settings_value(&transcription.meeting_provider);
+    let meeting_provider = preferred_meeting_provider(
+        default_provider,
+        dictation_provider,
+        requested_meeting_provider.or(Some(default_provider)),
+    );
     transcription.meeting_provider = asr_provider_to_settings_value(meeting_provider).to_string();
-    transcription.meeting_model_id = normalize_asr_model_id(
+    transcription.meeting_model_id = normalize_meeting_model_id(
         meeting_provider,
         if transcription.meeting_model_id.trim().is_empty() {
             &transcription.selected_model_id
@@ -13796,13 +14031,6 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
             &transcription.meeting_model_id
         },
     );
-
-    if transcription.use_shared_asr_selection {
-        transcription.dictation_provider = transcription.default_provider.clone();
-        transcription.dictation_model_id = transcription.selected_model_id.clone();
-        transcription.meeting_provider = transcription.default_provider.clone();
-        transcription.meeting_model_id = transcription.selected_model_id.clone();
-    }
 }
 
 fn resolve_transcription_provider_and_model(
@@ -13829,7 +14057,23 @@ fn resolve_transcription_provider_and_model(
 
     let provider = asr_provider_from_settings_value(provider_value)
         .unwrap_or(asr::AsrProviderType::DistilWhisper);
-    let model_id = normalize_asr_model_id(provider, model_value);
+    let provider =
+        if matches!(scope, TranscriptionScope::Meeting) && provider_is_dictation_only(provider) {
+            preferred_meeting_provider(
+                asr_provider_from_settings_value(&transcription.default_provider)
+                    .unwrap_or(asr::AsrProviderType::DistilWhisper),
+                asr_provider_from_settings_value(&transcription.dictation_provider)
+                    .unwrap_or(asr::AsrProviderType::DistilWhisper),
+                asr_provider_from_settings_value(&transcription.meeting_provider),
+            )
+        } else {
+            provider
+        };
+    let model_id = if matches!(scope, TranscriptionScope::Meeting) {
+        normalize_meeting_model_id(provider, model_value)
+    } else {
+        normalize_asr_model_id(provider, model_value)
+    };
     (provider, model_id)
 }
 
@@ -13877,6 +14121,15 @@ fn normalize_asr_model_id(provider_type: asr::AsrProviderType, model_id: &str) -
         trimmed
     };
 
+    if matches!(candidate, "macos_apple_speech" | "windows_sdk_dictation")
+        && !matches!(
+            provider_type,
+            asr::AsrProviderType::MacosAppleSpeech | asr::AsrProviderType::WindowsSdkDictation
+        )
+    {
+        return provider_type.default_model_id().to_string();
+    }
+
     match provider_type {
         asr::AsrProviderType::Parakeet => match candidate {
             "parakeet-tdt-0.6b-v3" | "parakeet-tdt-ctc-110m" => "parakeet-tdt-ctc-110m".to_string(),
@@ -13889,7 +14142,17 @@ fn normalize_asr_model_id(provider_type: asr::AsrProviderType, model_id: &str) -
         },
         asr::AsrProviderType::MacosAppleSpeech => "macos_apple_speech".to_string(),
         asr::AsrProviderType::WindowsSdkDictation => "windows_sdk_dictation".to_string(),
-        _ => candidate.to_string(),
+        _ => {
+            if provider_type
+                .model_options()
+                .iter()
+                .any(|option| option.id == candidate)
+            {
+                candidate.to_string()
+            } else {
+                provider_type.default_model_id().to_string()
+            }
+        }
     }
 }
 
