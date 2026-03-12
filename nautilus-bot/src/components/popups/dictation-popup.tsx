@@ -25,7 +25,12 @@ import {
   getDictationAudioLevel,
   stopDictation,
 } from "@/lib/tauri";
+import {
+  providerHostingPreference,
+  type DictationRoutePreference,
+} from "@/lib/asr-capabilities";
 import { cn } from "@/lib/utils";
+import type { AsrProviderType } from "@/types";
 import type { DictationCustomMode } from "@/types/settings";
 
 type DisplayMode = "full" | "compact" | "minimal";
@@ -55,6 +60,8 @@ interface DictationStateChangedEvent {
   activationMatcher?: string | null;
   dictationProvider?: string | null;
   dictationModelId?: string | null;
+  dictationRoutePreference?: DictationRoutePreference | null;
+  dictationResolvedHosting?: DictationRoutePreference | null;
 }
 
 type DictationModePreset =
@@ -196,6 +203,10 @@ export function DictationPopup() {
   const [customModes, setCustomModes] = useState<DictationCustomMode[]>([]);
   const [dictationProvider, setDictationProvider] = useState<string | null>(null);
   const [dictationModelId, setDictationModelId] = useState<string | null>(null);
+  const [dictationRoutePreference, setDictationRoutePreference] =
+    useState<DictationRoutePreference>("local");
+  const [dictationResolvedHosting, setDictationResolvedHosting] =
+    useState<DictationRoutePreference | null>(null);
   const [dictationInsertionMode, setDictationInsertionMode] =
     useState<DictationInsertionMode>("paste");
   const [resolvedModeLabel, setResolvedModeLabel] = useState<string | null>(null);
@@ -216,6 +227,9 @@ export function DictationPopup() {
     );
     setDictationProvider(settings.transcription.dictationProvider ?? null);
     setDictationModelId(settings.transcription.dictationModelId ?? null);
+    setDictationRoutePreference(
+      settings.transcription.dictationRoutePreference === "cloud" ? "cloud" : "local"
+    );
     setDictationInsertionMode(
       (settings.transcription.dictationInsertionMode ?? "paste") as DictationInsertionMode
     );
@@ -244,6 +258,12 @@ export function DictationPopup() {
     }
     if (typeof payload.dictationModelId !== "undefined") {
       setDictationModelId(payload.dictationModelId ?? null);
+    }
+    if (typeof payload.dictationRoutePreference !== "undefined") {
+      setDictationRoutePreference(payload.dictationRoutePreference ?? "local");
+    }
+    if (typeof payload.dictationResolvedHosting !== "undefined") {
+      setDictationResolvedHosting(payload.dictationResolvedHosting ?? null);
     }
   };
 
@@ -389,6 +409,14 @@ export function DictationPopup() {
   const contextMeta = CONTEXT_META[contextSource] ?? CONTEXT_META.none;
   const insertionMeta = INSERTION_META[dictationInsertionMode] ?? INSERTION_META.auto;
   const routeLabel = formatRouteLabel(dictationProvider, dictationModelId);
+  const hostingLabel =
+    dictationResolvedHosting ??
+    (dictationProvider
+      ? providerHostingPreference(
+          dictationProvider as AsrProviderType,
+          dictationModelId
+        )
+      : dictationRoutePreference);
   const targetDetail = runtimeAppTarget ? ` for ${runtimeAppTarget}` : "";
   const autoActivationDetail =
     activationMatcher && runtimeAppTarget
@@ -551,6 +579,9 @@ export function DictationPopup() {
             <div className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium ${modeMeta.accent}`}>
               <modeMeta.icon className="h-3.5 w-3.5" />
               {modeMeta.label}
+            </div>
+            <div className="inline-flex items-center gap-1.5 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-100">
+              {hostingLabel === "cloud" ? "Cloud route" : "Local route"}
             </div>
             <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-slate-200">
               <Clipboard className="h-3.5 w-3.5 text-slate-300" />

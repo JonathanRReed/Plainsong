@@ -23,6 +23,16 @@ pub struct Recording {
     pub meeting_template_id: Option<String>,
     #[serde(default)]
     pub notes_updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub consent_prompt_shown: bool,
+    #[serde(default)]
+    pub consent_notice_mode: Option<String>,
+    #[serde(default)]
+    pub consent_notice_surface: Option<String>,
+    #[serde(default)]
+    pub consent_notice_message: Option<String>,
+    #[serde(default)]
+    pub consent_notice_updated_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +120,14 @@ pub struct DictationStartOptions {
     #[serde(default)]
     pub context_source: String,
     #[serde(default)]
+    pub route_preference: Option<String>,
+    #[serde(default)]
+    pub requested_provider: Option<String>,
+    #[serde(default)]
+    pub requested_model_id: Option<String>,
+    #[serde(default)]
+    pub resolved_hosting: Option<String>,
+    #[serde(default)]
     pub captured_context_text: Option<String>,
     #[serde(default)]
     pub context_app_name: Option<String>,
@@ -124,6 +142,10 @@ impl Default for DictationStartOptions {
             project_id: Some("inbox".to_string()),
             profile: DictationProfile::NormalSpeed,
             context_source: "none".to_string(),
+            route_preference: None,
+            requested_provider: None,
+            requested_model_id: None,
+            resolved_hosting: None,
             captured_context_text: None,
             context_app_name: None,
             context_app_bundle_id: None,

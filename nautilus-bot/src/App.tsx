@@ -30,7 +30,11 @@ import {
   OPEN_ONBOARDING_EVENT,
   type OnboardingMode,
 } from "@/lib/onboarding";
-import { OPEN_MAIN_VIEW_EVENT, type MainViewId } from "@/lib/navigation";
+import {
+  OPEN_MAIN_VIEW_EVENT,
+  OPEN_RECORDING_WORKSPACE_EVENT as OPEN_RECORDING_WORKSPACE_CUSTOM_EVENT,
+  type MainViewId,
+} from "@/lib/navigation";
 import type { LicenseInfo } from "@/lib/tauri";
 import { usePeriodicLicenseCheck } from "@/hooks/use-periodic-license-check";
 
@@ -123,6 +127,7 @@ type OverlayMode = "dictation" | "recording" | null;
 
 interface MainViewRequestEvent {
   view?: ViewId | string | null;
+  recordingId?: string | null;
 }
 
 function getOverlayMode(): OverlayMode {
@@ -189,6 +194,9 @@ function AppRuntimeListeners() {
 function App() {
   const overlayMode = useMemo(getOverlayMode, []);
   const [activeView, setActiveView] = useState<ViewId>("dashboard");
+  const [pendingRecordingWorkspaceId, setPendingRecordingWorkspaceId] = useState<string | null>(
+    null
+  );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const firstViewMarked = useRef(false);
 
@@ -265,6 +273,8 @@ function App() {
     let unlisten: (() => void) | undefined;
     void listen<MainViewRequestEvent>("main-view-requested", (event) => {
       const requestedView = event.payload?.view;
+      const requestedRecordingId =
+        typeof event.payload?.recordingId === "string" ? event.payload.recordingId : null;
       if (
         requestedView === "dashboard" ||
         requestedView === "projects" ||
@@ -275,6 +285,9 @@ function App() {
         requestedView === "setup"
       ) {
         setActiveView(requestedView);
+        setPendingRecordingWorkspaceId(
+          requestedView === "recordings" ? requestedRecordingId : null
+        );
       }
     }).then((fn) => {
       unlisten = fn;
@@ -310,6 +323,19 @@ function App() {
       window.removeEventListener(OPEN_MAIN_VIEW_EVENT, handleOpenMainView as EventListener);
     };
   }, []);
+
+  useEffect(() => {
+    if (activeView !== "recordings" || !pendingRecordingWorkspaceId) {
+      return;
+    }
+
+    window.dispatchEvent(
+      new CustomEvent<{ recordingId: string }>(OPEN_RECORDING_WORKSPACE_CUSTOM_EVENT, {
+        detail: { recordingId: pendingRecordingWorkspaceId },
+      })
+    );
+    setPendingRecordingWorkspaceId(null);
+  }, [activeView, pendingRecordingWorkspaceId]);
 
   const handleActivated = (info: LicenseInfo) => {
     setLicense(info);

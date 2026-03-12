@@ -10,6 +10,7 @@ import {
 import {
   isMeetingEligibleProvider,
   isMeetingEligibleModel,
+  providerHostingPreference,
 } from "@/lib/asr-capabilities";
 import type { AsrProviderInfo, AsrProviderType } from "@/types";
 import type { Settings } from "@/types/settings";
@@ -30,6 +31,9 @@ export interface SetupStatusSnapshot {
   systemAudioAvailable: boolean | null;
   loopbackDevice: string | null;
   meetingCaptureMode: "me_and_them" | "mic_only" | "unknown";
+  dictationRoutePreference: "local" | "cloud";
+  dictationLocalReady: boolean;
+  dictationCloudReady: boolean;
   meetingRoutePolicy: "prefer_local" | "best_available";
   dictationRoute: SetupRouteStatus;
   meetingRoute: SetupRouteStatus;
@@ -151,10 +155,24 @@ function buildSnapshot(
 ): SetupStatusSnapshot {
   const dictationRoute = buildRouteStatus("dictation", settings, providers, permissions);
   const meetingRoute = buildRouteStatus("meeting", settings, providers, permissions);
+  const dictationRoutePreference =
+    settings?.transcription.dictationRoutePreference === "cloud" ? "cloud" : "local";
   const meetingRoutePolicy =
     settings?.transcription.meetingRoutePolicy === "best_available"
       ? "best_available"
       : "prefer_local";
+  const dictationLocalReady = providers.some(
+    (provider) =>
+      provider.inferenceEnabled &&
+      provider.runtimeStatus === "ready" &&
+      providerHostingPreference(provider.providerType, provider.selectedModelId) === "local"
+  );
+  const dictationCloudReady = providers.some(
+    (provider) =>
+      provider.inferenceEnabled &&
+      provider.runtimeStatus === "ready" &&
+      providerHostingPreference(provider.providerType, provider.selectedModelId) === "cloud"
+  );
   const dictationReady = Boolean(
     permissions?.microphoneReady &&
       dictationRoute.ready &&
@@ -199,6 +217,9 @@ function buildSnapshot(
     systemAudioAvailable,
     loopbackDevice,
     meetingCaptureMode,
+    dictationRoutePreference,
+    dictationLocalReady,
+    dictationCloudReady,
     meetingRoutePolicy,
     dictationRoute,
     meetingRoute,

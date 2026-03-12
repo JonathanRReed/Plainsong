@@ -22,6 +22,9 @@ import {
   repairCursorInsertPermissions,
   repairLocalModelCache,
   requestDictationPermissions,
+  verifyDictationSetup,
+  verifyMeetingSetup,
+  verifySystemAudioSetup,
 } from "@/lib/tauri";
 import {
   isCloudProvider,
@@ -97,6 +100,9 @@ export function SetupView() {
     systemAudioAvailable,
     loopbackDevice,
     meetingCaptureMode,
+    dictationRoutePreference,
+    dictationLocalReady,
+    dictationCloudReady,
     meetingRoutePolicy,
     dictationRoute,
     meetingRoute,
@@ -130,6 +136,24 @@ export function SetupView() {
     setStatusMessage(null);
     try {
       await action();
+      await refresh();
+    } catch (nextError) {
+      setStatusMessage(nextError instanceof Error ? nextError.message : String(nextError));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const runVerification = async (
+    key: string,
+    action: () => Promise<{ ok: boolean; title: string; summary: string; details: string[] }>
+  ) => {
+    setBusyAction(key);
+    setStatusMessage(null);
+    try {
+      const result = await action();
+      const suffix = result.details.length > 0 ? ` ${result.details.join(" ")}` : "";
+      setStatusMessage(`${result.title}: ${result.summary}${suffix}`);
       await refresh();
     } catch (nextError) {
       setStatusMessage(nextError instanceof Error ? nextError.message : String(nextError));
@@ -197,6 +221,12 @@ export function SetupView() {
                   <span>Active route</span>
                   <span className="font-medium">{dictationRoute.summary}</span>
                 </div>
+                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                  <span>Route preference</span>
+                  <span className="font-medium">
+                    {dictationRoutePreference === "cloud" ? "Cloud preferred" : "Local preferred"}
+                  </span>
+                </div>
                 <div className="grid gap-2 sm:grid-cols-3">
                   <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
                     <div className="text-xs text-current opacity-70">Microphone</div>
@@ -214,6 +244,20 @@ export function SetupView() {
                     <div className="text-xs text-current opacity-70">Cursor insert</div>
                     <div className="mt-1 font-medium">
                       {permissions?.accessibilityReady ? "Ready" : "Needs access"}
+                    </div>
+                  </div>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                    <div className="text-xs text-current opacity-70">Local dictation</div>
+                    <div className="mt-1 font-medium">
+                      {dictationLocalReady ? "Ready" : "No ready route"}
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                    <div className="text-xs text-current opacity-70">Cloud dictation</div>
+                    <div className="mt-1 font-medium">
+                      {dictationCloudReady ? "Ready" : "No ready route"}
                     </div>
                   </div>
                 </div>
@@ -235,6 +279,20 @@ export function SetupView() {
                   </div>
                 ) : null}
                 <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      void runVerification("verify-dictation", verifyDictationSetup)
+                    }
+                    disabled={busyAction !== null}
+                  >
+                    {busyAction === "verify-dictation" ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <ShieldCheck className="mr-2 h-4 w-4" />
+                    )}
+                    Test dictation
+                  </Button>
                   <Button
                     variant="secondary"
                     onClick={() =>
@@ -349,6 +407,34 @@ export function SetupView() {
                   </div>
                 ) : null}
                 <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      void runVerification("verify-meeting", verifyMeetingSetup)
+                    }
+                    disabled={busyAction !== null}
+                  >
+                    {busyAction === "verify-meeting" ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <ShieldCheck className="mr-2 h-4 w-4" />
+                    )}
+                    Test meeting route
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      void runVerification("verify-system-audio", verifySystemAudioSetup)
+                    }
+                    disabled={busyAction !== null}
+                  >
+                    {busyAction === "verify-system-audio" ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <MonitorUp className="mr-2 h-4 w-4" />
+                    )}
+                    Test system audio
+                  </Button>
                   <Button variant="secondary" onClick={() => requestOnboarding("meetings")}>
                     Guided meeting setup
                   </Button>

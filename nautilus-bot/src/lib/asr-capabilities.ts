@@ -1,5 +1,7 @@
 import type { AsrProviderInfo, AsrProviderType } from "@/types";
 
+export type DictationRoutePreference = "local" | "cloud";
+
 const DOWNLOADABLE_PROVIDER_SET = new Set<AsrProviderType>([
   "whisper",
   "parakeet",
@@ -46,6 +48,17 @@ export function isDictationOnlyProvider(providerType: AsrProviderType) {
 
 export function isCloudProvider(providerType: AsrProviderType) {
   return CLOUD_PROVIDER_SET.has(providerType);
+}
+
+export function providerHostingPreference(
+  providerType: AsrProviderType,
+  modelId?: string | null
+): DictationRoutePreference {
+  if (providerType === "voxtral" && (modelId ?? "").trim() === "voxtral-cloud") {
+    return "cloud";
+  }
+
+  return isCloudProvider(providerType) ? "cloud" : "local";
 }
 
 export function isMeetingEligibleProvider(providerType: AsrProviderType) {

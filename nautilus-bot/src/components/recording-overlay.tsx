@@ -2,8 +2,14 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Mic, Monitor, AlertCircle, CheckCircle } from "lucide-react";
-import { checkSystemAudioAvailability, getLoopbackDeviceName } from "@/lib/tauri";
-import { MEETING_TEMPLATES } from "@/lib/meeting-templates";
+import {
+  checkSystemAudioAvailability,
+  getLoopbackDeviceName,
+  getMeetingConsentAutomationStatus,
+  type MeetingConsentAutomationStatus,
+} from "@/lib/tauri";
+import { MEETING_CONSENT_NOTICE_TEXT } from "@/lib/meeting-consent";
+import { getMeetingTemplateOption, MEETING_TEMPLATES } from "@/lib/meeting-templates";
 
 interface ConsentDialogProps {
   open: boolean;
@@ -12,18 +18,22 @@ interface ConsentDialogProps {
 }
 
 export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProps) {
-  const [options, setOptions] = useState({
-    mic: true,
-    systemAudio: true,
-  });
+  const [captureMode, setCaptureMode] = useState<"mic_only" | "me_them">("me_them");
   const [template, setTemplate] = useState("auto");
   const [systemAudioAvailable, setSystemAudioAvailable] = useState<boolean | null>(null);
   const [loopbackDevice, setLoopbackDevice] = useState<string | null>(null);
+  const [consentAutomation, setConsentAutomation] =
+    useState<MeetingConsentAutomationStatus | null>(null);
+  const [copiedNotice, setCopiedNotice] = useState(false);
+  const selectedTemplate = getMeetingTemplateOption(template);
 
   useEffect(() => {
     if (open) {
       checkSystemAudioAvailability().then(setSystemAudioAvailable).catch(() => setSystemAudioAvailable(false));
       getLoopbackDeviceName().then(setLoopbackDevice).catch(() => setLoopbackDevice(null));
+      getMeetingConsentAutomationStatus()
+        .then(setConsentAutomation)
+        .catch(() => setConsentAutomation(null));
     }
   }, [open]);
 
@@ -32,27 +42,91 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
       return;
     }
 
-    if (systemAudioAvailable === false && options.systemAudio) {
-      setOptions(prev => ({ ...prev, systemAudio: false }));
+    if (systemAudioAvailable === false && captureMode === "me_them") {
+      setCaptureMode("mic_only");
     }
-  }, [open, options.systemAudio, systemAudioAvailable]);
+  }, [captureMode, open, systemAudioAvailable]);
+
+  useEffect(() => {
+    if (!open || !copiedNotice) {
+      return;
+    }
+
+    const id = window.setTimeout(() => setCopiedNotice(false), 1500);
+    return () => window.clearTimeout(id);
+  }, [copiedNotice, open]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent onPointerDownOutside={(e) => e.preventDefault()} onCloseAutoFocus={(e) => e.preventDefault()}>
         <DialogHeader>
-          <DialogTitle>Start Recording</DialogTitle>
+          <DialogTitle>Start Meeting</DialogTitle>
           <DialogDescription>
-            Choose what audio sources to capture. You'll see clear indicators while recording.
+            Choose the capture mode and note format. Nautilus will carry these choices into the live recorder and review workspace.
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={(e) => {
           e.preventDefault();
-          onStart({ ...options, template: template === "auto" ? undefined : template });
+          onStart({
+            mic: true,
+            systemAudio: captureMode === "me_them",
+            template: template === "auto" ? undefined : template,
+          });
         }}>
           <div className="space-y-4 py-4">
-          {/* Meeting template picker */}
+          <div>
+            <p className="mb-2 text-sm font-medium">Capture Mode</p>
+            <div className="grid gap-2 md:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => setCaptureMode("mic_only")}
+                className={`rounded-lg border p-3 text-left transition-colors ${
+                  captureMode === "mic_only"
+                    ? "border-active bg-active/10"
+                    : "border-border bg-background hover:bg-muted"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <Mic className="h-4 w-4 text-muted-foreground" />
+                  <p className="font-medium">Mic only</p>
+                </div>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Capture your side of the conversation and keep note-taking lightweight.
+                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (systemAudioAvailable) {
+                    setCaptureMode("me_them");
+                  }
+                }}
+                disabled={!systemAudioAvailable}
+                className={`rounded-lg border p-3 text-left transition-colors ${
+                  captureMode === "me_them"
+                    ? "border-active bg-active/10"
+                    : "border-border bg-background hover:bg-muted"
+                } disabled:cursor-not-allowed disabled:opacity-60`}
+              >
+                <div className="flex items-center gap-2">
+                  <Monitor className="h-4 w-4 text-muted-foreground" />
+                  <p className="font-medium">Me + Them</p>
+                </div>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Capture your microphone and remote participants for meeting-grade notes and follow-up.
+                </p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {systemAudioAvailable === null
+                    ? "Checking system audio availability..."
+                    : systemAudioAvailable
+                      ? `Ready via ${loopbackDevice || "system audio capture"}.`
+                      : "System audio is not ready, so Nautilus will fall back to Mic only."}
+                </p>
+              </button>
+            </div>
+          </div>
+
           <div>
             <p className="text-sm font-medium mb-2">Meeting Type</p>
             <div className="grid grid-cols-3 gap-1.5">
@@ -71,56 +145,80 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
                 </button>
               ))}
             </div>
-            {template !== "auto" && (
-              <p className="text-xs text-muted-foreground mt-1">
-                {MEETING_TEMPLATES.find(t => t.value === template)?.description}
-              </p>
-            )}
           </div>
 
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Mic className="h-5 w-5 text-muted-foreground" />
+          <div className="rounded-lg border bg-muted/30 p-3">
+            <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="font-medium">Microphone</p>
-                <p className="text-sm text-muted-foreground">Record your voice</p>
+                <p className="text-sm font-medium">{selectedTemplate.label}</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {selectedTemplate.description}
+                </p>
               </div>
+              <span className="rounded-full border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground">
+                {captureMode === "me_them" ? "Me + Them" : "Mic only"}
+              </span>
             </div>
-            <input
-              type="checkbox"
-              checked={options.mic}
-              onChange={(e) => setOptions(prev => ({ ...prev, mic: e.target.checked }))}
-              className="h-4 w-4"
-            />
+            <div className="mt-3 flex flex-wrap gap-2">
+              {selectedTemplate.notesOutline.slice(0, 4).map((section) => (
+                <span
+                  key={section}
+                  className="rounded-full border border-border bg-background px-2 py-1 text-[11px] text-muted-foreground"
+                >
+                  {section}
+                </span>
+              ))}
+            </div>
           </div>
 
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Monitor className="h-5 w-5 text-muted-foreground" />
-              <div>
-                <p className="font-medium">System Audio</p>
-                {systemAudioAvailable === null ? (
-                  <p className="text-sm text-muted-foreground">Checking availability...</p>
-                ) : systemAudioAvailable ? (
-                  <p className="text-sm text-green-600 flex items-center gap-1">
-                    <CheckCircle className="h-3 w-3" />
-                    {loopbackDevice || "Available"}
-                  </p>
-                ) : (
-                  <p className="text-sm text-amber-600 flex items-center gap-1">
-                    <AlertCircle className="h-3 w-3" />
-                    Install BlackHole: brew install blackhole-2ch
-                  </p>
-                )}
-              </div>
+          <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-sm text-muted-foreground">
+            <div className="flex items-center gap-2 font-medium text-foreground">
+              <CheckCircle className="h-4 w-4 text-emerald-600" />
+              Participant consent reminder
             </div>
-            <input
-              type="checkbox"
-              checked={options.systemAudio}
-              onChange={(e) => setOptions(prev => ({ ...prev, systemAudio: e.target.checked }))}
-              disabled={!systemAudioAvailable}
-              className="h-4 w-4"
-            />
+            <p className="mt-1">
+              By starting, you confirm participants know the meeting is being recorded and transcribed.
+            </p>
+          </div>
+
+          <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-medium text-foreground">Consent notice delivery</p>
+                <p className="mt-1 text-muted-foreground">
+                  {consentAutomation?.message ??
+                    "Nautilus checks whether it can post the consent notice automatically before the meeting starts."}
+                </p>
+              </div>
+              <span className="rounded-full border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground">
+                {consentAutomation?.canAutomate ? "Auto" : "Manual"}
+              </span>
+            </div>
+            <div className="mt-3 rounded-md border bg-background/80 px-3 py-2 text-xs text-muted-foreground">
+              {consentAutomation?.noticeText ?? MEETING_CONSENT_NOTICE_TEXT}
+            </div>
+            <div className="mt-3 flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(
+                      consentAutomation?.noticeText ?? MEETING_CONSENT_NOTICE_TEXT
+                    );
+                    setCopiedNotice(true);
+                  } catch {
+                    setCopiedNotice(false);
+                  }
+                }}
+              >
+                Copy notice
+              </Button>
+              {copiedNotice ? (
+                <span className="text-xs text-muted-foreground">Copied.</span>
+              ) : null}
+            </div>
           </div>
         </div>
 
@@ -131,9 +229,8 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
           <button
             type="submit"
             className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-active text-active-foreground hover:bg-active/90 h-10 px-4 py-2"
-            disabled={!options.mic && !options.systemAudio}
           >
-            Start Recording
+            Start Meeting
           </button>
         </DialogFooter>
         </form>

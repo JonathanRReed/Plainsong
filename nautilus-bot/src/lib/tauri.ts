@@ -24,6 +24,7 @@ export interface DictationStartOptions {
   projectId?: string;
   profile: "normal_speed" | "power_rewrite";
   contextSource?: "none" | "clipboard" | "selected_text" | "application_context";
+  routePreference?: "local" | "cloud";
 }
 
 export interface DictationHistoryDetails {
@@ -60,6 +61,17 @@ export interface MeetingChatMessage {
   templateId?: string | null;
   citations: MeetingChatCitation[];
   createdAt: string;
+}
+
+export interface MeetingConsentAutomationStatus {
+  mode: "auto_ready" | "manual_required" | string;
+  surface?: "zoom" | "google_meet" | string | null;
+  appName?: string | null;
+  appBundleId?: string | null;
+  browserUrl?: string | null;
+  canAutomate: boolean;
+  message: string;
+  noticeText: string;
 }
 
 export async function startDictation(options?: DictationStartOptions): Promise<void> {
@@ -110,12 +122,20 @@ export async function startRecording(options: {
   return await invoke("start_recording", { options });
 }
 
+export async function getMeetingConsentAutomationStatus(): Promise<MeetingConsentAutomationStatus> {
+  return await invoke("get_meeting_consent_automation_status");
+}
+
 export async function stopRecording(recordingId: string): Promise<void> {
   await invoke("stop_recording", { recordingId });
 }
 
 export async function openRecordingAudio(recordingId: string): Promise<void> {
   await invoke("open_recording_audio", { recordingId });
+}
+
+export async function openExportPath(targetPath: string): Promise<void> {
+  await invoke("open_export_path", { targetPath });
 }
 
 export async function getWaveformData(recordingId: string): Promise<number[]> {
@@ -621,8 +641,27 @@ export interface PermissionDiagnostics {
   notes: string[];
 }
 
+export interface SetupVerificationResult {
+  ok: boolean;
+  title: string;
+  summary: string;
+  details: string[];
+}
+
 export async function getPermissionDiagnostics(): Promise<PermissionDiagnostics> {
   return await invoke("get_permission_diagnostics");
+}
+
+export async function verifyDictationSetup(): Promise<SetupVerificationResult> {
+  return await invoke("verify_dictation_setup");
+}
+
+export async function verifyMeetingSetup(): Promise<SetupVerificationResult> {
+  return await invoke("verify_meeting_setup");
+}
+
+export async function verifySystemAudioSetup(): Promise<SetupVerificationResult> {
+  return await invoke("verify_system_audio_setup");
 }
 
 export async function openPermissionSettings(
