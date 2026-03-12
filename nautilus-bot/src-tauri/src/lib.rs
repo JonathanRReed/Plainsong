@@ -7854,9 +7854,16 @@ async fn reprocess_dictation_text(
     }
 
     let normalized_mode = normalize_dictation_mode_preset(&mode_preset).to_string();
-    let (output_text, used_ai, provider, model_id) = match normalized_mode.as_str() {
+    let effective_mode = if normalized_mode == "custom" {
+        let settings = state.settings_manager.lock().await.settings().clone();
+        resolved_dictation_mode_preset(&settings).to_string()
+    } else {
+        normalized_mode.clone()
+    };
+
+    let (output_text, used_ai, provider, model_id) = match effective_mode.as_str() {
         "messages" | "email" | "meeting_follow_up" => {
-            let prompt = dictation_mode_transform_prompt(&normalized_mode)
+            let prompt = dictation_mode_transform_prompt(&effective_mode)
                 .ok_or_else(|| "No transform prompt is configured for this mode.".to_string())?;
             match run_custom_dictation_transform_with_selected_provider(
                 state.inner(),
@@ -7872,7 +7879,7 @@ async fn reprocess_dictation_text(
                     Some(model_id),
                 ),
                 Err(error) => {
-                    let fallback = match normalized_mode.as_str() {
+                    let fallback = match effective_mode.as_str() {
                         "messages" => rewrite_shorter_text(input),
                         "email" => rewrite_professional_text(input),
                         "meeting_follow_up" => rewrite_professional_text(input),
@@ -7880,7 +7887,7 @@ async fn reprocess_dictation_text(
                     };
                     tracing::warn!(
                         "Dictation reprocess for mode '{}' fell back to local transform: {}",
-                        normalized_mode,
+                        effective_mode,
                         error
                     );
                     (fallback, false, None, None)
@@ -7891,7 +7898,7 @@ async fn reprocess_dictation_text(
         "voice" | "custom" => (
             crate::text::format::smart_format_dictation_text(
                 sanitize_dictation_output(input, input).trim(),
-                &normalized_mode,
+                &effective_mode,
             )
             .trim()
             .to_string(),
@@ -7902,7 +7909,7 @@ async fn reprocess_dictation_text(
         _ => (
             crate::text::format::smart_format_dictation_text(
                 sanitize_dictation_output(input, input).trim(),
-                &normalized_mode,
+                &effective_mode,
             )
             .trim()
             .to_string(),
@@ -7913,7 +7920,7 @@ async fn reprocess_dictation_text(
     };
 
     Ok(serde_json::json!({
-        "modePreset": normalized_mode,
+        "modePreset": effective_mode,
         "outputText": output_text,
         "usedAi": used_ai,
         "provider": provider,
@@ -8403,8 +8410,7 @@ async fn stop_dictation_session_for_session(
         &settings_snapshot.transcription.dictation_command_prefix,
     )
     .to_string();
-    let normalized_mode_preset =
-        normalize_dictation_mode_preset(&settings_snapshot.transcription.dictation_mode_preset);
+    let normalized_mode_preset = resolved_dictation_mode_preset(&settings_snapshot);
     let local_smart_formatting_enabled = settings_snapshot.transcription.intelligent_punctuation;
     let snippets_enabled = settings_snapshot.transcription.dictation_snippets_enabled;
     let configured_mode = DictationInsertionMode::from_settings_value(insertion_mode);
@@ -9125,7 +9131,7 @@ async fn stop_dictation_session_for_session(
         "dictation_profile": dictation_profile_to_settings_value(&dictation_options.profile),
         "dictation_model_id": dictation_model_id,
         "recording_id": persisted_recording_id,
-        "dictation_mode_preset": settings_snapshot.transcription.dictation_mode_preset,
+        "dictation_mode_preset": resolved_dictation_mode_preset(&settings_snapshot),
         "route_preference": dictation_options.route_preference,
         "resolved_hosting": dictation_options.resolved_hosting,
         "activation_matcher": resolved_activation_matcher,
@@ -11729,6 +11735,31 @@ fn active_dictation_custom_mode<'a>(
         })
 }
 
+fn normalize_dictation_base_mode_preset(value: &str) -> &'static str {
+    match value.trim() {
+        "messages" => "messages",
+        "email" => "email",
+        "notes" => "notes",
+        "meeting_follow_up" => "meeting_follow_up",
+        _ => "voice",
+    }
+}
+
+fn resolved_dictation_mode_preset(settings: &settings::Settings) -> &'static str {
+    if let Some(mode) = active_dictation_custom_mode(settings) {
+        if let Some(base_mode_preset) = mode.base_mode_preset.as_deref() {
+            return normalize_dictation_base_mode_preset(base_mode_preset);
+        }
+    }
+
+    let normalized = normalize_dictation_mode_preset(&settings.transcription.dictation_mode_preset);
+    if normalized == "custom" {
+        "voice"
+    } else {
+        normalized
+    }
+}
+
 fn resolve_dictation_format_prompt_metadata(
     settings: &settings::Settings,
 ) -> (Option<String>, Option<String>) {
@@ -14150,6 +14181,7 @@ mod tests {
             id: "custom-1".to_string(),
             name: "Gmail Replies".to_string(),
             description: String::new(),
+            base_mode_preset: Some("email".to_string()),
             custom_prompt: None,
             profile: "normal_speed".to_string(),
             route_preference: Some("local".to_string()),
@@ -14559,6 +14591,7 @@ mod tests {
             id: "gmail".to_string(),
             name: "Gmail Drafts".to_string(),
             description: String::new(),
+            base_mode_preset: Some("email".to_string()),
             custom_prompt: Some("Write polished email prose".to_string()),
             profile: "power_rewrite".to_string(),
             route_preference: Some("local".to_string()),
@@ -14580,6 +14613,37 @@ mod tests {
         let metadata = resolve_dictation_format_prompt_metadata(&settings);
         assert_eq!(metadata.0.as_deref(), Some("custom_mode_format:gmail"));
         assert_eq!(metadata.1.as_deref(), Some("Write polished email prose"));
+    }
+
+    #[test]
+    fn resolved_dictation_mode_uses_custom_mode_base_preset() {
+        let mut settings = settings::Settings::default();
+        settings.transcription.dictation_mode_preset = "custom".to_string();
+        settings.transcription.dictation_selected_custom_mode_id = Some("slack".to_string());
+        settings.transcription.dictation_custom_modes = vec![settings::DictationCustomMode {
+            id: "slack".to_string(),
+            name: "Slack Replies".to_string(),
+            description: String::new(),
+            base_mode_preset: Some("messages".to_string()),
+            custom_prompt: None,
+            profile: "normal_speed".to_string(),
+            route_preference: Some("local".to_string()),
+            language_override: None,
+            live_preview_enabled: Some(true),
+            insertion_mode: "paste".to_string(),
+            context_source: "application_context".to_string(),
+            save_to_inbox: false,
+            copy_to_clipboard: true,
+            command_mode_enabled: true,
+            dictation_provider: None,
+            dictation_model_id: None,
+            ai_provider: None,
+            ai_model_id: None,
+            activation_app_matcher: Some("Slack".to_string()),
+            activation_domain_matcher: None,
+        }];
+
+        assert_eq!(resolved_dictation_mode_preset(&settings), "messages");
     }
 
     #[test]
@@ -15150,7 +15214,7 @@ fn sync_dictation_overlay_runtime_metadata(
     dictation_resolved_hosting: Option<&str>,
 ) {
     if let Ok(mut state) = app.state::<AppState>().dictation_overlay_state.lock() {
-        state.resolved_mode_preset = Some(settings.transcription.dictation_mode_preset.clone());
+        state.resolved_mode_preset = Some(resolved_dictation_mode_preset(settings).to_string());
         state.resolved_custom_mode_id = settings
             .transcription
             .dictation_selected_custom_mode_id

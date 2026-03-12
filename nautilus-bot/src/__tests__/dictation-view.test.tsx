@@ -192,6 +192,7 @@ describe("DictationView modes", () => {
     render(<DictationView />);
 
     await screen.findByText("Modes");
+    fireEvent.click(screen.getByRole("button", { name: /messages/i }));
     fireEvent.click(screen.getByRole("button", { name: /custom/i }));
 
     const nameInput = await screen.findByLabelText("Mode name");
@@ -211,6 +212,7 @@ describe("DictationView modes", () => {
     expect(latestSettings.transcription.dictationSelectedCustomModeId).toBeTruthy();
     expect(latestSettings.transcription.dictationCustomModes).toHaveLength(1);
     expect(latestSettings.transcription.dictationCustomModes[0].name).toBe("Sales Follow-up");
+    expect(latestSettings.transcription.dictationCustomModes[0].baseModePreset).toBe("messages");
     expect(latestSettings.transcription.dictationCustomModes[0].activationDomainMatcher).toBe(
       "gmail.com"
     );
@@ -232,6 +234,7 @@ describe("DictationView modes", () => {
     expect(latestSettings.transcription.dictationSelectedCustomModeId).toBe("builtin-slack-replies");
     expect(latestSettings.transcription.dictationCustomModes).toHaveLength(1);
     expect(latestSettings.transcription.dictationCustomModes[0].name).toBe("Slack Replies");
+    expect(latestSettings.transcription.dictationCustomModes[0].baseModePreset).toBe("messages");
     expect(latestSettings.transcription.dictationCustomModes[0].activationAppMatcher).toBe("Slack");
     expect(latestSettings.transcription.dictationCustomModes[0].customPrompt).toMatch(/slack reply/i);
     expect(latestSettings.transcription.dictationContextSource).toBe("application_context");
