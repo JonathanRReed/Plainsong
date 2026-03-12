@@ -233,6 +233,7 @@ describe("DictationView modes", () => {
     expect(latestSettings.transcription.dictationCustomModes).toHaveLength(1);
     expect(latestSettings.transcription.dictationCustomModes[0].name).toBe("Slack Replies");
     expect(latestSettings.transcription.dictationCustomModes[0].activationAppMatcher).toBe("Slack");
+    expect(latestSettings.transcription.dictationCustomModes[0].customPrompt).toMatch(/slack reply/i);
     expect(latestSettings.transcription.dictationContextSource).toBe("application_context");
   });
 

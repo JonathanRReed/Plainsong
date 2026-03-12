@@ -102,6 +102,7 @@ type DictationModeDefinition = {
 type DictationCustomModeDraft = {
   name: string;
   description: string;
+  customPrompt: string;
   activationAppMatcher: string;
   activationDomainMatcher: string;
   languageOverride: string;
@@ -117,6 +118,7 @@ type RecommendedAppStyle = {
   id: string;
   name: string;
   description: string;
+  customPrompt: string;
   profile: "normal_speed" | "power_rewrite";
   routePreference: DictationRoutePreference;
   insertionMode: DictationInsertionMode;
@@ -137,6 +139,8 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     id: "builtin-slack-replies",
     name: "Slack Replies",
     description: "Short, clean replies that auto-activate in Slack and keep command edits ready.",
+    customPrompt:
+      "Rewrite the user's dictation as a concise Slack reply. Keep it direct, natural, and easy to scan. Avoid email-style greetings or sign-offs unless the user explicitly says them. Return only the final reply.",
     profile: "normal_speed",
     routePreference: "local",
     insertionMode: "paste",
@@ -151,6 +155,8 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     id: "builtin-gmail-drafts",
     name: "Gmail Drafts",
     description: "Polished email drafting with selected-text context and auto-activation on Gmail.",
+    customPrompt:
+      "Rewrite the user's dictation into polished email-ready prose. Preserve intent, improve structure, and keep tone professional. Return only the final email body with no subject line unless the user dictates one.",
     profile: "power_rewrite",
     routePreference: "local",
     insertionMode: "paste",
@@ -165,6 +171,8 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     id: "builtin-google-docs-writing",
     name: "Google Docs Writing",
     description: "Long-form drafting with browser context and clean insert behavior for Docs.",
+    customPrompt:
+      "Rewrite the user's dictation into clean long-form prose for a document. Improve flow and clarity, but keep the original meaning. Use paragraphs rather than bullets unless the user explicitly asks for bullets.",
     profile: "power_rewrite",
     routePreference: "local",
     insertionMode: "paste",
@@ -179,6 +187,8 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     id: "builtin-notion-notes",
     name: "Notion Notes",
     description: "Fast notes and structured edits for Notion pages with live preview on.",
+    customPrompt:
+      "Rewrite the user's dictation as crisp structured notes. Prefer short sections and bullets when they make the notes clearer. Keep action items and open questions explicit. Return only the final note text.",
     profile: "normal_speed",
     routePreference: "local",
     insertionMode: "paste",
@@ -193,6 +203,8 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     id: "builtin-linear-updates",
     name: "Linear Updates",
     description: "Issue updates with concise drafting and selected-text editing on linear.app.",
+    customPrompt:
+      "Rewrite the user's dictation as a concise project or issue update. Make status, blockers, and next steps explicit. Keep the language short, precise, and suitable for a work-tracking tool.",
     profile: "power_rewrite",
     routePreference: "local",
     insertionMode: "paste",
@@ -345,6 +357,7 @@ function createCustomModeDraft(
   return {
     name: "Custom Mode",
     description: "",
+    customPrompt: "",
     activationAppMatcher: "",
     activationDomainMatcher: "",
     languageOverride: "",
@@ -365,6 +378,7 @@ function summarizeMode(mode: {
   dictationModelId?: string | null;
   aiProvider?: string | null;
   aiModelId?: string | null;
+  customPrompt?: string | null;
   activationAppMatcher?: string | null;
   activationDomainMatcher?: string | null;
   languageOverride?: string | null;
@@ -414,6 +428,10 @@ function summarizeMode(mode: {
 
   if (mode.languageOverride?.trim()) {
     summary.push({ label: "Language", value: mode.languageOverride.trim() });
+  }
+
+  if (mode.customPrompt?.trim()) {
+    summary.push({ label: "Prompt", value: "Mode-specific style prompt" });
   }
 
   if (typeof mode.livePreviewEnabled === "boolean") {
@@ -922,6 +940,7 @@ export function DictationView() {
       `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name: (overrides?.name ?? customModeDraft.name).trim() || "Custom Mode",
     description: (overrides?.description ?? customModeDraft.description).trim(),
+    customPrompt: overrides?.customPrompt ?? (customModeDraft.customPrompt.trim() || null),
     profile: overrides?.profile ?? dictationProfile,
     routePreference: overrides?.routePreference ?? dictationRoutePreference,
     languageOverride:
@@ -951,6 +970,7 @@ export function DictationView() {
       createCustomModeDraft({
         name: mode.name,
         description: mode.description,
+        customPrompt: mode.customPrompt ?? "",
         activationAppMatcher: mode.activationAppMatcher ?? "",
         activationDomainMatcher: mode.activationDomainMatcher ?? "",
         languageOverride: mode.languageOverride ?? "",
@@ -1017,6 +1037,7 @@ export function DictationView() {
       createCustomModeDraft({
         name: nextMode.name,
         description: nextMode.description,
+        customPrompt: nextMode.customPrompt ?? "",
         activationAppMatcher: nextMode.activationAppMatcher ?? "",
         activationDomainMatcher: nextMode.activationDomainMatcher ?? "",
         languageOverride: nextMode.languageOverride ?? "",
@@ -1055,6 +1076,7 @@ export function DictationView() {
       id: style.id,
       name: style.name,
       description: style.description,
+      customPrompt: style.customPrompt,
       profile: style.profile,
       routePreference: style.routePreference,
       insertionMode: style.insertionMode,
@@ -1077,6 +1099,7 @@ export function DictationView() {
       createCustomModeDraft({
         name: nextMode.name,
         description: nextMode.description,
+        customPrompt: nextMode.customPrompt ?? "",
         activationAppMatcher: nextMode.activationAppMatcher ?? "",
         activationDomainMatcher: nextMode.activationDomainMatcher ?? "",
         languageOverride: nextMode.languageOverride ?? "",
@@ -1881,6 +1904,24 @@ export function DictationView() {
                         }
                         placeholder="What this mode is for"
                       />
+                    </div>
+                    <div className="space-y-2 md:col-span-2">
+                      <label className="text-sm font-medium">Style prompt</label>
+                      <textarea
+                        aria-label="Style prompt"
+                        className="min-h-24 w-full rounded-md border bg-background p-2 text-sm"
+                        value={customModeDraft.customPrompt}
+                        onChange={(event) =>
+                          setCustomModeDraft((current) => ({
+                            ...current,
+                            customPrompt: event.target.value,
+                          }))
+                        }
+                        placeholder="Optional. Tell Nautilus how this mode should rewrite dictation for this app or workflow."
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Optional. Overrides the global Smart Format prompt only when this mode is active.
+                      </p>
                     </div>
                   </div>
                   <div className="rounded-lg border bg-muted/20 p-3">

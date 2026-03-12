@@ -226,6 +226,7 @@ pub struct DictationCustomMode {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub custom_prompt: Option<String>,
     pub profile: String,
     pub route_preference: Option<String>,
     pub language_override: Option<String>,
@@ -679,6 +680,14 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
                     Some(trimmed.to_string())
                 }
             });
+        mode.custom_prompt = mode.custom_prompt.clone().and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
     }
 
     // Migrate legacy Notes preset behavior away from inline insertion.

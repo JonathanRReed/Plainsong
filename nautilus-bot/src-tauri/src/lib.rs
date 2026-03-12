@@ -9093,17 +9093,13 @@ async fn stop_dictation_session_for_session(
         "context_preview": truncate_for_audit_preview(dictation_options.captured_context_text.as_deref(), 280),
         "prompt_source": command_applied.clone().map(|key| format!("command:{}", key)).or_else(|| {
             if settings_snapshot.transcription.dictation_ai_formatting {
-                Some(if settings_snapshot.transcription.dictation_custom_prompt.as_ref().map(|value| !value.trim().is_empty()).unwrap_or(false) {
-                    "custom_dictation_format".to_string()
-                } else {
-                    "default_dictation_format".to_string()
-                })
+                resolve_dictation_format_prompt_metadata(&settings_snapshot).0
             } else {
                 None
             }
         }),
         "prompt_preview": truncate_for_audit_preview(
-            settings_snapshot.transcription.dictation_custom_prompt.as_deref(),
+            resolve_dictation_format_prompt_metadata(&settings_snapshot).1.as_deref(),
             220,
         ),
     });
@@ -11676,6 +11672,55 @@ fn dictation_mode_transform_prompt(mode_preset: &str) -> Option<&'static str> {
     }
 }
 
+fn active_dictation_custom_mode<'a>(
+    settings: &'a settings::Settings,
+) -> Option<&'a settings::DictationCustomMode> {
+    settings
+        .transcription
+        .dictation_selected_custom_mode_id
+        .as_deref()
+        .and_then(|selected_id| {
+            settings
+                .transcription
+                .dictation_custom_modes
+                .iter()
+                .find(|mode| mode.id == selected_id)
+        })
+}
+
+fn resolve_dictation_format_prompt_metadata(
+    settings: &settings::Settings,
+) -> (Option<String>, Option<String>) {
+    if let Some(mode) = active_dictation_custom_mode(settings) {
+        if let Some(prompt) = mode
+            .custom_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return (
+                Some(format!("custom_mode_format:{}", mode.id)),
+                Some(prompt.to_string()),
+            );
+        }
+    }
+
+    if let Some(prompt) = settings
+        .transcription
+        .dictation_custom_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return (
+            Some("custom_dictation_format".to_string()),
+            Some(prompt.to_string()),
+        );
+    }
+
+    (Some("default_dictation_format".to_string()), None)
+}
+
 async fn resolve_dictation_command_prompt(
     state: &AppState,
     command_key: &str,
@@ -11754,8 +11799,20 @@ async fn run_dictation_formatting_with_selected_provider(
 
     let settings = state.settings_manager.lock().await.settings().clone();
 
-    let system_prompt = if let Some(custom_prompt) = &settings.transcription.dictation_custom_prompt
+    let system_prompt = if let Some(custom_prompt) = active_dictation_custom_mode(&settings)
+        .and_then(|mode| mode.custom_prompt.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     {
+        let mut base = custom_prompt.to_string();
+        if let Some(app_name) = &active_app {
+            base = format!(
+                "{}\n\n[Context: User is dictating into application '{}']",
+                base, app_name
+            );
+        }
+        base
+    } else if let Some(custom_prompt) = &settings.transcription.dictation_custom_prompt {
         if !custom_prompt.trim().is_empty() {
             let mut base = custom_prompt.trim().to_string();
             if let Some(app_name) = &active_app {
@@ -14052,6 +14109,7 @@ mod tests {
             id: "custom-1".to_string(),
             name: "Gmail Replies".to_string(),
             description: String::new(),
+            custom_prompt: None,
             profile: "normal_speed".to_string(),
             route_preference: Some("local".to_string()),
             language_override: None,
@@ -14449,6 +14507,38 @@ mod tests {
         assert!(dictation_mode_transform_prompt("email").is_some());
         assert!(dictation_mode_transform_prompt("meeting_follow_up").is_some());
         assert!(dictation_mode_transform_prompt("voice").is_none());
+    }
+
+    #[test]
+    fn custom_mode_prompt_metadata_overrides_global_prompt() {
+        let mut settings = settings::Settings::default();
+        settings.transcription.dictation_custom_prompt = Some("Global prompt".to_string());
+        settings.transcription.dictation_selected_custom_mode_id = Some("gmail".to_string());
+        settings.transcription.dictation_custom_modes = vec![settings::DictationCustomMode {
+            id: "gmail".to_string(),
+            name: "Gmail Drafts".to_string(),
+            description: String::new(),
+            custom_prompt: Some("Write polished email prose".to_string()),
+            profile: "power_rewrite".to_string(),
+            route_preference: Some("local".to_string()),
+            language_override: None,
+            live_preview_enabled: Some(true),
+            insertion_mode: "paste".to_string(),
+            context_source: "selected_text".to_string(),
+            save_to_inbox: true,
+            copy_to_clipboard: true,
+            command_mode_enabled: true,
+            dictation_provider: None,
+            dictation_model_id: None,
+            ai_provider: None,
+            ai_model_id: None,
+            activation_app_matcher: None,
+            activation_domain_matcher: Some("gmail.com".to_string()),
+        }];
+
+        let metadata = resolve_dictation_format_prompt_metadata(&settings);
+        assert_eq!(metadata.0.as_deref(), Some("custom_mode_format:gmail"));
+        assert_eq!(metadata.1.as_deref(), Some("Write polished email prose"));
     }
 
     #[test]
