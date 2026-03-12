@@ -14,6 +14,8 @@
     "benchmark:dictation:baseline:dev": "node scripts/generate-dictation-benchmark.mjs --fixtures docs/evals/dictation-parity-fixture.json --out artifacts/evals/dictation-benchmark-baseline-dev.json",
     "benchmark:dictation:macos": "node scripts/capture-macos-dictation-benchmark.mjs",
     "benchmark:dictation:macos:promote-baseline": "node scripts/capture-macos-dictation-benchmark.mjs --promote-baseline",
+    "benchmark:dictation:windows": "node scripts/capture-windows-dictation-benchmark.mjs",
+    "benchmark:dictation:windows:promote-baseline": "node scripts/capture-windows-dictation-benchmark.mjs --promote-baseline",
     "gate:benchmark:macos": "node scripts/verify-benchmark-gates.mjs --schema docs/evals/benchmark-run.schema.json --baseline docs/evals/benchmark-run-baseline.json --candidate docs/evals/benchmark-run-latest-macos.json --out artifacts/benchmark-gates-macos.json",
     "gate:benchmark:windows": "node scripts/verify-benchmark-gates.mjs --schema docs/evals/benchmark-run.schema.json --baseline docs/evals/benchmark-run-baseline.json --candidate docs/evals/benchmark-run-latest-windows.json --out artifacts/benchmark-gates-windows.json"
   },
