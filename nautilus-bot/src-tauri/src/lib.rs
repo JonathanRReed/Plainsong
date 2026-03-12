@@ -6898,23 +6898,7 @@ async fn start_dictation_session(
             tauri::async_runtime::spawn_blocking(get_frontmost_app_bundle_id)
                 .await
                 .unwrap_or(None);
-        let sanitized = sanitize_dictation_target(context_target_app, context_target_bundle_id);
-        if sanitized.0.is_some() || sanitized.1.is_some() {
-            sanitized
-        } else if source == "hotkey" {
-            if let Some(target) = take_recent_external_target(state) {
-                tracing::info!(
-                    "Using cached external target for dictation: app={:?}, bundle_id={:?}",
-                    target.app_name,
-                    target.app_bundle_id
-                );
-                (target.app_name, target.app_bundle_id)
-            } else {
-                sanitized
-            }
-        } else {
-            sanitized
-        }
+        sanitize_dictation_target(context_target_app, context_target_bundle_id)
     };
     #[cfg(not(target_os = "macos"))]
     let context_target_app = tauri::async_runtime::spawn_blocking(get_frontmost_app_name)
@@ -10847,15 +10831,6 @@ fn resolve_insert_target(
     if current.0.is_some() || current.1.is_some() {
         update_last_external_target(state, current.0.clone(), current.1.clone(), None);
         return current;
-    }
-
-    if let Some(target) = take_recent_external_target(state) {
-        tracing::info!(
-            "Using cached external target for insertion: app={:?}, bundle_id={:?}",
-            target.app_name,
-            target.app_bundle_id
-        );
-        return (target.app_name, target.app_bundle_id);
     }
 
     (None, None)

@@ -5,6 +5,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Optional
 
 os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -201,7 +202,7 @@ def run_probe(provider: str):
     return {"ok": True}
 
 
-def run_download(provider: str, model_dir: Path, model_id: str | None = None):
+def run_download(provider: str, model_dir: Path, model_id: Optional[str] = None):
     from huggingface_hub import snapshot_download
 
     model_dir.mkdir(parents=True, exist_ok=True)
