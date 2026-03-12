@@ -52,7 +52,8 @@ Define the exact apps that count toward the launch claim:
 Output:
 
 - append owner and rationale to `docs/evals/dictation-parity-launch-scorecard.md`
-- create a blocked-app register entry for any excluded app
+- keep live app-level status in `docs/dictation-app-compatibility-matrix.md`
+- track blocked targets in `docs/dictation-blocked-app-register.md`
 
 ### T2. Freeze The Baseline Language Candidate Set
 
@@ -65,7 +66,7 @@ Minimum:
 
 Output:
 
-- language candidate list with owner
+- language candidate list with owner in `docs/evals/dictation-parity-launch-scorecard.md`
 - note any platform-specific risk by language
 
 ### T3. Record Current Packaged macOS Baseline

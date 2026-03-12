@@ -47,5 +47,9 @@ This file records launch-gate outcomes after the March hardening pass and blocke
   - `docs/evals/benchmark-run-baseline.json`
   - `docs/evals/benchmark-run-latest-macos.json`
   - `docs/evals/benchmark-run-latest-windows.json`
+- Dictation launch now also tracks Phase 0 readiness in:
+  - `docs/evals/dictation-parity-launch-scorecard.md`
+  - `docs/dictation-app-compatibility-matrix.md`
+  - `docs/dictation-blocked-app-register.md`
 - Cloud smoke gate is blocked by missing required live keys: `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `MISTRAL_API_KEY`.
 - Signed update/install validation remains blocked by unavailable Apple notarization setup and Windows signing certificate.
