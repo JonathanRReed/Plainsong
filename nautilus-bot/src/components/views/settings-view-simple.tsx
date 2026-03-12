@@ -137,6 +137,15 @@ type SettingsViewProps = {
   onLicenseChange?: (info: LicenseInfo) => void;
 };
 
+type DictationHotkeyBehavior = "hold_to_talk" | "toggle" | "hands_free";
+
+function resolveDictationHotkeyBehavior(settings: Settings | null): DictationHotkeyBehavior {
+  if (settings?.transcription.dictationHandsFreeEnabled) {
+    return "hands_free";
+  }
+  return settings?.transcription.dictationPushToTalk ? "hold_to_talk" : "toggle";
+}
+
 export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const { theme, setTheme } = useTheme();
   const [activeTab, setActiveTab] = useState<TabId>("general");
@@ -210,6 +219,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const { toast } = useToast();
   const microphonePermissionReady =
     permissionDiagnostics?.microphonePermissionReady ?? permissionDiagnostics?.microphoneReady ?? false;
+  const dictationShortcutBehavior = resolveDictationHotkeyBehavior(settings);
   const dictationShortcutBehaviorHint = settings?.transcription.dictationHandsFreeEnabled
     ? "Press shortcut once to start hands-free dictation, then pause speaking or press again to stop"
     : settings?.transcription.dictationPushToTalk
@@ -681,7 +691,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   );
 
   const updateDictationShortcutBehavior = useCallback(
-    (pushToTalk: boolean) => {
+    (mode: DictationHotkeyBehavior) => {
       if (!settings) {
         return;
       }
@@ -690,8 +700,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         ...settings,
         transcription: {
           ...settings.transcription,
-          dictationPushToTalk: pushToTalk,
-          dictationHandsFreeEnabled: false,
+          dictationPushToTalk: mode === "hold_to_talk",
+          dictationHandsFreeEnabled: mode === "hands_free",
         },
       });
     },
@@ -1096,16 +1106,26 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
                     
                     <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Push-to-talk dictation</Label>
+                      <div className="space-y-2 w-full">
+                        <Label>Hotkey behavior</Label>
                         <p className="text-sm text-muted-foreground">
                           {dictationShortcutBehaviorHint}
                         </p>
+                        <select
+                          aria-label="Hotkey behavior"
+                          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                          value={dictationShortcutBehavior}
+                          onChange={(event) =>
+                            updateDictationShortcutBehavior(
+                              event.target.value as DictationHotkeyBehavior
+                            )
+                          }
+                        >
+                          <option value="hold_to_talk">Hold-to-talk</option>
+                          <option value="toggle">Toggle press</option>
+                          <option value="hands_free">Hands-free</option>
+                        </select>
                       </div>
-                      <Switch
-                        checked={settings.transcription.dictationPushToTalk}
-                        onCheckedChange={updateDictationShortcutBehavior}
-                      />
                     </div>
                     
                     <div className="flex items-center justify-between">
@@ -1521,6 +1541,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         )}
                       </Label>
                       <select
+                        aria-label="Color scheme"
                         className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                         value={currentScheme}
                         onChange={(e: any) => {
@@ -1633,16 +1654,26 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
                     
                     <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Push-to-talk dictation</Label>
+                      <div className="space-y-2 w-full">
+                        <Label>Hotkey behavior</Label>
                         <p className="text-sm text-muted-foreground">
                           {dictationShortcutBehaviorHint}
                         </p>
+                        <select
+                          aria-label="Hotkey behavior"
+                          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                          value={dictationShortcutBehavior}
+                          onChange={(event) =>
+                            updateDictationShortcutBehavior(
+                              event.target.value as DictationHotkeyBehavior
+                            )
+                          }
+                        >
+                          <option value="hold_to_talk">Hold-to-talk</option>
+                          <option value="toggle">Toggle press</option>
+                          <option value="hands_free">Hands-free</option>
+                        </select>
                       </div>
-                      <Switch
-                        checked={settings.transcription.dictationPushToTalk}
-                        onCheckedChange={updateDictationShortcutBehavior}
-                      />
                     </div>
                     
                     <div className="flex items-center justify-between">
@@ -1851,16 +1882,26 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
                     
                     <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Push-to-talk dictation</Label>
+                      <div className="space-y-2 w-full">
+                        <Label>Hotkey behavior</Label>
                         <p className="text-sm text-muted-foreground">
                           {dictationShortcutBehaviorHint}
                         </p>
+                        <select
+                          aria-label="Hotkey behavior"
+                          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                          value={dictationShortcutBehavior}
+                          onChange={(event) =>
+                            updateDictationShortcutBehavior(
+                              event.target.value as DictationHotkeyBehavior
+                            )
+                          }
+                        >
+                          <option value="hold_to_talk">Hold-to-talk</option>
+                          <option value="toggle">Toggle press</option>
+                          <option value="hands_free">Hands-free</option>
+                        </select>
                       </div>
-                      <Switch
-                        checked={settings.transcription.dictationPushToTalk}
-                        onCheckedChange={updateDictationShortcutBehavior}
-                      />
                     </div>
                     
                     <div className="flex items-center justify-between">
@@ -2556,16 +2597,26 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
                     
                     <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Push-to-talk dictation</Label>
+                      <div className="space-y-2 w-full">
+                        <Label>Hotkey behavior</Label>
                         <p className="text-sm text-muted-foreground">
                           {dictationShortcutBehaviorHint}
                         </p>
+                        <select
+                          aria-label="Hotkey behavior"
+                          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                          value={dictationShortcutBehavior}
+                          onChange={(event) =>
+                            updateDictationShortcutBehavior(
+                              event.target.value as DictationHotkeyBehavior
+                            )
+                          }
+                        >
+                          <option value="hold_to_talk">Hold-to-talk</option>
+                          <option value="toggle">Toggle press</option>
+                          <option value="hands_free">Hands-free</option>
+                        </select>
                       </div>
-                      <Switch
-                        checked={settings.transcription.dictationPushToTalk}
-                        onCheckedChange={updateDictationShortcutBehavior}
-                      />
                     </div>
                     
                     <div className="flex items-center justify-between">
@@ -3167,16 +3218,26 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
                     
                     <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Push-to-talk dictation</Label>
+                      <div className="space-y-2 w-full">
+                        <Label>Hotkey behavior</Label>
                         <p className="text-sm text-muted-foreground">
                           {dictationShortcutBehaviorHint}
                         </p>
+                        <select
+                          aria-label="Hotkey behavior"
+                          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                          value={dictationShortcutBehavior}
+                          onChange={(event) =>
+                            updateDictationShortcutBehavior(
+                              event.target.value as DictationHotkeyBehavior
+                            )
+                          }
+                        >
+                          <option value="hold_to_talk">Hold-to-talk</option>
+                          <option value="toggle">Toggle press</option>
+                          <option value="hands_free">Hands-free</option>
+                        </select>
                       </div>
-                      <Switch
-                        checked={settings.transcription.dictationPushToTalk}
-                        onCheckedChange={updateDictationShortcutBehavior}
-                      />
                     </div>
                     
                     <div className="flex items-center justify-between">

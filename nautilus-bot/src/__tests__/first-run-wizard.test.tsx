@@ -82,6 +82,7 @@ const createSettings = () => ({
     dictationCopyToClipboard: true,
     dictationAutoRequestPermissions: true,
     dictationPushToTalk: true,
+    dictationHandsFreeEnabled: false,
     dictationAiFormatting: false,
     dictationCustomPrompt: null,
     meetingCustomPrompt: null,
@@ -234,6 +235,30 @@ describe("FirstRunWizard", () => {
     expect(saveSettings).toHaveBeenCalledTimes(1);
     expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+Space");
     expect(currentSettings.transcription.dictationPushToTalk).toBe(true);
+    expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
+  });
+
+  it("persists hands-free mode from onboarding", async () => {
+    const onComplete = vi.fn();
+
+    render(<FirstRunWizard mode="dictation" onComplete={onComplete} />);
+
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+    fireEvent.change(screen.getByLabelText("Hotkey behavior"), {
+      target: { value: "hands_free" },
+    });
+    await clickPrimary(/finish/i);
+
+    await waitFor(() => {
+      expect(onComplete).toHaveBeenCalledWith({
+        markOnboardingComplete: false,
+        meetingsCompleted: false,
+      });
+    });
+
+    expect(currentSettings.transcription.dictationPushToTalk).toBe(false);
+    expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(true);
   });
 
   it("repairs the meetings route in meetings-only onboarding", async () => {
