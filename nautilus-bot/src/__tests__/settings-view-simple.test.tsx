@@ -361,8 +361,10 @@ describe("SettingsView performance behavior", () => {
     await screen.findByText("Cross-meeting memory chat");
 
     fireEvent.click(screen.getByRole("button", { name: /open memory workspace/i }));
+    fireEvent.click(screen.getByRole("button", { name: /open relationship memory/i }));
+    fireEvent.click(screen.getByRole("button", { name: /open meetings workspace/i }));
 
-    expect(events).toEqual(["dashboard"]);
+    expect(events).toEqual(["dashboard", "dashboard", "recordings"]);
 
     window.removeEventListener(OPEN_MAIN_VIEW_EVENT, handler as EventListener);
   });
