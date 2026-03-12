@@ -7872,6 +7872,7 @@ async fn reprocess_dictation_text(
     state: tauri::State<'_, AppState>,
     text: String,
     mode_preset: String,
+    app_target: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let input = text.trim();
     if input.is_empty() {
@@ -7921,9 +7922,10 @@ async fn reprocess_dictation_text(
         }
         "notes" => (bulletize_text(input), false, None, None),
         "voice" | "custom" => (
-            crate::text::format::smart_format_dictation_text(
+            crate::text::format::smart_format_dictation_text_for_app(
                 sanitize_dictation_output(input, input).trim(),
                 &effective_mode,
+                app_target.as_deref(),
             )
             .trim()
             .to_string(),
@@ -7932,9 +7934,10 @@ async fn reprocess_dictation_text(
             None,
         ),
         _ => (
-            crate::text::format::smart_format_dictation_text(
+            crate::text::format::smart_format_dictation_text_for_app(
                 sanitize_dictation_output(input, input).trim(),
                 &effective_mode,
+                app_target.as_deref(),
             )
             .trim()
             .to_string(),
@@ -8710,8 +8713,11 @@ async fn stop_dictation_session_for_session(
 
     if local_smart_formatting_enabled && command_applied.is_none() && !result.text.trim().is_empty()
     {
-        result.text =
-            crate::text::format::smart_format_dictation_text(&result.text, normalized_mode_preset);
+        result.text = crate::text::format::smart_format_dictation_text_for_app(
+            &result.text,
+            normalized_mode_preset,
+            app_target.as_deref(),
+        );
     }
 
     let fallback_message = build_provider_fallback_message(

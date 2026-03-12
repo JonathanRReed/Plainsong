@@ -1578,7 +1578,8 @@ export function DictationView() {
     try {
       const result = await reprocessDictationText(
         selectedTranscript.fullText,
-        reprocessModePreset
+        reprocessModePreset,
+        selectedHistoryDetails?.appTarget ?? selectedHistoryDetails?.contextAppName ?? null
       );
       setReprocessedResult(result);
     } catch (error) {
