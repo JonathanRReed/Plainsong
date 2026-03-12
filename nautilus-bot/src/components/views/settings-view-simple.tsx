@@ -1219,13 +1219,14 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                     <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
                       <div className="space-y-0.5">
-                        <Label>Dictionary and snippet rules</Label>
+                        <Label>Advanced dictation controls</Label>
                         <p className="text-sm text-muted-foreground">
-                          Manage exact replacements and snippet content from the Dictation workspace.
+                          Manage dictionary rules, snippets, routing, insertion, context, live preview,
+                          and custom dictation modes from the Dictation workspace.
                         </p>
                       </div>
                       <Button variant="secondary" onClick={() => requestMainView("dictation")}>
-                        Open Dictation
+                        Open Dictation Controls
                       </Button>
                     </div>
                     
@@ -1841,13 +1842,14 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                     <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
                       <div className="space-y-0.5">
-                        <Label>Dictionary and snippet rules</Label>
+                        <Label>Advanced dictation controls</Label>
                         <p className="text-sm text-muted-foreground">
-                          Manage exact replacements and snippet content from the Dictation workspace.
+                          Manage dictionary rules, snippets, routing, insertion, context, live preview,
+                          and custom dictation modes from the Dictation workspace.
                         </p>
                       </div>
                       <Button variant="secondary" onClick={() => requestMainView("dictation")}>
-                        Open Dictation
+                        Open Dictation Controls
                       </Button>
                     </div>
                     
@@ -2143,13 +2145,14 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                     <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
                       <div className="space-y-0.5">
-                        <Label>Dictionary and snippet rules</Label>
+                        <Label>Advanced dictation controls</Label>
                         <p className="text-sm text-muted-foreground">
-                          Manage exact replacements and snippet content from the Dictation workspace.
+                          Manage dictionary rules, snippets, routing, insertion, context, live preview,
+                          and custom dictation modes from the Dictation workspace.
                         </p>
                       </div>
                       <Button variant="secondary" onClick={() => requestMainView("dictation")}>
-                        Open Dictation
+                        Open Dictation Controls
                       </Button>
                     </div>
                     
@@ -2932,13 +2935,14 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                     <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
                       <div className="space-y-0.5">
-                        <Label>Dictionary and snippet rules</Label>
+                        <Label>Advanced dictation controls</Label>
                         <p className="text-sm text-muted-foreground">
-                          Manage exact replacements and snippet content from the Dictation workspace.
+                          Manage dictionary rules, snippets, routing, insertion, context, live preview,
+                          and custom dictation modes from the Dictation workspace.
                         </p>
                       </div>
                       <Button variant="secondary" onClick={() => requestMainView("dictation")}>
-                        Open Dictation
+                        Open Dictation Controls
                       </Button>
                     </div>
                     
@@ -3627,13 +3631,14 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                     <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
                       <div className="space-y-0.5">
-                        <Label>Dictionary and snippet rules</Label>
+                        <Label>Advanced dictation controls</Label>
                         <p className="text-sm text-muted-foreground">
-                          Manage exact replacements and snippet content from the Dictation workspace.
+                          Manage dictionary rules, snippets, routing, insertion, context, live preview,
+                          and custom dictation modes from the Dictation workspace.
                         </p>
                       </div>
                       <Button variant="secondary" onClick={() => requestMainView("dictation")}>
-                        Open Dictation
+                        Open Dictation Controls
                       </Button>
                     </div>
                     
