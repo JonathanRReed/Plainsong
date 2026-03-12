@@ -210,7 +210,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const { toast } = useToast();
   const microphonePermissionReady =
     permissionDiagnostics?.microphonePermissionReady ?? permissionDiagnostics?.microphoneReady ?? false;
-  const dictationShortcutBehaviorHint = settings?.transcription.dictationPushToTalk
+  const dictationShortcutBehaviorHint = settings?.transcription.dictationHandsFreeEnabled
+    ? "Press shortcut once to start hands-free dictation, then pause speaking or press again to stop"
+    : settings?.transcription.dictationPushToTalk
     ? "Hold shortcut to record, release to stop"
     : "Press shortcut once to start, then press again to stop";
 
@@ -678,6 +680,24 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     [flushPendingSettingsSave, queueSettingsSave]
   );
 
+  const updateDictationShortcutBehavior = useCallback(
+    (pushToTalk: boolean) => {
+      if (!settings) {
+        return;
+      }
+
+      void updateSettings({
+        ...settings,
+        transcription: {
+          ...settings.transcription,
+          dictationPushToTalk: pushToTalk,
+          dictationHandsFreeEnabled: false,
+        },
+      });
+    },
+    [settings, updateSettings]
+  );
+
   const applyColorScheme = useCallback((scheme: string) => {
     const root = document.documentElement;
     if (scheme === "default") {
@@ -1084,15 +1104,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </div>
                       <Switch
                         checked={settings.transcription.dictationPushToTalk}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationPushToTalk: checked,
-                            },
-                          })
-                        }
+                        onCheckedChange={updateDictationShortcutBehavior}
                       />
                     </div>
                     
@@ -1629,15 +1641,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </div>
                       <Switch
                         checked={settings.transcription.dictationPushToTalk}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationPushToTalk: checked,
-                            },
-                          })
-                        }
+                        onCheckedChange={updateDictationShortcutBehavior}
                       />
                     </div>
                     
@@ -1855,15 +1859,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </div>
                       <Switch
                         checked={settings.transcription.dictationPushToTalk}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationPushToTalk: checked,
-                            },
-                          })
-                        }
+                        onCheckedChange={updateDictationShortcutBehavior}
                       />
                     </div>
                     
@@ -2568,15 +2564,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </div>
                       <Switch
                         checked={settings.transcription.dictationPushToTalk}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationPushToTalk: checked,
-                            },
-                          })
-                        }
+                        onCheckedChange={updateDictationShortcutBehavior}
                       />
                     </div>
                     
@@ -3187,15 +3175,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </div>
                       <Switch
                         checked={settings.transcription.dictationPushToTalk}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationPushToTalk: checked,
-                            },
-                          })
-                        }
+                        onCheckedChange={updateDictationShortcutBehavior}
                       />
                     </div>
                     

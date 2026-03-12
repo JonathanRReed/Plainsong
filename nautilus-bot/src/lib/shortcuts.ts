@@ -1,4 +1,4 @@
-export type DictationShortcutMode = "hold_to_talk" | "toggle";
+export type DictationShortcutMode = "hold_to_talk" | "toggle" | "hands_free";
 
 export function isMacPlatform(): boolean {
   if (typeof navigator === "undefined") return false;
@@ -39,6 +39,9 @@ export function dictationInstruction(shortcut: string, mode: DictationShortcutMo
   const label = formatShortcutForDisplay(shortcut);
   if (mode === "hold_to_talk") {
     return `Hold ${label} to record, release to transcribe and paste.`;
+  }
+  if (mode === "hands_free") {
+    return `Press ${label} to start hands-free dictation. It stops after silence or when you press again.`;
   }
   return `Press ${label} to start dictation, press again to transcribe and paste.`;
 }

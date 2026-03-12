@@ -33,6 +33,7 @@ const tauriMocks = vi.hoisted(() => ({
     speakerNamingMethod: "auto" as const,
     silenceSkipEnabled: false,
     dictationPushToTalk: false,
+    dictationHandsFreeEnabled: false,
     dictationCopyToClipboard: true,
     dictationCommandModeEnabled: true,
     dictationCommandPrefix: "command",

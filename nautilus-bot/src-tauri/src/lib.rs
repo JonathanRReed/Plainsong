@@ -6981,10 +6981,13 @@ async fn start_dictation_session(
 
     let silence_timeout_seconds = {
         let settings = state.settings_manager.lock().await;
-        settings
-            .settings()
-            .transcription
-            .dictation_silence_timeout_seconds
+        let transcription = &settings.settings().transcription;
+        let configured = transcription.dictation_silence_timeout_seconds;
+        if transcription.dictation_hands_free_enabled && configured <= 0.0 {
+            1.8
+        } else {
+            configured
+        }
     };
 
     let app_handle = app.clone();
@@ -8751,7 +8754,8 @@ async fn sync_recording_overlay_visibility(state: &AppState, app: &AppHandle) {
 async fn handle_global_dictation_toggle(app: AppHandle, is_press: bool) {
     let state = app.state::<AppState>();
     let settings = state.settings_manager.lock().await.settings().clone();
-    let is_ptt = settings.transcription.dictation_push_to_talk;
+    let is_hands_free = settings.transcription.dictation_hands_free_enabled;
+    let is_ptt = settings.transcription.dictation_push_to_talk && !is_hands_free;
 
     let current_state = *state.dictation_runtime_state.lock().await;
 
@@ -8796,8 +8800,12 @@ async fn handle_global_dictation_toggle(app: AppHandle, is_press: bool) {
                 // Releasing it will stop it.
                 return;
             }
-            if !is_ptt && !is_press {
+            if !is_ptt && !is_hands_free && !is_press {
                 // In Toggle mode, releasing shouldn't stop it.
+                return;
+            }
+            if is_hands_free && !is_press {
+                // Hands-free ignores key release. Silence timeout or a second press stops it.
                 return;
             }
 
@@ -8811,7 +8819,13 @@ async fn handle_global_dictation_toggle(app: AppHandle, is_press: bool) {
                 state.inner(),
                 &app,
                 session_id,
-                if is_ptt { "ptt_release" } else { "toggle" },
+                if is_ptt {
+                    "ptt_release"
+                } else if is_hands_free {
+                    "hands_free_toggle"
+                } else {
+                    "toggle"
+                },
                 tracker_insertion_mode(state.inner()).await.as_str(),
                 tracker_copy_to_clipboard(state.inner()).await,
             )

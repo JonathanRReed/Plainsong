@@ -65,6 +65,7 @@ export interface TranscriptionSettings {
   dictationCopyToClipboard?: boolean;
   dictationAutoRequestPermissions?: boolean;
   dictationPushToTalk: boolean;
+  dictationHandsFreeEnabled?: boolean;
   dictationRoutePreference?: "local" | "cloud";
   dictationRouteOverrideEnabled?: boolean;
   dictationKeepWarm?: "off" | "short" | "long";
