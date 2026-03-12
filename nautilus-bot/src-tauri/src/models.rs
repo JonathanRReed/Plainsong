@@ -173,6 +173,11 @@ impl Default for DictationStartOptions {
 #[serde(rename_all = "camelCase")]
 pub struct DictationHistoryDetails {
     pub mode_preset: Option<String>,
+    pub mode_label: Option<String>,
+    pub base_mode_preset: Option<String>,
+    pub base_mode_label: Option<String>,
+    pub custom_mode_id: Option<String>,
+    pub custom_mode_name: Option<String>,
     pub context_source: Option<String>,
     pub context_preview: Option<String>,
     pub context_app_name: Option<String>,

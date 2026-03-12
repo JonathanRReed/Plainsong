@@ -31,6 +31,11 @@ export interface DictationStartOptions {
 
 export interface DictationHistoryDetails {
   modePreset: string | null;
+  modeLabel: string | null;
+  baseModePreset: string | null;
+  baseModeLabel: string | null;
+  customModeId: string | null;
+  customModeName: string | null;
   contextSource: string | null;
   contextPreview: string | null;
   contextAppName: string | null;

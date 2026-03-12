@@ -394,6 +394,47 @@ function coerceBaseModePreset(modePreset: string | null | undefined): DictationB
   }
 }
 
+function historyModeLabel(details: DictationHistoryDetails | null): string {
+  if (!details) {
+    return "Unavailable";
+  }
+  if (details.modeLabel) {
+    return details.modeLabel;
+  }
+  if (details.modePreset) {
+    return (
+      modeDefinitionByIdStatic[details.modePreset as DictationModePreset]?.label ?? details.modePreset
+    );
+  }
+  return "Unavailable";
+}
+
+const modeDefinitionByIdStatic = DICTATION_MODE_DEFINITIONS.reduce<
+  Record<DictationModePreset, DictationModeDefinition>
+>((accumulator, definition) => {
+  accumulator[definition.id] = definition;
+  return accumulator;
+}, {} as Record<DictationModePreset, DictationModeDefinition>);
+
+function historyPromptSourceLabel(promptSource: string | null | undefined): string {
+  if (!promptSource) {
+    return "Direct transcript";
+  }
+  if (promptSource.startsWith("command:")) {
+    return `Command: ${promptSource.slice("command:".length)}`;
+  }
+  if (promptSource.startsWith("custom_mode_format:")) {
+    return "Custom mode prompt";
+  }
+  if (promptSource === "custom_dictation_format") {
+    return "Custom dictation prompt";
+  }
+  if (promptSource === "default_dictation_format") {
+    return "Standard dictation prompt";
+  }
+  return promptSource;
+}
+
 function summarizeMode(mode: {
   baseModePreset?: DictationBaseModePreset | null;
   profile: "normal_speed" | "power_rewrite";
@@ -677,6 +718,11 @@ export function DictationView() {
         ]);
         setSelectedTranscript(transcript);
         setSelectedHistoryDetails(historyDetails);
+        if (historyDetails?.baseModePreset) {
+          setReprocessModePreset(coerceBaseModePreset(historyDetails.baseModePreset));
+        } else if (historyDetails?.modePreset) {
+          setReprocessModePreset(coerceBaseModePreset(historyDetails.modePreset));
+        }
       } catch (error) {
         console.error("Failed to fetch transcript:", error);
         setSelectedTranscript(null);
@@ -3219,11 +3265,20 @@ export function DictationView() {
                           Mode
                         </p>
                         <p className="mt-1 text-sm font-medium">
-                          {selectedHistoryDetails.modePreset
-                            ? modeDefinitionById[
-                                selectedHistoryDetails.modePreset as DictationModePreset
-                              ]?.label ?? selectedHistoryDetails.modePreset
-                            : "Unavailable"}
+                          {historyModeLabel(selectedHistoryDetails)}
+                        </p>
+                      </div>
+                      <div className="rounded-md border bg-muted/30 px-3 py-2">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Base style
+                        </p>
+                        <p className="mt-1 text-sm font-medium">
+                          {selectedHistoryDetails?.baseModeLabel ??
+                            (selectedHistoryDetails?.baseModePreset
+                              ? modeDefinitionById[
+                                  selectedHistoryDetails.baseModePreset as DictationModePreset
+                                ]?.label ?? selectedHistoryDetails.baseModePreset
+                              : "Unavailable")}
                         </p>
                       </div>
                       <div className="rounded-md border bg-muted/30 px-3 py-2">
@@ -3263,15 +3318,19 @@ export function DictationView() {
                           Prompt strategy
                         </p>
                         <p className="mt-1 text-sm font-medium">
-                          {selectedHistoryDetails.promptSource ?? "Direct transcript"}
+                          {historyPromptSourceLabel(selectedHistoryDetails.promptSource)}
                         </p>
                       </div>
                     </div>
-                    {(selectedHistoryDetails.contextAppName ||
+                    {(selectedHistoryDetails.customModeName ||
+                      selectedHistoryDetails.contextAppName ||
                       selectedHistoryDetails.appTarget ||
                       selectedHistoryDetails.activationMatcher ||
                       selectedHistoryDetails.commandApplied) && (
                       <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                        {selectedHistoryDetails.customModeName && (
+                          <span>Custom mode: {selectedHistoryDetails.customModeName}</span>
+                        )}
                         {selectedHistoryDetails.contextAppName && (
                           <span>Context app: {selectedHistoryDetails.contextAppName}</span>
                         )}
@@ -3279,7 +3338,12 @@ export function DictationView() {
                           <span>Insert target: {selectedHistoryDetails.appTarget}</span>
                         )}
                         {selectedHistoryDetails.activationMatcher && (
-                          <span>Auto mode: {selectedHistoryDetails.activationMatcher}</span>
+                          <span>
+                            Auto rule:{" "}
+                            {selectedHistoryDetails.customModeName
+                              ? `${selectedHistoryDetails.customModeName} via ${selectedHistoryDetails.activationMatcher}`
+                              : selectedHistoryDetails.activationMatcher}
+                          </span>
                         )}
                         {selectedHistoryDetails.commandApplied && (
                           <span>Command: {selectedHistoryDetails.commandApplied}</span>
