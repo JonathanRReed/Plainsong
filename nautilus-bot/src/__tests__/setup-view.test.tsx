@@ -16,6 +16,9 @@ const setupStatusMock = vi.hoisted(() => ({
   systemAudioAvailable: false,
   loopbackDevice: null as string | null,
   meetingCaptureMode: "mic_only" as "me_and_them" | "mic_only" | "unknown",
+  dictationRoutePreference: "local" as "local" | "cloud",
+  dictationLocalReady: true,
+  dictationCloudReady: false,
   meetingRoutePolicy: "prefer_local" as "prefer_local" | "best_available",
   dictationRoute: {
     providerType: "distil_whisper",
@@ -98,6 +101,24 @@ const tauriMocks = vi.hoisted(() => ({
   repairCursorInsertPermissions: vi.fn(async () => {}),
   repairLocalModelCache: vi.fn(async () => ({ repairedCount: 0, removedPaths: [], notes: [] })),
   requestDictationPermissions: vi.fn(async () => {}),
+  verifyDictationSetup: vi.fn(async () => ({
+    ok: true,
+    title: "Dictation verification",
+    summary: "Dictation is ready.",
+    details: ["Microphone ready.", "Cursor insert ready."],
+  })),
+  verifyMeetingSetup: vi.fn(async () => ({
+    ok: false,
+    title: "Meeting verification",
+    summary: "Meeting route is partial.",
+    details: ["System audio is not available."],
+  })),
+  verifySystemAudioSetup: vi.fn(async () => ({
+    ok: false,
+    title: "System audio verification",
+    summary: "System audio capture is not ready yet.",
+    details: ["No loopback device detected."],
+  })),
 }));
 
 const onboardingMocks = vi.hoisted(() => ({
@@ -124,6 +145,9 @@ describe("SetupView", () => {
     setupStatusMock.systemAudioAvailable = false;
     setupStatusMock.loopbackDevice = null;
     setupStatusMock.meetingCaptureMode = "mic_only";
+    setupStatusMock.dictationRoutePreference = "local";
+    setupStatusMock.dictationLocalReady = true;
+    setupStatusMock.dictationCloudReady = false;
     setupStatusMock.meetingRoutePolicy = "prefer_local";
     setupStatusMock.meetingReady = false;
     setupStatusMock.dictationBlockers = [];
@@ -173,5 +197,18 @@ describe("SetupView", () => {
       screen.getByText(/Only microphone capture is ready/i)
     ).toBeInTheDocument();
     expect(screen.getAllByText("Current blockers").length).toBeGreaterThan(0);
+  });
+
+  it("runs setup verification checks from the doctor actions", async () => {
+    render(<SetupView />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Test dictation" }));
+
+    await waitFor(() => {
+      expect(tauriMocks.verifyDictationSetup).toHaveBeenCalled();
+      expect(
+        screen.getByText(/Dictation verification: Dictation is ready/i)
+      ).toBeInTheDocument();
+    });
   });
 });

@@ -125,6 +125,8 @@ const DICTATION_IDLE_RESET_ERROR_MS: u64 = 1300;
 const HOTKEY_TARGET_MAX_AGE_MS: i64 = 5_000;
 #[cfg(target_os = "macos")]
 const LAST_EXTERNAL_TARGET_MAX_AGE_MS: i64 = 120_000;
+#[cfg(target_os = "macos")]
+const MEETING_CONSENT_TARGET_MAX_AGE_MS: i64 = 12_000;
 const DICTATION_AI_FORMAT_TIMEOUT_MS: u64 = 1400;
 const DICTATION_AI_FORMAT_MIN_CHARS: usize = 80;
 const DICTATION_COMMAND_PREFIX_DEFAULT: &str = "command";
@@ -257,6 +259,37 @@ struct GroundedActionItemsResult {
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+struct SetupVerificationResult {
+    ok: bool,
+    title: String,
+    summary: String,
+    details: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeetingConsentAutomationStatus {
+    mode: String,
+    surface: Option<String>,
+    app_name: Option<String>,
+    app_bundle_id: Option<String>,
+    browser_url: Option<String>,
+    can_automate: bool,
+    message: String,
+    notice_text: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeetingConsentNoticeResult {
+    mode: String,
+    surface: Option<String>,
+    message: String,
+    notice_text: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DictationOverlayState {
     phase: String,
     started_at_ms: Option<i64>,
@@ -274,6 +307,8 @@ struct DictationOverlayState {
     activation_matcher: Option<String>,
     dictation_provider: Option<String>,
     dictation_model_id: Option<String>,
+    dictation_route_preference: Option<String>,
+    dictation_resolved_hosting: Option<String>,
 }
 
 impl Default for DictationOverlayState {
@@ -295,6 +330,8 @@ impl Default for DictationOverlayState {
             activation_matcher: None,
             dictation_provider: None,
             dictation_model_id: None,
+            dictation_route_preference: None,
+            dictation_resolved_hosting: None,
         }
     }
 }
@@ -306,6 +343,7 @@ struct RecordingOverlayState {
     recording_id: Option<String>,
     started_at_ms: Option<i64>,
     system_audio_active: Option<bool>,
+    consent_prompt_shown: Option<bool>,
     message: Option<String>,
 }
 
@@ -314,6 +352,7 @@ struct RecordingOverlayState {
 struct PendingDictationTarget {
     app_name: Option<String>,
     app_bundle_id: Option<String>,
+    browser_url: Option<String>,
     captured_at_ms: i64,
 }
 
@@ -332,6 +371,7 @@ impl Default for RecordingOverlayState {
             recording_id: None,
             started_at_ms: None,
             system_audio_active: None,
+            consent_prompt_shown: None,
             message: None,
         }
     }
@@ -1614,9 +1654,213 @@ async fn smoke_test_cursor_insert(
 }
 
 #[tauri::command]
+async fn verify_dictation_setup(
+    state: tauri::State<'_, AppState>,
+) -> Result<SetupVerificationResult, String> {
+    let permissions = collect_permission_diagnostics(state.inner(), Vec::new()).await;
+    let settings = state.settings_manager.lock().await.settings().clone();
+
+    let mut details = vec![
+        format!(
+            "Microphone: {}",
+            if permissions.microphone_ready { "ready" } else { "needs access" }
+        ),
+        format!(
+            "Cursor insert: {}",
+            if permissions.accessibility_ready {
+                "ready"
+            } else {
+                "needs access"
+            }
+        ),
+    ];
+
+    match resolve_ready_dictation_selection(
+        state.inner(),
+        &settings.transcription,
+        Some(&settings.transcription.dictation_route_preference),
+    )
+    .await
+    {
+        Ok((provider, model_id, route_preference, hosting, warning)) => {
+            if provider == asr::AsrProviderType::MacosAppleSpeech {
+                details.push(format!(
+                    "Speech recognition: {}",
+                    if permissions.speech_recognition_ready {
+                        "ready"
+                    } else {
+                        "needs access"
+                    }
+                ));
+            }
+            details.push(format!(
+                "Route preference: {}",
+                dictation_route_preference_to_settings_value(route_preference)
+            ));
+            details.push(format!(
+                "Resolved route: {} / {} ({})",
+                provider.display_name(),
+                model_id,
+                hosting_environment_to_settings_value(hosting)
+            ));
+            if let Some(warning) = warning {
+                details.push(warning);
+            }
+
+            let ok = permissions.microphone_ready
+                && permissions.accessibility_ready
+                && (provider != asr::AsrProviderType::MacosAppleSpeech
+                    || permissions.speech_recognition_ready);
+
+            Ok(SetupVerificationResult {
+                ok,
+                title: "Dictation verification".to_string(),
+                summary: if ok {
+                    "Dictation route, microphone, and insertion permissions are ready.".to_string()
+                } else {
+                    "Dictation route resolved, but one or more permissions still need attention."
+                        .to_string()
+                },
+                details,
+            })
+        }
+        Err(error) => {
+            details.push(error.clone());
+            Ok(SetupVerificationResult {
+                ok: false,
+                title: "Dictation verification".to_string(),
+                summary: "No ready dictation route matched the current preference.".to_string(),
+                details,
+            })
+        }
+    }
+}
+
+#[tauri::command]
+async fn verify_meeting_setup(
+    state: tauri::State<'_, AppState>,
+) -> Result<SetupVerificationResult, String> {
+    let permissions = collect_permission_diagnostics(state.inner(), Vec::new()).await;
+    let settings = state.settings_manager.lock().await.settings().clone();
+    let system_audio_available = {
+        let audio = state.audio_capture.lock().await;
+        audio.is_system_audio_available()
+    };
+    let loopback_device = {
+        let audio = state.audio_capture.lock().await;
+        audio.get_loopback_device_name()
+    };
+
+    let mut details = vec![
+        format!(
+            "Microphone: {}",
+            if permissions.microphone_ready { "ready" } else { "needs access" }
+        ),
+        format!(
+            "System audio: {}",
+            if system_audio_available {
+                "available"
+            } else {
+                "not detected"
+            }
+        ),
+        format!(
+            "Loopback device: {}",
+            loopback_device.unwrap_or_else(|| "not found".to_string())
+        ),
+    ];
+
+    match resolve_ready_meeting_selection(state.inner(), &settings.transcription).await {
+        Ok((provider, model_id, warning)) => {
+            details.push(format!(
+                "Meeting route: {} / {}",
+                provider.display_name(),
+                model_id
+            ));
+            if let Some(warning) = warning {
+                details.push(warning);
+            }
+            if !system_audio_available {
+                details.push(
+                    "Meetings can run in mic-only mode, but source-aware Me/Them capture still needs system audio."
+                        .to_string(),
+                );
+            }
+
+            let ok = permissions.microphone_ready && system_audio_available;
+
+            Ok(SetupVerificationResult {
+                ok,
+                title: "Meeting verification".to_string(),
+                summary: if ok {
+                    "Meeting route and system audio are ready for full meeting capture.".to_string()
+                } else {
+                    "Meeting transcription is available, but full Me/Them capture is not ready yet."
+                        .to_string()
+                },
+                details,
+            })
+        }
+        Err(error) => {
+            details.push(error);
+            Ok(SetupVerificationResult {
+                ok: false,
+                title: "Meeting verification".to_string(),
+                summary: "No meeting-grade route is currently ready.".to_string(),
+                details,
+            })
+        }
+    }
+}
+
+#[tauri::command]
+async fn verify_system_audio_setup(
+    state: tauri::State<'_, AppState>,
+) -> Result<SetupVerificationResult, String> {
+    let (system_audio_available, loopback_device) = {
+        let audio = state.audio_capture.lock().await;
+        (
+            audio.is_system_audio_available(),
+            audio.get_loopback_device_name(),
+        )
+    };
+
+    let mut details = Vec::new();
+    if let Some(device) = &loopback_device {
+        details.push(format!("Detected loopback device: {}", device));
+    } else {
+        details.push("No loopback device detected.".to_string());
+    }
+    if !system_audio_available {
+        details.push(
+            "Install or enable a loopback device such as BlackHole to capture remote participants."
+                .to_string(),
+        );
+    }
+
+    Ok(SetupVerificationResult {
+        ok: system_audio_available && loopback_device.is_some(),
+        title: "System audio verification".to_string(),
+        summary: if system_audio_available && loopback_device.is_some() {
+            "System audio capture is ready.".to_string()
+        } else {
+            "System audio capture is not ready yet.".to_string()
+        },
+        details,
+    })
+}
+
+#[tauri::command]
 async fn get_dictation_audio_level(state: tauri::State<'_, AppState>) -> Result<f32, String> {
     let audio = state.audio_capture.lock().await;
     Ok(audio.get_dictation_audio_level())
+}
+
+#[tauri::command]
+async fn get_meeting_consent_automation_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<MeetingConsentAutomationStatus, String> {
+    Ok(meeting_consent_automation_status(state.inner()))
 }
 
 #[tauri::command]
@@ -1705,6 +1949,11 @@ async fn start_recording(
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(|_| chrono::Utc::now()),
+        consent_prompt_shown: options.consent_prompt_shown,
+        consent_notice_mode: None,
+        consent_notice_surface: None,
+        consent_notice_message: None,
+        consent_notice_updated_at: None,
     }) {
         drop(db);
         let mut audio = state.audio_capture.lock().await;
@@ -1729,6 +1978,35 @@ async fn start_recording(
     if let Err(e) = db.log_audit_event("recording_started", Some(details), "info") {
         tracing::warn!("Failed to log audit event: {}", e);
     }
+
+    let consent_notice_result = if options.consent_prompt_shown {
+        let result = send_meeting_consent_notice_internal(state.inner());
+        if let Err(error) = db.update_recording_consent_state(
+            &recording_id,
+            options.consent_prompt_shown,
+            Some(result.mode.as_str()),
+            result.surface.as_deref(),
+            Some(result.message.as_str()),
+        ) {
+            tracing::warn!("Failed to persist consent automation state: {}", error);
+        }
+        let details = serde_json::json!({
+            "recording_id": &recording_id,
+            "mode": &result.mode,
+            "surface": &result.surface,
+            "message": &result.message,
+        });
+        if let Err(error) = db.log_audit_event("meeting_consent_notice", Some(details), "info") {
+            tracing::warn!("Failed to log consent automation audit event: {}", error);
+        }
+        Some(result)
+    } else {
+        if let Err(error) = db.update_recording_consent_state(&recording_id, false, None, None, None)
+        {
+            tracing::warn!("Failed to persist consent prompt state: {}", error);
+        }
+        None
+    };
 
     // Launch live streaming transcription task (mic-only path has a sample queue)
     // (maybe_stream_info was already fetched above before releasing the audio lock)
@@ -1831,7 +2109,8 @@ async fn start_recording(
         Some(recording_id.as_str()),
         Some(chrono::Utc::now().timestamp_millis()),
         Some(options.system_audio),
-        None,
+        Some(options.consent_prompt_shown),
+        consent_notice_result.as_ref().map(|result| result.message.as_str()),
     );
     emit_recording_status_with_markers(
         &app,
@@ -1874,6 +2153,7 @@ async fn stop_recording(
                     &app,
                     "error",
                     Some(recordingId.as_str()),
+                    None,
                     None,
                     None,
                     Some(&message),
@@ -1938,6 +2218,7 @@ async fn stop_recording(
         Some(recordingId.as_str()),
         None,
         None,
+        None,
         Some("Processing transcript"),
     );
     let meeting_processing_started_at = chrono::Utc::now().to_rfc3339();
@@ -1990,6 +2271,7 @@ async fn stop_recording(
                 &app_handle,
                 "error",
                 Some(recording_id_clone.as_str()),
+                None,
                 None,
                 None,
                 Some("Audio file not found"),
@@ -2090,6 +2372,7 @@ async fn stop_recording(
                         &app_handle,
                         "error",
                         Some(recording_id_clone.as_str()),
+                        None,
                         None,
                         None,
                         Some(&error),
@@ -2775,7 +3058,7 @@ async fn stop_recording(
         }
 
         preview_task.abort();
-        emit_recording_state(&app_handle, "idle", None, None, None, None);
+        emit_recording_state(&app_handle, "idle", None, None, None, None, None);
         hide_overlay_window(&app_handle, RECORDING_OVERLAY_LABEL);
     });
 
@@ -2893,6 +3176,17 @@ async fn open_recording_audio(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn open_export_path(targetPath: String) -> Result<(), String> {
+    let canonical = canonicalize_existing_absolute_path(&targetPath, "targetPath")?;
+    if !canonical.is_file() {
+        return Err(format!("targetPath must point to a file, got: {}", canonical.display()));
+    }
+    ensure_path_in_approved_roots(&canonical, "targetPath")?;
+    open_path_in_default_app(&canonical)
 }
 
 #[tauri::command]
@@ -5175,7 +5469,7 @@ async fn reset_app_state(
     }
 
     emit_dictation_state(&app, "idle", None, None, None, None, None, None);
-    emit_recording_state(&app, "idle", None, None, None, None);
+    emit_recording_state(&app, "idle", None, None, None, None, None);
     let _ = app.emit("app-state-reset", serde_json::json!({ "ok": true }));
 
     Ok(ResetAppStateResult {
@@ -5271,6 +5565,11 @@ async fn save_settings(
         settings.transcription.dictation_context_source =
             normalize_dictation_context_source(&settings.transcription.dictation_context_source)
                 .to_string();
+        settings.transcription.dictation_route_preference =
+            normalize_dictation_route_preference(
+                &settings.transcription.dictation_route_preference,
+            )
+            .to_string();
         let fallback_ai_provider = settings.privacy.llm_provider.clone();
         let fallback_ai_model = settings.privacy.llm_model_id.clone();
         for mode in &mut settings.transcription.dictation_custom_modes {
@@ -5712,9 +6011,16 @@ fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_main_window_to(app: tauri::AppHandle, view: String) -> Result<(), String> {
+fn open_main_window_to(
+    app: tauri::AppHandle,
+    view: String,
+    recording_id: Option<String>,
+) -> Result<(), String> {
     show_main_window(&app)?;
-    app.emit("main-view-requested", serde_json::json!({ "view": view }))
+    app.emit(
+        "main-view-requested",
+        serde_json::json!({ "view": view, "recordingId": recording_id }),
+    )
         .map_err(|error| format!("Failed to request main view change: {}", error))?;
     Ok(())
 }
@@ -5896,6 +6202,141 @@ async fn resolve_ready_meeting_selection(
     }
 }
 
+async fn resolve_ready_dictation_selection(
+    state: &AppState,
+    transcription: &settings::TranscriptionSettings,
+    route_override: Option<&str>,
+) -> Result<
+    (
+        asr::AsrProviderType,
+        String,
+        DictationRoutePreference,
+        HostingEnvironment,
+        Option<String>,
+    ),
+    String,
+> {
+    let requested_selection =
+        resolve_transcription_provider_and_model(transcription, TranscriptionScope::Dictation);
+    let route_preference = dictation_route_preference_from_option(
+        route_override,
+        &transcription.dictation_route_preference,
+    );
+    let requested_hosting =
+        provider_hosting_environment(requested_selection.0, &requested_selection.1);
+
+    if route_matches_hosting(route_preference, requested_selection.0, &requested_selection.1) {
+        match ensure_asr_route_ready(
+            state,
+            requested_selection.0,
+            &requested_selection.1,
+            "dictation",
+        )
+        .await
+        {
+            Ok(()) => {
+                return Ok((
+                    requested_selection.0,
+                    requested_selection.1,
+                    route_preference,
+                    requested_hosting,
+                    None,
+                ))
+            }
+            Err(requested_error) => {
+                let default_provider =
+                    asr_provider_from_settings_value(&transcription.default_provider)
+                        .unwrap_or(asr::AsrProviderType::DistilWhisper);
+                let dictation_provider =
+                    asr_provider_from_settings_value(&transcription.dictation_provider)
+                        .unwrap_or(default_provider);
+                let provider_infos = state
+                    .asr_manager
+                    .get_all_providers_info()
+                    .await
+                    .unwrap_or_default();
+                let preferred_candidates = preferred_dictation_provider_candidates(
+                    route_preference,
+                    default_provider,
+                    dictation_provider,
+                );
+                if let Some((provider_type, model_id)) = select_ready_dictation_candidate(
+                    &provider_infos,
+                    &preferred_candidates,
+                    route_preference,
+                ) {
+                    let resolved_hosting =
+                        provider_hosting_environment(provider_type, &model_id);
+                    let warning = format!(
+                        "Dictation route '{}' / '{}' was not ready. Using '{}' / '{}' for this capture.",
+                        requested_selection.0.display_name(),
+                        requested_selection.1,
+                        provider_type.display_name(),
+                        model_id
+                    );
+                    return Ok((
+                        provider_type,
+                        model_id,
+                        route_preference,
+                        resolved_hosting,
+                        Some(warning),
+                    ));
+                }
+
+                return Err(format!(
+                    "No {} dictation route is ready. {} Open Settings -> Setup and prepare a {} dictation route.",
+                    dictation_route_preference_to_settings_value(route_preference),
+                    requested_error,
+                    dictation_route_preference_to_settings_value(route_preference)
+                ));
+            }
+        }
+    }
+
+    let default_provider = asr_provider_from_settings_value(&transcription.default_provider)
+        .unwrap_or(asr::AsrProviderType::DistilWhisper);
+    let dictation_provider = asr_provider_from_settings_value(&transcription.dictation_provider)
+        .unwrap_or(default_provider);
+    let provider_infos = state
+        .asr_manager
+        .get_all_providers_info()
+        .await
+        .unwrap_or_default();
+    let preferred_candidates = preferred_dictation_provider_candidates(
+        route_preference,
+        default_provider,
+        dictation_provider,
+    );
+    if let Some((provider_type, model_id)) = select_ready_dictation_candidate(
+        &provider_infos,
+        &preferred_candidates,
+        route_preference,
+    ) {
+        let resolved_hosting = provider_hosting_environment(provider_type, &model_id);
+        let warning = format!(
+            "This dictation mode prefers {} routing. Using '{}' / '{}' instead of '{}' / '{}'.",
+            dictation_route_preference_to_settings_value(route_preference),
+            provider_type.display_name(),
+            model_id,
+            requested_selection.0.display_name(),
+            requested_selection.1
+        );
+        return Ok((
+            provider_type,
+            model_id,
+            route_preference,
+            resolved_hosting,
+            Some(warning),
+        ));
+    }
+
+    Err(format!(
+        "This dictation mode prefers {} routing, but no {} dictation route is ready. Open Settings -> Setup and prepare one.",
+        dictation_route_preference_to_settings_value(route_preference),
+        dictation_route_preference_to_settings_value(route_preference)
+    ))
+}
+
 async fn start_dictation_session(
     state: &AppState,
     app: &AppHandle,
@@ -5990,10 +6431,22 @@ async fn start_dictation_session(
         }
     }
 
-    let dictation_selection = resolve_transcription_provider_and_model(
+    if options.route_preference.is_none() {
+        options.route_preference = Some(settings_snapshot.transcription.dictation_route_preference.clone());
+    }
+
+    let (
+        dictation_provider,
+        dictation_model_id,
+        resolved_route_preference,
+        resolved_hosting,
+        provider_warning,
+    ) = resolve_ready_dictation_selection(
+        state,
         &settings_snapshot.transcription,
-        TranscriptionScope::Dictation,
-    );
+        options.route_preference.as_deref(),
+    )
+    .await?;
     let dictation_insertion_mode = DictationInsertionMode::from_settings_value(
         &settings_snapshot.transcription.dictation_insertion_mode,
     );
@@ -6038,13 +6491,26 @@ async fn start_dictation_session(
         tracker.next_session_id
     };
 
+    if let Some(warning) = provider_warning.as_deref() {
+        let _ = app.emit("asr-provider-warning", warning);
+    }
+
+    options.requested_provider = Some(asr_provider_to_settings_value(dictation_provider).to_string());
+    options.requested_model_id = Some(dictation_model_id.clone());
+    options.route_preference =
+        Some(dictation_route_preference_to_settings_value(resolved_route_preference).to_string());
+    options.resolved_hosting =
+        Some(hosting_environment_to_settings_value(resolved_hosting).to_string());
+
     sync_dictation_overlay_runtime_metadata(
         app,
         &settings_snapshot,
         context_target_app.as_deref(),
         resolved_activation_matcher.as_deref(),
-        Some(asr_provider_to_settings_value(dictation_selection.0)),
-        Some(dictation_selection.1.as_str()),
+        Some(asr_provider_to_settings_value(dictation_provider)),
+        Some(dictation_model_id.as_str()),
+        options.route_preference.as_deref(),
+        options.resolved_hosting.as_deref(),
     );
 
     emit_dictation_state(
@@ -6069,7 +6535,7 @@ async fn start_dictation_session(
         .map_err(|error| format!("Microphone permission is not ready. {}", error))?;
 
         #[cfg(target_os = "macos")]
-        if dictation_selection.0 == asr::AsrProviderType::MacosAppleSpeech {
+        if dictation_provider == asr::AsrProviderType::MacosAppleSpeech {
             crate::asr::platform::macos_speech::ensure_speech_authorized(
                 settings_snapshot
                     .transcription
@@ -6195,7 +6661,7 @@ async fn start_dictation_session(
         None,
     );
 
-    if let Err(error) = ensure_asr_provider_ready(state, dictation_selection.0, "dictation").await {
+    if let Err(error) = ensure_asr_provider_ready(state, dictation_provider, "dictation").await {
         {
             let mut audio = state.audio_capture.lock().await;
             audio.abort_dictation();
@@ -6296,7 +6762,7 @@ async fn start_dictation_session(
     {
         let inline_mode = matches!(dictation_insertion_mode, DictationInsertionMode::Inline);
 
-        let live_start_result = if dictation_selection.0 == asr::AsrProviderType::MacosAppleSpeech {
+        let live_start_result = if dictation_provider == asr::AsrProviderType::MacosAppleSpeech {
             start_apple_live_dictation_session(
                 state,
                 app,
@@ -6310,8 +6776,8 @@ async fn start_dictation_session(
                 state,
                 app,
                 session_id,
-                dictation_selection.0,
-                dictation_selection.1.clone(),
+                dictation_provider,
+                dictation_model_id.clone(),
                 inline_target_app.clone(),
             )
             .await;
@@ -7060,10 +7526,29 @@ async fn stop_dictation_session_for_session(
             None
         }
     };
-    let (dictation_provider, dictation_model_id) = resolve_transcription_provider_and_model(
-        &settings_snapshot.transcription,
-        TranscriptionScope::Dictation,
-    );
+    let route_preference = dictation_options.route_preference.clone();
+    let resolved_hosting = dictation_options.resolved_hosting.clone();
+    let dictation_provider = dictation_options
+        .requested_provider
+        .as_deref()
+        .and_then(asr_provider_from_settings_value)
+        .unwrap_or_else(|| {
+            resolve_transcription_provider_and_model(
+                &settings_snapshot.transcription,
+                TranscriptionScope::Dictation,
+            )
+            .0
+        });
+    let dictation_model_id = dictation_options
+        .requested_model_id
+        .clone()
+        .unwrap_or_else(|| {
+            resolve_transcription_provider_and_model(
+                &settings_snapshot.transcription,
+                TranscriptionScope::Dictation,
+            )
+            .1
+        });
 
     let raw_has_audio = wav_has_non_silent_audio(&audio_data, 0.01);
     let raw_duration_seconds = compute_wav_duration_seconds_from_bytes(&audio_data) as f64;
@@ -7662,6 +8147,8 @@ async fn stop_dictation_session_for_session(
             .captured_context_text
             .as_ref()
             .map(|text| text.chars().count()),
+        route_preference.as_deref(),
+        resolved_hosting.as_deref(),
     );
 
     if let Err(error) = app.emit("dictation-text-ready", &payload) {
@@ -7786,6 +8273,11 @@ async fn stop_dictation_session_for_session(
             meeting_notes: None,
             meeting_template_id: None,
             notes_updated_at: None,
+            consent_prompt_shown: false,
+            consent_notice_mode: None,
+            consent_notice_surface: None,
+            consent_notice_message: None,
+            consent_notice_updated_at: None,
         };
 
         if let Err(error) = db.create_recording(&recording) {
@@ -8222,6 +8714,8 @@ fn emit_dictation_state(
     let mut activation_matcher = None;
     let mut dictation_provider = None;
     let mut dictation_model_id = None;
+    let mut dictation_route_preference = None;
+    let mut dictation_resolved_hosting = None;
 
     if let Ok(mut state) = app.state::<AppState>().dictation_overlay_state.lock() {
         state.phase = phase.to_string();
@@ -8241,6 +8735,8 @@ fn emit_dictation_state(
             state.activation_matcher = None;
             state.dictation_provider = None;
             state.dictation_model_id = None;
+            state.dictation_route_preference = None;
+            state.dictation_resolved_hosting = None;
         }
         resolved_mode_preset = state.resolved_mode_preset.clone();
         resolved_custom_mode_id = state.resolved_custom_mode_id.clone();
@@ -8251,6 +8747,8 @@ fn emit_dictation_state(
         activation_matcher = state.activation_matcher.clone();
         dictation_provider = state.dictation_provider.clone();
         dictation_model_id = state.dictation_model_id.clone();
+        dictation_route_preference = state.dictation_route_preference.clone();
+        dictation_resolved_hosting = state.dictation_resolved_hosting.clone();
     }
 
     let payload = DictationStateChangedEvent {
@@ -8270,6 +8768,8 @@ fn emit_dictation_state(
         activation_matcher,
         dictation_provider,
         dictation_model_id,
+        dictation_route_preference,
+        dictation_resolved_hosting,
     };
     if let Err(error) = app.emit("dictation-state-changed", &payload) {
         tracing::warn!("Failed to emit dictation state: {}", error);
@@ -8296,6 +8796,7 @@ fn emit_recording_state(
     recording_id: Option<&str>,
     started_at_ms: Option<i64>,
     system_audio_active: Option<bool>,
+    consent_prompt_shown: Option<bool>,
     message: Option<&str>,
 ) {
     tracing::info!(
@@ -8310,6 +8811,7 @@ fn emit_recording_state(
         state.recording_id = recording_id.map(str::to_string);
         state.started_at_ms = started_at_ms;
         state.system_audio_active = system_audio_active;
+        state.consent_prompt_shown = consent_prompt_shown;
         state.message = message.map(str::to_string);
     }
 
@@ -8318,6 +8820,7 @@ fn emit_recording_state(
         recording_id: recording_id.map(str::to_string),
         started_at_ms,
         system_audio_active,
+        consent_prompt_shown,
         message: message.map(str::to_string),
     };
     if let Err(error) = app.emit("meeting-recording-state-changed", &payload) {
@@ -8676,13 +9179,13 @@ async fn handle_primary_tray_action(app: AppHandle, action: String) {
             }
         }
         TRAY_ITEM_OPEN_DICTATION => {
-            let _ = open_main_window_to(app.clone(), "dictation".to_string());
+            let _ = open_main_window_to(app.clone(), "dictation".to_string(), None);
         }
         TRAY_ITEM_OPEN_MEETINGS => {
-            let _ = open_main_window_to(app.clone(), "recordings".to_string());
+            let _ = open_main_window_to(app.clone(), "recordings".to_string(), None);
         }
         TRAY_ITEM_OPEN_SETTINGS => {
-            let _ = open_main_window_to(app.clone(), "settings".to_string());
+            let _ = open_main_window_to(app.clone(), "settings".to_string(), None);
         }
         TRAY_ITEM_START_DICTATION => {
             let state = app.state::<AppState>();
@@ -9201,25 +9704,44 @@ JSON.stringify({
 }
 
 #[cfg(target_os = "macos")]
-fn capture_hotkey_target_application() -> (Option<String>, Option<String>) {
+fn capture_hotkey_target_context() -> (Option<String>, Option<String>, Option<String>) {
     if let Some(frontmost) = workspace_frontmost_application() {
         let app_name = normalize_optional_trimmed(frontmost.name);
         let app_bundle_id = normalize_optional_trimmed(frontmost.bundle_id);
         let sanitized = sanitize_dictation_target(app_name, app_bundle_id);
         if sanitized.0.is_some() || sanitized.1.is_some() {
-            return sanitized;
+            return (
+                sanitized.0,
+                sanitized.1,
+                normalize_optional_trimmed(get_frontmost_browser_url()),
+            );
         }
     }
 
-    sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id())
+    let sanitized = sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
+    (
+        sanitized.0,
+        sanitized.1,
+        normalize_optional_trimmed(get_frontmost_browser_url()),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn capture_hotkey_target_application() -> (Option<String>, Option<String>) {
+    let (app_name, app_bundle_id, _) = capture_hotkey_target_context();
+    (app_name, app_bundle_id)
 }
 
 #[cfg(target_os = "macos")]
 fn capture_pending_hotkey_target(state: &AppState) {
-    let (app_name, app_bundle_id) = capture_hotkey_target_application();
+    let (app_name, app_bundle_id, browser_url) = capture_hotkey_target_context();
     let captured_at_ms = chrono::Utc::now().timestamp_millis();
-    if let Some(target) =
-        build_pending_dictation_target(app_name.clone(), app_bundle_id.clone(), captured_at_ms)
+    if let Some(target) = build_pending_dictation_target(
+        app_name.clone(),
+        app_bundle_id.clone(),
+        browser_url.clone(),
+        captured_at_ms,
+    )
     {
         if let Ok(mut pending_target) = state.pending_dictation_target.lock() {
             *pending_target = Some(target.clone());
@@ -9232,9 +9754,10 @@ fn capture_pending_hotkey_target(state: &AppState) {
     }
 
     tracing::info!(
-        "Captured pending dictation target at hotkey press: app={:?}, bundle_id={:?}",
+        "Captured pending dictation target at hotkey press: app={:?}, bundle_id={:?}, browser_url={:?}",
         app_name,
-        app_bundle_id
+        app_bundle_id,
+        browser_url
     );
 }
 
@@ -9269,14 +9792,16 @@ fn is_pending_hotkey_target_fresh(captured_at_ms: i64, now_ms: i64) -> bool {
 fn build_pending_dictation_target(
     app_name: Option<String>,
     app_bundle_id: Option<String>,
+    browser_url: Option<String>,
     captured_at_ms: i64,
 ) -> Option<PendingDictationTarget> {
-    if app_name.is_none() && app_bundle_id.is_none() {
+    if app_name.is_none() && app_bundle_id.is_none() && browser_url.is_none() {
         None
     } else {
         Some(PendingDictationTarget {
             app_name,
             app_bundle_id,
+            browser_url,
             captured_at_ms,
         })
     }
@@ -9287,9 +9812,12 @@ fn update_last_external_target(
     state: &AppState,
     app_name: Option<String>,
     app_bundle_id: Option<String>,
+    browser_url: Option<String>,
 ) {
     let captured_at_ms = chrono::Utc::now().timestamp_millis();
-    if let Some(target) = build_pending_dictation_target(app_name, app_bundle_id, captured_at_ms) {
+    if let Some(target) =
+        build_pending_dictation_target(app_name, app_bundle_id, browser_url, captured_at_ms)
+    {
         if let Ok(mut last_external_target) = state.last_external_target.lock() {
             *last_external_target = Some(target);
         }
@@ -9298,8 +9826,8 @@ fn update_last_external_target(
 
 #[cfg(target_os = "macos")]
 fn note_frontmost_application(state: &AppState) {
-    let (app_name, app_bundle_id) = capture_hotkey_target_application();
-    update_last_external_target(state, app_name, app_bundle_id);
+    let (app_name, app_bundle_id, browser_url) = capture_hotkey_target_context();
+    update_last_external_target(state, app_name, app_bundle_id, browser_url);
 }
 
 #[cfg(target_os = "macos")]
@@ -9333,13 +9861,13 @@ fn resolve_insert_target(
 ) -> (Option<String>, Option<String>) {
     let provided = sanitize_dictation_target(provided_app_name, provided_app_bundle_id);
     if provided.0.is_some() || provided.1.is_some() {
-        update_last_external_target(state, provided.0.clone(), provided.1.clone());
+        update_last_external_target(state, provided.0.clone(), provided.1.clone(), None);
         return provided;
     }
 
     let current = capture_hotkey_target_application();
     if current.0.is_some() || current.1.is_some() {
-        update_last_external_target(state, current.0.clone(), current.1.clone());
+        update_last_external_target(state, current.0.clone(), current.1.clone(), None);
         return current;
     }
 
@@ -9564,6 +10092,139 @@ end if
 #[cfg(not(target_os = "macos"))]
 fn get_frontmost_browser_url() -> Option<String> {
     None
+}
+
+fn meeting_consent_notice_text() -> &'static str {
+    "Heads up: I’m recording and transcribing this meeting with Nautilus for my notes. Please let me know now if you want me to stop."
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_recent_external_target_context(state: &AppState) -> Option<PendingDictationTarget> {
+    let (app_name, app_bundle_id, browser_url) = capture_hotkey_target_context();
+    build_pending_dictation_target(
+        app_name,
+        app_bundle_id,
+        browser_url,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .or_else(|| take_recent_external_target(state).filter(consent_target_is_fresh))
+}
+
+#[cfg(target_os = "macos")]
+fn match_meeting_consent_surface(target: &PendingDictationTarget) -> Option<&'static str> {
+    let app_name = target
+        .app_name
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let app_bundle_id = target
+        .app_bundle_id
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if app_name.contains("zoom") || app_bundle_id.contains("zoom") {
+        return Some("zoom");
+    }
+
+    let active_host = target
+        .browser_url
+        .as_deref()
+        .and_then(extract_host_from_url)
+        .unwrap_or_default();
+    if active_host == "meet.google.com" {
+        return Some("google_meet");
+    }
+
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn consent_target_is_fresh(target: &PendingDictationTarget) -> bool {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    now_ms - target.captured_at_ms <= MEETING_CONSENT_TARGET_MAX_AGE_MS
+}
+
+#[cfg(target_os = "macos")]
+fn consent_surface_can_automate(surface: &str) -> bool {
+    match surface {
+        "zoom" => can_dispatch_hotkeys(),
+        "google_meet" => can_dispatch_hotkeys() && check_accessibility_permission(),
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn meeting_consent_automation_status(state: &AppState) -> MeetingConsentAutomationStatus {
+    let notice_text = meeting_consent_notice_text().to_string();
+    let target = resolve_recent_external_target_context(state);
+
+    let Some(target) = target else {
+        return MeetingConsentAutomationStatus {
+            mode: "manual_required".to_string(),
+            surface: None,
+            app_name: None,
+            app_bundle_id: None,
+            browser_url: None,
+            can_automate: false,
+            message: "Manual reminder only. Open Zoom or the active Google Meet tab before starting if you want Nautilus to post the consent notice for you.".to_string(),
+            notice_text,
+        };
+    };
+
+    let surface = match_meeting_consent_surface(&target).map(str::to_string);
+    let can_automate = surface
+        .as_deref()
+        .map(consent_surface_can_automate)
+        .unwrap_or(false);
+    let message = match surface.as_deref() {
+        Some("zoom") if can_automate => {
+            "Zoom chat auto-notice is ready. Nautilus will open chat, focus the message box, and send the consent notice when recording starts.".to_string()
+        }
+        Some("google_meet") if can_automate => {
+            "Google Meet consent automation is ready. Nautilus will open chat and post the notice when recording starts while Accessibility remains enabled.".to_string()
+        }
+        Some("google_meet") => {
+            "Manual reminder only right now. Google Meet automation needs both keyboard-event access and Accessibility so Nautilus can open chat and insert the notice reliably.".to_string()
+        }
+        Some("zoom") => {
+            "Manual reminder only right now. Nautilus found Zoom, but macOS still needs keyboard-event permission before it can post the consent notice automatically.".to_string()
+        }
+        _ => {
+            "Manual reminder only. Nautilus can auto-post consent notices in Zoom and Google Meet on macOS; everything else falls back to a manual reminder.".to_string()
+        }
+    };
+
+    MeetingConsentAutomationStatus {
+        mode: if can_automate {
+            "auto_ready".to_string()
+        } else {
+            "manual_required".to_string()
+        },
+        surface,
+        app_name: target.app_name,
+        app_bundle_id: target.app_bundle_id,
+        browser_url: target.browser_url,
+        can_automate,
+        message,
+        notice_text,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn meeting_consent_automation_status(_state: &AppState) -> MeetingConsentAutomationStatus {
+    MeetingConsentAutomationStatus {
+        mode: "manual_required".to_string(),
+        surface: None,
+        app_name: None,
+        app_bundle_id: None,
+        browser_url: None,
+        can_automate: false,
+        message:
+            "Manual reminder only. Consent chat automation is currently implemented for macOS meeting apps."
+                .to_string(),
+        notice_text: meeting_consent_notice_text().to_string(),
+    }
 }
 
 fn normalize_sentence_for_compare(sentence: &str) -> String {
@@ -10046,6 +10707,8 @@ fn build_dictation_text_ready_payload(
     activation_matcher: Option<&str>,
     context_source: Option<&str>,
     context_chars: Option<usize>,
+    route_preference: Option<&str>,
+    resolved_hosting: Option<&str>,
 ) -> DictationTextReadyEvent {
     let is_fallback = result.requested_provider != result.actual_provider
         || result
@@ -10082,6 +10745,8 @@ fn build_dictation_text_ready_payload(
         activation_matcher: activation_matcher.map(str::to_string),
         context_source: context_source.map(str::to_string),
         context_chars,
+        route_preference: route_preference.map(str::to_string),
+        resolved_hosting: resolved_hosting.map(str::to_string),
     }
 }
 
@@ -11455,8 +12120,12 @@ pub fn run() {
             stop_dictation,
             force_stop_dictation,
             smoke_test_cursor_insert,
+            verify_dictation_setup,
+            verify_meeting_setup,
+            verify_system_audio_setup,
             reprocess_dictation_text,
             get_dictation_audio_level,
+            get_meeting_consent_automation_status,
             start_recording,
             stop_recording,
             get_recordings,
@@ -11468,6 +12137,7 @@ pub fn run() {
             get_meeting_chat_messages,
             update_meeting_chat_messages,
             open_recording_audio,
+            open_export_path,
             get_waveform_data,
             get_recording_waveform,
             analyze_recording,
@@ -12618,6 +13288,8 @@ mod tests {
             Some("slack"),
             Some("clipboard"),
             Some(42),
+            Some("cloud"),
+            Some("local"),
         );
         let payload = serde_json::to_value(payload).expect("payload should serialize");
 
@@ -12632,6 +13304,8 @@ mod tests {
             "activationMatcher",
             "contextSource",
             "contextChars",
+            "routePreference",
+            "resolvedHosting",
             "requestedProvider",
             "actualProvider",
             "fallbackReason",
@@ -13170,6 +13844,10 @@ fn dictation_options_from_settings(settings: &settings::Settings) -> models::Dic
             &settings.transcription.dictation_context_source,
         )
         .to_string(),
+        route_preference: Some(settings.transcription.dictation_route_preference.clone()),
+        requested_provider: None,
+        requested_model_id: None,
+        resolved_hosting: None,
         captured_context_text: None,
         context_app_name: None,
         context_app_bundle_id: None,
@@ -13200,6 +13878,10 @@ fn normalize_dictation_custom_mode(
     mode.profile =
         dictation_profile_to_settings_value(&dictation_profile_from_settings_value(&mode.profile))
             .to_string();
+    mode.route_preference = mode
+        .route_preference
+        .clone()
+        .map(|preference| normalize_dictation_route_preference(&preference).to_string());
     mode.insertion_mode = normalize_dictation_insertion_mode(&mode.insertion_mode).to_string();
     mode.context_source = normalize_dictation_context_source(&mode.context_source).to_string();
     mode.dictation_provider =
@@ -13316,6 +13998,8 @@ fn sync_dictation_overlay_runtime_metadata(
     activation_matcher: Option<&str>,
     dictation_provider: Option<&str>,
     dictation_model_id: Option<&str>,
+    dictation_route_preference: Option<&str>,
+    dictation_resolved_hosting: Option<&str>,
 ) {
     if let Ok(mut state) = app.state::<AppState>().dictation_overlay_state.lock() {
         state.resolved_mode_preset = Some(settings.transcription.dictation_mode_preset.clone());
@@ -13337,6 +14021,8 @@ fn sync_dictation_overlay_runtime_metadata(
         state.activation_matcher = activation_matcher.map(str::to_string);
         state.dictation_provider = dictation_provider.map(str::to_string);
         state.dictation_model_id = dictation_model_id.map(str::to_string);
+        state.dictation_route_preference = dictation_route_preference.map(str::to_string);
+        state.dictation_resolved_hosting = dictation_resolved_hosting.map(str::to_string);
     }
 }
 
@@ -13345,6 +14031,9 @@ fn apply_runtime_dictation_custom_mode(
     mode: &settings::DictationCustomMode,
 ) {
     settings.transcription.dictation_profile = mode.profile.clone();
+    if let Some(route_preference) = mode.route_preference.as_ref() {
+        settings.transcription.dictation_route_preference = route_preference.clone();
+    }
     settings.transcription.dictation_insertion_mode = mode.insertion_mode.clone();
     settings.transcription.dictation_context_source = mode.context_source.clone();
     settings.transcription.dictation_save_to_inbox = mode.save_to_inbox;
@@ -13407,6 +14096,13 @@ fn normalize_dictation_context_source(value: &str) -> &'static str {
         "selected_text" => "selected_text",
         "application_context" => "application_context",
         _ => "none",
+    }
+}
+
+fn normalize_dictation_route_preference(value: &str) -> &'static str {
+    match value {
+        "cloud" => "cloud",
+        _ => "local",
     }
 }
 
@@ -14653,10 +15349,84 @@ enum MeetingRoutePolicy {
     BestAvailable,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DictationRoutePreference {
+    Local,
+    Cloud,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostingEnvironment {
+    Local,
+    Cloud,
+}
+
 fn meeting_route_policy_from_settings(value: &str) -> MeetingRoutePolicy {
     match value.trim() {
         "best_available" => MeetingRoutePolicy::BestAvailable,
         _ => MeetingRoutePolicy::PreferLocal,
+    }
+}
+
+fn dictation_route_preference_from_settings(value: &str) -> DictationRoutePreference {
+    match value.trim() {
+        "cloud" => DictationRoutePreference::Cloud,
+        _ => DictationRoutePreference::Local,
+    }
+}
+
+fn dictation_route_preference_to_settings_value(
+    preference: DictationRoutePreference,
+) -> &'static str {
+    match preference {
+        DictationRoutePreference::Local => "local",
+        DictationRoutePreference::Cloud => "cloud",
+    }
+}
+
+fn dictation_route_preference_from_option(
+    value: Option<&str>,
+    fallback: &str,
+) -> DictationRoutePreference {
+    value
+        .map(dictation_route_preference_from_settings)
+        .unwrap_or_else(|| dictation_route_preference_from_settings(fallback))
+}
+
+fn hosting_environment_to_settings_value(hosting: HostingEnvironment) -> &'static str {
+    match hosting {
+        HostingEnvironment::Local => "local",
+        HostingEnvironment::Cloud => "cloud",
+    }
+}
+
+fn provider_hosting_environment(
+    provider: asr::AsrProviderType,
+    model_id: &str,
+) -> HostingEnvironment {
+    match provider {
+        asr::AsrProviderType::OpenAiCloud
+        | asr::AsrProviderType::ElevenLabsScribe
+        | asr::AsrProviderType::Groq => HostingEnvironment::Cloud,
+        asr::AsrProviderType::Voxtral if normalize_asr_model_id(provider, model_id) == "voxtral-cloud" => {
+            HostingEnvironment::Cloud
+        }
+        _ => HostingEnvironment::Local,
+    }
+}
+
+fn route_matches_hosting(
+    preference: DictationRoutePreference,
+    provider: asr::AsrProviderType,
+    model_id: &str,
+) -> bool {
+    match preference {
+        DictationRoutePreference::Local => {
+            provider_hosting_environment(provider, model_id) == HostingEnvironment::Local
+        }
+        DictationRoutePreference::Cloud => {
+            provider_hosting_environment(provider, model_id) == HostingEnvironment::Cloud
+        }
     }
 }
 
@@ -14786,6 +15556,75 @@ fn preferred_meeting_provider(
     asr::AsrProviderType::DistilWhisper
 }
 
+fn preferred_dictation_provider_candidates(
+    preference: DictationRoutePreference,
+    default_provider: asr::AsrProviderType,
+    dictation_provider: asr::AsrProviderType,
+) -> Vec<asr::AsrProviderType> {
+    let mut candidates = Vec::new();
+    let local_defaults = [
+        asr::AsrProviderType::DistilWhisper,
+        asr::AsrProviderType::MacosAppleSpeech,
+        asr::AsrProviderType::WindowsSdkDictation,
+        asr::AsrProviderType::Whisper,
+        asr::AsrProviderType::Moonshine,
+        asr::AsrProviderType::Parakeet,
+        asr::AsrProviderType::Canary,
+        asr::AsrProviderType::Voxtral,
+    ];
+    let cloud_defaults = [
+        asr::AsrProviderType::OpenAiCloud,
+        asr::AsrProviderType::ElevenLabsScribe,
+        asr::AsrProviderType::Groq,
+        asr::AsrProviderType::Voxtral,
+    ];
+
+    let mut ordered_candidates = Vec::new();
+    ordered_candidates.push(dictation_provider);
+    ordered_candidates.push(default_provider);
+    match preference {
+        DictationRoutePreference::Local => {
+            ordered_candidates.extend(local_defaults);
+            ordered_candidates.extend(cloud_defaults);
+        }
+        DictationRoutePreference::Cloud => {
+            ordered_candidates.extend(cloud_defaults);
+            ordered_candidates.extend(local_defaults);
+        }
+    }
+
+    for provider in ordered_candidates {
+        if !candidates.contains(&provider) {
+            candidates.push(provider);
+        }
+    }
+
+    candidates
+}
+
+fn select_ready_dictation_candidate(
+    provider_infos: &[asr::manager::ProviderInfo],
+    preferred_candidates: &[asr::AsrProviderType],
+    preference: DictationRoutePreference,
+) -> Option<(asr::AsrProviderType, String)> {
+    preferred_candidates.iter().find_map(|candidate_provider| {
+        provider_infos
+            .iter()
+            .find(|info| {
+                info.provider_type == *candidate_provider
+                    && matches!(info.runtime_status, asr::manager::RuntimeStatus::Ready)
+                    && info.is_available
+                    && info.inference_enabled
+                    && route_matches_hosting(
+                        preference,
+                        info.provider_type,
+                        &info.selected_model_id,
+                    )
+            })
+            .map(|info| (info.provider_type, info.selected_model_id.clone()))
+    })
+}
+
 fn select_ready_meeting_candidate(
     provider_infos: &[asr::manager::ProviderInfo],
     preferred_candidates: &[asr::AsrProviderType],
@@ -14810,6 +15649,9 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
     let meeting_policy = meeting_route_policy_from_settings(&transcription.meeting_route_policy);
     let default_provider = asr_provider_from_settings_value(&transcription.default_provider)
         .unwrap_or(asr::AsrProviderType::DistilWhisper);
+    transcription.dictation_route_preference =
+        normalize_dictation_route_preference(&transcription.dictation_route_preference)
+            .to_string();
     transcription.default_provider = asr_provider_to_settings_value(default_provider).to_string();
     transcription.selected_model_id =
         normalize_asr_model_id(default_provider, &transcription.selected_model_id);
@@ -16790,15 +17632,43 @@ fn read_clipboard_text() -> Result<String, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn dispatch_command_keystroke(keycode: u16) -> Result<(), String> {
+#[derive(Clone, Copy, Default)]
+struct MacosKeyModifiers {
+    command: bool,
+    shift: bool,
+    control: bool,
+    option: bool,
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_macos_keystroke(keycode: u16, modifiers: MacosKeyModifiers) -> Result<(), String> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
     const COMMAND_KEYCODE: CGKeyCode = 55;
+    const SHIFT_KEYCODE: CGKeyCode = 56;
+    const OPTION_KEYCODE: CGKeyCode = 58;
+    const CONTROL_KEYCODE: CGKeyCode = 59;
     const KEYSTROKE_DELAY_MS: u64 = 50;
     const MAX_ATTEMPTS: usize = 2;
 
     let mut last_error: Option<String> = None;
+    let flags = {
+        let mut next = CGEventFlags::CGEventFlagNull;
+        if modifiers.command {
+            next.insert(CGEventFlags::CGEventFlagCommand);
+        }
+        if modifiers.shift {
+            next.insert(CGEventFlags::CGEventFlagShift);
+        }
+        if modifiers.control {
+            next.insert(CGEventFlags::CGEventFlagControl);
+        }
+        if modifiers.option {
+            next.insert(CGEventFlags::CGEventFlagAlternate);
+        }
+        next
+    };
 
     for attempt in 1..=MAX_ATTEMPTS {
         let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
@@ -16806,31 +17676,65 @@ fn dispatch_command_keystroke(keycode: u16) -> Result<(), String> {
         let target_keycode: CGKeyCode = keycode;
 
         let result = (|| -> Result<(), String> {
-            let command_down =
-                CGEvent::new_keyboard_event(source.clone(), COMMAND_KEYCODE, true)
-                    .map_err(|_| "Failed to create command key down event".to_string())?;
-            command_down.set_flags(CGEventFlags::CGEventFlagCommand);
-            command_down.post(CGEventTapLocation::Session);
+            let modifier_keys = [
+                (
+                    modifiers.control,
+                    CONTROL_KEYCODE,
+                    "control",
+                ),
+                (
+                    modifiers.option,
+                    OPTION_KEYCODE,
+                    "option",
+                ),
+                (
+                    modifiers.shift,
+                    SHIFT_KEYCODE,
+                    "shift",
+                ),
+                (
+                    modifiers.command,
+                    COMMAND_KEYCODE,
+                    "command",
+                ),
+            ];
 
-            std::thread::sleep(std::time::Duration::from_millis(KEYSTROKE_DELAY_MS));
+            for (enabled, modifier_keycode, label) in modifier_keys {
+                if !enabled {
+                    continue;
+                }
+                let modifier_down =
+                    CGEvent::new_keyboard_event(source.clone(), modifier_keycode, true)
+                        .map_err(|_| format!("Failed to create {} key down event", label))?;
+                modifier_down.set_flags(flags);
+                modifier_down.post(CGEventTapLocation::Session);
+                std::thread::sleep(std::time::Duration::from_millis(KEYSTROKE_DELAY_MS));
+            }
 
             let key_down = CGEvent::new_keyboard_event(source.clone(), target_keycode, true)
                 .map_err(|_| "Failed to create target key down event".to_string())?;
-            key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+            key_down.set_flags(flags);
             key_down.post(CGEventTapLocation::Session);
 
             std::thread::sleep(std::time::Duration::from_millis(KEYSTROKE_DELAY_MS));
 
             let key_up = CGEvent::new_keyboard_event(source.clone(), target_keycode, false)
                 .map_err(|_| "Failed to create target key up event".to_string())?;
-            key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+            key_up.set_flags(flags);
             key_up.post(CGEventTapLocation::Session);
 
             std::thread::sleep(std::time::Duration::from_millis(KEYSTROKE_DELAY_MS));
 
-            let command_up = CGEvent::new_keyboard_event(source, COMMAND_KEYCODE, false)
-                .map_err(|_| "Failed to create command key up event".to_string())?;
-            command_up.post(CGEventTapLocation::Session);
+            for (enabled, modifier_keycode, label) in modifier_keys.into_iter().rev() {
+                if !enabled {
+                    continue;
+                }
+                let modifier_up =
+                    CGEvent::new_keyboard_event(source.clone(), modifier_keycode, false)
+                        .map_err(|_| format!("Failed to create {} key up event", label))?;
+                modifier_up.post(CGEventTapLocation::Session);
+                std::thread::sleep(std::time::Duration::from_millis(KEYSTROKE_DELAY_MS));
+            }
 
             Ok(())
         })();
@@ -16847,6 +17751,17 @@ fn dispatch_command_keystroke(keycode: u16) -> Result<(), String> {
     }
 
     Err(last_error.unwrap_or_else(|| "Command keystroke failed".to_string()))
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_command_keystroke(keycode: u16) -> Result<(), String> {
+    dispatch_macos_keystroke(
+        keycode,
+        MacosKeyModifiers {
+            command: true,
+            ..MacosKeyModifiers::default()
+        },
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -16916,6 +17831,165 @@ fn send_native_copy_key(
     _target_app_bundle_id: Option<&str>,
 ) -> Result<(), String> {
     Err("Copy command is not supported on this platform.".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn send_meeting_consent_notice_via_zoom(
+    state: &AppState,
+    target: &PendingDictationTarget,
+    notice_text: &str,
+) -> Result<(), String> {
+    reactivate_target_application(target.app_name.as_deref(), target.app_bundle_id.as_deref())?;
+    std::thread::sleep(std::time::Duration::from_millis(180));
+    dispatch_macos_keystroke(
+        4,
+        MacosKeyModifiers {
+            command: true,
+            shift: true,
+            ..MacosKeyModifiers::default()
+        },
+    )
+    .map_err(|error| format!("Failed to open Zoom chat: {}", error))?;
+    std::thread::sleep(std::time::Duration::from_millis(220));
+    dispatch_macos_keystroke(
+        14,
+        MacosKeyModifiers {
+            command: true,
+            shift: true,
+            ..MacosKeyModifiers::default()
+        },
+    )
+    .map_err(|error| format!("Failed to focus the Zoom chat message box: {}", error))?;
+    std::thread::sleep(std::time::Duration::from_millis(140));
+    insert_text_via_accessibility(
+        notice_text,
+        target.app_name.as_deref(),
+        target.app_bundle_id.as_deref(),
+    )
+    .or_else(|_| {
+        dispatch_paste_from_clipboard(
+            state,
+            notice_text,
+            false,
+            target.app_name.as_deref(),
+            target.app_bundle_id.as_deref(),
+        )
+        .map(|_| ())
+    })?;
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    dispatch_macos_keystroke(36, MacosKeyModifiers::default())
+        .map_err(|error| format!("Failed to send the Zoom chat message: {}", error))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn send_meeting_consent_notice_via_google_meet(
+    target: &PendingDictationTarget,
+    notice_text: &str,
+) -> Result<(), String> {
+    reactivate_target_application(target.app_name.as_deref(), target.app_bundle_id.as_deref())?;
+    std::thread::sleep(std::time::Duration::from_millis(180));
+    dispatch_macos_keystroke(
+        8,
+        MacosKeyModifiers {
+            command: true,
+            control: true,
+            ..MacosKeyModifiers::default()
+        },
+    )
+    .map_err(|error| format!("Failed to open Google Meet chat: {}", error))?;
+    std::thread::sleep(std::time::Duration::from_millis(260));
+    insert_text_via_accessibility(
+        notice_text,
+        target.app_name.as_deref(),
+        target.app_bundle_id.as_deref(),
+    )?;
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    dispatch_macos_keystroke(36, MacosKeyModifiers::default())
+        .map_err(|error| format!("Failed to send the Google Meet chat message: {}", error))?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn send_meeting_consent_notice_internal(
+    state: &AppState,
+) -> MeetingConsentNoticeResult {
+    let status = meeting_consent_automation_status(state);
+    let notice_text = status.notice_text.clone();
+    let manual_return = |surface: Option<String>, message: String| -> MeetingConsentNoticeResult {
+        MeetingConsentNoticeResult {
+            mode: "manual_required".to_string(),
+            surface,
+            message,
+            notice_text: notice_text.clone(),
+        }
+    };
+
+    let Some(target) = resolve_recent_external_target_context(state) else {
+        return manual_return(
+            None,
+            "Manual reminder only. Copy the consent notice from the start sheet or recorder before you continue.".to_string(),
+        );
+    };
+
+    let Some(surface) = match_meeting_consent_surface(&target).map(str::to_string) else {
+        return manual_return(
+            None,
+            "Manual reminder only. This meeting surface is not one Nautilus can post into automatically.".to_string(),
+        );
+    };
+
+    if !consent_surface_can_automate(&surface) {
+        return manual_return(
+            Some(surface),
+            "Manual reminder only. Copy the consent notice from Nautilus before you continue."
+                .to_string(),
+        );
+    }
+
+    let send_result = match surface.as_str() {
+        "zoom" => send_meeting_consent_notice_via_zoom(state, &target, &notice_text),
+        "google_meet" => send_meeting_consent_notice_via_google_meet(&target, &notice_text),
+        _ => Err("Unsupported meeting surface.".to_string()),
+    };
+
+    match send_result {
+        Ok(()) => MeetingConsentNoticeResult {
+            mode: "sent".to_string(),
+            surface: Some(surface.clone()),
+            message: if surface == "zoom" {
+                "Consent notice posted in Zoom chat.".to_string()
+            } else {
+                "Consent notice posted in Google Meet chat.".to_string()
+            },
+            notice_text,
+        },
+        Err(error) => {
+            tracing::warn!(
+                "Consent notice automation failed on surface '{}': {}",
+                surface,
+                error
+            );
+            manual_return(
+                Some(surface),
+                format!(
+                    "Automatic consent posting did not complete. {} Copy the notice from Nautilus and send it manually.",
+                    error
+                ),
+            )
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn send_meeting_consent_notice_internal(_state: &AppState) -> MeetingConsentNoticeResult {
+    MeetingConsentNoticeResult {
+        mode: "manual_required".to_string(),
+        surface: None,
+        message: "Consent reminder stayed manual. Copy the notice from Nautilus before you continue."
+            .to_string(),
+        notice_text: meeting_consent_notice_text().to_string(),
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

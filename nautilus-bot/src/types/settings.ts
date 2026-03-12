@@ -15,6 +15,7 @@ export interface DictationCustomMode {
   name: string;
   description: string;
   profile: "normal_speed" | "power_rewrite";
+  routePreference?: "local" | "cloud" | null;
   insertionMode: "auto" | "paste" | "inline" | "clipboard_only";
   contextSource: "none" | "clipboard" | "selected_text" | "application_context";
   saveToInbox: boolean;
@@ -62,6 +63,7 @@ export interface TranscriptionSettings {
   dictationCopyToClipboard?: boolean;
   dictationAutoRequestPermissions?: boolean;
   dictationPushToTalk: boolean;
+  dictationRoutePreference?: "local" | "cloud";
   dictationAiFormatting: boolean;
   dictationModePreset?:
     | "voice"

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -20,6 +21,7 @@ import {
   openRecordingAudio,
   runDiarization,
   renameSpeaker,
+  getRecording,
   deleteRecording,
   renameRecording,
   retryMeetingAutoName,
@@ -34,6 +36,8 @@ import {
   updateMeetingChatMessages,
   summarizeRecordingGrounded,
   extractActionItemsGrounded,
+  exportRecordingV2,
+  openExportPath,
 } from "@/lib/tauri";
 import type { MeetingChatMessage } from "@/lib/tauri";
 import type { MeetingTranscriptDetails, Recording } from "@/types";
@@ -42,10 +46,21 @@ import {
   getMeetingTemplateOption,
   MEETING_TEMPLATES,
 } from "@/lib/meeting-templates";
+import {
+  describeMeetingConsent,
+  MEETING_CONSENT_NOTICE_TEXT,
+} from "@/lib/meeting-consent";
+import {
+  OPEN_RECORDING_WORKSPACE_EVENT,
+  type OpenRecordingWorkspaceDetail,
+} from "@/lib/navigation";
 import { listen } from "@tauri-apps/api/event";
 import {
   AlertCircle,
+  CheckCircle2,
+  Copy,
   Edit3,
+  ExternalLink,
   FileAudio,
   FileOutput,
   FileText,
@@ -59,6 +74,7 @@ import {
   Search,
   Square,
   Trash2,
+  Users,
 } from "lucide-react";
 import type { AnalysisTemplate } from "@/types";
 
@@ -305,6 +321,72 @@ function formatSourceMode(details: MeetingTranscriptDetails | null): string {
   }
 }
 
+function formatCaptureMode(systemAudio: boolean): string {
+  return systemAudio ? "Me + Them" : "Mic only";
+}
+
+function buildMeetingShareMarkdown(args: {
+  recording: Recording;
+  summary: string;
+  actionItems: string[];
+  notes: string;
+  transcript: string;
+  captureMode: string;
+  consentLabel: string;
+  templateLabel: string;
+}): string {
+  const sections = [
+    `# ${args.recording.title}`,
+    `- Date: ${new Date(args.recording.createdAt).toLocaleString()}`,
+    `- Capture mode: ${args.captureMode}`,
+    `- Template: ${args.templateLabel}`,
+    `- Consent: ${args.consentLabel}`,
+  ];
+
+  const body = [
+    args.summary.trim() ? `## Summary\n${args.summary.trim()}` : null,
+    args.actionItems.length > 0
+      ? `## Action Items\n${args.actionItems.map((item) => `- ${item}`).join("\n")}`
+      : null,
+    args.notes.trim() ? `## Notes\n${args.notes.trim()}` : null,
+    args.transcript.trim() ? `## Transcript\n${args.transcript.trim()}` : null,
+  ].filter(Boolean);
+
+  return [...sections, ...body].join("\n\n").trim();
+}
+
+function resolveRecordingCaptureMode(
+  recording: Recording | null,
+  details: MeetingTranscriptDetails | null,
+  fallbackSystemAudio = false
+): string {
+  const sourceMode = formatSourceMode(details);
+  if (sourceMode !== "Unknown") {
+    return sourceMode;
+  }
+
+  if (recording?.metadata?.systemAudio != null) {
+    return formatCaptureMode(Boolean(recording.metadata.systemAudio));
+  }
+
+  return formatCaptureMode(fallbackSystemAudio);
+}
+
+function formatMeetingReviewState(status: Recording["status"] | undefined): string {
+  switch (status) {
+    case "recording":
+      return "Capture live";
+    case "processing":
+      return "Transcribing";
+    case "completed":
+      return "Review ready";
+    case "error":
+      return "Needs attention";
+    default:
+      return "Unknown";
+  }
+}
+
 function qualityToneClasses(tone: "good" | "warn" | "muted"): string {
   switch (tone) {
     case "good":
@@ -333,6 +415,10 @@ export function RecordingsView() {
   const [showRenameDialog, setShowRenameDialog] = useState<Recording | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [isStopping, setIsStopping] = useState(false);
+  const [liveMeetingNotes, setLiveMeetingNotes] = useState("");
+  const [liveMeetingTemplateId, setLiveMeetingTemplateId] = useState("auto");
+  const [liveMeetingSystemAudio, setLiveMeetingSystemAudio] = useState(false);
+  const [liveMeetingConsentShown, setLiveMeetingConsentShown] = useState(false);
   const [meetingNotes, setMeetingNotes] = useState("");
   const [meetingNotesTargetId, setMeetingNotesTargetId] = useState<string | null>(null);
   const [meetingTemplateId, setMeetingTemplateId] = useState("auto");
@@ -343,6 +429,7 @@ export function RecordingsView() {
   const [isRefreshingActionItems, setIsRefreshingActionItems] = useState(false);
   const recordingRequestGuard = useScopedRequestGuard<string | null>();
   const lastRecordingState = useRef(false);
+  const lastSavedLiveMeetingNotesRef = useRef("");
   const lastSavedMeetingNotesRef = useRef("");
   const lastSavedMeetingTemplateRef = useRef("auto");
   const lastSavedMeetingSummaryRef = useRef("");
@@ -365,6 +452,8 @@ export function RecordingsView() {
     "all"
   );
   const [isBulkReclassifying, setIsBulkReclassifying] = useState(false);
+  const [isExportingMeeting, setIsExportingMeeting] = useState(false);
+  const [lastMeetingExportPath, setLastMeetingExportPath] = useState<string | null>(null);
 
   const {
     selectedRecording,
@@ -409,9 +498,46 @@ export function RecordingsView() {
     if (lastRecordingState.current && !isRecording) {
       refetch();
       setStreamChunks([]);
+      setLiveMeetingNotes("");
+      setLiveMeetingTemplateId("auto");
+      setLiveMeetingSystemAudio(false);
+      setLiveMeetingConsentShown(false);
+      lastSavedLiveMeetingNotesRef.current = "";
     }
     lastRecordingState.current = isRecording;
   }, [isRecording, refetch]);
+
+  useEffect(() => {
+    if (!isRecording || !recordingId) {
+      return;
+    }
+
+    const normalizedNotes = liveMeetingNotes.trim();
+    if (normalizedNotes === lastSavedLiveMeetingNotesRef.current.trim()) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void updateRecordingNotes(recordingId, liveMeetingNotes)
+        .then(() => {
+          lastSavedLiveMeetingNotesRef.current = liveMeetingNotes;
+          setSelectedRecording((current) =>
+            current?.id === recordingId
+              ? {
+                  ...current,
+                  meetingNotes: normalizedNotes ? liveMeetingNotes : null,
+                  notesUpdatedAt: new Date().toISOString(),
+                }
+              : current
+          );
+        })
+        .catch((error) => {
+          console.error("Failed to update live meeting notes:", error);
+        });
+    }, 350);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [isRecording, liveMeetingNotes, recordingId, setSelectedRecording]);
 
   useEffect(() => {
     if (!meetingNotesTargetId) {
@@ -596,6 +722,25 @@ export function RecordingsView() {
     selectedRecording?.summary,
   ]);
 
+  useEffect(() => {
+    if (!isRecording || !recordingId || selectedRecording?.id !== recordingId) {
+      return;
+    }
+
+    const nextNotes = selectedRecording.meetingNotes ?? "";
+    setLiveMeetingNotes((current) => (current === nextNotes ? current : nextNotes));
+    setLiveMeetingTemplateId((current) => {
+      const nextTemplateId = selectedRecording.meetingTemplateId ?? "auto";
+      return current === nextTemplateId ? current : nextTemplateId;
+    });
+  }, [
+    isRecording,
+    recordingId,
+    selectedRecording?.id,
+    selectedRecording?.meetingNotes,
+    selectedRecording?.meetingTemplateId,
+  ]);
+
   // Subscribe to live streaming transcript events while recording
   useEffect(() => {
     if (!isRecording || !recordingId) {
@@ -684,31 +829,7 @@ export function RecordingsView() {
     };
   }, [refetch]);
 
-  const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean; template?: string }) => {
-    try {
-      const startedId = await startMeeting({
-        ...options,
-        projectId: "default",
-        meetingNotes: meetingNotes.trim() || undefined,
-        consentPromptShown: true,
-      });
-      if (startedId) {
-        setMeetingNotesTargetId(startedId);
-        lastSavedMeetingNotesRef.current = meetingNotes;
-        refetch();
-      }
-    } catch (error) {
-      console.error("Failed to start recording:", error);
-      toast(
-        error instanceof Error ? error.message : "Failed to start recording",
-        "error"
-      );
-    } finally {
-      setShowConsent(false);
-    }
-  };
-
-  const handleRecordingClick = (recording: Recording) => {
+  const openMeetingWorkspace = (recording: Recording) => {
     recordingRequestGuard.setScope(recording.id);
     setMeetingNotes(recording.meetingNotes ?? "");
     setMeetingNotesTargetId(recording.id);
@@ -723,6 +844,7 @@ export function RecordingsView() {
     );
     setMeetingChatMessages([]);
     lastSavedMeetingChatRef.current = "[]";
+    setLastMeetingExportPath(null);
     setShowRecordingDetail(true);
     setSearchQuery("");
     setDiarizationMessage(null);
@@ -745,6 +867,43 @@ export function RecordingsView() {
         }
         console.error("Failed to load meeting chat:", error);
       });
+  };
+
+  const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean; template?: string }) => {
+    try {
+      const selectedTemplateId = options.template ?? "auto";
+      const shouldSeedTemplateOutline =
+        !liveMeetingNotes.trim() && typeof options.template === "string";
+      const seededNotes = shouldSeedTemplateOutline
+        ? buildMeetingTemplateOutline(options.template)
+        : liveMeetingNotes;
+      const startedId = await startMeeting({
+        ...options,
+        projectId: "default",
+        meetingNotes: seededNotes.trim() || undefined,
+        consentPromptShown: true,
+      });
+      if (startedId) {
+        setLiveMeetingNotes(seededNotes);
+        setLiveMeetingTemplateId(selectedTemplateId);
+        setLiveMeetingSystemAudio(options.systemAudio);
+        setLiveMeetingConsentShown(true);
+        lastSavedLiveMeetingNotesRef.current = seededNotes;
+        void refetch();
+      }
+    } catch (error) {
+      console.error("Failed to start recording:", error);
+      toast(
+        error instanceof Error ? error.message : "Failed to start recording",
+        "error"
+      );
+    } finally {
+      setShowConsent(false);
+    }
+  };
+
+  const handleRecordingClick = (recording: Recording) => {
+    openMeetingWorkspace(recording);
   };
 
   const handleApplyTemplateOutline = () => {
@@ -912,6 +1071,70 @@ export function RecordingsView() {
     }
   };
 
+  const handleCopyMeetingShareMarkdown = async () => {
+    if (!selectedRecording || !selectedMeetingShareMarkdown.trim()) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(selectedMeetingShareMarkdown);
+      toast("Meeting recap copied as markdown.", "success");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to copy the meeting recap.";
+      toast(message, "error");
+    }
+  };
+
+  const handleExportMeetingArtifact = async (
+    format: "markdown" | "text" | "evidence_bundle"
+  ) => {
+    if (!selectedRecording) {
+      return;
+    }
+
+    setIsExportingMeeting(true);
+    setLastMeetingExportPath(null);
+    try {
+      const result = await exportRecordingV2(selectedRecording.id, format, {
+        redactionLevel: format === "evidence_bundle" ? "strict" : "basic",
+        preview: false,
+      });
+      if (!result.exportPath) {
+        throw new Error("Export did not return a file path.");
+      }
+      setLastMeetingExportPath(result.exportPath);
+      toast(
+        format === "evidence_bundle"
+          ? "Evidence bundle exported."
+          : format === "text"
+            ? "Plain-text export created."
+            : "Markdown export created.",
+        "success"
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to export the meeting artifact.";
+      toast(message, "error");
+    } finally {
+      setIsExportingMeeting(false);
+    }
+  };
+
+  const handleOpenMeetingExport = async () => {
+    if (!lastMeetingExportPath) {
+      return;
+    }
+
+    try {
+      await openExportPath(lastMeetingExportPath);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to open the exported file.";
+      toast(message, "error");
+    }
+  };
+
   const handleRunDiarization = async () => {
     if (!selectedRecording) {
       return;
@@ -1023,6 +1246,10 @@ export function RecordingsView() {
     () => effectiveRecordings.filter((recording) => recording.sourceType === "meeting"),
     [effectiveRecordings]
   );
+  const activeMeeting = useMemo(
+    () => meetings.find((meeting) => meeting.id === recordingId) ?? null,
+    [meetings, recordingId]
+  );
   const filteredMeetings = useMemo(() => {
     const query = meetingSearch.trim().toLowerCase();
     return meetings
@@ -1053,10 +1280,83 @@ export function RecordingsView() {
     () => getMeetingTemplateOption(meetingTemplateId),
     [meetingTemplateId]
   );
+  const liveMeetingTemplateOption = useMemo(
+    () => getMeetingTemplateOption(liveMeetingTemplateId),
+    [liveMeetingTemplateId]
+  );
   const meetingNoteSections = useMemo(
     () => parseMeetingNoteSections(meetingNotes, meetingTemplateId),
     [meetingNotes, meetingTemplateId]
   );
+  const activeMeetingCaptureMode = useMemo(
+    () =>
+      resolveRecordingCaptureMode(activeMeeting, null, liveMeetingSystemAudio),
+    [activeMeeting, liveMeetingSystemAudio]
+  );
+  const selectedMeetingCaptureMode = useMemo(
+    () =>
+      resolveRecordingCaptureMode(
+        selectedRecording,
+        selectedTranscriptDetails,
+        selectedRecording?.id === recordingId ? liveMeetingSystemAudio : false
+      ),
+    [liveMeetingSystemAudio, recordingId, selectedRecording, selectedTranscriptDetails]
+  );
+  const selectedMeetingActionItems = useMemo(
+    () => actionItemsFromText(meetingActionItemsText),
+    [meetingActionItemsText]
+  );
+  const selectedMeetingConsent = useMemo(
+    () =>
+      describeMeetingConsent(
+        selectedRecording,
+        selectedRecording?.id === recordingId ? liveMeetingConsentShown : false
+      ),
+    [liveMeetingConsentShown, recordingId, selectedRecording]
+  );
+  const selectedMeetingShareMarkdown = useMemo(
+    () =>
+      selectedRecording
+        ? buildMeetingShareMarkdown({
+            recording: selectedRecording,
+            summary: meetingSummary,
+            actionItems: selectedMeetingActionItems,
+            notes: meetingNotes,
+            transcript: selectedTranscript?.fullText ?? "",
+            captureMode: selectedMeetingCaptureMode,
+            consentLabel: selectedMeetingConsent.shareLabel,
+            templateLabel: selectedTemplateOption.label,
+          })
+        : "",
+    [
+      meetingNotes,
+      meetingSummary,
+      recordingId,
+      selectedMeetingActionItems,
+      selectedMeetingCaptureMode,
+      selectedMeetingConsent.shareLabel,
+      selectedRecording,
+      selectedTemplateOption.label,
+      selectedTranscript?.fullText,
+    ]
+  );
+  const transcriptPreviewItems = useMemo(() => {
+    if (selectedRecording?.id === recordingId && streamChunks.length > 0) {
+      return streamChunks.slice(-5).map((chunk, index) => ({
+        id: `live-${index}-${chunk.startTime}`,
+        text: chunk.text,
+        startTime: chunk.startTime,
+        isPartial: chunk.isPartial,
+      }));
+    }
+
+    return (selectedTranscript?.segments ?? []).slice(-4).map((segment) => ({
+      id: segment.id,
+      text: segment.text,
+      startTime: segment.startTime,
+      isPartial: false,
+    }));
+  }, [recordingId, selectedRecording?.id, selectedTranscript?.segments, streamChunks]);
 
   const updateMeetingSections = (
     updater: (sections: MeetingNoteSection[]) => MeetingNoteSection[]
@@ -1164,6 +1464,44 @@ export function RecordingsView() {
     const secs = safeSeconds % 60;
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
+
+  useEffect(() => {
+    const handleOpenRecordingWorkspace = (event: Event) => {
+      const detail = (event as CustomEvent<OpenRecordingWorkspaceDetail>).detail;
+      const requestedRecordingId = detail?.recordingId?.trim();
+      if (!requestedRecordingId) {
+        return;
+      }
+
+      const existingRecording =
+        effectiveRecordings.find((recording) => recording.id === requestedRecordingId) ?? null;
+      if (existingRecording) {
+        openMeetingWorkspace(existingRecording);
+        return;
+      }
+
+      void getRecording(requestedRecordingId)
+        .then((recording) => {
+          if (recording?.sourceType === "meeting") {
+            openMeetingWorkspace(recording);
+          }
+        })
+        .catch((error) => {
+          console.error("Failed to open requested recording workspace:", error);
+        });
+    };
+
+    window.addEventListener(
+      OPEN_RECORDING_WORKSPACE_EVENT,
+      handleOpenRecordingWorkspace as EventListener
+    );
+    return () => {
+      window.removeEventListener(
+        OPEN_RECORDING_WORKSPACE_EVENT,
+        handleOpenRecordingWorkspace as EventListener
+      );
+    };
+  }, [effectiveRecordings]);
 
   return (
     <div className="h-full flex flex-col">
@@ -1332,52 +1670,125 @@ export function RecordingsView() {
           {isRecording && recordingId && (
             <Card className="mb-4 border-active/40 bg-active/5">
               <CardContent className="p-4">
-                <div className="flex items-center justify-between gap-4 mb-3">
-                  <div>
-                    <p className="text-sm font-medium text-active">Recording in progress</p>
-                    <p className="text-xs text-muted-foreground">Meeting capture is live</p>
+                <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="space-y-2">
+                    <div>
+                      <p className="text-sm font-medium text-active">Recording in progress</p>
+                      <p className="text-xs text-muted-foreground">
+                        Keep notes current while Nautilus captures the meeting.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline" className="border-active/30 bg-background/70 text-active">
+                        Live meeting
+                      </Badge>
+                      <Badge variant="outline" className="bg-background/70">
+                        <Users className="mr-1 h-3 w-3" />
+                        {activeMeetingCaptureMode}
+                      </Badge>
+                      <Badge variant="outline" className="bg-background/70">
+                        Template: {liveMeetingTemplateOption.label}
+                      </Badge>
+                      {liveMeetingConsentShown ? (
+                        <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
+                          <CheckCircle2 className="mr-1 h-3 w-3" />
+                          Consent confirmed
+                        </Badge>
+                      ) : null}
+                    </div>
                   </div>
-                  <div className="font-mono text-lg font-semibold">{formattedDuration}</div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        const fallbackCreatedAt = new Date().toISOString();
+                        openMeetingWorkspace(
+                          activeMeeting ?? {
+                            id: recordingId,
+                            title: "Live meeting",
+                            projectId: "default",
+                            duration: 0,
+                            createdAt: fallbackCreatedAt,
+                            updatedAt: fallbackCreatedAt,
+                            sourceType: "meeting",
+                            audioPath: "",
+                            metadata: {
+                              sampleRate: 0,
+                              channels: 1,
+                              systemAudio: liveMeetingSystemAudio,
+                            },
+                            status: "recording",
+                            meetingNotes: liveMeetingNotes.trim() ? liveMeetingNotes : null,
+                            meetingTemplateId:
+                              liveMeetingTemplateId === "auto" ? null : liveMeetingTemplateId,
+                          }
+                        );
+                      }}
+                    >
+                      <Edit3 className="mr-2 h-4 w-4" />
+                      Open Workspace
+                    </Button>
+                    <div className="font-mono text-lg font-semibold">{formattedDuration}</div>
+                  </div>
                 </div>
                 <RecordingWaveform
                   recordingId={recordingId}
                   isRecording={isRecording}
                   height={56}
                 />
-                <div className="mt-3 border-t border-active/20 pt-3">
-                  <p className="text-xs font-medium text-muted-foreground mb-1">Meeting Notes <span className="opacity-50">(optional — AI will use these)</span></p>
-                  <textarea
-                    value={meetingNotes}
-                    onChange={(e) => setMeetingNotes(e.target.value)}
-                    placeholder="Jot key points, names, or topics as you go..."
-                    rows={3}
-                    className="w-full text-sm bg-background border border-border rounded-md px-3 py-2 resize-none placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-active"
-                  />
-                </div>
-                {streamChunks.length > 0 && (
-                  <div className="mt-3 border-t border-active/20 pt-3">
-                    <p className="text-xs font-medium text-active mb-1.5">Live Transcript</p>
-                    <div
-                      ref={streamScrollRef}
-                      className="max-h-32 overflow-y-auto text-sm text-muted-foreground space-y-1 pr-1"
-                    >
-                      {streamChunks.map((chunk, i) => {
-                        const minutes = Math.floor(chunk.startTime / 60);
-                        const seconds = Math.floor(chunk.startTime % 60);
-                        const ts = `${minutes}:${seconds.toString().padStart(2, "0")}`;
-                        return (
-                          <p
-                            key={i}
-                            className={chunk.isPartial ? "opacity-50 italic" : "opacity-100"}
-                          >
-                            <span className="text-xs text-active/60 mr-1.5 font-mono">{ts}</span>
-                            {chunk.text}
-                          </p>
-                        );
-                      })}
+                <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,1fr)]">
+                  <div className="rounded-lg border border-active/20 bg-background/80 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                      <p className="text-xs font-medium text-muted-foreground">
+                        Meeting Notes <span className="opacity-50">(grounds summary, actions, and Ask)</span>
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">
+                        Autosaves to this meeting
+                      </p>
                     </div>
+                    <textarea
+                      value={liveMeetingNotes}
+                      onChange={(e) => setLiveMeetingNotes(e.target.value)}
+                      placeholder="Capture decisions, names, risks, and next steps as the conversation moves."
+                      rows={8}
+                      className="w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-active"
+                    />
                   </div>
-                )}
+                  <div className="rounded-lg border border-active/20 bg-background/70 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <p className="text-xs font-medium text-active">Live Transcript</p>
+                      <p className="text-[11px] text-muted-foreground">
+                        Transcript stays secondary to notes here
+                      </p>
+                    </div>
+                    {streamChunks.length > 0 ? (
+                      <div
+                        ref={streamScrollRef}
+                        className="max-h-48 space-y-1 overflow-y-auto pr-1 text-sm text-muted-foreground"
+                      >
+                        {streamChunks.map((chunk, i) => {
+                          const minutes = Math.floor(chunk.startTime / 60);
+                          const seconds = Math.floor(chunk.startTime % 60);
+                          const ts = `${minutes}:${seconds.toString().padStart(2, "0")}`;
+                          return (
+                            <p
+                              key={i}
+                              className={chunk.isPartial ? "opacity-50 italic" : "opacity-100"}
+                            >
+                              <span className="mr-1.5 font-mono text-xs text-active/60">{ts}</span>
+                              {chunk.text}
+                            </p>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="flex h-full min-h-[140px] items-center justify-center rounded-md border border-dashed border-active/20 bg-muted/20 px-4 text-center text-sm text-muted-foreground">
+                        Live transcript lines will appear here while the meeting is being captured.
+                      </div>
+                    )}
+                  </div>
+                </div>
               </CardContent>
             </Card>
           )}
@@ -1530,17 +1941,18 @@ export function RecordingsView() {
               setMeetingNotesTargetId(null);
               setMeetingNotes("");
               setMeetingChatMessages([]);
+              setLastMeetingExportPath(null);
               lastSavedMeetingNotesRef.current = "";
               lastSavedMeetingChatRef.current = "[]";
             }
           }
         }}
       >
-        <DialogContent className="flex h-[85vh] max-h-[85vh] min-h-0 max-w-5xl flex-col overflow-hidden">
+          <DialogContent className="flex h-[85vh] max-h-[85vh] min-h-0 max-w-5xl flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle>{selectedRecording?.title ?? "Recording"}</DialogTitle>
             <DialogDescription>
-              Review meeting notes, grounded AI outputs, transcript edits, and audio assets for this recording.
+              Continue from live notes into grounded review, transcript editing, and follow-up for this meeting.
             </DialogDescription>
           </DialogHeader>
 
@@ -1585,6 +1997,48 @@ export function RecordingsView() {
                         ) : null}
                       </div>
                     </div>
+                    <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                      <div className="rounded-lg border bg-muted/30 p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Workspace
+                        </p>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <Badge variant="outline" className="bg-background/80">
+                            {formatMeetingReviewState(selectedRecording?.status)}
+                          </Badge>
+                          {selectedRecording?.id === recordingId && isRecording ? (
+                            <Badge variant="outline" className="border-active/30 bg-active/10 text-active">
+                              Live meeting
+                            </Badge>
+                          ) : null}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border bg-muted/30 p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Capture mode
+                        </p>
+                        <p className="mt-2 text-sm font-medium">{selectedMeetingCaptureMode}</p>
+                      </div>
+                      <div className="rounded-lg border bg-muted/30 p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Transcript grounding
+                        </p>
+                        <p className="mt-2 text-sm font-medium">
+                          {selectedTranscript?.segments?.length ?? 0} segments
+                        </p>
+                      </div>
+                      <div className="rounded-lg border bg-muted/30 p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Consent
+                        </p>
+                        <p className="mt-2 text-sm font-medium">{selectedMeetingConsent.label}</p>
+                        {selectedMeetingConsent.message ? (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {selectedMeetingConsent.message}
+                          </p>
+                        ) : null}
+                      </div>
+                    </div>
                     <div className="mt-4 flex flex-wrap items-center gap-2">
                       <label className="text-xs font-medium text-muted-foreground" htmlFor="meeting-template">
                         Format
@@ -1609,6 +2063,24 @@ export function RecordingsView() {
                       >
                         Apply Outline
                       </Button>
+                      {selectedMeetingConsent.needsManualNotice ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(MEETING_CONSENT_NOTICE_TEXT);
+                              toast("Consent notice copied.", "success");
+                            } catch {
+                              toast("Couldn't copy the consent notice.", "error");
+                            }
+                          }}
+                        >
+                          <Copy className="mr-2 h-4 w-4" />
+                          Copy Notice
+                        </Button>
+                      ) : null}
                     </div>
                     <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
                       <p className="text-xs text-muted-foreground">
@@ -1702,6 +2174,129 @@ export function RecordingsView() {
                   </div>
 
                   <div className="space-y-4">
+                    <div className="rounded-lg border bg-muted/20 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                            Share & export
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Copy a clean markdown recap or export this meeting as markdown, text, or an evidence bundle without leaving review.
+                          </p>
+                        </div>
+                        <Badge variant="outline" className="bg-background/80">
+                          Single-user
+                        </Badge>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleCopyMeetingShareMarkdown()}
+                          disabled={!selectedRecording || !selectedMeetingShareMarkdown.trim()}
+                        >
+                          <Copy className="mr-2 h-4 w-4" />
+                          Copy Markdown
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleExportMeetingArtifact("markdown")}
+                          disabled={!selectedRecording || isExportingMeeting}
+                        >
+                          <FileText className="mr-2 h-4 w-4" />
+                          Export Markdown
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleExportMeetingArtifact("text")}
+                          disabled={!selectedRecording || isExportingMeeting}
+                        >
+                          <FileOutput className="mr-2 h-4 w-4" />
+                          Export Text
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleExportMeetingArtifact("evidence_bundle")}
+                          disabled={!selectedRecording || isExportingMeeting}
+                        >
+                          {isExportingMeeting ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <CheckCircle2 className="mr-2 h-4 w-4" />
+                          )}
+                          Evidence Bundle
+                        </Button>
+                      </div>
+                      {lastMeetingExportPath ? (
+                        <div className="mt-3 rounded-md border bg-background/80 px-3 py-2 text-xs text-muted-foreground">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="min-w-0 break-all">{lastMeetingExportPath}</span>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => void handleOpenMeetingExport()}
+                            >
+                              <ExternalLink className="mr-2 h-4 w-4" />
+                              Open
+                            </Button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="rounded-lg border bg-muted/20 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                            Transcript preview
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Keep the note canvas open while checking the latest grounded lines.
+                          </p>
+                        </div>
+                        <Badge variant="outline" className="bg-background/80">
+                          {selectedRecording?.id === recordingId && isRecording ? "Live" : "Recent"}
+                        </Badge>
+                      </div>
+                      {transcriptPreviewItems.length > 0 ? (
+                        <div className="mt-3 space-y-2">
+                          {transcriptPreviewItems.map((item) => {
+                            const minutes = Math.floor(item.startTime / 60);
+                            const seconds = Math.floor(item.startTime % 60);
+                            const ts = `${minutes}:${seconds.toString().padStart(2, "0")}`;
+                            return (
+                              <div
+                                key={item.id}
+                                className="rounded-md border bg-background/80 px-3 py-2 text-sm"
+                              >
+                                <p className="mb-1 font-mono text-[11px] text-muted-foreground">
+                                  {ts}
+                                  {item.isPartial ? " · partial" : ""}
+                                </p>
+                                <p className={item.isPartial ? "text-muted-foreground italic" : ""}>
+                                  {item.text}
+                                </p>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="mt-3 rounded-md border border-dashed bg-background/60 px-4 py-6 text-center text-sm text-muted-foreground">
+                          {selectedRecording?.status === "processing"
+                            ? "Transcript preview will populate when processing catches up."
+                            : "Transcript preview appears here once the meeting has transcript content."}
+                        </div>
+                      )}
+                    </div>
+
                     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
                       <div className="rounded-lg border bg-muted/30 p-4">
                         <p className="text-[11px] uppercase tracking-wide text-muted-foreground">

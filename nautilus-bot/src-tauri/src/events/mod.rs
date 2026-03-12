@@ -19,6 +19,8 @@ pub struct DictationStateChangedEvent {
     pub activation_matcher: Option<String>,
     pub dictation_provider: Option<String>,
     pub dictation_model_id: Option<String>,
+    pub dictation_route_preference: Option<String>,
+    pub dictation_resolved_hosting: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,6 +30,7 @@ pub struct MeetingRecordingStateChangedEvent {
     pub recording_id: Option<String>,
     pub started_at_ms: Option<i64>,
     pub system_audio_active: Option<bool>,
+    pub consent_prompt_shown: Option<bool>,
     pub message: Option<String>,
 }
 
@@ -74,4 +77,6 @@ pub struct DictationTextReadyEvent {
     pub activation_matcher: Option<String>,
     pub context_source: Option<String>,
     pub context_chars: Option<usize>,
+    pub route_preference: Option<String>,
+    pub resolved_hosting: Option<String>,
 }

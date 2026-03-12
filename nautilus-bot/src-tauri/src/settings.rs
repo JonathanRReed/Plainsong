@@ -152,6 +152,8 @@ pub struct TranscriptionSettings {
     pub dictation_auto_request_permissions: bool,
     /// Dictation: Use Push-to-Talk (start on press, stop on release)
     pub dictation_push_to_talk: bool,
+    /// Dictation route preference: local or cloud.
+    pub dictation_route_preference: String,
     /// Dictation: Smart Format — LLM polishes text before insert
     pub dictation_ai_formatting: bool,
     /// Dictation mode preset: voice, messages, email, notes, meeting_follow_up, custom
@@ -217,6 +219,7 @@ pub struct DictationCustomMode {
     pub name: String,
     pub description: String,
     pub profile: String,
+    pub route_preference: Option<String>,
     pub insertion_mode: String,
     pub context_source: String,
     pub save_to_inbox: bool,
@@ -256,6 +259,7 @@ impl Default for TranscriptionSettings {
             dictation_auto_request_permissions: true,
             // Toggle mode is safer for new users and avoids silent hold-to-talk confusion.
             dictation_push_to_talk: false,
+            dictation_route_preference: "local".to_string(),
             dictation_ai_formatting: false,
             dictation_mode_preset: "voice".to_string(),
             dictation_selected_custom_mode_id: None,

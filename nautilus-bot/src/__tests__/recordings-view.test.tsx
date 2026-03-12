@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   eventListeners: new Map<string, (event: { payload: any }) => void>(),
   refetch: vi.fn(),
   toast: vi.fn(),
+  startMeeting: vi.fn(),
+  stopMeeting: vi.fn(),
   getRecording: vi.fn(),
   getTranscript: vi.fn(),
   getMeetingTranscriptDetails: vi.fn(),
@@ -18,6 +20,8 @@ const mocks = vi.hoisted(() => ({
   updateRecordingTemplate: vi.fn(),
   summarizeRecordingGrounded: vi.fn(),
   extractActionItemsGrounded: vi.fn(),
+  exportRecordingV2: vi.fn(),
+  openExportPath: vi.fn(),
   recordings: [
     {
       id: "r1",
@@ -31,6 +35,11 @@ const mocks = vi.hoisted(() => ({
       status: "completed" as const,
     },
   ],
+  recordingState: {
+    isRecording: false,
+    recordingId: null as string | null,
+    formattedDuration: "00:00",
+  },
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -51,11 +60,11 @@ vi.mock("@/hooks/use-recordings", () => ({
 
 vi.mock("@/hooks/use-recording", () => ({
   useRecording: () => ({
-    startMeeting: vi.fn(),
-    stopMeeting: vi.fn(),
-    isRecording: false,
-    recordingId: null,
-    formattedDuration: "00:00",
+    startMeeting: mocks.startMeeting,
+    stopMeeting: mocks.stopMeeting,
+    isRecording: mocks.recordingState.isRecording,
+    recordingId: mocks.recordingState.recordingId,
+    formattedDuration: mocks.recordingState.formattedDuration,
   }),
 }));
 
@@ -143,6 +152,8 @@ vi.mock("@/lib/tauri", () => ({
   updateRecordingTemplate: mocks.updateRecordingTemplate,
   summarizeRecordingGrounded: mocks.summarizeRecordingGrounded,
   extractActionItemsGrounded: mocks.extractActionItemsGrounded,
+  exportRecordingV2: mocks.exportRecordingV2,
+  openExportPath: mocks.openExportPath,
 }));
 
 function deferred<T>() {
@@ -159,6 +170,16 @@ describe("RecordingsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.eventListeners.clear();
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: vi.fn(async () => {}),
+      },
+    });
+    mocks.recordingState = {
+      isRecording: false,
+      recordingId: null,
+      formattedDuration: "00:00",
+    };
     mocks.recordings = [
       {
         id: "r1",
@@ -169,9 +190,16 @@ describe("RecordingsView", () => {
         updatedAt: "2026-03-06T12:00:00Z",
         sourceType: "meeting",
         audioPath: "/tmp/weekly-sync.wav",
+        metadata: {
+          sampleRate: 16000,
+          channels: 1,
+          systemAudio: true,
+        },
         status: "completed" as const,
       },
     ];
+    mocks.startMeeting.mockReset();
+    mocks.stopMeeting.mockReset();
     mocks.getRecording.mockResolvedValue(mocks.recordings[0]);
     mocks.getTranscript.mockResolvedValue({
       id: "t1",
@@ -224,6 +252,13 @@ describe("RecordingsView", () => {
       ],
       model: "test-model",
       processingTimeMs: 900,
+    });
+    mocks.exportRecordingV2.mockResolvedValue({
+      format: "markdown",
+      redactionLevel: "basic",
+      preview: false,
+      exportPath: "/tmp/weekly-sync.md",
+      content: null,
     });
   });
 
@@ -449,6 +484,80 @@ describe("RecordingsView", () => {
     });
   });
 
+  it("copies a markdown recap from the meeting review workspace", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("Meeting notes");
+
+    fireEvent.change(screen.getByLabelText("Meeting summary"), {
+      target: { value: "Tight weekly recap" },
+    });
+    fireEvent.change(screen.getByLabelText("Meeting action items"), {
+      target: { value: "Ship launch checklist" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy Markdown" }));
+
+    await waitFor(() => {
+      expect(navigator.clipboard.writeText).toHaveBeenCalled();
+    });
+    expect(mocks.toast).toHaveBeenCalledWith("Meeting recap copied as markdown.", "success");
+  });
+
+  it("uses persisted consent state in review metadata and markdown exports", async () => {
+    mocks.recordings = [
+      {
+        ...mocks.recordings[0],
+        consentPromptShown: true,
+        consentNoticeMode: "manual_required",
+        consentNoticeMessage:
+          "Manual reminder only. Copy the consent notice from Nautilus before you continue.",
+      },
+    ];
+    mocks.getRecording.mockResolvedValue(mocks.recordings[0]);
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("Meeting notes");
+
+    expect(screen.getByText("Manual reminder required")).toBeInTheDocument();
+    expect(
+      screen.getByText("Manual reminder only. Copy the consent notice from Nautilus before you continue.")
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy Markdown" }));
+
+    await waitFor(() => {
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+        expect.stringContaining("- Consent: Manual reminder required")
+      );
+    });
+  });
+
+  it("exports meeting artifacts from the review workspace and opens the result", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("Meeting notes");
+
+    fireEvent.click(screen.getByRole("button", { name: "Export Markdown" }));
+
+    await waitFor(() => {
+      expect(mocks.exportRecordingV2).toHaveBeenCalledWith("r1", "markdown", {
+        redactionLevel: "basic",
+        preview: false,
+      });
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
+
+    await waitFor(() => {
+      expect(mocks.openExportPath).toHaveBeenCalledWith("/tmp/weekly-sync.md");
+    });
+  });
+
   it("ignores stale meeting chat loads after switching recordings", async () => {
     mocks.recordings = [
       {
@@ -528,5 +637,31 @@ describe("RecordingsView", () => {
     });
 
     expect(screen.queryByText("2 chat messages")).not.toBeInTheDocument();
+  });
+
+  it("opens the live meeting workspace from the in-progress recorder card", async () => {
+    mocks.recordingState = {
+      isRecording: true,
+      recordingId: "r1",
+      formattedDuration: "02:04",
+    };
+    mocks.recordings = [
+      {
+        ...mocks.recordings[0],
+        status: "recording",
+      },
+    ];
+    mocks.getRecording.mockResolvedValue(mocks.recordings[0]);
+
+    render(<RecordingsView />);
+
+    expect(screen.getByText("Open Workspace")).toBeInTheDocument();
+    expect(screen.getByText("Me + Them")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Workspace" }));
+
+    await screen.findByText("Meeting notes");
+    expect(screen.getByText("Capture mode")).toBeInTheDocument();
+    expect(screen.getAllByText("Me + Them").length).toBeGreaterThan(0);
   });
 });

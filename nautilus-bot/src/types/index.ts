@@ -15,6 +15,11 @@ export interface Recording {
   meetingNotes?: string | null;
   meetingTemplateId?: string | null;
   notesUpdatedAt?: string | null;
+  consentPromptShown?: boolean;
+  consentNoticeMode?: string | null;
+  consentNoticeSurface?: string | null;
+  consentNoticeMessage?: string | null;
+  consentNoticeUpdatedAt?: string | null;
 }
 
 export interface RecordingMetadata {
