@@ -3,6 +3,8 @@
 //! Adds proper punctuation, capitalization, and paragraph breaks
 //! to raw ASR output for better readability.
 
+use regex::RegexBuilder;
+
 /// Punctuation configuration
 #[derive(Debug, Clone)]
 pub struct PunctuationConfig {
@@ -344,6 +346,162 @@ impl Default for IntelligentPunctuator {
     }
 }
 
+fn replace_spoken_token(
+    input: &str,
+    phrase: &str,
+    replacement: &str,
+) -> String {
+    let escaped = regex::escape(phrase);
+    let pattern = format!(r"(^|[\s])({})([\s]|$)", escaped);
+    let Ok(re) = RegexBuilder::new(&pattern)
+        .case_insensitive(true)
+        .build()
+    else {
+        return input.to_string();
+    };
+
+    re.replace_all(input, |captures: &regex::Captures<'_>| {
+        format!("{}{}{}", &captures[1], replacement, &captures[3])
+    })
+    .to_string()
+}
+
+fn normalize_spoken_punctuation(text: &str) -> String {
+    let replacements = [
+        ("new paragraph", "\n\n"),
+        ("new line", "\n"),
+        ("newline", "\n"),
+        ("question mark", "?"),
+        ("exclamation point", "!"),
+        ("exclamation mark", "!"),
+        ("full stop", "."),
+        ("comma", ","),
+        ("period", "."),
+        ("colon", ":"),
+        ("semicolon", ";"),
+    ];
+
+    replacements.iter().fold(text.to_string(), |current, (phrase, replacement)| {
+        replace_spoken_token(&current, phrase, replacement)
+    })
+}
+
+fn normalize_spacing_around_punctuation(text: &str) -> String {
+    let mut output = text.replace("\r\n", "\n");
+    let replacements = [
+        (" ,", ","),
+        (" .", "."),
+        (" !", "!"),
+        (" ?", "?"),
+        (" :", ":"),
+        (" ;", ";"),
+        (",,", ","),
+        ("..", "."),
+        ("!!", "!"),
+        ("??", "?"),
+    ];
+    for (needle, replacement) in replacements {
+        output = output.replace(needle, replacement);
+    }
+
+    let Ok(space_re) = RegexBuilder::new(r"[ \t]{2,}").build() else {
+        return output;
+    };
+    let output = space_re.replace_all(&output, " ").to_string();
+    output
+        .replace("\n\n\n", "\n\n")
+        .replace(" \n", "\n")
+        .replace("\n ", "\n")
+}
+
+fn restore_structural_breaks(text: &str) -> String {
+    text.replace(" \n\n ", "\n\n")
+        .replace(" \n ", "\n")
+        .replace("\n ", "\n")
+        .replace(" \n", "\n")
+}
+
+fn capitalize_standalone_i(text: &str) -> String {
+    let Ok(re) = RegexBuilder::new(r"(^|[^A-Za-z])i(?=$|[^A-Za-z])").build() else {
+        return text.to_string();
+    };
+    re.replace_all(text, |captures: &regex::Captures<'_>| {
+        format!("{}I", &captures[1])
+    })
+    .to_string()
+}
+
+fn capitalize_after_line_breaks(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut capitalize_next = true;
+
+    for ch in text.chars() {
+        if capitalize_next && ch.is_ascii_lowercase() {
+            output.push(ch.to_ascii_uppercase());
+            capitalize_next = false;
+        } else {
+            output.push(ch);
+            if ch == '\n' {
+                capitalize_next = true;
+            } else if !ch.is_whitespace() {
+                capitalize_next = false;
+            }
+        }
+    }
+
+    output
+}
+
+pub fn smart_format_dictation_text(text: &str, mode_preset: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let normalized = normalize_spoken_punctuation(trimmed);
+    let normalized = capitalize_standalone_i(&normalized);
+    let normalized = restore_structural_breaks(&normalize_spacing_around_punctuation(&normalized));
+
+    let config = match mode_preset {
+        "messages" => PunctuationConfig {
+            capitalize_sentences: true,
+            add_periods: false,
+            add_commas: false,
+            detect_questions: false,
+            paragraph_breaks: false,
+            words_per_paragraph: 1000,
+            format_numbers: false,
+            expand_contractions: false,
+        },
+        "notes" => PunctuationConfig {
+            capitalize_sentences: true,
+            add_periods: false,
+            add_commas: false,
+            detect_questions: false,
+            paragraph_breaks: false,
+            words_per_paragraph: 1000,
+            format_numbers: false,
+            expand_contractions: false,
+        },
+        _ => PunctuationConfig {
+            capitalize_sentences: true,
+            add_periods: false,
+            add_commas: false,
+            detect_questions: false,
+            paragraph_breaks: false,
+            words_per_paragraph: 1000,
+            format_numbers: false,
+            expand_contractions: false,
+        },
+    };
+
+    capitalize_after_line_breaks(&restore_structural_breaks(
+        IntelligentPunctuator::new(config)
+            .punctuate(&normalized)
+            .trim(),
+    ))
+}
+
 /// Format transcript for specific use cases
 pub fn format_for_use_case(text: &str, use_case: &str) -> String {
     let config = match use_case {
@@ -420,5 +578,20 @@ mod tests {
         let input = "okay so lets review the agenda first we need to discuss budget";
         let result = format_for_use_case(input, "meeting");
         assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn smart_format_dictation_replaces_spoken_punctuation_tokens() {
+        let input = "hello comma this is jon period new paragraph i will follow up question mark";
+        let result = smart_format_dictation_text(input, "voice");
+        assert!(result.contains("Hello, this is jon."));
+        assert!(result.contains("\n\nI will follow up?"));
+    }
+
+    #[test]
+    fn smart_format_dictation_keeps_message_mode_lightweight() {
+        let input = "hi there new line i can send that over tomorrow";
+        let result = smart_format_dictation_text(input, "messages");
+        assert_eq!(result, "Hi there\nI can send that over tomorrow");
     }
 }
