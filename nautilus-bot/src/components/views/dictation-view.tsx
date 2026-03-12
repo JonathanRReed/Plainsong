@@ -14,6 +14,7 @@ import {
   createDictationDictionaryEntry,
   updateDictationDictionaryEntry,
   deleteDictationDictionaryEntry,
+  learnDictationCorrection,
   listDictationSnippets,
   createDictationSnippet,
   updateDictationSnippet,
@@ -22,6 +23,7 @@ import {
   upsertDictationCommandPreset,
   deleteDictationCommandPreset,
   type DictationDictionaryEntry,
+  type LearnDictationCorrectionResult,
   type DictationSnippet,
   type DictationCommandPreset,
   type DictationReprocessResult,
@@ -577,6 +579,7 @@ export function DictationView() {
   const [dictationInsertionMode, setDictationInsertionMode] =
     useState<DictationInsertionMode>("auto");
   const [dictationSnippetsEnabled, setDictationSnippetsEnabled] = useState(true);
+  const [dictationAutoLearnCorrections, setDictationAutoLearnCorrections] = useState(true);
   const [dictationDictionaryEntries, setDictationDictionaryEntries] = useState<
     DictationDictionaryEntry[]
   >([]);
@@ -600,6 +603,11 @@ export function DictationView() {
   const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null);
   const [selectedTranscript, setSelectedTranscript] = useState<Transcript | null>(null);
   const [selectedHistoryDetails, setSelectedHistoryDetails] = useState<DictationHistoryDetails | null>(null);
+  const [latestCorrectionBaseline, setLatestCorrectionBaseline] = useState("");
+  const [latestLearnStatus, setLatestLearnStatus] = useState<string | null>(null);
+  const [historyCorrectionText, setHistoryCorrectionText] = useState("");
+  const [historyCorrectionBaseline, setHistoryCorrectionBaseline] = useState("");
+  const [historyLearnStatus, setHistoryLearnStatus] = useState<string | null>(null);
   const [isLoadingTranscript, setIsLoadingTranscript] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [reprocessModePreset, setReprocessModePreset] =
@@ -696,11 +704,14 @@ export function DictationView() {
 
   useEffect(() => {
     if (!isDialogOpen || !selectedRecording) {
-    setSelectedTranscript(null);
-    setSelectedHistoryDetails(null);
-    setReprocessedResult(null);
-    setReprocessError(null);
-    return;
+      setSelectedTranscript(null);
+      setSelectedHistoryDetails(null);
+      setReprocessedResult(null);
+      setReprocessError(null);
+      setHistoryCorrectionText("");
+      setHistoryCorrectionBaseline("");
+      setHistoryLearnStatus(null);
+      return;
     }
     setIsLoadingTranscript(true);
     setReprocessedResult(null);
@@ -718,6 +729,10 @@ export function DictationView() {
         ]);
         setSelectedTranscript(transcript);
         setSelectedHistoryDetails(historyDetails);
+        const transcriptText = transcript?.fullText ?? "";
+        setHistoryCorrectionText(transcriptText);
+        setHistoryCorrectionBaseline(transcriptText);
+        setHistoryLearnStatus(null);
         if (historyDetails?.baseModePreset) {
           setReprocessModePreset(coerceBaseModePreset(historyDetails.baseModePreset));
         } else if (historyDetails?.modePreset) {
@@ -807,6 +822,9 @@ export function DictationView() {
         setDictationCommandPrefix(settings.transcription.dictationCommandPrefix ?? "command");
         setDictationInsertionMode(nextInsertionMode);
         setDictationSnippetsEnabled(settings.transcription.dictationSnippetsEnabled ?? true);
+        setDictationAutoLearnCorrections(
+          settings.transcription.dictationAutoLearnCorrections ?? true
+        );
         setDictationRetentionPreset(settings.transcription.dictationRetentionPreset ?? "never");
         setDictationRetentionCustomHours(settings.transcription.dictationRetentionCustomHours ?? 24);
         const shortcut = settings.shortcuts.toggleDictation || defaultShortcut;
@@ -889,6 +907,7 @@ export function DictationView() {
       commandPrefix: string;
       insertionMode: DictationInsertionMode;
       snippetsEnabled: boolean;
+      autoLearnCorrections: boolean;
       retentionPreset: "immediate" | "24h" | "72h" | "never" | "custom";
       retentionCustomHours: number;
     }>
@@ -910,6 +929,8 @@ export function DictationView() {
       const nextCommandModeEnabled =
         updates.commandModeEnabled ?? dictationCommandModeEnabled;
       const nextInsertionMode = updates.insertionMode ?? dictationInsertionMode;
+      const nextAutoLearnCorrections =
+        updates.autoLearnCorrections ?? dictationAutoLearnCorrections;
       const nextModePreset =
         updates.modePreset ??
         inferModePreset({
@@ -942,6 +963,7 @@ export function DictationView() {
       settings.transcription.dictationInsertionMode = nextInsertionMode;
       settings.transcription.dictationSnippetsEnabled =
         updates.snippetsEnabled ?? dictationSnippetsEnabled;
+      settings.transcription.dictationAutoLearnCorrections = nextAutoLearnCorrections;
       settings.transcription.dictationRetentionPreset =
         updates.retentionPreset ?? dictationRetentionPreset;
       settings.transcription.dictationRetentionCustomHours =
@@ -1301,6 +1323,8 @@ export function DictationView() {
         const text = payload?.text ?? "";
         if (text) {
           setTranscribedText(text);
+          setLatestCorrectionBaseline(text);
+          setLatestLearnStatus(null);
           setDictationError(null);
         }
         if (payload?.actualProvider) {
@@ -1363,6 +1387,8 @@ export function DictationView() {
       const text = await stopDictation();
         if (text?.trim()) {
           setTranscribedText(text);
+          setLatestCorrectionBaseline(text);
+          setLatestLearnStatus(null);
           setDictationError(null);
           void refetchDictationHistory();
         } else {
@@ -1566,6 +1592,92 @@ export function DictationView() {
           // Keep optimistic state if reload fails.
         });
     }
+  };
+
+  const syncLearnedDictionaryEntry = (result: LearnDictationCorrectionResult) => {
+    const learnedEntry = result.entry;
+    if (!learnedEntry) {
+      return;
+    }
+
+    setDictationDictionaryEntries((prev) => {
+      const existingIndex = prev.findIndex((entry) => entry.id === learnedEntry.id);
+      if (existingIndex >= 0) {
+        return prev.map((entry, index) => (index === existingIndex ? learnedEntry : entry));
+      }
+      return [...prev, learnedEntry].sort((left, right) =>
+        left.spokenForm.localeCompare(right.spokenForm)
+      );
+    });
+  };
+
+  const learnCorrection = async (
+    originalText: string,
+    correctedText: string,
+    options?: {
+      force?: boolean;
+      appTarget?: string | null;
+      onSuccess?: () => void;
+      setStatus?: (value: string | null) => void;
+    }
+  ) => {
+    const setStatus = options?.setStatus ?? (() => {});
+    try {
+      const result = await learnDictationCorrection({
+        originalText,
+        correctedText,
+        appTarget: options?.appTarget ?? null,
+        force: options?.force ?? false,
+      });
+
+      if (!result.learned) {
+        setStatus(result.reason ?? "No safe correction detected");
+        return false;
+      }
+
+      syncLearnedDictionaryEntry(result);
+      setStatus(
+        `${result.action === "updated" ? "Updated" : "Learned"}: ${result.spokenForm} -> ${result.replacement}`
+      );
+      options?.onSuccess?.();
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatus(message);
+      return false;
+    }
+  };
+
+  const maybeAutoLearnLatestCorrection = async () => {
+    const original = latestCorrectionBaseline.trim();
+    const corrected = transcribedText.trim();
+    if (!dictationAutoLearnCorrections || !original || !corrected || original === corrected) {
+      return;
+    }
+
+    await learnCorrection(original, corrected, {
+      appTarget,
+      setStatus: setLatestLearnStatus,
+      onSuccess: () => setLatestCorrectionBaseline(corrected),
+    });
+  };
+
+  const maybeAutoLearnHistoryCorrection = async () => {
+    const original = historyCorrectionBaseline.trim();
+    const corrected = historyCorrectionText.trim();
+    if (!dictationAutoLearnCorrections || !original || !corrected || original === corrected) {
+      return;
+    }
+
+    await learnCorrection(original, corrected, {
+      appTarget:
+        selectedHistoryDetails?.activationMatcher ??
+        selectedHistoryDetails?.appTarget ??
+        selectedHistoryDetails?.contextAppName ??
+        null,
+      setStatus: setHistoryLearnStatus,
+      onSuccess: () => setHistoryCorrectionBaseline(corrected),
+    });
   };
 
   const handleReprocessSelectedDictation = async () => {
@@ -2381,8 +2493,42 @@ export function DictationView() {
                 </Button>
               </CardHeader>
               <CardContent>
-                <div className="p-4 bg-muted rounded-lg">
-                  <p className="whitespace-pre-wrap">{transcribedText}</p>
+                <div className="space-y-3">
+                  <div className="rounded-lg bg-muted p-4">
+                    <textarea
+                      className="min-h-[120px] w-full resize-y bg-transparent text-sm outline-none"
+                      value={transcribedText}
+                      onChange={(event) => setTranscribedText(event.target.value)}
+                      onBlur={() => {
+                        void maybeAutoLearnLatestCorrection();
+                      }}
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={latestCorrectionBaseline.trim() === transcribedText.trim()}
+                      onClick={() =>
+                        void learnCorrection(latestCorrectionBaseline, transcribedText, {
+                          force: true,
+                          appTarget,
+                          setStatus: setLatestLearnStatus,
+                          onSuccess: () => setLatestCorrectionBaseline(transcribedText.trim()),
+                        })
+                      }
+                    >
+                      Learn correction
+                    </Button>
+                    <p className="text-xs text-muted-foreground">
+                      Edit a mistaken word here and Nautilus can remember it for next time.
+                    </p>
+                  </div>
+                  {latestLearnStatus && (
+                    <div className="rounded-md border bg-background px-3 py-2 text-xs text-muted-foreground">
+                      {latestLearnStatus}
+                    </div>
+                  )}
                 </div>
                 {fallbackStatus && (
                   <div className="mt-3 rounded-md border border-amber-400/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
@@ -2843,6 +2989,18 @@ export function DictationView() {
                       Normalize names, brands, and phrases before snippets are applied.
                     </p>
                   </div>
+                  <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={dictationAutoLearnCorrections}
+                      onChange={(event) => {
+                        const next = event.target.checked;
+                        setDictationAutoLearnCorrections(next);
+                        void persistDictationPreferences({ autoLearnCorrections: next });
+                      }}
+                    />
+                    Auto-learn corrections
+                  </label>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_1fr_auto] gap-2">
@@ -3486,22 +3644,55 @@ export function DictationView() {
                     <div>
                       <p className="text-sm font-medium">What Nautilus heard</p>
                       <p className="text-xs text-muted-foreground">
-                        The saved raw transcript from the original capture.
+                        The saved raw transcript from the original capture. Edit it to teach
+                        Nautilus a correction.
                       </p>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => navigator.clipboard.writeText(selectedTranscript.fullText)}
-                    >
-                      Copy
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => navigator.clipboard.writeText(historyCorrectionText)}
+                      >
+                        Copy
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={historyCorrectionBaseline.trim() === historyCorrectionText.trim()}
+                        onClick={() =>
+                          void learnCorrection(historyCorrectionBaseline, historyCorrectionText, {
+                            force: true,
+                            appTarget:
+                              selectedHistoryDetails?.activationMatcher ??
+                              selectedHistoryDetails?.appTarget ??
+                              selectedHistoryDetails?.contextAppName ??
+                              null,
+                            setStatus: setHistoryLearnStatus,
+                            onSuccess: () =>
+                              setHistoryCorrectionBaseline(historyCorrectionText.trim()),
+                          })
+                        }
+                      >
+                        Learn correction
+                      </Button>
+                    </div>
                   </div>
-                  <div className="p-4 bg-muted rounded-lg min-h-[180px]">
-                    <p className="whitespace-pre-wrap text-sm">
-                      {selectedTranscript.fullText}
-                    </p>
+                  <div className="rounded-lg bg-muted p-4 min-h-[180px]">
+                    <textarea
+                      className="min-h-[180px] w-full resize-y bg-transparent text-sm outline-none"
+                      value={historyCorrectionText}
+                      onChange={(event) => setHistoryCorrectionText(event.target.value)}
+                      onBlur={() => {
+                        void maybeAutoLearnHistoryCorrection();
+                      }}
+                    />
                   </div>
+                  {historyLearnStatus && (
+                    <div className="rounded-md border bg-background px-3 py-2 text-xs text-muted-foreground">
+                      {historyLearnStatus}
+                    </div>
+                  )}
                 </div>
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">

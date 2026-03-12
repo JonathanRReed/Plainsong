@@ -344,6 +344,28 @@ pub struct UpdateDictationDictionaryEntryRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LearnDictationCorrectionRequest {
+    pub original_text: String,
+    pub corrected_text: String,
+    #[serde(default)]
+    pub app_target: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearnDictationCorrectionResult {
+    pub learned: bool,
+    pub action: Option<String>,
+    pub reason: Option<String>,
+    pub spoken_form: Option<String>,
+    pub replacement: Option<String>,
+    pub entry: Option<DictationDictionaryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DictationSnippet {
     pub id: String,
     pub trigger: String,

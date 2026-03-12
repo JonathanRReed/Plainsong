@@ -1218,6 +1218,27 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       />
                     </div>
 
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Auto-learn corrections</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Learn safe word and short-phrase fixes from confirmed dictation edits.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationAutoLearnCorrections ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationAutoLearnCorrections: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
                     <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
                       <div className="space-y-0.5">
                         <Label>Advanced dictation controls</Label>
@@ -1842,6 +1863,27 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       />
                     </div>
 
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Auto-learn corrections</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Learn safe word and short-phrase fixes from confirmed dictation edits.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationAutoLearnCorrections ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationAutoLearnCorrections: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
                     <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
                       <div className="space-y-0.5">
                         <Label>Advanced dictation controls</Label>
@@ -2140,6 +2182,27 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             transcription: {
                               ...settings.transcription,
                               dictationSnippetsEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Auto-learn corrections</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Learn safe word and short-phrase fixes from confirmed dictation edits.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationAutoLearnCorrections ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationAutoLearnCorrections: checked,
                             },
                           })
                         }
@@ -2937,6 +3000,27 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       />
                     </div>
 
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Auto-learn corrections</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Learn safe word and short-phrase fixes from confirmed dictation edits.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationAutoLearnCorrections ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationAutoLearnCorrections: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
                     <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
                       <div className="space-y-0.5">
                         <Label>Advanced dictation controls</Label>
@@ -3628,6 +3712,27 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             transcription: {
                               ...settings.transcription,
                               dictationSnippetsEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Auto-learn corrections</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Learn safe word and short-phrase fixes from confirmed dictation edits.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationAutoLearnCorrections ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationAutoLearnCorrections: checked,
                             },
                           })
                         }
