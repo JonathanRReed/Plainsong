@@ -370,6 +370,33 @@ export async function createProject(project: {
   return await invoke("create_project", { project });
 }
 
+export interface DictationDictionaryEntry {
+  id: string;
+  spokenForm: string;
+  replacement: string;
+  appScope: string | null;
+  caseSensitive: boolean;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateDictationDictionaryEntryRequest {
+  spokenForm: string;
+  replacement: string;
+  appScope?: string | null;
+  caseSensitive?: boolean;
+  enabled?: boolean;
+}
+
+export interface UpdateDictationDictionaryEntryRequest {
+  spokenForm?: string;
+  replacement?: string;
+  appScope?: string | null;
+  caseSensitive?: boolean;
+  enabled?: boolean;
+}
+
 export interface DictationSnippet {
   id: string;
   trigger: string;
@@ -410,6 +437,27 @@ export interface UpsertDictationCommandPresetRequest {
   commandKey: string;
   systemPrompt: string;
   enabled?: boolean;
+}
+
+export async function listDictationDictionaryEntries(): Promise<DictationDictionaryEntry[]> {
+  return await invoke("list_dictation_dictionary_entries");
+}
+
+export async function createDictationDictionaryEntry(
+  request: CreateDictationDictionaryEntryRequest
+): Promise<DictationDictionaryEntry> {
+  return await invoke("create_dictation_dictionary_entry", { request });
+}
+
+export async function updateDictationDictionaryEntry(
+  entryId: string,
+  request: UpdateDictationDictionaryEntryRequest
+): Promise<DictationDictionaryEntry> {
+  return await invoke("update_dictation_dictionary_entry", { entryId, request });
+}
+
+export async function deleteDictationDictionaryEntry(entryId: string): Promise<void> {
+  await invoke("delete_dictation_dictionary_entry", { entryId });
 }
 
 export async function listDictationSnippets(): Promise<DictationSnippet[]> {

@@ -10,6 +10,10 @@ import {
   getTranscript,
   reprocessDictationText,
   deleteRecording,
+  listDictationDictionaryEntries,
+  createDictationDictionaryEntry,
+  updateDictationDictionaryEntry,
+  deleteDictationDictionaryEntry,
   listDictationSnippets,
   createDictationSnippet,
   updateDictationSnippet,
@@ -17,6 +21,7 @@ import {
   listDictationCommandPresets,
   upsertDictationCommandPreset,
   deleteDictationCommandPreset,
+  type DictationDictionaryEntry,
   type DictationSnippet,
   type DictationCommandPreset,
   type DictationReprocessResult,
@@ -387,10 +392,17 @@ export function DictationView() {
   const [dictationInsertionMode, setDictationInsertionMode] =
     useState<DictationInsertionMode>("auto");
   const [dictationSnippetsEnabled, setDictationSnippetsEnabled] = useState(true);
+  const [dictationDictionaryEntries, setDictationDictionaryEntries] = useState<
+    DictationDictionaryEntry[]
+  >([]);
   const [dictationSnippets, setDictationSnippets] = useState<DictationSnippet[]>([]);
   const [dictationCommandPresets, setDictationCommandPresets] = useState<
     DictationCommandPreset[]
   >([]);
+  const [newDictionarySpokenForm, setNewDictionarySpokenForm] = useState("");
+  const [newDictionaryReplacement, setNewDictionaryReplacement] = useState("");
+  const [newDictionaryAppScope, setNewDictionaryAppScope] = useState("");
+  const [newDictionaryCaseSensitive, setNewDictionaryCaseSensitive] = useState(false);
   const [newSnippetTrigger, setNewSnippetTrigger] = useState("");
   const [newSnippetExpansion, setNewSnippetExpansion] = useState("");
   const [newSnippetAppScope, setNewSnippetAppScope] = useState("");
@@ -615,6 +627,22 @@ export function DictationView() {
       mounted = false;
     };
   }, [defaultShortcut]);
+
+  useEffect(() => {
+    let mounted = true;
+    void listDictationDictionaryEntries()
+      .then((entries) => {
+        if (mounted) {
+          setDictationDictionaryEntries(entries);
+        }
+      })
+      .catch((error) => {
+        console.warn("Failed to load dictation dictionary entries:", error);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -1100,6 +1128,39 @@ export function DictationView() {
     }
   };
 
+  const handleAddDictionaryEntry = async () => {
+    const spokenForm = newDictionarySpokenForm.trim();
+    const replacement = newDictionaryReplacement.trim();
+    if (!spokenForm || !replacement) {
+      return;
+    }
+    try {
+      const created = await createDictationDictionaryEntry({
+        spokenForm,
+        replacement,
+        appScope: newDictionaryAppScope.trim() || null,
+        caseSensitive: newDictionaryCaseSensitive,
+        enabled: true,
+      });
+      setDictationDictionaryEntries((prev) => [...prev, created]);
+      setNewDictionarySpokenForm("");
+      setNewDictionaryReplacement("");
+      setNewDictionaryAppScope("");
+      setNewDictionaryCaseSensitive(false);
+    } catch (error) {
+      console.warn("Failed to create dictation dictionary entry:", error);
+    }
+  };
+
+  const handleDeleteDictionaryEntry = async (entryId: string) => {
+    try {
+      await deleteDictationDictionaryEntry(entryId);
+      setDictationDictionaryEntries((prev) => prev.filter((entry) => entry.id !== entryId));
+    } catch (error) {
+      console.warn("Failed to delete dictation dictionary entry:", error);
+    }
+  };
+
   const handleDeleteSnippet = async (snippetId: string) => {
     try {
       await deleteDictationSnippet(snippetId);
@@ -1197,6 +1258,34 @@ export function DictationView() {
       console.warn("Failed to update dictation snippet:", error);
       void listDictationSnippets()
         .then(setDictationSnippets)
+        .catch(() => {
+          // Keep optimistic state if reload fails.
+        });
+    }
+  };
+
+  const patchDictionaryEntry = async (
+    entryId: string,
+    updates: Partial<{
+      spokenForm: string;
+      replacement: string;
+      appScope: string | null;
+      caseSensitive: boolean;
+      enabled: boolean;
+    }>
+  ) => {
+    setDictationDictionaryEntries((prev) =>
+      prev.map((entry) => (entry.id === entryId ? { ...entry, ...updates } : entry))
+    );
+    try {
+      const updated = await updateDictationDictionaryEntry(entryId, updates);
+      setDictationDictionaryEntries((prev) =>
+        prev.map((entry) => (entry.id === entryId ? updated : entry))
+      );
+    } catch (error) {
+      console.warn("Failed to update dictation dictionary entry:", error);
+      void listDictationDictionaryEntries()
+        .then(setDictationDictionaryEntries)
         .catch(() => {
           // Keep optimistic state if reload fails.
         });
@@ -2353,6 +2442,156 @@ export function DictationView() {
                     );
                   })}
                 </div>
+              </div>
+
+              <div className="mt-5 border-t pt-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">Dictionary</p>
+                    <p className="text-xs text-muted-foreground">
+                      Normalize names, brands, and phrases before snippets are applied.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_1fr_auto] gap-2">
+                  <input
+                    type="text"
+                    className="w-full p-2 border rounded-md bg-background"
+                    placeholder="Say (e.g. open ai)"
+                    value={newDictionarySpokenForm}
+                    onChange={(event) => setNewDictionarySpokenForm(event.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="w-full p-2 border rounded-md bg-background"
+                    placeholder="Insert (e.g. OpenAI)"
+                    value={newDictionaryReplacement}
+                    onChange={(event) => setNewDictionaryReplacement(event.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="w-full p-2 border rounded-md bg-background"
+                    placeholder="App scope (optional)"
+                    value={newDictionaryAppScope}
+                    onChange={(event) => setNewDictionaryAppScope(event.target.value)}
+                  />
+                  <Button variant="outline" onClick={() => void handleAddDictionaryEntry()}>
+                    Add
+                  </Button>
+                </div>
+                <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={newDictionaryCaseSensitive}
+                    onChange={(event) => setNewDictionaryCaseSensitive(event.target.checked)}
+                  />
+                  Case-sensitive match
+                </label>
+
+                {dictationDictionaryEntries.length > 0 && (
+                  <div className="space-y-2">
+                    {dictationDictionaryEntries.map((entry) => (
+                      <div key={entry.id} className="rounded-md border p-2 space-y-2">
+                        <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_1fr] gap-2">
+                          <input
+                            type="text"
+                            className="w-full p-2 border rounded-md bg-background text-sm font-mono"
+                            value={entry.spokenForm}
+                            onChange={(event) =>
+                              setDictationDictionaryEntries((prev) =>
+                                prev.map((current) =>
+                                  current.id === entry.id
+                                    ? { ...current, spokenForm: event.target.value }
+                                    : current
+                                )
+                              )
+                            }
+                            onBlur={(event) =>
+                              void patchDictionaryEntry(entry.id, {
+                                spokenForm: event.target.value.trim(),
+                              })
+                            }
+                          />
+                          <input
+                            type="text"
+                            className="w-full p-2 border rounded-md bg-background text-sm"
+                            value={entry.replacement}
+                            onChange={(event) =>
+                              setDictationDictionaryEntries((prev) =>
+                                prev.map((current) =>
+                                  current.id === entry.id
+                                    ? { ...current, replacement: event.target.value }
+                                    : current
+                                )
+                              )
+                            }
+                            onBlur={(event) =>
+                              void patchDictionaryEntry(entry.id, {
+                                replacement: event.target.value.trim(),
+                              })
+                            }
+                          />
+                          <input
+                            type="text"
+                            className="w-full p-2 border rounded-md bg-background text-sm"
+                            placeholder="App scope"
+                            value={entry.appScope ?? ""}
+                            onChange={(event) =>
+                              setDictationDictionaryEntries((prev) =>
+                                prev.map((current) =>
+                                  current.id === entry.id
+                                    ? { ...current, appScope: event.target.value }
+                                    : current
+                                )
+                              )
+                            }
+                            onBlur={(event) =>
+                              void patchDictionaryEntry(entry.id, {
+                                appScope: event.target.value.trim() || null,
+                              })
+                            }
+                          />
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={entry.caseSensitive}
+                                onChange={(event) =>
+                                  void patchDictionaryEntry(entry.id, {
+                                    caseSensitive: event.target.checked,
+                                  })
+                                }
+                              />
+                              Case-sensitive
+                            </label>
+                            <label className="inline-flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={entry.enabled}
+                                onChange={(event) =>
+                                  void patchDictionaryEntry(entry.id, {
+                                    enabled: event.target.checked,
+                                  })
+                                }
+                              />
+                              Enabled
+                            </label>
+                          </div>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => void handleDeleteDictionaryEntry(entry.id)}
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="mt-5 border-t pt-4 space-y-3">

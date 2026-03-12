@@ -265,6 +265,42 @@ pub struct TemplateExportResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DictationDictionaryEntry {
+    pub id: String,
+    pub spoken_form: String,
+    pub replacement: String,
+    pub app_scope: Option<String>,
+    pub case_sensitive: bool,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDictationDictionaryEntryRequest {
+    pub spoken_form: String,
+    pub replacement: String,
+    #[serde(default)]
+    pub app_scope: Option<String>,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDictationDictionaryEntryRequest {
+    pub spoken_form: Option<String>,
+    pub replacement: Option<String>,
+    pub app_scope: Option<Option<String>>,
+    pub case_sensitive: Option<bool>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DictationSnippet {
     pub id: String,
     pub trigger: String,
