@@ -677,14 +677,14 @@ pub fn smart_format_dictation_text_for_app(
     };
 
     normalize_for_app_style(
-        restore_structural_breaks(&restore_structural_break_tokens(
-            &capitalize_after_line_breaks(
+        capitalize_after_line_breaks(&restore_structural_breaks(
+            &restore_structural_break_tokens(&capitalize_after_line_breaks(
                 &restore_structural_breaks(
                     IntelligentPunctuator::new(config)
                         .punctuate(&normalized)
                         .trim(),
                 ),
-            ),
+            )),
         )),
         mode_preset,
         app_style,
