@@ -7575,14 +7575,16 @@ async fn stop_dictation_session_for_session(
                 if normalized_message.contains("no audio was captured")
                     || normalized_message.contains("no microphone samples")
                 {
-                    let push_to_talk = state
+                    let transcription = state
                         .settings_manager
                         .lock()
                         .await
                         .settings()
                         .transcription
-                        .dictation_push_to_talk;
-                    let hint = if push_to_talk {
+                        .clone();
+                    let hint = if transcription.dictation_hands_free_enabled {
+                        "Press the dictation hotkey once to start hands-free capture, speak naturally, then pause or press again to stop."
+                    } else if transcription.dictation_push_to_talk {
                         "Hold the dictation hotkey while speaking, then release to transcribe, or switch Hotkey behavior to Toggle in Dictation Settings."
                     } else {
                         "Speak for at least a second before stopping dictation, then check microphone privacy permissions."

@@ -270,7 +270,7 @@ describe("SettingsView performance behavior", () => {
     );
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
-    const select = screen.getByRole("combobox");
+    const select = screen.getByLabelText("Color scheme");
     expect(select).toHaveValue("default");
     expect(screen.queryByText("Rose Pine Night (Pro)")).not.toBeInTheDocument();
   });
@@ -300,7 +300,7 @@ describe("SettingsView performance behavior", () => {
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     vi.useFakeTimers();
 
-    const select = screen.getByRole("combobox");
+    const select = screen.getByLabelText("Color scheme");
     fireEvent.change(select, { target: { value: "rose-pine" } });
 
     await act(async () => {

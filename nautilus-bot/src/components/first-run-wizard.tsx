@@ -30,7 +30,12 @@ import {
   saveSettings,
   type PermissionDiagnostics,
 } from "@/lib/tauri";
-import { defaultDictationShortcut, formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
+import {
+  defaultDictationShortcut,
+  dictationInstruction,
+  formatShortcutForDisplay,
+  normalizeShortcut,
+} from "@/lib/shortcuts";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
@@ -160,7 +165,8 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [selectedModelId, setSelectedModelId] = useState("base.en");
 
   const [shortcutValue, setShortcutValue] = useState(defaultDictationShortcut());
-  const [hotkeyMode, setHotkeyMode] = useState<"hold_to_talk" | "toggle">("hold_to_talk");
+  const [hotkeyMode, setHotkeyMode] =
+    useState<"hold_to_talk" | "toggle" | "hands_free">("hold_to_talk");
   const [hotkeyDemoActive, setHotkeyDemoActive] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -205,7 +211,13 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         }
         setAutoRequestPermissions(settings.transcription.dictationAutoRequestPermissions ?? true);
         setShortcutValue(settings.shortcuts.toggleDictation || defaultDictationShortcut());
-        setHotkeyMode(settings.transcription.dictationPushToTalk ? "hold_to_talk" : "toggle");
+        setHotkeyMode(
+          settings.transcription.dictationHandsFreeEnabled
+            ? "hands_free"
+            : settings.transcription.dictationPushToTalk
+            ? "hold_to_talk"
+            : "toggle"
+        );
         setMeetingAudioStorageMode(
           settings.transcription.meetingAudioStorageMode === "transcript_only"
             ? "transcript_only"
@@ -335,6 +347,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       settings.shortcuts.toggleDictation = normalizeShortcut(shortcutValue);
       settings.shortcuts.toggleDictationAlternates = [];
       settings.transcription.dictationPushToTalk = hotkeyMode === "hold_to_talk";
+      settings.transcription.dictationHandsFreeEnabled = hotkeyMode === "hands_free";
       settings.transcription.dictationAutoRequestPermissions = autoRequestPermissions;
       await saveSettings(settings);
       return true;
@@ -908,17 +921,15 @@ function HotkeyStep({
   onToggle(): void;
   displayShortcut: string;
   onShortcutChange(value: string): void;
-  hotkeyMode: "hold_to_talk" | "toggle";
-  onHotkeyModeChange(value: "hold_to_talk" | "toggle"): void;
+  hotkeyMode: "hold_to_talk" | "toggle" | "hands_free";
+  onHotkeyModeChange(value: "hold_to_talk" | "toggle" | "hands_free"): void;
   includeMeetings: boolean;
   saveError: string | null;
 }) {
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        {hotkeyMode === "hold_to_talk"
-          ? `Hold ${displayShortcut} anywhere to dictate. Release to transcribe and insert.`
-          : `Press ${displayShortcut} once to start dictating and again to finish.`}
+        {dictationInstruction(displayShortcut, hotkeyMode)}
       </p>
 
       <div className="space-y-2 rounded-lg border border-border p-3">
@@ -943,14 +954,24 @@ function HotkeyStep({
       </div>
 
       <div className="space-y-2 rounded-lg border border-border p-3">
-        <label className="text-xs font-medium text-muted-foreground">Hotkey behavior</label>
+        <label
+          htmlFor="first-run-hotkey-behavior"
+          className="text-xs font-medium text-muted-foreground"
+        >
+          Hotkey behavior
+        </label>
         <select
+          id="first-run-hotkey-behavior"
+          aria-label="Hotkey behavior"
           className="w-full rounded-md border border-border bg-background p-2 text-sm"
           value={hotkeyMode}
-          onChange={(event) => onHotkeyModeChange(event.target.value as "hold_to_talk" | "toggle")}
+          onChange={(event) =>
+            onHotkeyModeChange(event.target.value as "hold_to_talk" | "toggle" | "hands_free")
+          }
         >
           <option value="hold_to_talk">Hold-to-talk</option>
           <option value="toggle">Toggle press</option>
+          <option value="hands_free">Hands-free</option>
         </select>
       </div>
 
