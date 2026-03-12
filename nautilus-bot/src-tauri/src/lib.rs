@@ -5651,6 +5651,26 @@ fn dictation_history_details_from_audit(
             .get("dictation_mode_preset")
             .and_then(|value| value.as_str())
             .map(str::to_string),
+        mode_label: details
+            .get("dictation_mode_label")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        base_mode_preset: details
+            .get("dictation_base_mode_preset")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        base_mode_label: details
+            .get("dictation_base_mode_label")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        custom_mode_id: details
+            .get("dictation_custom_mode_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        custom_mode_name: details
+            .get("dictation_custom_mode_name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
         context_source: details
             .get("context_source")
             .and_then(|value| value.as_str())
@@ -5748,6 +5768,11 @@ fn merge_dictation_history_details(
 
 fn dictation_history_details_is_empty(details: &models::DictationHistoryDetails) -> bool {
     details.mode_preset.is_none()
+        && details.mode_label.is_none()
+        && details.base_mode_preset.is_none()
+        && details.base_mode_label.is_none()
+        && details.custom_mode_id.is_none()
+        && details.custom_mode_name.is_none()
         && details.context_source.is_none()
         && details.context_preview.is_none()
         && details.context_app_name.is_none()
@@ -9099,57 +9124,78 @@ async fn stop_dictation_session_for_session(
         tracing::warn!("Failed to persist dictation insertion action: {}", error);
     }
 
-    let details = serde_json::json!({
-        "stop_reason": stop_reason,
-        "session_id": session_id,
-        "model": &result.model_name,
-        "model_id": &result.model_id,
-        "language": &result.language,
-        "requested_provider": result.requested_provider,
-        "actual_provider": result.actual_provider,
-        "requested_engine": result.requested_engine,
-        "actual_engine": result.actual_engine,
-        "optimization_applied": result.optimization_applied,
-        "fallback_reason": result.fallback_reason,
-        "text_length": result.text.len(),
-        "pasted": pasted,
-        "copied": copied,
-        "paste_error": paste_error,
-        "insertion_mode_requested": insertion_mode,
-        "insertion_mode_used": insertion_mode_used,
-        "outcome": outcome,
-        "command_applied": command_applied,
-        "snippet_applied_count": snippet_applied_count,
-        "app_target": app_target,
-        "startup_latency_ms": startup_latency_ms,
-        "end_to_end_ms": end_to_end_ms,
-        "transcription_latency_ms": transcription_latency_ms,
-        "save_to_inbox": dictation_options.save_to_inbox,
-        "dictation_persisted": dictation_options.save_to_inbox && persist_dictation_record,
-        "dictation_retention_preset": dictation_retention_preset,
-        "dictation_project_id": dictation_options.project_id,
-        "dictation_profile": dictation_profile_to_settings_value(&dictation_options.profile),
-        "dictation_model_id": dictation_model_id,
-        "recording_id": persisted_recording_id,
-        "dictation_mode_preset": resolved_dictation_mode_preset(&settings_snapshot),
-        "route_preference": dictation_options.route_preference,
-        "resolved_hosting": dictation_options.resolved_hosting,
-        "activation_matcher": resolved_activation_matcher,
-        "context_source": dictation_options.context_source,
-        "context_app_name": dictation_options.context_app_name,
-        "context_preview": truncate_for_audit_preview(dictation_options.captured_context_text.as_deref(), 280),
-        "prompt_source": command_applied.clone().map(|key| format!("command:{}", key)).or_else(|| {
+    let active_custom_mode = active_dictation_custom_mode(&settings_snapshot);
+    let resolved_mode_preset = resolved_dictation_mode_preset(&settings_snapshot);
+    let resolved_mode_label = dictation_mode_label(
+        &settings_snapshot.transcription.dictation_mode_preset,
+        settings_snapshot
+            .transcription
+            .dictation_selected_custom_mode_id
+            .as_deref(),
+        &settings_snapshot.transcription.dictation_custom_modes,
+    );
+    let resolved_base_mode_label = resolved_dictation_base_mode_label(&settings_snapshot);
+    let prompt_metadata = resolve_dictation_format_prompt_metadata(&settings_snapshot);
+    let prompt_source = command_applied
+        .clone()
+        .map(|key| format!("command:{}", key))
+        .or_else(|| {
             if settings_snapshot.transcription.dictation_ai_formatting {
-                resolve_dictation_format_prompt_metadata(&settings_snapshot).0
+                prompt_metadata.0.clone()
             } else {
                 None
             }
-        }),
-        "prompt_preview": truncate_for_audit_preview(
-            resolve_dictation_format_prompt_metadata(&settings_snapshot).1.as_deref(),
-            220,
-        ),
-    });
+        });
+    let prompt_preview = truncate_for_audit_preview(prompt_metadata.1.as_deref(), 220);
+    let context_preview =
+        truncate_for_audit_preview(dictation_options.captured_context_text.as_deref(), 280);
+    let mut details = serde_json::Map::new();
+    details.insert("stop_reason".to_string(), serde_json::to_value(stop_reason).unwrap_or(serde_json::Value::Null));
+    details.insert("session_id".to_string(), serde_json::to_value(session_id).unwrap_or(serde_json::Value::Null));
+    details.insert("model".to_string(), serde_json::to_value(&result.model_name).unwrap_or(serde_json::Value::Null));
+    details.insert("model_id".to_string(), serde_json::to_value(&result.model_id).unwrap_or(serde_json::Value::Null));
+    details.insert("language".to_string(), serde_json::to_value(&result.language).unwrap_or(serde_json::Value::Null));
+    details.insert("requested_provider".to_string(), serde_json::to_value(result.requested_provider).unwrap_or(serde_json::Value::Null));
+    details.insert("actual_provider".to_string(), serde_json::to_value(result.actual_provider).unwrap_or(serde_json::Value::Null));
+    details.insert("requested_engine".to_string(), serde_json::to_value(result.requested_engine).unwrap_or(serde_json::Value::Null));
+    details.insert("actual_engine".to_string(), serde_json::to_value(result.actual_engine).unwrap_or(serde_json::Value::Null));
+    details.insert("optimization_applied".to_string(), serde_json::to_value(result.optimization_applied).unwrap_or(serde_json::Value::Null));
+    details.insert("fallback_reason".to_string(), serde_json::to_value(result.fallback_reason).unwrap_or(serde_json::Value::Null));
+    details.insert("text_length".to_string(), serde_json::to_value(result.text.len()).unwrap_or(serde_json::Value::Null));
+    details.insert("pasted".to_string(), serde_json::to_value(pasted).unwrap_or(serde_json::Value::Null));
+    details.insert("copied".to_string(), serde_json::to_value(copied).unwrap_or(serde_json::Value::Null));
+    details.insert("paste_error".to_string(), serde_json::to_value(&paste_error).unwrap_or(serde_json::Value::Null));
+    details.insert("insertion_mode_requested".to_string(), serde_json::to_value(insertion_mode).unwrap_or(serde_json::Value::Null));
+    details.insert("insertion_mode_used".to_string(), serde_json::to_value(&insertion_mode_used).unwrap_or(serde_json::Value::Null));
+    details.insert("outcome".to_string(), serde_json::to_value(outcome).unwrap_or(serde_json::Value::Null));
+    details.insert("command_applied".to_string(), serde_json::to_value(&command_applied).unwrap_or(serde_json::Value::Null));
+    details.insert("snippet_applied_count".to_string(), serde_json::to_value(snippet_applied_count).unwrap_or(serde_json::Value::Null));
+    details.insert("app_target".to_string(), serde_json::to_value(&app_target).unwrap_or(serde_json::Value::Null));
+    details.insert("startup_latency_ms".to_string(), serde_json::to_value(startup_latency_ms).unwrap_or(serde_json::Value::Null));
+    details.insert("end_to_end_ms".to_string(), serde_json::to_value(end_to_end_ms).unwrap_or(serde_json::Value::Null));
+    details.insert("transcription_latency_ms".to_string(), serde_json::to_value(transcription_latency_ms).unwrap_or(serde_json::Value::Null));
+    details.insert("save_to_inbox".to_string(), serde_json::to_value(dictation_options.save_to_inbox).unwrap_or(serde_json::Value::Null));
+    details.insert("dictation_persisted".to_string(), serde_json::to_value(dictation_options.save_to_inbox && persist_dictation_record).unwrap_or(serde_json::Value::Null));
+    details.insert("dictation_retention_preset".to_string(), serde_json::to_value(dictation_retention_preset).unwrap_or(serde_json::Value::Null));
+    details.insert("dictation_project_id".to_string(), serde_json::to_value(&dictation_options.project_id).unwrap_or(serde_json::Value::Null));
+    details.insert("dictation_profile".to_string(), serde_json::to_value(dictation_profile_to_settings_value(&dictation_options.profile)).unwrap_or(serde_json::Value::Null));
+    details.insert("dictation_model_id".to_string(), serde_json::to_value(&dictation_model_id).unwrap_or(serde_json::Value::Null));
+    details.insert("recording_id".to_string(), serde_json::to_value(&persisted_recording_id).unwrap_or(serde_json::Value::Null));
+    details.insert("dictation_mode_preset".to_string(), serde_json::to_value(resolved_mode_preset).unwrap_or(serde_json::Value::Null));
+    details.insert("dictation_mode_label".to_string(), serde_json::to_value(&resolved_mode_label).unwrap_or(serde_json::Value::Null));
+    details.insert("dictation_base_mode_preset".to_string(), serde_json::to_value(resolved_mode_preset).unwrap_or(serde_json::Value::Null));
+    details.insert("dictation_base_mode_label".to_string(), serde_json::to_value(&resolved_base_mode_label).unwrap_or(serde_json::Value::Null));
+    details.insert("dictation_custom_mode_id".to_string(), serde_json::to_value(active_custom_mode.map(|mode| mode.id.as_str())).unwrap_or(serde_json::Value::Null));
+    details.insert("dictation_custom_mode_name".to_string(), serde_json::to_value(active_custom_mode.map(|mode| mode.name.as_str())).unwrap_or(serde_json::Value::Null));
+    details.insert("route_preference".to_string(), serde_json::to_value(&dictation_options.route_preference).unwrap_or(serde_json::Value::Null));
+    details.insert("resolved_hosting".to_string(), serde_json::to_value(&dictation_options.resolved_hosting).unwrap_or(serde_json::Value::Null));
+    details.insert("activation_matcher".to_string(), serde_json::to_value(&resolved_activation_matcher).unwrap_or(serde_json::Value::Null));
+    details.insert("context_source".to_string(), serde_json::to_value(&dictation_options.context_source).unwrap_or(serde_json::Value::Null));
+    details.insert("context_app_name".to_string(), serde_json::to_value(&dictation_options.context_app_name).unwrap_or(serde_json::Value::Null));
+    details.insert("context_preview".to_string(), serde_json::to_value(&context_preview).unwrap_or(serde_json::Value::Null));
+    details.insert("prompt_source".to_string(), serde_json::to_value(&prompt_source).unwrap_or(serde_json::Value::Null));
+    details.insert("prompt_preview".to_string(), serde_json::to_value(&prompt_preview).unwrap_or(serde_json::Value::Null));
+    let details = serde_json::Value::Object(details);
     if let Err(e) = db.log_audit_event("dictation_completed", Some(details), "info") {
         tracing::warn!("Failed to log audit event: {}", e);
     }
@@ -11758,6 +11804,14 @@ fn resolved_dictation_mode_preset(settings: &settings::Settings) -> &'static str
     } else {
         normalized
     }
+}
+
+fn resolved_dictation_base_mode_label(settings: &settings::Settings) -> String {
+    dictation_mode_label(
+        resolved_dictation_mode_preset(settings),
+        None,
+        &settings.transcription.dictation_custom_modes,
+    )
 }
 
 fn resolve_dictation_format_prompt_metadata(
@@ -14467,6 +14521,11 @@ mod tests {
     fn dictation_history_details_merge_prefers_artifact_records() {
         let audit = serde_json::json!({
             "dictation_mode_preset": "brain-dump",
+            "dictation_mode_label": "Slack Replies",
+            "dictation_base_mode_preset": "messages",
+            "dictation_base_mode_label": "Messages",
+            "dictation_custom_mode_id": "builtin-slack-replies",
+            "dictation_custom_mode_name": "Slack Replies",
             "context_source": "clipboard",
             "context_preview": "legacy context",
             "context_app_name": "Notes",
@@ -14522,6 +14581,14 @@ mod tests {
         );
 
         assert_eq!(details.mode_preset.as_deref(), Some("brain-dump"));
+        assert_eq!(details.mode_label.as_deref(), Some("Slack Replies"));
+        assert_eq!(details.base_mode_preset.as_deref(), Some("messages"));
+        assert_eq!(details.base_mode_label.as_deref(), Some("Messages"));
+        assert_eq!(
+            details.custom_mode_id.as_deref(),
+            Some("builtin-slack-replies")
+        );
+        assert_eq!(details.custom_mode_name.as_deref(), Some("Slack Replies"));
         assert_eq!(details.context_preview.as_deref(), Some("legacy context"));
         assert_eq!(details.activation_matcher.as_deref(), Some("slack"));
         assert_eq!(
