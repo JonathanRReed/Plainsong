@@ -79,7 +79,7 @@ async fn local_asr_rtf_gate_under_1_2x() {
     let local_providers = [
         AsrProviderType::Whisper,
         AsrProviderType::Parakeet,
-        AsrProviderType::Canary,
+        AsrProviderType::WhisperCandle,
         AsrProviderType::DistilWhisper,
         AsrProviderType::Moonshine,
         AsrProviderType::Voxtral,
