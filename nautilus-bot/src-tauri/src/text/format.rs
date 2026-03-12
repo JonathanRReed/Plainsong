@@ -691,10 +691,6 @@ pub fn smart_format_dictation_text_for_app(
     )
 }
 
-pub fn smart_format_dictation_text(text: &str, mode_preset: &str) -> String {
-    smart_format_dictation_text_for_app(text, mode_preset, None)
-}
-
 /// Format transcript for specific use cases
 pub fn format_for_use_case(text: &str, use_case: &str) -> String {
     let config = match use_case {
@@ -776,7 +772,7 @@ mod tests {
     #[test]
     fn smart_format_dictation_replaces_spoken_punctuation_tokens() {
         let input = "hello comma this is jon period new paragraph i will follow up question mark";
-        let result = smart_format_dictation_text(input, "voice");
+        let result = smart_format_dictation_text_for_app(input, "voice", None);
         assert!(result.contains("Hello, this is jon."));
         assert!(result.contains("\n\nI will follow up?"));
     }
@@ -784,7 +780,7 @@ mod tests {
     #[test]
     fn smart_format_dictation_keeps_message_mode_lightweight() {
         let input = "hi there new line i can send that over tomorrow";
-        let result = smart_format_dictation_text(input, "messages");
+        let result = smart_format_dictation_text_for_app(input, "messages", None);
         assert_eq!(result, "Hi there\nI can send that over tomorrow");
     }
 

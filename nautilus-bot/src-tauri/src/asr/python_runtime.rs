@@ -277,7 +277,7 @@ fn command_success(program: &str, args: &[&str]) -> bool {
         .unwrap_or(false)
 }
 
-fn choose_bootstrap_python() -> Option<String> {
+fn bootstrap_python_candidates() -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();
     if let Ok(value) = std::env::var("NAUTILUS_PYTHON") {
         if !value.trim().is_empty() {
@@ -301,44 +301,61 @@ fn choose_bootstrap_python() -> Option<String> {
     );
 
     let mut seen = HashSet::new();
-    for candidate in candidates {
-        if !seen.insert(candidate.clone()) {
-            continue;
-        }
-        if command_success(&candidate, &["-c", "import venv"]) {
-            return Some(candidate);
-        }
-    }
-    None
+    candidates
+        .into_iter()
+        .filter(|candidate| seen.insert(candidate.clone()))
+        .collect()
 }
 
-fn ensure_managed_runtime(provider: &str) -> Result<String> {
-    let venv_dir = managed_venv_dir();
-    std::fs::create_dir_all(venv_dir.parent().unwrap_or_else(|| Path::new(".")))
-        .context("Failed to create managed runtime root")?;
-    let python_path = managed_python_executable(&venv_dir);
+fn remove_managed_runtime_dir(venv_dir: &Path) -> Result<()> {
+    if !venv_dir.exists() {
+        return Ok(());
+    }
+
+    std::fs::remove_dir_all(venv_dir).with_context(|| {
+        format!(
+            "Failed to remove managed ASR runtime at {}",
+            venv_dir.display()
+        )
+    })
+}
+
+fn install_managed_runtime_for_candidate(
+    provider: &str,
+    venv_dir: &Path,
+    bootstrap_python: &str,
+    probe: &str,
+) -> Result<String> {
+    remove_managed_runtime_dir(venv_dir)?;
+
+    let output = Command::new(bootstrap_python)
+        .args(["-m", "venv", venv_dir.to_string_lossy().as_ref()])
+        .output()
+        .with_context(|| {
+            format!(
+                "Failed to create managed ASR virtualenv with '{}'",
+                bootstrap_python
+            )
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim()
+        } else {
+            "unknown virtualenv creation error"
+        };
+        return Err(anyhow!(
+            "Failed to create managed ASR runtime with '{}': {}",
+            bootstrap_python,
+            detail
+        ));
+    }
+
+    let python_path = managed_python_executable(venv_dir);
     let python_string = python_path.to_string_lossy().to_string();
-    let probe = provider_import_probe(provider);
-
-    if python_path.exists() && command_success(&python_string, &["-c", probe]) {
-        return Ok(python_string);
-    }
-
-    if !python_path.exists() {
-        let bootstrap_python = choose_bootstrap_python()
-            .ok_or_else(|| anyhow!("Could not find a Python interpreter with 'venv' support"))?;
-        let output = Command::new(&bootstrap_python)
-            .args(["-m", "venv", venv_dir.to_string_lossy().as_ref()])
-            .output()
-            .context("Failed to create managed ASR virtualenv")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!(
-                "Failed to create managed ASR runtime: {}",
-                stderr.trim()
-            ));
-        }
-    }
 
     let pip_bootstrap = Command::new(&python_string)
         .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
@@ -355,9 +372,18 @@ fn ensure_managed_runtime(provider: &str) -> Result<String> {
         .context("Failed to install base Python packaging tools")?;
     if !pip_bootstrap.status.success() {
         let stderr = String::from_utf8_lossy(&pip_bootstrap.stderr);
-        return Err(anyhow!(
-            "Failed to bootstrap managed runtime tooling: {}",
+        let stdout = String::from_utf8_lossy(&pip_bootstrap.stdout);
+        let detail = if !stderr.trim().is_empty() {
             stderr.trim()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim()
+        } else {
+            "unknown pip bootstrap error"
+        };
+        return Err(anyhow!(
+            "Failed to bootstrap managed runtime tooling with '{}': {}",
+            bootstrap_python,
+            detail
         ));
     }
 
@@ -370,27 +396,79 @@ fn ensure_managed_runtime(provider: &str) -> Result<String> {
         .output()
         .with_context(|| {
             format!(
-                "Failed to install managed runtime dependencies for {}",
-                provider
+                "Failed to install managed runtime dependencies for {} with '{}'",
+                provider, bootstrap_python
             )
         })?;
     if !install_output.status.success() {
         let stderr = String::from_utf8_lossy(&install_output.stderr);
-        return Err(anyhow!(
-            "Managed runtime dependency install failed for {}: {}",
-            provider,
+        let stdout = String::from_utf8_lossy(&install_output.stdout);
+        let detail = if !stderr.trim().is_empty() {
             stderr.trim()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim()
+        } else {
+            "unknown dependency install error"
+        };
+        return Err(anyhow!(
+            "Managed runtime dependency install failed for {} with '{}': {}",
+            provider,
+            bootstrap_python,
+            detail
         ));
     }
 
     if !command_success(&python_string, &["-c", probe]) {
         return Err(anyhow!(
-            "Managed runtime installed for '{}' but required imports are still unavailable",
+            "Managed runtime installed with '{}' but required '{}' imports are still unavailable",
+            bootstrap_python,
             provider
         ));
     }
 
     Ok(python_string)
+}
+
+fn ensure_managed_runtime(provider: &str) -> Result<String> {
+    let venv_dir = managed_venv_dir();
+    std::fs::create_dir_all(venv_dir.parent().unwrap_or_else(|| Path::new(".")))
+        .context("Failed to create managed runtime root")?;
+    let python_path = managed_python_executable(&venv_dir);
+    let python_string = python_path.to_string_lossy().to_string();
+    let probe = provider_import_probe(provider);
+
+    if python_path.exists() && command_success(&python_string, &["-c", probe]) {
+        return Ok(python_string);
+    }
+
+    let candidates = bootstrap_python_candidates();
+    if candidates.is_empty() {
+        return Err(anyhow!(
+            "Could not find a Python interpreter candidate for managed ASR runtime bootstrap"
+        ));
+    }
+
+    let mut failures = Vec::new();
+    for candidate in candidates {
+        if !command_success(&candidate, &["-c", "import venv"]) {
+            failures.push(format!("{}: missing venv support", candidate));
+            continue;
+        }
+
+        match install_managed_runtime_for_candidate(provider, &venv_dir, &candidate, probe) {
+            Ok(python) => return Ok(python),
+            Err(error) => {
+                failures.push(format!("{}: {}", candidate, error));
+                let _ = remove_managed_runtime_dir(&venv_dir);
+            }
+        }
+    }
+
+    Err(anyhow!(
+        "Failed to bootstrap managed runtime for '{}'. Tried: {}",
+        provider,
+        failures.join(" | ")
+    ))
 }
 
 /// Find a Python executable that can import the required runtime probe modules.
