@@ -94,6 +94,7 @@ export interface TranscriptionSettings {
   dictationCommandPrefix?: string;
   dictationInsertionMode?: "auto" | "paste" | "inline" | "clipboard_only";
   dictationSnippetsEnabled?: boolean;
+  dictationAutoLearnCorrections?: boolean;
   dictationCustomPrompt: string | null;
   meetingCustomPrompt: string | null;
   meetingAutoNameEnabled?: boolean;

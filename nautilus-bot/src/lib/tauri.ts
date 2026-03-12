@@ -433,6 +433,22 @@ export interface UpdateDictationDictionaryEntryRequest {
   enabled?: boolean;
 }
 
+export interface LearnDictationCorrectionRequest {
+  originalText: string;
+  correctedText: string;
+  appTarget?: string | null;
+  force?: boolean;
+}
+
+export interface LearnDictationCorrectionResult {
+  learned: boolean;
+  action?: "created" | "updated" | null;
+  reason?: string | null;
+  spokenForm?: string | null;
+  replacement?: string | null;
+  entry?: DictationDictionaryEntry | null;
+}
+
 export interface DictationSnippet {
   id: string;
   trigger: string;
@@ -494,6 +510,12 @@ export async function updateDictationDictionaryEntry(
 
 export async function deleteDictationDictionaryEntry(entryId: string): Promise<void> {
   await invoke("delete_dictation_dictionary_entry", { entryId });
+}
+
+export async function learnDictationCorrection(
+  request: LearnDictationCorrectionRequest
+): Promise<LearnDictationCorrectionResult> {
+  return await invoke("learn_dictation_correction", { request });
 }
 
 export async function listDictationSnippets(): Promise<DictationSnippet[]> {

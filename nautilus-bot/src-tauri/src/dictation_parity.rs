@@ -49,6 +49,12 @@ pub struct SnippetRule {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LearnedCorrectionCandidate {
+    pub spoken_form: String,
+    pub replacement: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationBenchmarkFixture {
@@ -163,6 +169,113 @@ fn default_true() -> bool {
 
 fn default_fixture_schema_version() -> String {
     "1.0".to_string()
+}
+
+fn normalize_correction_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn trim_phrase_edges(value: &str) -> String {
+    value
+        .trim_matches(|ch: char| !(ch.is_alphanumeric() || ch == '\'' || ch == '-'))
+        .trim()
+        .to_string()
+}
+
+fn contains_alpha_numeric(value: &str) -> bool {
+    value.chars().any(|ch| ch.is_alphanumeric())
+}
+
+fn looks_like_auto_learning_safe_phrase(value: &str) -> bool {
+    let words = value.split_whitespace().count();
+    !value.is_empty() && words <= 4 && value.chars().count() <= 48 && contains_alpha_numeric(value)
+}
+
+fn auto_learning_guard_rejects_apostrophe_phrase(value: &str) -> bool {
+    value.contains('\'') && !value.chars().any(|ch| ch.is_uppercase())
+}
+
+pub fn infer_learned_correction(
+    original_text: &str,
+    corrected_text: &str,
+    force: bool,
+) -> Result<LearnedCorrectionCandidate, String> {
+    let original = normalize_correction_text(original_text);
+    let corrected = normalize_correction_text(corrected_text);
+
+    if original.is_empty() || corrected.is_empty() {
+        return Err("Correction text cannot be empty".to_string());
+    }
+
+    if original == corrected {
+        return Err("No correction detected".to_string());
+    }
+
+    let original_tokens = original.split_whitespace().collect::<Vec<_>>();
+    let corrected_tokens = corrected.split_whitespace().collect::<Vec<_>>();
+
+    let mut prefix_len = 0usize;
+    while prefix_len < original_tokens.len()
+        && prefix_len < corrected_tokens.len()
+        && original_tokens[prefix_len].eq_ignore_ascii_case(corrected_tokens[prefix_len])
+    {
+        prefix_len += 1;
+    }
+
+    let mut original_suffix_len = original_tokens.len();
+    let mut corrected_suffix_len = corrected_tokens.len();
+    while original_suffix_len > prefix_len
+        && corrected_suffix_len > prefix_len
+        && original_tokens[original_suffix_len - 1]
+            .eq_ignore_ascii_case(corrected_tokens[corrected_suffix_len - 1])
+    {
+        original_suffix_len -= 1;
+        corrected_suffix_len -= 1;
+    }
+
+    if prefix_len > 0 {
+        let previous_original = original_tokens[prefix_len - 1];
+        let previous_corrected = corrected_tokens[prefix_len - 1];
+        let case_only_match = previous_original.eq_ignore_ascii_case(previous_corrected)
+            && previous_original != previous_corrected;
+        let looks_like_named_phrase = previous_original
+            .chars()
+            .chain(previous_corrected.chars())
+            .any(|ch| ch.is_uppercase());
+        if case_only_match && looks_like_named_phrase {
+            prefix_len -= 1;
+        }
+    }
+
+    let original_middle =
+        trim_phrase_edges(&original_tokens[prefix_len..original_suffix_len].join(" "));
+    let corrected_middle =
+        trim_phrase_edges(&corrected_tokens[prefix_len..corrected_suffix_len].join(" "));
+
+    if original_middle.is_empty() || corrected_middle.is_empty() {
+        return Err("Correction did not resolve to a safe replacement span".to_string());
+    }
+
+    if !looks_like_auto_learning_safe_phrase(&original_middle)
+        || !looks_like_auto_learning_safe_phrase(&corrected_middle)
+    {
+        return Err("Correction was larger than the safe auto-learn window".to_string());
+    }
+
+    if !force && auto_learning_guard_rejects_apostrophe_phrase(&corrected_middle) {
+        return Err("Skipping contraction or possessive correction for auto-learn".to_string());
+    }
+
+    if original_middle.eq_ignore_ascii_case(&corrected_middle)
+        && original_middle == corrected_middle
+    {
+        return Err("No correction detected".to_string());
+    }
+
+    Ok(LearnedCorrectionCandidate {
+        spoken_form: original_middle,
+        replacement: corrected_middle,
+    })
 }
 
 fn replace_case_insensitive_all(
@@ -1325,5 +1438,49 @@ mod tests {
         let sentence_case = sentence_case_context_selection("SHIP IT. please REVIEW this!")
             .expect("sentence case succeeds");
         assert_eq!(sentence_case, "Ship it. Please review this!");
+    }
+
+    #[test]
+    fn infer_learned_correction_extracts_single_word_fix() {
+        let candidate =
+            infer_learned_correction("please email jon tomorrow", "please email John tomorrow", false)
+                .expect("infers proper-name correction");
+        assert_eq!(candidate.spoken_form, "jon");
+        assert_eq!(candidate.replacement, "John");
+    }
+
+    #[test]
+    fn infer_learned_correction_extracts_short_phrase_fix() {
+        let candidate = infer_learned_correction(
+            "send to launch pad account",
+            "send to Launch Plan account",
+            false,
+        )
+        .expect("infers short phrase correction");
+        assert_eq!(candidate.spoken_form, "launch pad");
+        assert_eq!(candidate.replacement, "Launch Plan");
+    }
+
+    #[test]
+    fn infer_learned_correction_rejects_large_rewrites() {
+        let error = infer_learned_correction(
+            "quick status update for the roadmap",
+            "Here is a concise project update with next steps and blockers",
+            false,
+        )
+        .expect_err("rejects rewrite");
+        assert!(error.contains("safe auto-learn window"));
+    }
+
+    #[test]
+    fn infer_learned_correction_rejects_contractions_for_auto_learn() {
+        let error =
+            infer_learned_correction("we are", "we're", false).expect_err("rejects contraction");
+        assert!(error.contains("Skipping contraction"));
+
+        let forced =
+            infer_learned_correction("we are", "we're", true).expect("manual learn can force");
+        assert_eq!(forced.spoken_form, "we are");
+        assert_eq!(forced.replacement, "we're");
     }
 }

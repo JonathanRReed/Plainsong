@@ -43,6 +43,7 @@ const tauriMocks = vi.hoisted(() => ({
     dictationSelectedCustomModeId: null,
     dictationCustomModes: [],
     dictationSnippetsEnabled: true,
+    dictationAutoLearnCorrections: true,
     dictationRetentionPreset: "never" as const,
     dictationRetentionCustomHours: 24,
     memorySearchMode: "fts" as const,
@@ -141,6 +142,22 @@ vi.mock("@/lib/tauri", () => ({
   createDictationDictionaryEntry: vi.fn(),
   updateDictationDictionaryEntry: vi.fn(),
   deleteDictationDictionaryEntry: vi.fn(),
+  learnDictationCorrection: vi.fn(async () => ({
+    learned: true,
+    action: "created",
+    spokenForm: "jon",
+    replacement: "John",
+    entry: {
+      id: "learned-1",
+      spokenForm: "jon",
+      replacement: "John",
+      appScope: null,
+      caseSensitive: false,
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+  })),
   listDictationSnippets: vi.fn(async () => []),
   createDictationSnippet: vi.fn(),
   updateDictationSnippet: vi.fn(),
@@ -281,5 +298,37 @@ describe("DictationView modes", () => {
 
     expect(await screen.findByText("Auto mode: slack")).toBeInTheDocument();
     expect(screen.getByText("Target app: Slack")).toBeInTheDocument();
+  });
+
+  it("learns a corrected latest-result word on blur", async () => {
+    const tauri = await import("@/lib/tauri");
+    render(<DictationView />);
+
+    await screen.findByText("Modes");
+    const handler = tauriMocks.eventListeners.get("dictation-text-ready");
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          text: "please email jon tomorrow",
+          actualProvider: "distil_whisper",
+        },
+      });
+    });
+
+    const editor = screen.getByDisplayValue("please email jon tomorrow");
+    fireEvent.change(editor, { target: { value: "please email John tomorrow" } });
+    fireEvent.blur(editor);
+
+    await waitFor(() => {
+      expect(tauri.learnDictationCorrection).toHaveBeenCalledWith({
+        originalText: "please email jon tomorrow",
+        correctedText: "please email John tomorrow",
+        appTarget: null,
+        force: false,
+      });
+    });
+
+    expect(await screen.findByText("Learned: jon -> John")).toBeInTheDocument();
   });
 });

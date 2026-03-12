@@ -4840,6 +4840,78 @@ async fn delete_dictation_dictionary_entry(
 }
 
 #[tauri::command]
+async fn learn_dictation_correction(
+    state: tauri::State<'_, AppState>,
+    request: models::LearnDictationCorrectionRequest,
+) -> Result<models::LearnDictationCorrectionResult, String> {
+    let candidate = match crate::dictation_parity::infer_learned_correction(
+        &request.original_text,
+        &request.corrected_text,
+        request.force,
+    ) {
+        Ok(value) => value,
+        Err(reason) => {
+            return Ok(models::LearnDictationCorrectionResult {
+                learned: false,
+                action: None,
+                reason: Some(reason),
+                spoken_form: None,
+                replacement: None,
+                entry: None,
+            });
+        }
+    };
+
+    let mut db = state.db.lock().await;
+    let existing = db
+        .list_dictation_dictionary_entries()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|entry| {
+            entry.app_scope.is_none()
+                && entry
+                    .spoken_form
+                    .eq_ignore_ascii_case(candidate.spoken_form.as_str())
+        });
+
+    let (action, entry) = if let Some(existing) = existing {
+        let updated = db
+            .update_dictation_dictionary_entry(
+                &existing.id,
+                &models::UpdateDictationDictionaryEntryRequest {
+                    spoken_form: Some(candidate.spoken_form.clone()),
+                    replacement: Some(candidate.replacement.clone()),
+                    app_scope: Some(None),
+                    case_sensitive: Some(false),
+                    enabled: Some(true),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        ("updated".to_string(), updated)
+    } else {
+        let created = db
+            .create_dictation_dictionary_entry(&models::CreateDictationDictionaryEntryRequest {
+                spoken_form: candidate.spoken_form.clone(),
+                replacement: candidate.replacement.clone(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+            })
+            .map_err(|e| e.to_string())?;
+        ("created".to_string(), created)
+    };
+
+    Ok(models::LearnDictationCorrectionResult {
+        learned: true,
+        action: Some(action),
+        reason: None,
+        spoken_form: Some(candidate.spoken_form),
+        replacement: Some(candidate.replacement),
+        entry: Some(entry),
+    })
+}
+
+#[tauri::command]
 async fn list_dictation_snippets(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<models::DictationSnippet>, String> {
@@ -13213,6 +13285,7 @@ pub fn run() {
             create_dictation_dictionary_entry,
             update_dictation_dictionary_entry,
             delete_dictation_dictionary_entry,
+            learn_dictation_correction,
             list_dictation_snippets,
             create_dictation_snippet,
             update_dictation_snippet,

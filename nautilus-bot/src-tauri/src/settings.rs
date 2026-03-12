@@ -180,6 +180,8 @@ pub struct TranscriptionSettings {
     pub dictation_insertion_mode: String,
     /// Dictation: snippet expansion toggle
     pub dictation_snippets_enabled: bool,
+    /// Dictation: learn safe confirmed text corrections into the dictionary automatically.
+    pub dictation_auto_learn_corrections: bool,
     /// Custom system prompt for Smart Format
     pub dictation_custom_prompt: Option<String>,
     /// Custom system prompt for Meeting Summaries
@@ -285,6 +287,7 @@ impl Default for TranscriptionSettings {
             dictation_command_prefix: "command".to_string(),
             dictation_insertion_mode: "paste".to_string(),
             dictation_snippets_enabled: true,
+            dictation_auto_learn_corrections: true,
             dictation_custom_prompt: None,
             meeting_custom_prompt: None,
             meeting_auto_name_enabled: true,
@@ -890,5 +893,6 @@ mod tests {
         assert_eq!(settings.transcription.dictation_command_prefix, "command");
         assert_eq!(settings.transcription.dictation_insertion_mode, "paste");
         assert!(settings.transcription.dictation_snippets_enabled);
+        assert!(settings.transcription.dictation_auto_learn_corrections);
     }
 }
