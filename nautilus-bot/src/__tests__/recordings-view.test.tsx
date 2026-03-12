@@ -126,6 +126,31 @@ vi.mock("@/components/ai-analysis-panel", () => ({
       >
         Push meeting chat
       </button>
+      {props.responseActions
+        ?.filter((action: any) =>
+          action.isVisible?.({
+            response: "Thanks all. Next steps: Jon will send the launch plan by Friday.",
+            query: "follow-up",
+            templateId: "follow_up",
+            citations: [],
+          }) ?? true
+        )
+        .map((action: any) => (
+          <button
+            key={action.label}
+            type="button"
+            onClick={() =>
+              action.onAction({
+                response: "Thanks all. Next steps: Jon will send the launch plan by Friday.",
+                query: "follow-up",
+                templateId: "follow_up",
+                citations: [],
+              })
+            }
+          >
+            {action.label}
+          </button>
+        ))}
       <div>{props.chatMessages?.length ?? 0} chat messages</div>
     </div>
   ),
@@ -479,6 +504,38 @@ describe("RecordingsView", () => {
           createdAt: "2026-03-06T12:01:00Z",
         },
       ]);
+    });
+  });
+
+  it("copies a grounded follow-up draft from the ask workspace", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("Meeting notes");
+    fireEvent.click(await screen.findByRole("tab", { name: "Ask" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Copy Follow-up" }));
+
+    await waitFor(() => {
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+        "Thanks all. Next steps: Jon will send the launch plan by Friday."
+      );
+    });
+    expect(mocks.toast).toHaveBeenCalledWith("Follow-up draft copied.", "success");
+  });
+
+  it("can append a grounded follow-up draft into meeting notes", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("Meeting notes");
+    fireEvent.click(await screen.findByRole("tab", { name: "Ask" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Append to Notes" }));
+
+    await waitFor(() => {
+      expect(mocks.updateRecordingNotes).toHaveBeenCalledWith(
+        "r1",
+        "Follow-up draft\nThanks all. Next steps: Jon will send the launch plan by Friday."
+      );
     });
   });
 

@@ -107,6 +107,14 @@ const MEETING_ASK_TEMPLATES: AnalysisTemplate[] = [
     query: "Extract all deadlines, dates, and time-sensitive follow-ups from this meeting and the saved notes.",
     description: "Highlight timing commitments",
   },
+  {
+    id: "follow_up",
+    name: "Follow-up Draft",
+    icon: "file-text",
+    query:
+      "Using the meeting transcript and saved meeting notes, draft a concise professional follow-up email or message. Keep decisions, owners, next steps, and deadlines clear. Return only the final follow-up draft.",
+    description: "Write the post-meeting follow-up",
+  },
 ];
 
 function normalizeActionItems(items: string[]): string[] {
@@ -1090,6 +1098,23 @@ export function RecordingsView() {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to copy the meeting recap.";
+      toast(message, "error");
+    }
+  };
+
+  const handleCopyMeetingFollowUp = async (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      toast("Nothing to copy for the follow-up draft.", "error");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(trimmed);
+      toast("Follow-up draft copied.", "success");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to copy the follow-up draft.";
       toast(message, "error");
     }
   };
@@ -2422,6 +2447,7 @@ export function RecordingsView() {
                         {
                           label: "Replace Summary",
                           onAction: ({ response }) => setMeetingSummary(response),
+                          isVisible: ({ templateId }) => templateId !== "follow_up",
                         },
                         {
                           label: "Append to Notes",
@@ -2433,9 +2459,18 @@ export function RecordingsView() {
                                   ? "Decisions"
                                   : templateId === "dates"
                                     ? "Deadlines"
+                                    : templateId === "follow_up"
+                                      ? "Follow-up draft"
                                     : "Meeting answer",
                               response
                             ),
+                        },
+                        {
+                          label: "Copy Follow-up",
+                          onAction: ({ response }) => {
+                            void handleCopyMeetingFollowUp(response);
+                          },
+                          isVisible: ({ templateId }) => templateId === "follow_up",
                         },
                       ]}
                       actionItemActions={[
