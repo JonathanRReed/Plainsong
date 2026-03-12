@@ -8109,6 +8109,20 @@ async fn stop_dictation_session_for_session(
                         .map_err(|e| format!("Command '{}' failed: {}", command_key, e))?;
                     result.text.clear();
                 }
+                DictationCommandAction::ReplaceEntireSelection(replacement) => {
+                    let command_input = resolve_contextual_command_input(
+                        "",
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Replace Text",
+                    )?;
+                    let updated_text =
+                        crate::dictation_parity::replace_context_selection(
+                            command_input.as_str(),
+                            replacement.as_str(),
+                        )?;
+                    result.text = updated_text;
+                }
                 DictationCommandAction::ReplaceSelection {
                     target,
                     replacement,
@@ -8125,6 +8139,57 @@ async fn stop_dictation_session_for_session(
                         replacement.as_str(),
                     )?;
                     result.text = updated_text;
+                }
+                DictationCommandAction::AppendToSelection(suffix) => {
+                    let command_input = resolve_contextual_command_input(
+                        "",
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Append Text",
+                    )?;
+                    let updated_text =
+                        crate::dictation_parity::append_to_context_selection(
+                            command_input.as_str(),
+                            suffix.as_str(),
+                        )?;
+                    result.text = updated_text;
+                }
+                DictationCommandAction::PrependToSelection(prefix) => {
+                    let command_input = resolve_contextual_command_input(
+                        "",
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Prepend Text",
+                    )?;
+                    let updated_text =
+                        crate::dictation_parity::prepend_to_context_selection(
+                            command_input.as_str(),
+                            prefix.as_str(),
+                        )?;
+                    result.text = updated_text;
+                }
+                DictationCommandAction::DeletePhrase(target) => {
+                    let command_input = resolve_contextual_command_input(
+                        "",
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Delete Phrase",
+                    )?;
+                    let (updated_text, _) =
+                        crate::dictation_parity::delete_phrase_from_context(
+                            command_input.as_str(),
+                            target.as_str(),
+                        )?;
+                    result.text = updated_text;
+                }
+                DictationCommandAction::DeleteSelection => {
+                    let _command_input = resolve_contextual_command_input(
+                        "",
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Delete Selection",
+                    )?;
+                    result.text.clear();
                 }
             }
             command_applied = Some(command_key);
@@ -8176,12 +8241,18 @@ async fn stop_dictation_session_for_session(
     let mut paste_error: Option<String> = None;
     let mut insert_latency_ms: Option<u64> = None;
     let mut successful_insert_strategy: Option<CursorInsertStrategy> = None;
-    let mut insertion_mode_used = if command_applied.is_some() && result.text.trim().is_empty() {
+    let should_treat_as_command_only = matches!(
+        command_applied.as_deref(),
+        Some("undo_last_insert") | Some("delete_last_sentence")
+    );
+    let mut insertion_mode_used = if should_treat_as_command_only && result.text.trim().is_empty() {
         "command_only".to_string()
     } else {
         "none".to_string()
     };
-    if !result.text.trim().is_empty() {
+    let should_deliver_text =
+        !result.text.trim().is_empty() || matches!(command_applied.as_deref(), Some("delete_selection"));
+    if should_deliver_text {
         emit_dictation_state(
             app,
             "delivering",

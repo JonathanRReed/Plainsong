@@ -10,10 +10,15 @@ pub enum DictationCommandAction {
     InsertText(String),
     UndoLastInsert,
     DeleteLastSentence,
+    ReplaceEntireSelection(String),
     ReplaceSelection {
         target: String,
         replacement: String,
     },
+    AppendToSelection(String),
+    PrependToSelection(String),
+    DeletePhrase(String),
+    DeleteSelection,
     RewriteShorter(String),
     RewriteProfessional(String),
     Bulletize(String),
@@ -369,6 +374,34 @@ fn trim_command_value(raw: &str) -> &str {
         .trim()
 }
 
+fn join_with_spacing(left: &str, right: &str) -> String {
+    let left = left.trim();
+    let right = right.trim();
+    if left.is_empty() {
+        return right.to_string();
+    }
+    if right.is_empty() {
+        return left.to_string();
+    }
+
+    let needs_space = left
+        .chars()
+        .last()
+        .map(|ch| ch.is_alphanumeric())
+        .unwrap_or(false)
+        && right
+            .chars()
+            .next()
+            .map(|ch| ch.is_alphanumeric())
+            .unwrap_or(false);
+
+    if needs_space {
+        format!("{} {}", left, right)
+    } else {
+        format!("{}{}", left, right)
+    }
+}
+
 fn parse_phrase_swap_command(
     raw: &str,
     verb: &str,
@@ -451,6 +484,24 @@ pub fn parse_dictation_command(
             DictationCommandAction::DeleteLastSentence,
         ));
     }
+    if let Some(payload) = command_payload(&remainder, "replace selection with") {
+        return Some((
+            "replace_selection_text".to_string(),
+            DictationCommandAction::ReplaceEntireSelection(payload.to_string()),
+        ));
+    }
+    if let Some(payload) = command_payload(&remainder, "replace that with") {
+        return Some((
+            "replace_selection_text".to_string(),
+            DictationCommandAction::ReplaceEntireSelection(payload.to_string()),
+        ));
+    }
+    if let Some(payload) = command_payload(&remainder, "change that to") {
+        return Some((
+            "replace_selection_text".to_string(),
+            DictationCommandAction::ReplaceEntireSelection(payload.to_string()),
+        ));
+    }
     if let Some((target, replacement)) = parse_phrase_swap_command(&remainder, "replace", "with") {
         return Some((
             "replace_selection".to_string(),
@@ -467,6 +518,38 @@ pub fn parse_dictation_command(
                 target,
                 replacement,
             },
+        ));
+    }
+    if let Some(payload) = command_payload(&remainder, "append") {
+        return Some((
+            "append_to_selection".to_string(),
+            DictationCommandAction::AppendToSelection(payload.to_string()),
+        ));
+    }
+    if let Some(payload) = command_payload(&remainder, "prepend") {
+        return Some((
+            "prepend_to_selection".to_string(),
+            DictationCommandAction::PrependToSelection(payload.to_string()),
+        ));
+    }
+    if let Some(payload) = command_payload(&remainder, "delete phrase") {
+        return Some((
+            "delete_phrase".to_string(),
+            DictationCommandAction::DeletePhrase(payload.to_string()),
+        ));
+    }
+    if let Some(payload) = command_payload(&remainder, "remove phrase") {
+        return Some((
+            "delete_phrase".to_string(),
+            DictationCommandAction::DeletePhrase(payload.to_string()),
+        ));
+    }
+    if remainder.eq_ignore_ascii_case("delete selection")
+        || remainder.eq_ignore_ascii_case("clear selection")
+    {
+        return Some((
+            "delete_selection".to_string(),
+            DictationCommandAction::DeleteSelection,
         ));
     }
     if let Some(payload) = command_payload(&remainder, "rewrite shorter") {
@@ -579,13 +662,91 @@ pub fn apply_contextual_phrase_replacement(
     Ok((output, applied))
 }
 
+pub fn replace_context_selection(input: &str, replacement: &str) -> Result<String, String> {
+    let source = input.trim();
+    if source.is_empty() {
+        return Err("Replace Text needs some text to work with.".to_string());
+    }
+
+    let replacement = trim_command_value(replacement);
+    if replacement.is_empty() {
+        return Err("Replace Text needs replacement text.".to_string());
+    }
+
+    Ok(replacement.to_string())
+}
+
+pub fn append_to_context_selection(input: &str, suffix: &str) -> Result<String, String> {
+    let source = input.trim();
+    if source.is_empty() {
+        return Err("Append Text needs some text to work with.".to_string());
+    }
+
+    let suffix = trim_command_value(suffix);
+    if suffix.is_empty() {
+        return Err("Append Text needs the text to append.".to_string());
+    }
+
+    Ok(join_with_spacing(source, suffix))
+}
+
+pub fn prepend_to_context_selection(input: &str, prefix: &str) -> Result<String, String> {
+    let source = input.trim();
+    if source.is_empty() {
+        return Err("Prepend Text needs some text to work with.".to_string());
+    }
+
+    let prefix = trim_command_value(prefix);
+    if prefix.is_empty() {
+        return Err("Prepend Text needs the text to prepend.".to_string());
+    }
+
+    Ok(join_with_spacing(prefix, source))
+}
+
+pub fn delete_phrase_from_context(input: &str, target: &str) -> Result<(String, usize), String> {
+    let source = input.trim();
+    if source.is_empty() {
+        return Err("Delete Phrase needs some text to work with.".to_string());
+    }
+
+    let target = trim_command_value(target);
+    if target.is_empty() {
+        return Err("Delete Phrase needs a phrase to remove.".to_string());
+    }
+
+    let (output, applied) = replace_case_insensitive_all(source, target, "");
+    if applied == 0 {
+        return Err(format!(
+            "Delete Phrase could not find '{}' in the current text.",
+            target
+        ));
+    }
+
+    let normalized = regex::Regex::new(r"\s+([,.;:!?])")
+        .expect("valid punctuation whitespace regex")
+        .replace_all(&output, "$1")
+        .to_string();
+    let normalized = regex::Regex::new(r"[ \t]{2,}")
+        .expect("valid repeated spaces regex")
+        .replace_all(&normalized, " ")
+        .to_string();
+
+    Ok((normalized.trim().to_string(), applied))
+}
+
 fn command_output(action: &DictationCommandAction, original_input: &str) -> String {
     match action {
         DictationCommandAction::InsertText(text) => text.clone(),
         DictationCommandAction::UndoLastInsert | DictationCommandAction::DeleteLastSentence => {
             String::new()
         }
-        DictationCommandAction::ReplaceSelection { .. } => original_input.to_string(),
+        DictationCommandAction::ReplaceEntireSelection(_)
+        | DictationCommandAction::ReplaceSelection { .. }
+        | DictationCommandAction::AppendToSelection(_)
+        | DictationCommandAction::PrependToSelection(_)
+        | DictationCommandAction::DeletePhrase(_)
+        | DictationCommandAction::DeleteSelection => original_input.to_string(),
         DictationCommandAction::RewriteShorter(text)
         | DictationCommandAction::RewriteProfessional(text)
         | DictationCommandAction::Bulletize(text) => {
@@ -617,8 +778,8 @@ fn default_insertion_outcome(command_applied: Option<&str>) -> String {
 
 fn default_insertion_mode(command_applied: Option<&str>) -> String {
     match command_applied {
-        Some(_) => "command_only".to_string(),
-        None => "paste".to_string(),
+        Some("undo_last_insert") | Some("delete_last_sentence") => "command_only".to_string(),
+        _ => "paste".to_string(),
     }
 }
 
@@ -925,6 +1086,50 @@ mod tests {
     }
 
     #[test]
+    fn parse_dictation_command_supports_replace_entire_selection() {
+        let (command, action) = parse_dictation_command(
+            "command replace selection with approved launch plan",
+            DEFAULT_COMMAND_PREFIX,
+        )
+        .expect("parses replace selection text command");
+        assert_eq!(command, "replace_selection_text");
+        assert_eq!(
+            action,
+            DictationCommandAction::ReplaceEntireSelection("approved launch plan".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_dictation_command_supports_append_prepend_and_delete_phrase() {
+        let (append_command, append_action) =
+            parse_dictation_command("command append thanks", DEFAULT_COMMAND_PREFIX)
+                .expect("parses append");
+        assert_eq!(append_command, "append_to_selection");
+        assert_eq!(
+            append_action,
+            DictationCommandAction::AppendToSelection("thanks".to_string())
+        );
+
+        let (prepend_command, prepend_action) =
+            parse_dictation_command("command prepend please", DEFAULT_COMMAND_PREFIX)
+                .expect("parses prepend");
+        assert_eq!(prepend_command, "prepend_to_selection");
+        assert_eq!(
+            prepend_action,
+            DictationCommandAction::PrependToSelection("please".to_string())
+        );
+
+        let (delete_command, delete_action) =
+            parse_dictation_command("command delete phrase roadmap", DEFAULT_COMMAND_PREFIX)
+                .expect("parses delete phrase");
+        assert_eq!(delete_command, "delete_phrase");
+        assert_eq!(
+            delete_action,
+            DictationCommandAction::DeletePhrase("roadmap".to_string())
+        );
+    }
+
+    #[test]
     fn apply_contextual_phrase_replacement_is_case_insensitive() {
         let (output, applied) = apply_contextual_phrase_replacement(
             "Roadmap review for the roadmap team",
@@ -933,6 +1138,28 @@ mod tests {
         )
         .expect("replacement succeeds");
         assert_eq!(output, "launch plan review for the launch plan team");
+        assert_eq!(applied, 2);
+    }
+
+    #[test]
+    fn append_and_prepend_context_selection_keep_spacing_clean() {
+        let appended =
+            append_to_context_selection("approved plan", "today").expect("append succeeds");
+        assert_eq!(appended, "approved plan today");
+
+        let prepended =
+            prepend_to_context_selection("approved plan", "Please").expect("prepend succeeds");
+        assert_eq!(prepended, "Please approved plan");
+    }
+
+    #[test]
+    fn delete_phrase_from_context_removes_matches_and_cleans_spacing() {
+        let (output, applied) = delete_phrase_from_context(
+            "Please remove roadmap, then share the roadmap update.",
+            "roadmap",
+        )
+        .expect("delete phrase succeeds");
+        assert_eq!(output, "Please remove, then share the update.");
         assert_eq!(applied, 2);
     }
 }
