@@ -5,6 +5,15 @@
 
 use regex::RegexBuilder;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DictationAppStyle {
+    Generic,
+    Chat,
+    Email,
+    Document,
+    Worklog,
+}
+
 /// Punctuation configuration
 #[derive(Debug, Clone)]
 pub struct PunctuationConfig {
@@ -421,6 +430,16 @@ fn restore_structural_breaks(text: &str) -> String {
         .replace(" \n", "\n")
 }
 
+fn preserve_structural_break_tokens(text: &str) -> String {
+    text.replace("\n\n", " __NAUTILUS_PARAGRAPH_BREAK__ ")
+        .replace('\n', " __NAUTILUS_LINE_BREAK__ ")
+}
+
+fn restore_structural_break_tokens(text: &str) -> String {
+    text.replace("__NAUTILUS_PARAGRAPH_BREAK__", "\n\n")
+        .replace("__NAUTILUS_LINE_BREAK__", "\n")
+}
+
 fn capitalize_standalone_i(text: &str) -> String {
     let Ok(re) = RegexBuilder::new(r"(^|[^A-Za-z])i(?=$|[^A-Za-z])").build() else {
         return text.to_string();
@@ -452,7 +471,111 @@ fn capitalize_after_line_breaks(text: &str) -> String {
     output
 }
 
-pub fn smart_format_dictation_text(text: &str, mode_preset: &str) -> String {
+fn resolve_dictation_app_style(app_target: Option<&str>) -> DictationAppStyle {
+    let normalized = app_target
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+
+    let Some(app_name) = normalized.as_deref() else {
+        return DictationAppStyle::Generic;
+    };
+
+    if ["slack", "messages", "imessage", "discord", "teams"]
+        .iter()
+        .any(|candidate| app_name.contains(candidate))
+    {
+        return DictationAppStyle::Chat;
+    }
+
+    if ["gmail", "outlook", "mail", "superhuman"]
+        .iter()
+        .any(|candidate| app_name.contains(candidate))
+    {
+        return DictationAppStyle::Email;
+    }
+
+    if ["google docs", "docs", "notion", "word", "notes", "obsidian"]
+        .iter()
+        .any(|candidate| app_name.contains(candidate))
+    {
+        return DictationAppStyle::Document;
+    }
+
+    if ["linear", "hubspot", "salesforce", "jira"]
+        .iter()
+        .any(|candidate| app_name.contains(candidate))
+    {
+        return DictationAppStyle::Worklog;
+    }
+
+    DictationAppStyle::Generic
+}
+
+fn ensure_terminal_punctuation(text: &str, punctuation: char) -> String {
+    let trimmed = text.trim_end();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.ends_with(['.', '!', '?', ':']) {
+        return trimmed.to_string();
+    }
+    format!("{}{}", trimmed, punctuation)
+}
+
+fn trim_chatty_terminal_period(text: &str) -> String {
+    let trimmed = text.trim_end();
+    if trimmed.contains('\n') || trimmed.ends_with(['?', '!']) {
+        return trimmed.to_string();
+    }
+    trimmed.strip_suffix('.').unwrap_or(trimmed).to_string()
+}
+
+fn normalize_for_app_style(
+    text: String,
+    mode_preset: &str,
+    app_style: DictationAppStyle,
+) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    match app_style {
+        DictationAppStyle::Chat => {
+            if mode_preset == "messages" || mode_preset == "voice" {
+                trim_chatty_terminal_period(trimmed)
+            } else {
+                trimmed.to_string()
+            }
+        }
+        DictationAppStyle::Email => {
+            if mode_preset == "messages" {
+                trim_chatty_terminal_period(trimmed)
+            } else {
+                ensure_terminal_punctuation(trimmed, '.')
+            }
+        }
+        DictationAppStyle::Document => trimmed
+            .replace("\n\n\n", "\n\n")
+            .trim()
+            .to_string(),
+        DictationAppStyle::Worklog => {
+            if mode_preset == "messages" {
+                trim_chatty_terminal_period(trimmed)
+            } else {
+                ensure_terminal_punctuation(trimmed, '.')
+            }
+        }
+        DictationAppStyle::Generic => trimmed.to_string(),
+    }
+}
+
+pub fn smart_format_dictation_text_for_app(
+    text: &str,
+    mode_preset: &str,
+    app_target: Option<&str>,
+) -> String {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -461,9 +584,11 @@ pub fn smart_format_dictation_text(text: &str, mode_preset: &str) -> String {
     let normalized = normalize_spoken_punctuation(trimmed);
     let normalized = capitalize_standalone_i(&normalized);
     let normalized = restore_structural_breaks(&normalize_spacing_around_punctuation(&normalized));
+    let normalized = preserve_structural_break_tokens(&normalized);
+    let app_style = resolve_dictation_app_style(app_target);
 
-    let config = match mode_preset {
-        "messages" => PunctuationConfig {
+    let config = match (mode_preset, app_style) {
+        ("messages", _) => PunctuationConfig {
             capitalize_sentences: true,
             add_periods: false,
             add_commas: false,
@@ -473,11 +598,53 @@ pub fn smart_format_dictation_text(text: &str, mode_preset: &str) -> String {
             format_numbers: false,
             expand_contractions: false,
         },
-        "notes" => PunctuationConfig {
+        ("notes", DictationAppStyle::Document) => PunctuationConfig {
+            capitalize_sentences: true,
+            add_periods: true,
+            add_commas: false,
+            detect_questions: true,
+            paragraph_breaks: true,
+            words_per_paragraph: 28,
+            format_numbers: false,
+            expand_contractions: false,
+        },
+        ("notes", _) => PunctuationConfig {
             capitalize_sentences: true,
             add_periods: false,
             add_commas: false,
             detect_questions: false,
+            paragraph_breaks: false,
+            words_per_paragraph: 1000,
+            format_numbers: false,
+            expand_contractions: false,
+        },
+        ("email", _) | ("meeting_follow_up", _) | (_, DictationAppStyle::Email) => {
+            PunctuationConfig {
+                capitalize_sentences: true,
+                add_periods: true,
+                add_commas: true,
+                detect_questions: true,
+                paragraph_breaks: true,
+                words_per_paragraph: 36,
+                format_numbers: false,
+                expand_contractions: false,
+            }
+        }
+        (_, DictationAppStyle::Document) => PunctuationConfig {
+            capitalize_sentences: true,
+            add_periods: true,
+            add_commas: true,
+            detect_questions: true,
+            paragraph_breaks: true,
+            words_per_paragraph: 40,
+            format_numbers: false,
+            expand_contractions: false,
+        },
+        (_, DictationAppStyle::Worklog) => PunctuationConfig {
+            capitalize_sentences: true,
+            add_periods: true,
+            add_commas: false,
+            detect_questions: true,
             paragraph_breaks: false,
             words_per_paragraph: 1000,
             format_numbers: false,
@@ -485,9 +652,9 @@ pub fn smart_format_dictation_text(text: &str, mode_preset: &str) -> String {
         },
         _ => PunctuationConfig {
             capitalize_sentences: true,
-            add_periods: false,
+            add_periods: true,
             add_commas: false,
-            detect_questions: false,
+            detect_questions: true,
             paragraph_breaks: false,
             words_per_paragraph: 1000,
             format_numbers: false,
@@ -495,11 +662,23 @@ pub fn smart_format_dictation_text(text: &str, mode_preset: &str) -> String {
         },
     };
 
-    capitalize_after_line_breaks(&restore_structural_breaks(
-        IntelligentPunctuator::new(config)
-            .punctuate(&normalized)
-            .trim(),
-    ))
+    normalize_for_app_style(
+        restore_structural_breaks(&restore_structural_break_tokens(
+            &capitalize_after_line_breaks(
+                &restore_structural_breaks(
+                    IntelligentPunctuator::new(config)
+                        .punctuate(&normalized)
+                        .trim(),
+                ),
+            ),
+        )),
+        mode_preset,
+        app_style,
+    )
+}
+
+pub fn smart_format_dictation_text(text: &str, mode_preset: &str) -> String {
+    smart_format_dictation_text_for_app(text, mode_preset, None)
 }
 
 /// Format transcript for specific use cases
@@ -593,5 +772,27 @@ mod tests {
         let input = "hi there new line i can send that over tomorrow";
         let result = smart_format_dictation_text(input, "messages");
         assert_eq!(result, "Hi there\nI can send that over tomorrow");
+    }
+
+    #[test]
+    fn smart_format_dictation_uses_email_style_for_email_apps() {
+        let input = "hi jonathan can you review the launch plan question mark";
+        let result = smart_format_dictation_text_for_app(input, "voice", Some("Gmail"));
+        assert_eq!(result, "Hi jonathan can you review the launch plan?");
+    }
+
+    #[test]
+    fn smart_format_dictation_keeps_chat_apps_lightweight() {
+        let input = "sounds good period";
+        let result = smart_format_dictation_text_for_app(input, "voice", Some("Slack"));
+        assert_eq!(result, "Sounds good");
+    }
+
+    #[test]
+    fn smart_format_dictation_adds_structure_for_document_apps() {
+        let input = "first section period new paragraph second section period";
+        let result = smart_format_dictation_text_for_app(input, "voice", Some("Notion"));
+        assert!(result.contains("\n\n"));
+        assert!(result.ends_with('.'));
     }
 }

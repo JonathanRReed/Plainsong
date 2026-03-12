@@ -131,9 +131,10 @@ export interface DictationReprocessResult {
 
 export async function reprocessDictationText(
   text: string,
-  modePreset: string
+  modePreset: string,
+  appTarget?: string | null
 ): Promise<DictationReprocessResult> {
-  return await invoke("reprocess_dictation_text", { text, modePreset });
+  return await invoke("reprocess_dictation_text", { text, modePreset, appTarget });
 }
 
 export async function getDictationHistoryDetails(
