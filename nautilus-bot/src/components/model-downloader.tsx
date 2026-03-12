@@ -60,16 +60,23 @@ const PROVIDER_BUNDLES: Array<{
   {
     id: "parakeet",
     providerType: "parakeet",
-    label: "NVIDIA Parakeet TDT CTC 110M",
-    description: "Downloads encoder.onnx + tokens.txt from public CTC ONNX sources (native ONNX, no Python).",
+    label: "NVIDIA Parakeet bundle",
+    description: "Downloads the currently selected Parakeet model. Stable CTC 0.6B is recommended; larger and legacy variants remain available on demand.",
     indicator: "parakeet/encoder.onnx",
   },
   {
-    id: "canary",
-    providerType: "canary",
-    label: "NVIDIA Canary local",
-    description: "Downloads Canary local model assets for on-device transcription.",
+    id: "whisper_candle",
+    providerType: "whisper_candle",
+    label: "Whisper Candle experimental bundle",
+    description: "Downloads Whisper Large V3 Turbo for the native Candle runtime. Experimental, dictation-focused path.",
     indicator: "model.safetensors",
+  },
+  {
+    id: "moonshine",
+    providerType: "moonshine",
+    label: "Moonshine local bundle",
+    description: "Downloads the currently selected Moonshine model. Tiny and Base are both available as stable edge options.",
+    indicator: "encoder_model.onnx",
   },
   {
     id: "macos_mlx_sidecar",
@@ -259,7 +266,7 @@ export function ModelDownloader({ className }: ModelDownloaderProps) {
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-lg">Provider Bundles</CardTitle>
-          <CardDescription>Download complete model bundles for non-Whisper providers</CardDescription>
+          <CardDescription>Download complete bundles for alternative local providers and platform runtimes</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           {PROVIDER_BUNDLES.map((bundle) => {

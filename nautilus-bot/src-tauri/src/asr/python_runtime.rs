@@ -239,6 +239,9 @@ fn provider_import_probe(provider: &str) -> &'static str {
         "voxtral_local" => {
             "import torch; import soundfile; import librosa; from transformers import AutoProcessor, VoxtralRealtimeForConditionalGeneration; from mistral_common.tokens.tokenizers.audio import Audio"
         }
+        "parakeet_ctc" => {
+            "import torch; from transformers import pipeline"
+        }
         _ => "import json",
     }
 }
@@ -249,6 +252,14 @@ fn provider_requirements(provider: &str) -> &'static [&'static str] {
             "torch>=2.3.0",
             "transformers>=5.2.0,<6",
             "mistral-common[audio]>=1.9.0",
+            "huggingface_hub>=0.29.0",
+            "soundfile>=0.12.1",
+            "librosa>=0.10.2",
+            "numpy>=1.26.0",
+        ],
+        "parakeet_ctc" => &[
+            "torch>=2.3.0",
+            "transformers>=4.56.0,<6",
             "huggingface_hub>=0.29.0",
             "soundfile>=0.12.1",
             "librosa>=0.10.2",

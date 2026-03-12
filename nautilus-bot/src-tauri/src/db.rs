@@ -566,6 +566,7 @@ impl Database {
                 status TEXT NOT NULL DEFAULT 'recording',
                 meeting_notes TEXT,
                 meeting_template_id TEXT,
+                meeting_capture_mode TEXT,
                 notes_updated_at TEXT,
                 consent_prompt_shown INTEGER NOT NULL DEFAULT 0,
                 consent_notice_mode TEXT,
@@ -930,6 +931,10 @@ impl Database {
             [],
         );
         let _ = self.conn.execute(
+            "ALTER TABLE recordings ADD COLUMN meeting_capture_mode TEXT",
+            [],
+        );
+        let _ = self.conn.execute(
             "ALTER TABLE recordings ADD COLUMN consent_prompt_shown INTEGER NOT NULL DEFAULT 0",
             [],
         );
@@ -1136,6 +1141,7 @@ impl Database {
                     COALESCE(meeting_artifacts.action_items, recordings.action_items),
                     recordings.meeting_notes,
                     COALESCE(meeting_artifacts.template_id, recordings.meeting_template_id),
+                    recordings.meeting_capture_mode,
                     recordings.notes_updated_at,
                     recordings.consent_prompt_shown,
                     recordings.consent_notice_mode,
@@ -1154,10 +1160,10 @@ impl Database {
             let action_items_json: Option<String> = row.get(10)?;
             let action_items = action_items_json.and_then(|s| serde_json::from_str(&s).ok());
             let notes_updated_at = row
-                .get::<_, Option<String>>(13)?
+                .get::<_, Option<String>>(14)?
                 .and_then(|value| value.parse().ok());
             let consent_notice_updated_at = row
-                .get::<_, Option<String>>(18)?
+                .get::<_, Option<String>>(19)?
                 .and_then(|value| value.parse().ok());
             Ok(Recording {
                 id: row.get(0)?,
@@ -1179,11 +1185,12 @@ impl Database {
                 action_items,
                 meeting_notes: row.get(11)?,
                 meeting_template_id: row.get(12)?,
+                meeting_capture_mode: row.get(13)?,
                 notes_updated_at,
-                consent_prompt_shown: row.get::<_, i64>(14).unwrap_or(0) != 0,
-                consent_notice_mode: row.get(15)?,
-                consent_notice_surface: row.get(16)?,
-                consent_notice_message: row.get(17)?,
+                consent_prompt_shown: row.get::<_, i64>(15).unwrap_or(0) != 0,
+                consent_notice_mode: row.get(16)?,
+                consent_notice_surface: row.get(17)?,
+                consent_notice_message: row.get(18)?,
                 consent_notice_updated_at,
             })
         })?;
@@ -1208,6 +1215,7 @@ impl Database {
                     COALESCE(meeting_artifacts.action_items, recordings.action_items),
                     recordings.meeting_notes,
                     COALESCE(meeting_artifacts.template_id, recordings.meeting_template_id),
+                    recordings.meeting_capture_mode,
                     recordings.notes_updated_at,
                     recordings.consent_prompt_shown,
                     recordings.consent_notice_mode,
@@ -1223,10 +1231,10 @@ impl Database {
             let action_items_json: Option<String> = row.get(10)?;
             let action_items = action_items_json.and_then(|s| serde_json::from_str(&s).ok());
             let notes_updated_at = row
-                .get::<_, Option<String>>(13)?
+                .get::<_, Option<String>>(14)?
                 .and_then(|value| value.parse().ok());
             let consent_notice_updated_at = row
-                .get::<_, Option<String>>(18)?
+                .get::<_, Option<String>>(19)?
                 .and_then(|value| value.parse().ok());
             Ok(Recording {
                 id: row.get(0)?,
@@ -1248,11 +1256,12 @@ impl Database {
                 action_items,
                 meeting_notes: row.get(11)?,
                 meeting_template_id: row.get(12)?,
+                meeting_capture_mode: row.get(13)?,
                 notes_updated_at,
-                consent_prompt_shown: row.get::<_, i64>(14).unwrap_or(0) != 0,
-                consent_notice_mode: row.get(15)?,
-                consent_notice_surface: row.get(16)?,
-                consent_notice_message: row.get(17)?,
+                consent_prompt_shown: row.get::<_, i64>(15).unwrap_or(0) != 0,
+                consent_notice_mode: row.get(16)?,
+                consent_notice_surface: row.get(17)?,
+                consent_notice_message: row.get(18)?,
                 consent_notice_updated_at,
             })
         });
@@ -1350,10 +1359,11 @@ impl Database {
         self.conn.execute(
             "INSERT INTO recordings (
                 id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status,
-                meeting_notes, meeting_template_id, notes_updated_at, consent_prompt_shown,
-                consent_notice_mode, consent_notice_surface, consent_notice_message, consent_notice_updated_at
+                meeting_notes, meeting_template_id, meeting_capture_mode, notes_updated_at,
+                consent_prompt_shown, consent_notice_mode, consent_notice_surface,
+                consent_notice_message, consent_notice_updated_at
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 &recording.id,
                 &recording.title,
@@ -1366,6 +1376,7 @@ impl Database {
                 &recording.status,
                 &recording.meeting_notes,
                 &recording.meeting_template_id,
+                &recording.meeting_capture_mode,
                 recording
                     .notes_updated_at
                     .as_ref()
@@ -2610,6 +2621,7 @@ mod tests {
             action_items: None,
             meeting_notes: None,
             meeting_template_id: None,
+            meeting_capture_mode: None,
             notes_updated_at: None,
             consent_prompt_shown: false,
             consent_notice_mode: None,

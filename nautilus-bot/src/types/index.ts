@@ -14,6 +14,7 @@ export interface Recording {
   actionItems?: string[];
   meetingNotes?: string | null;
   meetingTemplateId?: string | null;
+  meetingCaptureMode?: "mic_only" | "me_and_them" | null;
   notesUpdatedAt?: string | null;
   consentPromptShown?: boolean;
   consentNoticeMode?: string | null;

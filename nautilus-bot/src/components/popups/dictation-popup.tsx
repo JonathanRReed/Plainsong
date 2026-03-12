@@ -40,6 +40,7 @@ type DictationPhase =
   | "recording"
   | "stopping"
   | "transcribing"
+  | "delivering"
   | "done"
   | "error";
 
@@ -48,6 +49,7 @@ interface DictationStateChangedEvent {
   startedAtMs?: number | null;
   message?: string | null;
   preview?: string | null;
+  partialText?: string | null;
   sessionId?: number | null;
   stopReason?: string | null;
   outcome?: string | null;
@@ -60,6 +62,9 @@ interface DictationStateChangedEvent {
   activationMatcher?: string | null;
   dictationProvider?: string | null;
   dictationModelId?: string | null;
+  requestedRoute?: DictationRoutePreference | null;
+  resolvedRoute?: string | null;
+  providerModelLabel?: string | null;
   dictationRoutePreference?: DictationRoutePreference | null;
   dictationResolvedHosting?: DictationRoutePreference | null;
 }
@@ -108,7 +113,18 @@ const INSERTION_META: Record<DictationInsertionMode, { label: string; detail: st
   clipboard_only: { label: "Clipboard only", detail: "Do not try to insert automatically" },
 };
 
-function formatRouteLabel(provider: string | null, modelId: string | null) {
+function formatRouteLabel(
+  providerModelLabel: string | null,
+  resolvedRoute: string | null,
+  provider: string | null,
+  modelId: string | null
+) {
+  if (providerModelLabel) {
+    return providerModelLabel;
+  }
+  if (resolvedRoute) {
+    return resolvedRoute;
+  }
   if (!provider && !modelId) {
     return "Current transcription route";
   }
@@ -203,6 +219,9 @@ export function DictationPopup() {
   const [customModes, setCustomModes] = useState<DictationCustomMode[]>([]);
   const [dictationProvider, setDictationProvider] = useState<string | null>(null);
   const [dictationModelId, setDictationModelId] = useState<string | null>(null);
+  const [requestedRoute, setRequestedRoute] = useState<DictationRoutePreference | null>(null);
+  const [resolvedRoute, setResolvedRoute] = useState<string | null>(null);
+  const [providerModelLabel, setProviderModelLabel] = useState<string | null>(null);
   const [dictationRoutePreference, setDictationRoutePreference] =
     useState<DictationRoutePreference>("local");
   const [dictationResolvedHosting, setDictationResolvedHosting] =
@@ -259,6 +278,15 @@ export function DictationPopup() {
     if (typeof payload.dictationModelId !== "undefined") {
       setDictationModelId(payload.dictationModelId ?? null);
     }
+    if (typeof payload.requestedRoute !== "undefined") {
+      setRequestedRoute(payload.requestedRoute ?? null);
+    }
+    if (typeof payload.resolvedRoute !== "undefined") {
+      setResolvedRoute(payload.resolvedRoute ?? null);
+    }
+    if (typeof payload.providerModelLabel !== "undefined") {
+      setProviderModelLabel(payload.providerModelLabel ?? null);
+    }
     if (typeof payload.dictationRoutePreference !== "undefined") {
       setDictationRoutePreference(payload.dictationRoutePreference ?? "local");
     }
@@ -278,7 +306,7 @@ export function DictationPopup() {
 
     setPhase(payload.phase);
     setMessage(payload.message ?? null);
-    setPreview(payload.preview ?? null);
+    setPreview(payload.partialText ?? payload.preview ?? null);
     setOutcome(payload.outcome ?? null);
     if (payload.phase === "idle") {
       lastSessionIdRef.current = null;
@@ -408,7 +436,12 @@ export function DictationPopup() {
       : modeMeta.label);
   const contextMeta = CONTEXT_META[contextSource] ?? CONTEXT_META.none;
   const insertionMeta = INSERTION_META[dictationInsertionMode] ?? INSERTION_META.auto;
-  const routeLabel = formatRouteLabel(dictationProvider, dictationModelId);
+  const routeLabel = formatRouteLabel(
+    providerModelLabel,
+    resolvedRoute,
+    dictationProvider,
+    dictationModelId
+  );
   const hostingLabel =
     dictationResolvedHosting ??
     (dictationProvider
@@ -480,7 +513,10 @@ export function DictationPopup() {
     const dotColor =
       phase === "recording"
         ? "bg-orange-400"
-        : phase === "primed" || phase === "transcribing" || phase === "stopping"
+        : phase === "primed" ||
+            phase === "transcribing" ||
+            phase === "delivering" ||
+            phase === "stopping"
           ? "bg-cyan-400"
           : phase === "done"
             ? "bg-emerald-400"
@@ -583,6 +619,11 @@ export function DictationPopup() {
             <div className="inline-flex items-center gap-1.5 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-100">
               {hostingLabel === "cloud" ? "Cloud route" : "Local route"}
             </div>
+            {requestedRoute && (
+              <div className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300">
+                Requested {requestedRoute === "cloud" ? "cloud" : "local"}
+              </div>
+            )}
             <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-slate-200">
               <Clipboard className="h-3.5 w-3.5 text-slate-300" />
               {contextMeta.label}
@@ -687,6 +728,19 @@ export function DictationPopup() {
               {autoActivationDetail && (
                 <p className="mt-1 text-xs text-cyan-200/90">{autoActivationDetail}</p>
               )}
+            </div>
+          </div>
+        )}
+
+        {phase === "delivering" && (
+          <div className="flex items-center gap-3 text-white">
+            <Loader2 className="h-5 w-5 animate-spin text-emerald-300" />
+            <div>
+              <p className="text-sm font-semibold">Delivering result</p>
+              <p className="text-xs text-slate-300">
+                Finishing {insertionMeta.label.toLowerCase()}
+                {targetDetail} with {routeLabel}.
+              </p>
             </div>
           </div>
         )}

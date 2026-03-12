@@ -13,6 +13,14 @@ fn whisper_context_cache() -> &'static Mutex<HashMap<String, Arc<whisper_rs::Whi
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+pub(crate) fn clear_cached_model(model_id: &str) {
+    if let Ok(mut cache) = whisper_context_cache().lock() {
+        if cache.remove(model_id).is_some() {
+            tracing::info!("Cleared cached Whisper context for model {}", model_id);
+        }
+    }
+}
+
 pub struct WhisperProvider {
     model_path: PathBuf,
     #[allow(dead_code)]

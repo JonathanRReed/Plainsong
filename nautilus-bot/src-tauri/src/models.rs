@@ -22,6 +22,8 @@ pub struct Recording {
     #[serde(default)]
     pub meeting_template_id: Option<String>,
     #[serde(default)]
+    pub meeting_capture_mode: Option<String>,
+    #[serde(default)]
     pub notes_updated_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub consent_prompt_shown: bool,
@@ -99,6 +101,8 @@ pub struct RecordingOptions {
     pub meeting_notes: Option<String>,
     #[serde(default)]
     pub consent_prompt_shown: bool,
+    #[serde(default)]
+    pub meeting_capture_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -122,9 +126,17 @@ pub struct DictationStartOptions {
     #[serde(default)]
     pub route_preference: Option<String>,
     #[serde(default)]
+    pub language_override: Option<String>,
+    #[serde(default)]
+    pub live_preview_enabled: Option<bool>,
+    #[serde(default)]
     pub requested_provider: Option<String>,
     #[serde(default)]
     pub requested_model_id: Option<String>,
+    #[serde(default)]
+    pub resolved_route: Option<String>,
+    #[serde(default)]
+    pub provider_model_label: Option<String>,
     #[serde(default)]
     pub resolved_hosting: Option<String>,
     #[serde(default)]
@@ -143,8 +155,12 @@ impl Default for DictationStartOptions {
             profile: DictationProfile::NormalSpeed,
             context_source: "none".to_string(),
             route_preference: None,
+            language_override: None,
+            live_preview_enabled: None,
             requested_provider: None,
             requested_model_id: None,
+            resolved_route: None,
+            provider_model_label: None,
             resolved_hosting: None,
             captured_context_text: None,
             context_app_name: None,
@@ -168,6 +184,8 @@ pub struct DictationHistoryDetails {
     pub requested_provider: Option<String>,
     pub actual_provider: Option<String>,
     pub model_id: Option<String>,
+    pub route_preference: Option<String>,
+    pub resolved_hosting: Option<String>,
     pub startup_latency_ms: Option<u64>,
     pub transcription_latency_ms: Option<u64>,
     pub insert_latency_ms: Option<u64>,

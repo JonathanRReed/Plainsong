@@ -44,15 +44,18 @@ export const LOCAL_ASR_MODEL_GROUPS: AsrModelOptionGroup[] = [
   {
     label: "Provider-specific alternatives",
     options: [
-      { id: "parakeet-tdt-ctc-110m", label: "Parakeet TDT CTC 110M - ultra low latency" },
-      { id: "canary-qwen-2.5b", label: "Canary Qwen 2.5B - max English accuracy" },
-      { id: "distil-large-v3.5", label: "Distil-Whisper Large V3.5 - 6x faster" },
+      { id: "parakeet-ctc-0.6b", label: "Parakeet CTC 0.6B - stable local accuracy" },
+      { id: "parakeet-ctc-1.1b", label: "Parakeet CTC 1.1B - experimental high accuracy" },
+      { id: "parakeet-tdt-ctc-110m", label: "Parakeet TDT CTC 110M - experimental legacy latency" },
+      { id: "whisper-large-v3-turbo", label: "Whisper Candle - experimental native turbo" },
+      { id: "distil-large-v3.5", label: "Distil-Whisper Large V3.5 - fast meeting-grade" },
     ],
   },
   {
     label: "Other local providers",
     options: [
-      { id: "moonshine", label: "Moonshine - UsefulSensors, edge-optimized" },
+      { id: "moonshine-tiny", label: "Moonshine Tiny - stable edge model" },
+      { id: "moonshine-base", label: "Moonshine Base - stable edge accuracy" },
       { id: "voxtral-local", label: "Voxtral Mini (Local) - Mistral, multilingual" },
     ],
   },

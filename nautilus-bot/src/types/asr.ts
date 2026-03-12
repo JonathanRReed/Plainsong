@@ -77,7 +77,7 @@ export interface BenchmarkResult {
 export type AsrProviderType =
   | "whisper"
   | "parakeet"
-  | "canary"
+  | "whisper_candle"
   | "distil_whisper"
   | "macos_apple_speech"
   | "moonshine"

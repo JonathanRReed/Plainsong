@@ -423,15 +423,23 @@ impl DownloadManager {
         }
 
         // Check Parakeet models
-        let parakeet_dir = self.models_dir.join("parakeet");
-        if parakeet_dir.exists() {
-            let mut entries = tokio::fs::read_dir(&parakeet_dir).await?;
+        for (dir_name, label) in [
+            ("parakeet", "Parakeet Legacy"),
+            ("parakeet_ctc_0.6b", "Parakeet CTC 0.6B"),
+            ("parakeet_ctc_1.1b", "Parakeet CTC 1.1B"),
+        ] {
+            let model_dir = self.models_dir.join(dir_name);
+            if !model_dir.exists() {
+                continue;
+            }
+
+            let mut entries = tokio::fs::read_dir(&model_dir).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let metadata = entry.metadata().await?;
                 if metadata.is_file() {
                     let name = entry.file_name().to_string_lossy().to_string();
                     models.push(DownloadedModel {
-                        name: format!("Parakeet {}", name),
+                        name: format!("{} {}", label, name),
                         provider: "parakeet".to_string(),
                         path: entry.path(),
                         size_bytes: metadata.len(),
@@ -441,17 +449,17 @@ impl DownloadManager {
             }
         }
 
-        // Check Canary models
-        let canary_dir = self.models_dir.join("canary");
-        if canary_dir.exists() {
-            let mut entries = tokio::fs::read_dir(&canary_dir).await?;
+        // Check Whisper Candle bundle (keeps the legacy canary directory for migration stability)
+        let whisper_candle_dir = self.models_dir.join("canary");
+        if whisper_candle_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&whisper_candle_dir).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let metadata = entry.metadata().await?;
                 if metadata.is_file() {
                     let name = entry.file_name().to_string_lossy().to_string();
                     models.push(DownloadedModel {
-                        name: format!("Canary {}", name),
-                        provider: "canary".to_string(),
+                        name: format!("Whisper Candle {}", name),
+                        provider: "whisper_candle".to_string(),
                         path: entry.path(),
                         size_bytes: metadata.len(),
                         downloaded_at: metadata.modified()?,
@@ -471,6 +479,29 @@ impl DownloadManager {
                     models.push(DownloadedModel {
                         name: format!("Distil {}", name),
                         provider: "distil_whisper".to_string(),
+                        path: entry.path(),
+                        size_bytes: metadata.len(),
+                        downloaded_at: metadata.modified()?,
+                    });
+                }
+            }
+        }
+
+        // Check Moonshine models
+        for (dir_name, label) in [("moonshine", "Moonshine Base"), ("moonshine_tiny", "Moonshine Tiny")] {
+            let model_dir = self.models_dir.join(dir_name);
+            if !model_dir.exists() {
+                continue;
+            }
+
+            let mut entries = tokio::fs::read_dir(&model_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let metadata = entry.metadata().await?;
+                if metadata.is_file() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    models.push(DownloadedModel {
+                        name: format!("{} {}", label, name),
+                        provider: "moonshine".to_string(),
                         path: entry.path(),
                         size_bytes: metadata.len(),
                         downloaded_at: metadata.modified()?,

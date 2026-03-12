@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RecordingsView } from "@/components/views/recordings-view";
+import type { Recording } from "@/types";
 
 const mocks = vi.hoisted(() => ({
   eventListeners: new Map<string, (event: { payload: any }) => void>(),
@@ -33,8 +34,9 @@ const mocks = vi.hoisted(() => ({
       sourceType: "meeting",
       audioPath: "/tmp/weekly-sync.wav",
       status: "completed" as const,
+      meetingCaptureMode: "me_and_them" as const,
     },
-  ],
+  ] as Recording[],
   recordingState: {
     isRecording: false,
     recordingId: null as string | null,
@@ -190,14 +192,10 @@ describe("RecordingsView", () => {
         updatedAt: "2026-03-06T12:00:00Z",
         sourceType: "meeting",
         audioPath: "/tmp/weekly-sync.wav",
-        metadata: {
-          sampleRate: 16000,
-          channels: 1,
-          systemAudio: true,
-        },
+        meetingCaptureMode: "me_and_them",
         status: "completed" as const,
       },
-    ];
+    ] as Recording[];
     mocks.startMeeting.mockReset();
     mocks.stopMeeting.mockReset();
     mocks.getRecording.mockResolvedValue(mocks.recordings[0]);
@@ -569,6 +567,7 @@ describe("RecordingsView", () => {
         updatedAt: "2026-03-06T12:00:00Z",
         sourceType: "meeting",
         audioPath: "/tmp/weekly-sync.wav",
+        meetingCaptureMode: "me_and_them",
         status: "completed",
       },
       {
@@ -580,9 +579,10 @@ describe("RecordingsView", () => {
         updatedAt: "2026-03-06T13:00:00Z",
         sourceType: "meeting",
         audioPath: "/tmp/launch-review.wav",
+        meetingCaptureMode: "mic_only",
         status: "completed",
       },
-    ];
+    ] as Recording[];
     mocks.getRecording.mockImplementation(async (recordingId: string) =>
       mocks.recordings.find((recording) => recording.id === recordingId) ?? null
     );
@@ -650,7 +650,7 @@ describe("RecordingsView", () => {
         ...mocks.recordings[0],
         status: "recording",
       },
-    ];
+    ] as Recording[];
     mocks.getRecording.mockResolvedValue(mocks.recordings[0]);
 
     render(<RecordingsView />);

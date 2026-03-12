@@ -22,6 +22,7 @@ import {
   repairCursorInsertPermissions,
   repairLocalModelCache,
   requestDictationPermissions,
+  smokeTestCursorInsert,
   verifyDictationSetup,
   verifyMeetingSetup,
   verifySystemAudioSetup,
@@ -306,6 +307,42 @@ export function SetupView() {
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                     ) : null}
                     Request permissions
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      void runAction("verify-insert-permissions", async () => {
+                        const result = await smokeTestCursorInsert("Nautilus insert test");
+                        const target = result.targetApp ?? "the current app";
+                        if (result.error) {
+                          setStatusMessage(`Insert permissions test: ${result.error}`);
+                          return;
+                        }
+                        if (result.pasted) {
+                          setStatusMessage(
+                            `Insert permissions test: Sent a test insert to ${target}.`
+                          );
+                          return;
+                        }
+                        if (result.copied) {
+                          setStatusMessage(
+                            `Insert permissions test: Direct insert was unavailable, so the test text was copied for manual paste in ${target}.`
+                          );
+                          return;
+                        }
+                        setStatusMessage(
+                          "Insert permissions test: Nautilus could not confirm insert behavior."
+                        );
+                      })
+                    }
+                    disabled={busyAction !== null}
+                  >
+                    {busyAction === "verify-insert-permissions" ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Wrench className="mr-2 h-4 w-4" />
+                    )}
+                    Test insert permissions
                   </Button>
                   <Button
                     variant="outline"

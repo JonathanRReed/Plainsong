@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Mic, Monitor, AlertCircle, CheckCircle } from "lucide-react";
+import { Mic, Monitor, CheckCircle } from "lucide-react";
 import {
   checkSystemAudioAvailability,
   getLoopbackDeviceName,
