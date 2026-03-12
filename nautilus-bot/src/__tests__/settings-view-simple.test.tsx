@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsView } from "@/components/views/settings-view-simple";
 import { ToastProvider } from "@/components/toast";
 import { OPEN_ONBOARDING_EVENT } from "@/lib/onboarding";
+import { OPEN_MAIN_VIEW_EVENT } from "@/lib/navigation";
 
 const baseSettings = {
   audio: {
@@ -340,5 +341,29 @@ describe("SettingsView performance behavior", () => {
     expect(events).toEqual(["full", "dictation", "meetings"]);
 
     window.removeEventListener(OPEN_ONBOARDING_EVENT, handler as EventListener);
+  });
+
+  it("opens the memory workspace from AI settings", async () => {
+    const events: Array<string | undefined> = [];
+    const handler = (event: Event) => {
+      events.push((event as CustomEvent<{ view?: string }>).detail?.view);
+    };
+    window.addEventListener(OPEN_MAIN_VIEW_EVENT, handler as EventListener);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("AI & Keys"));
+    await screen.findByText("Cross-meeting memory chat");
+
+    fireEvent.click(screen.getByRole("button", { name: /open memory workspace/i }));
+
+    expect(events).toEqual(["dashboard"]);
+
+    window.removeEventListener(OPEN_MAIN_VIEW_EVENT, handler as EventListener);
   });
 });
