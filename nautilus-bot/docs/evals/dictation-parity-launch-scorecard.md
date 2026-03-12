@@ -152,6 +152,13 @@ What is still missing or not launch-certified:
 - GA language certification evidence
 - context-aware styles limited to a verified app matrix with packaged evidence
 
+Current artifact note:
+
+- `docs/evals/benchmark-run-baseline.json` exists as the current local macOS fixture-run baseline
+- `docs/evals/benchmark-run-latest-macos.json` exists as the current local macOS fixture-run candidate
+- `docs/evals/benchmark-run-latest-windows.json` is still missing
+- these local JSON artifacts are useful for schema and gate plumbing, but they do not replace packaged app evidence
+
 ## Phase 0 Deliverables
 
 - real `benchmark-run-baseline.json`
