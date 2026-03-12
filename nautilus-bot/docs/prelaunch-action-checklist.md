@@ -40,6 +40,7 @@ Current blocker register: `docs/strict-release-blocker-register.md`.
 ## E) Competitor Parity Gates (Required)
 
 - [ ] Complete all `CP-*` launch blockers in `docs/competitor-parity-gates.md` with `PASS` status only.
+- [ ] Complete all `DP-*` launch blockers in `docs/evals/dictation-parity-launch-scorecard.md` with `PASS` status only.
 - [ ] Confirm meeting processing UX parity (`processing` state, spinner, auto-refresh transcript in detail view).
 - [ ] Confirm transcript-only and retention-delete modes behave exactly as configured.
 - [ ] Confirm onboarding parity for Normal + Power tracks, including persistence behavior.
@@ -47,6 +48,8 @@ Current blocker register: `docs/strict-release-blocker-register.md`.
 - [ ] Confirm at least one cloud backup provider passes setup + sync + restore.
 - [ ] Validate benchmark artifact schema (`docs/evals/benchmark-run.schema.json`) and provider-integrity fields in CP-15 evidence.
 - [ ] Validate meeting status event markers (`meetingProcessingStartedAt`, `transcriptFirstAvailableAt`, `consentPromptShown`) in packaged QA logs.
+- [ ] Freeze and maintain the launch app matrix in `docs/dictation-app-compatibility-matrix.md`.
+- [ ] Track launch-problematic apps in `docs/dictation-blocked-app-register.md` until closed.
 
 ## F) Final Signoff
 

@@ -30,6 +30,8 @@ Core product claim:
 - `docs/evals/benchmark-run-latest-windows.json`
 - `docs/evals/wispr-vs-nautilus-scorecard-template.csv`
 - `docs/evals/dictation-parity-fixture.json`
+- `docs/dictation-app-compatibility-matrix.md`
+- `docs/dictation-blocked-app-register.md`
 - `artifacts/qa/macos/capture-dictation-hotkey.md`
 - `artifacts/qa/windows/capture-dictation-hotkey.md`
 - `artifacts/benchmark-gates-macos.json`
@@ -71,9 +73,22 @@ The default launch matrix is:
 - VS Code
 - Cursor
 - Messages or iMessage
-- one historically problematic app from QA history on each platform
+- HubSpot in Chrome on macOS
+- Outlook on Windows
 
-This matrix may grow later, but launch claims must be limited to the verified set.
+Rationale:
+
+- it covers native notes, browser docs, chat, knowledge tools, code editors, messaging, CRM, and email composition
+- it matches the launch audience of solo professionals, founders, operators, and sales people
+- it keeps the matrix small enough to benchmark honestly
+
+Owner split:
+
+- Product owns the matrix definition
+- Engineering owns insertion behavior and telemetry
+- QA owns packaged evidence capture
+
+This matrix may grow later, but launch claims must be limited to the verified set and tracked in `docs/dictation-app-compatibility-matrix.md`.
 
 ## Launch Language Matrix
 
@@ -94,6 +109,18 @@ Suggested next candidates:
 - Japanese
 - Korean
 - Mandarin Chinese
+
+Initial freeze rationale:
+
+- these languages cover the highest-probability mainstream launch use cases
+- they balance Western business usage with globally important high-demand languages
+- they are narrow enough to benchmark honestly before broadening support
+
+Owner split:
+
+- Product owns the final GA language list
+- Engineering owns provider-model guidance
+- QA owns certification evidence
 
 Additional languages should be added only if the benchmark and insertion evidence exists.
 

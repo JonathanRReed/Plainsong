@@ -53,6 +53,7 @@ Current status:
 - Local packaging perf gates (size + cold start): ✅ PASS (cold-start currently historical evidence)
 - Packaged QA matrix execution: ⚠️ BLOCKED (49/49 blocked; no rows pending, no rows passed)
 - Benchmark parity artifacts (CP-13/CP-14/CP-15): ❌ NOT PRODUCED (gate fails on missing files)
+- Dictation parity Phase 0 artifacts: ⚠️ IN PROGRESS (`docs/evals/dictation-parity-launch-scorecard.md`, app matrix frozen, benchmark JSON still missing)
 - Cloud ASR smoke gate: ❌ BLOCKED (missing required cloud API secrets)
 
 See `docs/strict-release-blocker-register.md` for blocker ownership and unblock actions.
@@ -67,6 +68,9 @@ See `docs/strict-release-blocker-register.md` for blocker ownership and unblock 
    - `docs/evals/benchmark-run-baseline.json`
    - `docs/evals/benchmark-run-latest-macos.json`
    - `docs/evals/benchmark-run-latest-windows.json`
+   - Tracking doc: `docs/evals/dictation-parity-launch-scorecard.md`
+   - App matrix: `docs/dictation-app-compatibility-matrix.md`
+   - Blocked apps: `docs/dictation-blocked-app-register.md`
 3. Apple paid signing/notarization setup is unavailable, blocking signed DMG + notarization evidence.
 4. Windows code-signing certificate is unavailable, blocking signed installer security evidence.
 5. Packaged QA rows are marked BLOCKED, but strict release requires PASS evidence across scope.
@@ -76,6 +80,7 @@ See `docs/strict-release-blocker-register.md` for blocker ownership and unblock 
 - Release signing + notarization secrets must be configured (`TAURI_SIGNING_*`, `APPLE_*`, `WINDOWS_CERTIFICATE*`) and accessible in the release environment.
 - Gate runners must have access to required local ASR model assets if local RTF gate remains enforced in CI.
 - Benchmark baseline/candidate JSON artifacts must exist and pass schema + threshold validation.
+- Dictation Phase 0 must move from frozen assumptions to real packaged evidence before any dictation parity claim is credible.
 - Final Go/No-Go still requires QA + engineering signoff.
 
 ## Launch Recommendation

@@ -1,36 +1,41 @@
 # Dictation App Compatibility Matrix (macOS + Windows)
 
+Frozen Phase 0 launch matrix as of 2026-03-12.
+
 Status values:
+- `PENDING`: not yet validated in packaged QA.
 - `SUPPORTED`: direct paste path is reliable.
 - `PARTIAL`: works with caveats (permission/app focus/format quirks).
 - `CLIPBOARD_ONLY`: copy path works, direct paste is blocked/unreliable.
 - `UNSUPPORTED`: neither mode is acceptable for GA.
 
+This matrix is the default source of truth for DP-02 in `docs/evals/dictation-parity-launch-scorecard.md`.
+
 ## macOS
 
 | App | Status | Mode Used | Notes |
 | --- | --- | --- | --- |
-| Apple Notes | PENDING | auto | Validate paragraph/newline command behavior. |
-| Google Docs (Chrome) | PENDING | auto | Validate cursor focus recovery after hotkey release. |
-| Slack | PENDING | auto | Validate snippet expansions and punctuation consistency. |
-| Notion | PENDING | auto | Validate multiline insert behavior. |
-| VS Code | PENDING | clipboard_only | Validate command mode payload rewrites. |
-| Cursor | PENDING | clipboard_only | Validate command mode + snippet coexistence. |
-| Messages | PENDING | auto | Validate short utterance handling. |
-| One problematic app | PENDING | clipboard_only | Capture exact limitation and remediation. |
+| Apple Notes | PENDING | auto | Core native text-field baseline for solo-professional dictation. |
+| Google Docs (Chrome) | PENDING | auto | High-value browser editor; validate cursor focus recovery after hotkey release. |
+| Slack | PENDING | auto | High-frequency chat target; validate snippet expansions and punctuation consistency. |
+| Notion | PENDING | auto | High-frequency notes workspace; validate multiline insert behavior. |
+| VS Code | PENDING | clipboard_only | High-value operator/founder target; direct insert remains lower confidence today. |
+| Cursor | PENDING | clipboard_only | AI editor target; validate command mode and snippet coexistence. |
+| Messages | PENDING | auto | Short-utterance chat baseline. |
+| HubSpot (Chrome) | PENDING | clipboard_only | Launch-problematic CRM target for sales workflows; capture rich-text field limitations. |
 
 ## Windows
 
 | App | Status | Mode Used | Notes |
 | --- | --- | --- | --- |
-| Notepad | PENDING | clipboard_only | Current runtime defaults to clipboard fallback. |
-| Word | PENDING | clipboard_only | Validate formatting retention. |
-| Google Docs (Edge/Chrome) | PENDING | clipboard_only | Validate browser focus behavior. |
-| Slack | PENDING | clipboard_only | Validate snippet triggers and punctuation. |
-| Notion | PENDING | clipboard_only | Validate multiline behavior. |
-| VS Code | PENDING | clipboard_only | Validate long utterances. |
-| Cursor | PENDING | clipboard_only | Validate command handling behavior. |
-| One problematic app | PENDING | clipboard_only | Capture exact limitation and remediation. |
+| Notepad | PENDING | clipboard_only | Low-complexity text field baseline; current runtime defaults to clipboard fallback. |
+| Word | PENDING | clipboard_only | High-value document target; validate formatting retention. |
+| Google Docs (Edge/Chrome) | PENDING | clipboard_only | Browser editor baseline; validate focus and paste behavior. |
+| Slack | PENDING | clipboard_only | High-frequency chat target; validate snippet triggers and punctuation. |
+| Notion | PENDING | clipboard_only | High-frequency notes workspace; validate multiline behavior. |
+| VS Code | PENDING | clipboard_only | High-value operator/founder target; validate long utterances. |
+| Cursor | PENDING | clipboard_only | AI editor target; validate command handling behavior. |
+| Outlook | PENDING | clipboard_only | Launch-problematic sales target; capture rich-text compose limitations. |
 
 ## Exit Gate
 - Mark launch-ready only when all target apps are `SUPPORTED` or `PARTIAL` with documented workaround.
