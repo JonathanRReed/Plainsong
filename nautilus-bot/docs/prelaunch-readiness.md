@@ -52,7 +52,7 @@ Current status:
 - Rust format/clippy/check/lib/tests: ✅ PASS
 - Local packaging perf gates (size + cold start): ✅ PASS (cold-start currently historical evidence)
 - Packaged QA matrix execution: ⚠️ BLOCKED (49/49 blocked; no rows pending, no rows passed)
-- Benchmark parity artifacts (CP-13/CP-14/CP-15): ❌ NOT PRODUCED (gate fails on missing files)
+- Benchmark parity artifacts (CP-13/CP-14/CP-15): ⚠️ PARTIAL (local fixture-driven `docs/evals/benchmark-run-baseline.json` and `docs/evals/benchmark-run-latest-macos.json` exist; `docs/evals/benchmark-run-latest-windows.json` is still missing; macOS gate currently fails latency-improvement because baseline and candidate are the same run)
 - Dictation parity Phase 0 artifacts: ⚠️ IN PROGRESS (`docs/evals/dictation-parity-launch-scorecard.md`, app matrix frozen, benchmark JSON still missing)
 - Cloud ASR smoke gate: ❌ BLOCKED (missing required cloud API secrets)
 
@@ -64,10 +64,11 @@ See `docs/strict-release-blocker-register.md` for blocker ownership and unblock 
    - `OPENAI_API_KEY`
    - `ELEVENLABS_API_KEY`
    - `MISTRAL_API_KEY`
-2. Benchmark run artifacts for CP-13/CP-14/CP-15 are required but not yet committed:
-   - `docs/evals/benchmark-run-baseline.json`
-   - `docs/evals/benchmark-run-latest-macos.json`
-   - `docs/evals/benchmark-run-latest-windows.json`
+2. Benchmark run artifacts for CP-13/CP-14/CP-15 are still incomplete:
+   - Present locally: `docs/evals/benchmark-run-baseline.json`
+   - Present locally: `docs/evals/benchmark-run-latest-macos.json`
+   - Missing: `docs/evals/benchmark-run-latest-windows.json`
+   - The current macOS artifact is generated from the fixture benchmark runner, not packaged-app execution, so it does not satisfy the packaged evidence requirement by itself.
    - Tracking doc: `docs/evals/dictation-parity-launch-scorecard.md`
    - App matrix: `docs/dictation-app-compatibility-matrix.md`
    - Blocked apps: `docs/dictation-blocked-app-register.md`

@@ -1,0 +1,50 @@
+{
+  "generatedAt": "2026-03-12T17:59:26.402Z",
+  "baselinePath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/evals/benchmark-run-baseline.json",
+  "candidatePath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/evals/benchmark-run-latest-macos.json",
+  "schemaPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/evals/benchmark-run.schema.json",
+  "thresholds": {
+    "commandMin": 0.95,
+    "snippetMin": 0.99,
+    "latencyImprovementMin": 0.25
+  },
+  "metrics": {
+    "baselineP50EndToEndMs": 260,
+    "candidateP50EndToEndMs": 260,
+    "latencyImprovement": 0,
+    "commandSuccessRate": 1,
+    "snippetSuccessRate": 1
+  },
+  "checks": [
+    {
+      "id": "cp13-command-success",
+      "pass": true,
+      "actual": 1,
+      "required": 0.95,
+      "comparator": ">="
+    },
+    {
+      "id": "cp14-snippet-success",
+      "pass": true,
+      "actual": 1,
+      "required": 0.99,
+      "comparator": ">="
+    },
+    {
+      "id": "cp15-latency-improvement",
+      "pass": false,
+      "actual": 0,
+      "required": 0.25,
+      "comparator": ">="
+    },
+    {
+      "id": "cp15-provider-integrity",
+      "pass": true,
+      "actual": "ok",
+      "required": "0 issues",
+      "comparator": "==",
+      "details": []
+    }
+  ],
+  "pass": false
+}
