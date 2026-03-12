@@ -156,7 +156,7 @@ Current artifact note:
 
 - `docs/evals/benchmark-run-baseline.json` exists as the current local macOS fixture-run baseline
 - `docs/evals/benchmark-run-latest-macos.json` exists as the current local macOS fixture-run candidate
-- `docs/evals/benchmark-run-latest-windows.json` is still missing
+- `docs/evals/benchmark-run-latest-windows.json` is still missing, but the capture path is now wired via `scripts/capture-windows-dictation-benchmark.mjs`
 - these local JSON artifacts are useful for schema and gate plumbing, but they do not replace packaged app evidence
 
 ## Phase 0 Deliverables

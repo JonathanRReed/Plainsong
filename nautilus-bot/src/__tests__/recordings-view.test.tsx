@@ -539,6 +539,87 @@ describe("RecordingsView", () => {
     });
   });
 
+  it("builds an enhanced notes draft with citations and can apply it to meeting notes", async () => {
+    mocks.summarizeRecordingGrounded.mockResolvedValue({
+      summary: "Launch is on track with one open dependency.",
+      citations: [
+        {
+          text: "We are on track for launch, pending legal approval.",
+          startTime: 15,
+          endTime: 21,
+          recordingId: "r1",
+          certainty: 0.97,
+        },
+      ],
+      model: "test-model",
+      processingTimeMs: 1200,
+    });
+    mocks.extractActionItemsGrounded.mockResolvedValue({
+      items: [
+        {
+          task: "Send legal review packet",
+          assignee: "Jon",
+          deadline: "Friday",
+          citations: [
+            {
+              text: "Jon will send the legal review packet by Friday.",
+              startTime: 34,
+              endTime: 39,
+              recordingId: "r1",
+              certainty: 0.95,
+            },
+          ],
+        },
+      ],
+      model: "test-model",
+      processingTimeMs: 900,
+    });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("Meeting notes");
+    fireEvent.click(await screen.findByRole("tab", { name: "Notes" }));
+
+    fireEvent.change(screen.getByLabelText("Goals notes"), {
+      target: { value: "Keep the launch blocked only on legal approval." },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Enhance Notes" }));
+
+    await waitFor(() => {
+      expect(mocks.summarizeRecordingGrounded).toHaveBeenCalledWith("r1");
+      expect(mocks.extractActionItemsGrounded).toHaveBeenCalledWith("r1");
+    });
+
+    const expectedDraft =
+      "Summary\n" +
+      "Launch is on track with one open dependency.\n\n" +
+      "Action Items\n" +
+      "- Send legal review packet (Owner: Jon · Due: Friday)\n\n" +
+      "Raw Notes Context\n" +
+      "Goals\nKeep the launch blocked only on legal approval.";
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Regenerate" })
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Apply to Notes" })
+      ).not.toBeDisabled();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Apply to Notes" }));
+
+    await waitFor(() => {
+      expect(mocks.updateRecordingNotes).toHaveBeenLastCalledWith("r1", expectedDraft);
+    });
+    expect(mocks.toast).toHaveBeenCalledWith(
+      "Enhanced notes applied to this meeting.",
+      "success"
+    );
+  });
+
   it("copies a markdown recap from the meeting review workspace", async () => {
     render(<RecordingsView />);
 

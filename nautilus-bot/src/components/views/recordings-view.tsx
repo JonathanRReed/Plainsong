@@ -77,6 +77,7 @@ import {
   Users,
 } from "lucide-react";
 import type { AnalysisTemplate } from "@/types";
+import type { LlmCitation } from "@/types";
 
 const MEETING_ASK_TEMPLATES: AnalysisTemplate[] = [
   {
@@ -146,6 +147,59 @@ function formatGroundedActionItem(item: {
   }
 
   return `${item.task.trim()} (${details.join(" · ")})`;
+}
+
+type EnhancedMeetingNotesDraft = {
+  text: string;
+  generatedAt: string;
+  rawNotesSnapshot: string;
+  summaryCitations: LlmCitation[];
+  actionItemCitations: Array<{
+    label: string;
+    citations: LlmCitation[];
+  }>;
+};
+
+function formatCitationTimeRange(citation: LlmCitation): string | null {
+  if (
+    typeof citation.startTime !== "number" &&
+    typeof citation.endTime !== "number"
+  ) {
+    return null;
+  }
+
+  const formatSeconds = (value?: number) => {
+    if (typeof value !== "number" || Number.isNaN(value)) {
+      return null;
+    }
+    const totalSeconds = Math.max(0, Math.floor(value));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+  };
+
+  const start = formatSeconds(citation.startTime);
+  const end = formatSeconds(citation.endTime);
+  if (start && end) {
+    return `${start}-${end}`;
+  }
+  return start ?? end;
+}
+
+function buildEnhancedMeetingNotesDraftText(args: {
+  summary: string;
+  actionItems: string[];
+  rawNotes: string;
+}): string {
+  const sections = [
+    args.summary.trim() ? `Summary\n${args.summary.trim()}` : null,
+    args.actionItems.length > 0
+      ? `Action Items\n${args.actionItems.map((item) => `- ${item}`).join("\n")}`
+      : null,
+    args.rawNotes.trim() ? `Raw Notes Context\n${args.rawNotes.trim()}` : null,
+  ].filter(Boolean);
+
+  return sections.join("\n\n").trim();
 }
 
 type MeetingNoteSection = {
@@ -440,6 +494,9 @@ export function RecordingsView() {
   const [meetingTemplateId, setMeetingTemplateId] = useState("auto");
   const [meetingSummary, setMeetingSummary] = useState("");
   const [meetingActionItemsText, setMeetingActionItemsText] = useState("");
+  const [enhancedMeetingNotesDraft, setEnhancedMeetingNotesDraft] =
+    useState<EnhancedMeetingNotesDraft | null>(null);
+  const [isEnhancingMeetingNotes, setIsEnhancingMeetingNotes] = useState(false);
   const [meetingChatMessages, setMeetingChatMessages] = useState<MeetingChatMessage[]>([]);
   const [isRefreshingSummary, setIsRefreshingSummary] = useState(false);
   const [isRefreshingActionItems, setIsRefreshingActionItems] = useState(false);
@@ -451,6 +508,7 @@ export function RecordingsView() {
   const lastSavedMeetingSummaryRef = useRef("");
   const lastSavedMeetingActionItemsRef = useRef("[]");
   const lastSavedMeetingChatRef = useRef("[]");
+  const lastSelectedMeetingIdRef = useRef<string | null>(null);
 
   // Live streaming transcript state
   type StreamChunk = { text: string; startTime: number; isPartial: boolean };
@@ -696,6 +754,8 @@ export function RecordingsView() {
       setMeetingTemplateId("auto");
       setMeetingSummary("");
       setMeetingActionItemsText("");
+      setEnhancedMeetingNotesDraft(null);
+      setIsEnhancingMeetingNotes(false);
       setMeetingChatMessages([]);
       setIsRefreshingSummary(false);
       setIsRefreshingActionItems(false);
@@ -712,7 +772,9 @@ export function RecordingsView() {
       setMeetingTemplateId("auto");
       setMeetingSummary("");
       setMeetingActionItemsText("");
+      setEnhancedMeetingNotesDraft(null);
       setMeetingChatMessages([]);
+      lastSelectedMeetingIdRef.current = null;
       lastSavedMeetingTemplateRef.current = "auto";
       lastSavedMeetingSummaryRef.current = "";
       lastSavedMeetingActionItemsRef.current = "[]";
@@ -726,6 +788,10 @@ export function RecordingsView() {
     setMeetingTemplateId(nextTemplateId);
     setMeetingSummary(nextSummary);
     setMeetingActionItemsText(nextActionItemsText);
+    if (lastSelectedMeetingIdRef.current !== selectedRecording.id) {
+      setEnhancedMeetingNotesDraft(null);
+      lastSelectedMeetingIdRef.current = selectedRecording.id;
+    }
     lastSavedMeetingTemplateRef.current = nextTemplateId;
     lastSavedMeetingSummaryRef.current = nextSummary;
     lastSavedMeetingActionItemsRef.current = JSON.stringify(
@@ -1087,6 +1153,122 @@ export function RecordingsView() {
     }
   };
 
+  const handleEnhanceMeetingNotes = async () => {
+    if (!selectedRecording) {
+      return;
+    }
+
+    const requestToken = recordingRequestGuard.beginRequest(selectedRecording.id);
+    setIsEnhancingMeetingNotes(true);
+    try {
+      const [summaryResult, actionItemsResult] = await Promise.all([
+        summarizeRecordingGrounded(selectedRecording.id),
+        extractActionItemsGrounded(selectedRecording.id),
+      ]);
+      if (!recordingRequestGuard.isCurrent(requestToken)) {
+        return;
+      }
+
+      const nextSummary = summaryResult.summary.trim();
+      const nextActionItems = normalizeActionItems(
+        actionItemsResult.items.map((item) => formatGroundedActionItem(item))
+      );
+      const nextActionItemsText = actionItemsToText(nextActionItems);
+
+      setMeetingSummary(nextSummary);
+      setMeetingActionItemsText(nextActionItemsText);
+      lastSavedMeetingSummaryRef.current = nextSummary;
+      lastSavedMeetingActionItemsRef.current = JSON.stringify(nextActionItems);
+      setSelectedRecording((current) =>
+        current?.id === selectedRecording.id
+          ? {
+              ...current,
+              summary: nextSummary || undefined,
+              actionItems: nextActionItems,
+            }
+          : current
+      );
+      await updateRecordingAnalysis(
+        selectedRecording.id,
+        nextSummary || null,
+        nextActionItems
+      );
+
+      const draftText = buildEnhancedMeetingNotesDraftText({
+        summary: nextSummary,
+        actionItems: nextActionItems,
+        rawNotes: meetingNotes,
+      });
+      setEnhancedMeetingNotesDraft({
+        text: draftText,
+        generatedAt: new Date().toISOString(),
+        rawNotesSnapshot: meetingNotes,
+        summaryCitations: summaryResult.citations ?? [],
+        actionItemCitations: actionItemsResult.items.map((item, index) => ({
+          label: nextActionItems[index] ?? item.task,
+          citations: item.citations ?? [],
+        })),
+      });
+      toast("Enhanced notes draft ready.", "success");
+    } catch (error) {
+      if (!recordingRequestGuard.isCurrent(requestToken)) {
+        return;
+      }
+      const message =
+        error instanceof Error ? error.message : "Failed to build enhanced notes.";
+      toast(message, "error");
+    } finally {
+      if (recordingRequestGuard.isCurrent(requestToken)) {
+        setIsEnhancingMeetingNotes(false);
+      }
+    }
+  };
+
+  const handleCopyEnhancedMeetingNotes = async () => {
+    const draft = enhancedMeetingNotesDraft?.text.trim();
+    if (!draft) {
+      toast("Nothing to copy for enhanced notes.", "error");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(draft);
+      toast("Enhanced notes copied.", "success");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to copy enhanced notes.";
+      toast(message, "error");
+    }
+  };
+
+  const handleApplyEnhancedMeetingNotes = async () => {
+    if (!selectedRecording || !enhancedMeetingNotesDraft?.text.trim()) {
+      return;
+    }
+
+    try {
+      const nextNotes = enhancedMeetingNotesDraft.text.trim();
+      setMeetingNotes(nextNotes);
+      lastSavedMeetingNotesRef.current = nextNotes;
+      setSelectedRecording((current) =>
+        current?.id === selectedRecording.id
+          ? {
+              ...current,
+              meetingNotes: nextNotes,
+              notesUpdatedAt: new Date().toISOString(),
+            }
+          : current
+      );
+      await updateRecordingNotes(selectedRecording.id, nextNotes);
+      setEnhancedMeetingNotesDraft(null);
+      toast("Enhanced notes applied to this meeting.", "success");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to apply enhanced notes.";
+      toast(message, "error");
+    }
+  };
+
   const handleCopyMeetingShareMarkdown = async () => {
     if (!selectedRecording || !selectedMeetingShareMarkdown.trim()) {
       return;
@@ -1390,6 +1572,14 @@ export function RecordingsView() {
       isPartial: false,
     }));
   }, [recordingId, selectedRecording?.id, selectedTranscript?.segments, streamChunks]);
+  const enhancedMeetingNotesIsStale = useMemo(
+    () =>
+      Boolean(
+        enhancedMeetingNotesDraft &&
+          enhancedMeetingNotesDraft.rawNotesSnapshot.trim() !== meetingNotes.trim()
+      ),
+    [enhancedMeetingNotesDraft, meetingNotes]
+  );
 
   const updateMeetingSections = (
     updater: (sections: MeetingNoteSection[]) => MeetingNoteSection[]
@@ -2203,6 +2393,163 @@ export function RecordingsView() {
                           />
                         </div>
                       ))}
+                    </div>
+
+                    <div className="rounded-lg border border-active/30 bg-active/5 p-4 space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-active">
+                              Enhanced Notes
+                            </p>
+                            <Badge variant="outline" className="bg-background/80">
+                              Transcript + raw notes
+                            </Badge>
+                            {enhancedMeetingNotesIsStale ? (
+                              <Badge variant="outline" className="bg-amber-500/10 text-amber-100">
+                                Raw notes changed
+                              </Badge>
+                            ) : null}
+                          </div>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Build a separate enhanced draft from the transcript and your current raw
+                            notes, then review citations before replacing anything.
+                          </p>
+                          {enhancedMeetingNotesDraft ? (
+                            <p className="mt-2 text-[11px] text-muted-foreground">
+                              Generated{" "}
+                              {new Date(enhancedMeetingNotesDraft.generatedAt).toLocaleString()}.
+                            </p>
+                          ) : null}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => void handleEnhanceMeetingNotes()}
+                            disabled={!selectedRecording || isEnhancingMeetingNotes}
+                          >
+                            {isEnhancingMeetingNotes ? (
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            ) : (
+                              <RefreshCw className="mr-2 h-4 w-4" />
+                            )}
+                            {enhancedMeetingNotesDraft ? "Regenerate" : "Enhance Notes"}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => void handleCopyEnhancedMeetingNotes()}
+                            disabled={!enhancedMeetingNotesDraft?.text.trim()}
+                          >
+                            <Copy className="mr-2 h-4 w-4" />
+                            Copy
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={() => void handleApplyEnhancedMeetingNotes()}
+                            disabled={!enhancedMeetingNotesDraft?.text.trim()}
+                          >
+                            <CheckCircle2 className="mr-2 h-4 w-4" />
+                            Apply to Notes
+                          </Button>
+                        </div>
+                      </div>
+
+                      {enhancedMeetingNotesDraft ? (
+                        <div className="space-y-3">
+                          <Textarea
+                            value={enhancedMeetingNotesDraft.text}
+                            readOnly
+                            aria-label="Enhanced meeting notes draft"
+                            rows={12}
+                            className="min-h-[220px] resize-y bg-background/90"
+                          />
+
+                          <div className="rounded-md border bg-background/80 p-3 space-y-3">
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                                Source Evidence
+                              </p>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                Review which transcript lines grounded this enhanced draft.
+                              </p>
+                            </div>
+
+                            <div className="space-y-2">
+                              <p className="text-xs font-medium">Summary</p>
+                              {enhancedMeetingNotesDraft.summaryCitations.length > 0 ? (
+                                enhancedMeetingNotesDraft.summaryCitations.map((citation, index) => (
+                                  <div
+                                    key={`enhanced-summary-citation-${index}`}
+                                    className="rounded-md border px-3 py-2 text-sm"
+                                  >
+                                    <p>{citation.text}</p>
+                                    <p className="mt-1 text-[11px] text-muted-foreground">
+                                      {formatCitationTimeRange(citation) ?? "No timestamp"}
+                                      {citation.recordingId ? ` · ${citation.recordingId}` : ""}
+                                    </p>
+                                  </div>
+                                ))
+                              ) : (
+                                <p className="text-xs text-muted-foreground">
+                                  No summary citations were returned for this draft.
+                                </p>
+                              )}
+                            </div>
+
+                            <div className="space-y-2">
+                              <p className="text-xs font-medium">Action Items</p>
+                              {enhancedMeetingNotesDraft.actionItemCitations.some(
+                                (group) => group.citations.length > 0
+                              ) ? (
+                                enhancedMeetingNotesDraft.actionItemCitations.map((group, groupIndex) => (
+                                  <div
+                                    key={`enhanced-action-group-${groupIndex}`}
+                                    className="rounded-md border px-3 py-2"
+                                  >
+                                    <p className="text-sm font-medium">{group.label}</p>
+                                    <div className="mt-2 space-y-2">
+                                      {group.citations.length > 0 ? (
+                                        group.citations.map((citation, citationIndex) => (
+                                          <div
+                                            key={`enhanced-action-citation-${groupIndex}-${citationIndex}`}
+                                            className="rounded-md border bg-muted/20 px-3 py-2 text-sm"
+                                          >
+                                            <p>{citation.text}</p>
+                                            <p className="mt-1 text-[11px] text-muted-foreground">
+                                              {formatCitationTimeRange(citation) ?? "No timestamp"}
+                                              {citation.recordingId
+                                                ? ` · ${citation.recordingId}`
+                                                : ""}
+                                            </p>
+                                          </div>
+                                        ))
+                                      ) : (
+                                        <p className="text-xs text-muted-foreground">
+                                          No citations were returned for this action item.
+                                        </p>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))
+                              ) : (
+                                <p className="text-xs text-muted-foreground">
+                                  No action-item citations were returned for this draft.
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="rounded-md border border-dashed bg-background/60 px-4 py-6 text-center text-sm text-muted-foreground">
+                          Generate an enhanced draft when you want a cleaner meeting note built
+                          from the transcript and your saved raw notes.
+                        </div>
+                      )}
                     </div>
                   </div>
 
