@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useProjects } from "@/hooks/use-projects";
 import { useRecordings } from "@/hooks/use-recordings";
 import { analyzeRecordings, askMemory, searchTranscripts, validateLicense } from "@/lib/tauri";
-import type { LicenseInfo } from "@/lib/tauri";
+import type { LicenseInfo, MeetingChatMessage } from "@/lib/tauri";
 import { deriveEntitlement } from "@/hooks/use-license-features";
 import { useSetupStatus } from "@/hooks/use-setup-status";
 import { requestMainView } from "@/lib/navigation";
@@ -42,13 +42,7 @@ export function DashboardView() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [memoryQuery, setMemoryQuery] = useState("");
-  const [memoryAnswer, setMemoryAnswer] = useState<string | null>(null);
-  const [memoryCitations, setMemoryCitations] = useState<Array<{
-    text: string;
-    startTime?: number;
-    endTime?: number;
-    recordingId?: string;
-  }>>([]);
+  const [memoryMessages, setMemoryMessages] = useState<MeetingChatMessage[]>([]);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [license, setLicense] = useState<LicenseInfo | null>(null);
@@ -71,14 +65,51 @@ export function DashboardView() {
     return acc;
   }, {}), [recordings]);
 
+  const buildThreadedMemoryQuery = (query: string) => {
+    if (memoryMessages.length === 0) {
+      return query;
+    }
+
+    const threadContext = memoryMessages
+      .slice(-6)
+      .map((message) => `${message.role === "assistant" ? "Assistant" : "User"}: ${message.content}`)
+      .join("\n\n");
+
+    return [
+      "Conversation so far:",
+      threadContext,
+      "",
+      `New user question: ${query}`,
+      "Answer the newest question directly. Use prior meeting transcripts as the source of truth and cite the supporting evidence.",
+    ].join("\n");
+  };
+
   const runMemoryQuery = async () => {
     if (!memoryQuery.trim()) return;
+    const query = memoryQuery.trim();
     setMemoryLoading(true);
     setMemoryError(null);
     try {
-      const result = await askMemory(memoryQuery.trim());
-      setMemoryAnswer(result.response);
-      setMemoryCitations(result.citations);
+      const result = await askMemory(buildThreadedMemoryQuery(query));
+      const timestamp = new Date().toISOString();
+      setMemoryMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          content: query,
+          citations: [],
+          createdAt: timestamp,
+        },
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: result.response,
+          citations: result.citations,
+          createdAt: new Date().toISOString(),
+        },
+      ]);
+      setMemoryQuery("");
     } catch (error) {
       setMemoryError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -217,7 +248,7 @@ export function DashboardView() {
             </CardHeader>
             <CardContent className="space-y-4">
               <p className="text-sm text-muted-foreground">
-                Ask anything about your meetings. Nautilus searches all transcripts and answers with citations.
+                Ask anything about your meetings. Nautilus searches all transcripts, keeps the thread locally in the app, and answers with citations.
               </p>
               <div className="flex gap-2">
                 <Input
@@ -231,22 +262,52 @@ export function DashboardView() {
                   onClick={() => void runMemoryQuery()}
                   disabled={!entitlement.proEnabled || memoryLoading || !memoryQuery.trim()}
                 >
-                  {memoryLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Ask"}
+                  {memoryLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Send"}
                 </Button>
               </div>
+              {memoryMessages.length > 0 && (
+                <div className="flex items-center justify-between rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                  <span>Cross-meeting thread keeps your last follow-up questions in context.</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setMemoryMessages([]);
+                      setMemoryError(null);
+                    }}
+                  >
+                    Clear chat
+                  </Button>
+                </div>
+              )}
               {memoryError && <p className="text-sm text-destructive">{memoryError}</p>}
-              {memoryAnswer && (
-                <div className="space-y-2 rounded-md border p-3 text-sm">
-                  <p className="whitespace-pre-wrap">{memoryAnswer}</p>
-                  {memoryCitations.length > 0 && (
-                    <div className="space-y-1 border-t pt-2">
-                      {memoryCitations.map((c, i) => (
-                        <p key={i} className="text-xs text-muted-foreground">
-                          [{c.recordingId ?? "recording"}] {c.startTime?.toFixed(1)}s–{c.endTime?.toFixed(1)}s: {c.text}
+              {memoryMessages.length > 0 && (
+                <div className="space-y-3 rounded-md border p-3 text-sm">
+                  {memoryMessages.map((message) => (
+                    <div key={message.id} className="space-y-2">
+                      <div
+                        className={
+                          message.role === "assistant"
+                            ? "rounded-md bg-muted px-3 py-2"
+                            : "rounded-md border px-3 py-2"
+                        }
+                      >
+                        <p className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                          {message.role === "assistant" ? "Nautilus" : "You"}
                         </p>
-                      ))}
+                        <p className="whitespace-pre-wrap">{message.content}</p>
+                      </div>
+                      {message.role === "assistant" && message.citations.length > 0 && (
+                        <div className="space-y-1 border-l pl-3">
+                          {message.citations.map((citation, index) => (
+                            <p key={`${message.id}-${index}`} className="text-xs text-muted-foreground">
+                              [{citation.recordingId ?? "recording"}] {citation.startTime?.toFixed(1)}s-{citation.endTime?.toFixed(1)}s: {citation.text}
+                            </p>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                  )}
+                  ))}
                 </div>
               )}
             </CardContent>
