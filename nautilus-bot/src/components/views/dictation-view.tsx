@@ -2307,8 +2307,9 @@ export function DictationView() {
                   </select>
                   <p className="text-xs text-muted-foreground">
                     Lets voice commands transform existing text. Try &quot;command rewrite professional&quot;
-                    or &quot;command bulletize selection&quot;. Application context captures the
-                    frontmost app, window title, and selected text when available.
+                    , &quot;command bulletize selection&quot;, or &quot;command replace roadmap with launch plan&quot;.
+                    Correction commands like &quot;command undo that&quot; work without text context.
+                    Application context captures the frontmost app, window title, and selected text when available.
                   </p>
                 </div>
 
