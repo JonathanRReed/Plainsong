@@ -226,6 +226,7 @@ pub struct DictationCustomMode {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub base_mode_preset: Option<String>,
     pub custom_prompt: Option<String>,
     pub profile: String,
     pub route_preference: Option<String>,
@@ -656,6 +657,18 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
         normalize_dictation_keep_warm(&transcription.dictation_keep_warm);
 
     for mode in &mut transcription.dictation_custom_modes {
+        mode.base_mode_preset = mode.base_mode_preset.clone().and_then(|value| {
+            let normalized = match value.trim() {
+                "messages" => Some("messages"),
+                "email" => Some("email"),
+                "notes" => Some("notes"),
+                "meeting_follow_up" => Some("meeting_follow_up"),
+                "voice" => Some("voice"),
+                _ => None,
+            };
+            normalized.map(str::to_string)
+        });
+
         if let Some(provider) = mode.dictation_provider.as_mut() {
             *provider = normalize_transcription_provider_value(provider);
         }

@@ -82,6 +82,7 @@ type DictationModePreset =
   | "notes"
   | "meeting_follow_up"
   | "custom";
+type DictationBaseModePreset = Exclude<DictationModePreset, "custom">;
 
 type DictationInsertionMode = "auto" | "paste" | "inline" | "clipboard_only";
 type DictationContextSource = "none" | "clipboard" | "selected_text" | "application_context";
@@ -102,6 +103,7 @@ type DictationModeDefinition = {
 type DictationCustomModeDraft = {
   name: string;
   description: string;
+  baseModePreset: DictationBaseModePreset;
   customPrompt: string;
   activationAppMatcher: string;
   activationDomainMatcher: string;
@@ -118,6 +120,7 @@ type RecommendedAppStyle = {
   id: string;
   name: string;
   description: string;
+  baseModePreset: DictationBaseModePreset;
   customPrompt: string;
   profile: "normal_speed" | "power_rewrite";
   routePreference: DictationRoutePreference;
@@ -139,6 +142,7 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     id: "builtin-slack-replies",
     name: "Slack Replies",
     description: "Short, clean replies that auto-activate in Slack and keep command edits ready.",
+    baseModePreset: "messages",
     customPrompt:
       "Rewrite the user's dictation as a concise Slack reply. Keep it direct, natural, and easy to scan. Avoid email-style greetings or sign-offs unless the user explicitly says them. Return only the final reply.",
     profile: "normal_speed",
@@ -155,6 +159,7 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     id: "builtin-gmail-drafts",
     name: "Gmail Drafts",
     description: "Polished email drafting with selected-text context and auto-activation on Gmail.",
+    baseModePreset: "email",
     customPrompt:
       "Rewrite the user's dictation into polished email-ready prose. Preserve intent, improve structure, and keep tone professional. Return only the final email body with no subject line unless the user dictates one.",
     profile: "power_rewrite",
@@ -171,6 +176,7 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     id: "builtin-google-docs-writing",
     name: "Google Docs Writing",
     description: "Long-form drafting with browser context and clean insert behavior for Docs.",
+    baseModePreset: "voice",
     customPrompt:
       "Rewrite the user's dictation into clean long-form prose for a document. Improve flow and clarity, but keep the original meaning. Use paragraphs rather than bullets unless the user explicitly asks for bullets.",
     profile: "power_rewrite",
@@ -187,6 +193,7 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     id: "builtin-notion-notes",
     name: "Notion Notes",
     description: "Fast notes and structured edits for Notion pages with live preview on.",
+    baseModePreset: "notes",
     customPrompt:
       "Rewrite the user's dictation as crisp structured notes. Prefer short sections and bullets when they make the notes clearer. Keep action items and open questions explicit. Return only the final note text.",
     profile: "normal_speed",
@@ -203,6 +210,7 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     id: "builtin-linear-updates",
     name: "Linear Updates",
     description: "Issue updates with concise drafting and selected-text editing on linear.app.",
+    baseModePreset: "meeting_follow_up",
     customPrompt:
       "Rewrite the user's dictation as a concise project or issue update. Make status, blockers, and next steps explicit. Keep the language short, precise, and suitable for a work-tracking tool.",
     profile: "power_rewrite",
@@ -243,6 +251,7 @@ const COMMAND_PRESET_FIELDS: Array<{
 ];
 
 const DEFAULT_DICTATION_MODE: DictationModePreset = "voice";
+const DEFAULT_BASE_MODE: DictationBaseModePreset = "voice";
 
 const INSERTION_MODE_LABELS: Record<DictationInsertionMode, string> = {
   auto: "Recommended",
@@ -357,6 +366,7 @@ function createCustomModeDraft(
   return {
     name: "Custom Mode",
     description: "",
+    baseModePreset: DEFAULT_BASE_MODE,
     customPrompt: "",
     activationAppMatcher: "",
     activationDomainMatcher: "",
@@ -366,7 +376,26 @@ function createCustomModeDraft(
   };
 }
 
+function dictationModeLabel(modePreset: Exclude<DictationModePreset, "custom">): string {
+  return (
+    DICTATION_MODE_DEFINITIONS.find((definition) => definition.id === modePreset)?.label ?? "Voice"
+  );
+}
+
+function coerceBaseModePreset(modePreset: string | null | undefined): DictationBaseModePreset {
+  switch (modePreset) {
+    case "messages":
+    case "email":
+    case "notes":
+    case "meeting_follow_up":
+      return modePreset;
+    default:
+      return "voice";
+  }
+}
+
 function summarizeMode(mode: {
+  baseModePreset?: DictationBaseModePreset | null;
   profile: "normal_speed" | "power_rewrite";
   routePreference?: DictationRoutePreference | null;
   insertionMode: DictationInsertionMode;
@@ -385,6 +414,10 @@ function summarizeMode(mode: {
   livePreviewEnabled?: boolean | null;
 }): DictationModeSummaryItem[] {
   const summary: DictationModeSummaryItem[] = [
+    {
+      label: "Base",
+      value: dictationModeLabel(mode.baseModePreset ?? "voice"),
+    },
     { label: "Style", value: PROFILE_LABELS[mode.profile] },
     {
       label: "Route",
@@ -622,17 +655,19 @@ export function DictationView() {
 
   useEffect(() => {
     if (!isDialogOpen || !selectedRecording) {
-      setSelectedTranscript(null);
-      setSelectedHistoryDetails(null);
-      setReprocessedResult(null);
-      setReprocessError(null);
-      return;
+    setSelectedTranscript(null);
+    setSelectedHistoryDetails(null);
+    setReprocessedResult(null);
+    setReprocessError(null);
+    return;
     }
     setIsLoadingTranscript(true);
     setReprocessedResult(null);
     setReprocessError(null);
     setReprocessModePreset(
-      dictationModePreset === "custom" ? DEFAULT_DICTATION_MODE : dictationModePreset
+      dictationModePreset === "custom"
+        ? selectedCustomMode?.baseModePreset ?? DEFAULT_BASE_MODE
+        : dictationModePreset
     );
     const fetchTranscript = async () => {
       try {
@@ -651,7 +686,7 @@ export function DictationView() {
       }
     };
     void fetchTranscript();
-  }, [dictationModePreset, isDialogOpen, selectedRecording]);
+  }, [dictationModePreset, isDialogOpen, selectedCustomMode?.baseModePreset, selectedRecording]);
 
   const dictationHistory = useMemo(
     () =>
@@ -876,6 +911,13 @@ export function DictationView() {
     setSelectedCustomModeId(null);
     const definition = modeDefinitionById[modeId];
     if (!definition || modeId === "custom") {
+      setCustomModeDraft((current) => ({
+        ...current,
+        baseModePreset:
+          dictationModePreset === "custom"
+            ? current.baseModePreset
+            : coerceBaseModePreset(dictationModePreset),
+      }));
       void persistDictationPreferences({ modePreset: modeId, selectedCustomModeId: null });
       return;
     }
@@ -940,6 +982,11 @@ export function DictationView() {
       `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name: (overrides?.name ?? customModeDraft.name).trim() || "Custom Mode",
     description: (overrides?.description ?? customModeDraft.description).trim(),
+    baseModePreset:
+      overrides?.baseModePreset ??
+      (dictationModePreset === "custom"
+        ? selectedCustomMode?.baseModePreset ?? customModeDraft.baseModePreset
+        : coerceBaseModePreset(dictationModePreset)),
     customPrompt: overrides?.customPrompt ?? (customModeDraft.customPrompt.trim() || null),
     profile: overrides?.profile ?? dictationProfile,
     routePreference: overrides?.routePreference ?? dictationRoutePreference,
@@ -970,6 +1017,7 @@ export function DictationView() {
       createCustomModeDraft({
         name: mode.name,
         description: mode.description,
+        baseModePreset: mode.baseModePreset ?? DEFAULT_BASE_MODE,
         customPrompt: mode.customPrompt ?? "",
         activationAppMatcher: mode.activationAppMatcher ?? "",
         activationDomainMatcher: mode.activationDomainMatcher ?? "",
@@ -1037,6 +1085,7 @@ export function DictationView() {
       createCustomModeDraft({
         name: nextMode.name,
         description: nextMode.description,
+        baseModePreset: nextMode.baseModePreset ?? DEFAULT_BASE_MODE,
         customPrompt: nextMode.customPrompt ?? "",
         activationAppMatcher: nextMode.activationAppMatcher ?? "",
         activationDomainMatcher: nextMode.activationDomainMatcher ?? "",
@@ -1076,6 +1125,7 @@ export function DictationView() {
       id: style.id,
       name: style.name,
       description: style.description,
+      baseModePreset: style.baseModePreset,
       customPrompt: style.customPrompt,
       profile: style.profile,
       routePreference: style.routePreference,
@@ -1099,6 +1149,7 @@ export function DictationView() {
       createCustomModeDraft({
         name: nextMode.name,
         description: nextMode.description,
+        baseModePreset: nextMode.baseModePreset ?? DEFAULT_BASE_MODE,
         customPrompt: nextMode.customPrompt ?? "",
         activationAppMatcher: nextMode.activationAppMatcher ?? "",
         activationDomainMatcher: nextMode.activationDomainMatcher ?? "",
@@ -1152,6 +1203,8 @@ export function DictationView() {
         createCustomModeDraft({
           name: selectedCustomMode.name,
           description: selectedCustomMode.description,
+          baseModePreset: selectedCustomMode.baseModePreset ?? DEFAULT_BASE_MODE,
+          customPrompt: selectedCustomMode.customPrompt ?? "",
           activationAppMatcher: selectedCustomMode.activationAppMatcher ?? "",
           activationDomainMatcher: selectedCustomMode.activationDomainMatcher ?? "",
           languageOverride: selectedCustomMode.languageOverride ?? "",
@@ -1904,6 +1957,32 @@ export function DictationView() {
                         }
                         placeholder="What this mode is for"
                       />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium">Base style</label>
+                      <select
+                        aria-label="Base style"
+                        className="w-full rounded-md border bg-background p-2 text-sm"
+                        value={customModeDraft.baseModePreset}
+                        onChange={(event) =>
+                          setCustomModeDraft((current) => ({
+                            ...current,
+                            baseModePreset: event.target.value as DictationBaseModePreset,
+                          }))
+                        }
+                      >
+                        {DICTATION_MODE_DEFINITIONS.filter((mode) => mode.id !== "custom").map(
+                          (mode) => (
+                            <option key={mode.id} value={mode.id}>
+                              {mode.label}
+                            </option>
+                          )
+                        )}
+                      </select>
+                      <p className="text-xs text-muted-foreground">
+                        Sets the deterministic formatting and reprocess behavior this custom mode
+                        should inherit before any mode-specific prompt runs.
+                      </p>
                     </div>
                     <div className="space-y-2 md:col-span-2">
                       <label className="text-sm font-medium">Style prompt</label>

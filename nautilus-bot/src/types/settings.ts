@@ -1,3 +1,10 @@
+export type DictationBaseModePreset =
+  | "voice"
+  | "messages"
+  | "email"
+  | "notes"
+  | "meeting_follow_up";
+
 export interface Settings {
   audio: AudioSettings;
   transcription: TranscriptionSettings;
@@ -14,6 +21,7 @@ export interface DictationCustomMode {
   id: string;
   name: string;
   description: string;
+  baseModePreset?: DictationBaseModePreset | null;
   customPrompt?: string | null;
   profile: "normal_speed" | "power_rewrite";
   routePreference?: "local" | "cloud" | null;
