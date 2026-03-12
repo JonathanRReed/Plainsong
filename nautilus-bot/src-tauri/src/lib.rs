@@ -116,7 +116,10 @@ const TRAY_ITEM_START_MEETING_MIC: &str = "tray_start_meeting_mic";
 const TRAY_ITEM_START_MEETING_SYSTEM: &str = "tray_start_meeting_system";
 const TRAY_ITEM_STOP_MEETING: &str = "tray_stop_meeting";
 const TRAY_ITEM_QUIT: &str = "tray_quit";
-const DICTATION_MAX_DURATION_SECONDS: u64 = 120;
+const DICTATION_MAX_DURATION_SECONDS: u64 = 360;
+const DEFAULT_HANDS_FREE_SILENCE_TIMEOUT_SECONDS: f32 = 1.8;
+const MIN_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 0.8;
+const MAX_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 30.0;
 const DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
 const DICTATION_IDLE_RESET_SUCCESS_MS: u64 = 650;
 const DICTATION_IDLE_RESET_STARTUP_ERROR_MS: u64 = 900;
@@ -6101,6 +6104,10 @@ async fn save_settings(
         settings.audio.silence_timeout_seconds =
             normalize_silence_timeout_seconds(settings.audio.silence_timeout_seconds);
         settings.ui.color_scheme = normalize_color_scheme_value(&settings.ui.color_scheme);
+        settings.transcription.dictation_silence_timeout_seconds =
+            normalize_dictation_silence_timeout_seconds(
+                settings.transcription.dictation_silence_timeout_seconds,
+            );
         normalize_platform_optimization(&mut settings.transcription.platform_optimization);
         normalize_contextual_asr_settings(&mut settings.transcription);
 
@@ -7484,9 +7491,9 @@ async fn start_dictation_session(
         let transcription = &settings.settings().transcription;
         let configured = transcription.dictation_silence_timeout_seconds;
         if transcription.dictation_hands_free_enabled && configured <= 0.0 {
-            1.8
+            DEFAULT_HANDS_FREE_SILENCE_TIMEOUT_SECONDS
         } else {
-            configured
+            normalize_dictation_silence_timeout_seconds(configured)
         }
     };
 
@@ -11384,16 +11391,8 @@ fn looks_low_information_dictation(text: &str) -> bool {
         "you",
         "you you",
         "you you you",
-        "thank you",
-        "thanks",
-        "thanks you",
-        "okay",
-        "ok",
         "uh",
         "um",
-        "hmm",
-        "huh",
-        "mm",
     ];
 
     if LOW_INFORMATION_PHRASES.contains(&normalized.as_str()) {
@@ -11409,7 +11408,7 @@ fn looks_low_information_dictation(text: &str) -> bool {
         }
     }
 
-    words.len() == 1 && words[0].len() <= 2
+    false
 }
 
 fn should_suppress_low_information_dictation(
@@ -11606,27 +11605,10 @@ fn resolve_contextual_command_input(
 }
 
 fn rewrite_shorter_text(text: &str) -> String {
-    let mut output = text.trim().to_string();
+    let mut output = strip_light_dictation_disfluencies(text);
     if output.is_empty() {
         return output;
     }
-    let fillers = [
-        " basically ",
-        " actually ",
-        " literally ",
-        " just ",
-        " really ",
-    ];
-    output = format!(" {} ", output);
-    for filler in fillers {
-        output = output.replace(filler, " ");
-    }
-    output = output
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string();
 
     let words: Vec<&str> = output.split_whitespace().collect();
     if words.len() > 22 {
@@ -11636,6 +11618,23 @@ fn rewrite_shorter_text(text: &str) -> String {
         }
     }
     output
+}
+
+fn strip_light_dictation_disfluencies(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|token| {
+            let normalized = token
+                .trim_matches(|ch: char| !ch.is_alphanumeric())
+                .to_ascii_lowercase();
+            !matches!(
+                normalized.as_str(),
+                "um" | "uh" | "umm" | "uhh" | "er" | "erm" | "ah"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
 }
 
 fn rewrite_professional_text(text: &str) -> String {
@@ -11929,14 +11928,14 @@ fn generate_default_dictation_prompt(active_app: Option<String>) -> String {
             "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
             The user is currently dictating into the application: '{}'. 
             Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). 
-            Fix any grammar, punctuation, and capitalization errors. Remove filler words (ums, ahs). 
+            Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them. 
             Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
             Just output the corrected text directly.",
             app_name
         )
     } else {
         "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
-        Fix any grammar, punctuation, and capitalization errors. Remove filler words (ums, ahs). 
+        Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them. 
         Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
         Just output the corrected text directly."
             .to_string()
@@ -14184,8 +14183,8 @@ mod tests {
     #[test]
     fn low_information_dictation_detection_flags_common_hallucinations() {
         assert!(looks_low_information_dictation("you"));
-        assert!(looks_low_information_dictation("thank you"));
-        assert!(looks_low_information_dictation("ok"));
+        assert!(!looks_low_information_dictation("thank you"));
+        assert!(!looks_low_information_dictation("ok"));
         assert!(!looks_low_information_dictation(
             "please schedule this for tomorrow"
         ));
@@ -14207,16 +14206,46 @@ mod tests {
     fn low_information_suppression_respects_duration_thresholds() {
         // Low-information outputs like "you" are always suppressed (Whisper hallucinations)
         assert!(should_suppress_low_information_dictation("you", 1.2, true));
-        assert!(should_suppress_low_information_dictation("ok", 0.85, true));
         assert!(should_suppress_low_information_dictation("you", 0.6, true));
         assert!(should_suppress_low_information_dictation("you", 0.3, true));
         assert!(should_suppress_low_information_dictation("you", 0.2, true));
         // Valid content is never suppressed
         assert!(!should_suppress_low_information_dictation(
+            "ok",
+            0.85,
+            true
+        ));
+        assert!(!should_suppress_low_information_dictation(
+            "thank you",
+            1.0,
+            true
+        ));
+        assert!(!should_suppress_low_information_dictation(
             "please schedule this",
             1.5,
             true
         ));
+    }
+
+    #[test]
+    fn rewrite_shorter_preserves_semantic_backtracks() {
+        assert_eq!(
+            rewrite_shorter_text("I don't know actually let's ship this tomorrow"),
+            "I don't know actually let's ship this tomorrow"
+        );
+        assert_eq!(
+            rewrite_shorter_text("um I don't know uh what we should do next"),
+            "I don't know what we should do next"
+        );
+    }
+
+    #[test]
+    fn dictation_silence_timeout_normalization_preserves_disabled_state() {
+        assert_eq!(normalize_dictation_silence_timeout_seconds(0.0), 0.0);
+        assert_eq!(normalize_dictation_silence_timeout_seconds(-3.0), 0.0);
+        assert_eq!(normalize_dictation_silence_timeout_seconds(0.4), 0.8);
+        assert_eq!(normalize_dictation_silence_timeout_seconds(8.0), 8.0);
+        assert_eq!(normalize_dictation_silence_timeout_seconds(99.0), 30.0);
     }
 
     #[test]
@@ -17402,6 +17431,17 @@ async fn transcribe_meeting_recording(
 
 fn normalize_silence_timeout_seconds(value: f32) -> f32 {
     value.clamp(MIN_SILENCE_TIMEOUT_SECONDS, MAX_SILENCE_TIMEOUT_SECONDS)
+}
+
+fn normalize_dictation_silence_timeout_seconds(value: f32) -> f32 {
+    if !value.is_finite() || value <= 0.0 {
+        0.0
+    } else {
+        value.clamp(
+            MIN_DICTATION_SILENCE_TIMEOUT_SECONDS,
+            MAX_DICTATION_SILENCE_TIMEOUT_SECONDS,
+        )
+    }
 }
 
 fn normalize_color_scheme_value(value: &str) -> String {

@@ -277,6 +277,13 @@ const PROFILE_LABELS = {
 const shortcutMode = (pushToTalk: boolean, handsFreeEnabled: boolean) =>
   handsFreeEnabled ? "hands_free" : pushToTalk ? "hold_to_talk" : "toggle";
 
+function normalizeDictationSilenceTimeoutSeconds(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+  return Math.min(30, Math.max(0.8, value));
+}
+
 const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
   {
     id: "voice",
@@ -580,6 +587,7 @@ export function DictationView() {
     useState<DictationInsertionMode>("auto");
   const [dictationSnippetsEnabled, setDictationSnippetsEnabled] = useState(true);
   const [dictationAutoLearnCorrections, setDictationAutoLearnCorrections] = useState(true);
+  const [dictationSilenceTimeoutSeconds, setDictationSilenceTimeoutSeconds] = useState(0);
   const [dictationDictionaryEntries, setDictationDictionaryEntries] = useState<
     DictationDictionaryEntry[]
   >([]);
@@ -825,6 +833,9 @@ export function DictationView() {
         setDictationAutoLearnCorrections(
           settings.transcription.dictationAutoLearnCorrections ?? true
         );
+        setDictationSilenceTimeoutSeconds(
+          settings.transcription.dictationSilenceTimeoutSeconds ?? 0
+        );
         setDictationRetentionPreset(settings.transcription.dictationRetentionPreset ?? "never");
         setDictationRetentionCustomHours(settings.transcription.dictationRetentionCustomHours ?? 24);
         const shortcut = settings.shortcuts.toggleDictation || defaultShortcut;
@@ -908,6 +919,7 @@ export function DictationView() {
       insertionMode: DictationInsertionMode;
       snippetsEnabled: boolean;
       autoLearnCorrections: boolean;
+      silenceTimeoutSeconds: number;
       retentionPreset: "immediate" | "24h" | "72h" | "never" | "custom";
       retentionCustomHours: number;
     }>
@@ -931,6 +943,9 @@ export function DictationView() {
       const nextInsertionMode = updates.insertionMode ?? dictationInsertionMode;
       const nextAutoLearnCorrections =
         updates.autoLearnCorrections ?? dictationAutoLearnCorrections;
+      const nextSilenceTimeoutSeconds = normalizeDictationSilenceTimeoutSeconds(
+        updates.silenceTimeoutSeconds ?? dictationSilenceTimeoutSeconds
+      );
       const nextModePreset =
         updates.modePreset ??
         inferModePreset({
@@ -964,6 +979,7 @@ export function DictationView() {
       settings.transcription.dictationSnippetsEnabled =
         updates.snippetsEnabled ?? dictationSnippetsEnabled;
       settings.transcription.dictationAutoLearnCorrections = nextAutoLearnCorrections;
+      settings.transcription.dictationSilenceTimeoutSeconds = nextSilenceTimeoutSeconds;
       settings.transcription.dictationRetentionPreset =
         updates.retentionPreset ?? dictationRetentionPreset;
       settings.transcription.dictationRetentionCustomHours =
@@ -2773,6 +2789,37 @@ export function DictationView() {
                   </select>
                   <p className="text-xs text-muted-foreground">
                     Controls whether popup and inline flows show partial dictation text while you speak.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Silence auto-stop</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      max={30}
+                      step={0.1}
+                      className="w-28 p-2 border rounded-md bg-background"
+                      value={dictationSilenceTimeoutSeconds <= 0 ? 0 : dictationSilenceTimeoutSeconds}
+                      onChange={(event) => {
+                        const rawValue = Number.parseFloat(event.target.value);
+                        const next = Number.isFinite(rawValue) ? rawValue : 0;
+                        setDictationSilenceTimeoutSeconds(next <= 0 ? 0 : next);
+                      }}
+                      onBlur={(event) => {
+                        const rawValue = Number.parseFloat(event.target.value);
+                        const next = normalizeDictationSilenceTimeoutSeconds(
+                          Number.isFinite(rawValue) ? rawValue : 0
+                        );
+                        setDictationSilenceTimeoutSeconds(next);
+                        void persistDictationPreferences({ silenceTimeoutSeconds: next });
+                      }}
+                    />
+                    <span className="text-sm text-muted-foreground">seconds</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    `0` disables silence auto-stop. Hands-free falls back to 1.8 seconds if this is off.
                   </p>
                 </div>
 
