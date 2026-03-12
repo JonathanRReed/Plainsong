@@ -14,6 +14,7 @@ export interface DictationCustomMode {
   id: string;
   name: string;
   description: string;
+  customPrompt?: string | null;
   profile: "normal_speed" | "power_rewrite";
   routePreference?: "local" | "cloud" | null;
   languageOverride?: string | null;
