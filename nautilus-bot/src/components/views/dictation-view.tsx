@@ -113,8 +113,97 @@ type DictationModeSummaryItem = {
   value: string;
 };
 
+type RecommendedAppStyle = {
+  id: string;
+  name: string;
+  description: string;
+  profile: "normal_speed" | "power_rewrite";
+  routePreference: DictationRoutePreference;
+  insertionMode: DictationInsertionMode;
+  contextSource: DictationContextSource;
+  saveToInbox: boolean;
+  copyToClipboard: boolean;
+  commandModeEnabled: boolean;
+  activationAppMatcher?: string;
+  activationDomainMatcher?: string;
+  livePreviewEnabled?: boolean;
+};
+
 const ACTIVATION_APP_SUGGESTIONS = ["Slack", "Cursor", "Messages"];
 const ACTIVATION_DOMAIN_SUGGESTIONS = ["gmail.com", "linear.app", "docs.google.com"];
+
+const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
+  {
+    id: "builtin-slack-replies",
+    name: "Slack Replies",
+    description: "Short, clean replies that auto-activate in Slack and keep command edits ready.",
+    profile: "normal_speed",
+    routePreference: "local",
+    insertionMode: "paste",
+    contextSource: "application_context",
+    saveToInbox: false,
+    copyToClipboard: true,
+    commandModeEnabled: true,
+    activationAppMatcher: "Slack",
+    livePreviewEnabled: true,
+  },
+  {
+    id: "builtin-gmail-drafts",
+    name: "Gmail Drafts",
+    description: "Polished email drafting with selected-text context and auto-activation on Gmail.",
+    profile: "power_rewrite",
+    routePreference: "local",
+    insertionMode: "paste",
+    contextSource: "selected_text",
+    saveToInbox: true,
+    copyToClipboard: true,
+    commandModeEnabled: true,
+    activationDomainMatcher: "gmail.com",
+    livePreviewEnabled: true,
+  },
+  {
+    id: "builtin-google-docs-writing",
+    name: "Google Docs Writing",
+    description: "Long-form drafting with browser context and clean insert behavior for Docs.",
+    profile: "power_rewrite",
+    routePreference: "local",
+    insertionMode: "paste",
+    contextSource: "application_context",
+    saveToInbox: true,
+    copyToClipboard: true,
+    commandModeEnabled: true,
+    activationDomainMatcher: "docs.google.com",
+    livePreviewEnabled: true,
+  },
+  {
+    id: "builtin-notion-notes",
+    name: "Notion Notes",
+    description: "Fast notes and structured edits for Notion pages with live preview on.",
+    profile: "normal_speed",
+    routePreference: "local",
+    insertionMode: "paste",
+    contextSource: "application_context",
+    saveToInbox: true,
+    copyToClipboard: true,
+    commandModeEnabled: true,
+    activationAppMatcher: "Notion",
+    livePreviewEnabled: true,
+  },
+  {
+    id: "builtin-linear-updates",
+    name: "Linear Updates",
+    description: "Issue updates with concise drafting and selected-text editing on linear.app.",
+    profile: "power_rewrite",
+    routePreference: "local",
+    insertionMode: "paste",
+    contextSource: "selected_text",
+    saveToInbox: true,
+    copyToClipboard: true,
+    commandModeEnabled: true,
+    activationDomainMatcher: "linear.app",
+    livePreviewEnabled: true,
+  },
+];
 
 const COMMAND_PRESET_FIELDS: Array<{
   key: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection";
@@ -961,6 +1050,63 @@ export function DictationView() {
     }
   };
 
+  const handleInstallRecommendedStyle = async (style: RecommendedAppStyle) => {
+    const nextMode = buildCurrentCustomMode({
+      id: style.id,
+      name: style.name,
+      description: style.description,
+      profile: style.profile,
+      routePreference: style.routePreference,
+      insertionMode: style.insertionMode,
+      contextSource: style.contextSource,
+      saveToInbox: style.saveToInbox,
+      copyToClipboard: style.copyToClipboard,
+      commandModeEnabled: style.commandModeEnabled,
+      activationAppMatcher: style.activationAppMatcher ?? null,
+      activationDomainMatcher: style.activationDomainMatcher ?? null,
+      livePreviewEnabled: style.livePreviewEnabled ?? dictationLivePreviewEnabled,
+    });
+    const nextModes = dictationCustomModes.some((mode) => mode.id === nextMode.id)
+      ? dictationCustomModes.map((mode) => (mode.id === nextMode.id ? nextMode : mode))
+      : [...dictationCustomModes, nextMode];
+
+    setDictationCustomModes(nextModes);
+    setDictationModePreset("custom");
+    setSelectedCustomModeId(nextMode.id);
+    setCustomModeDraft(
+      createCustomModeDraft({
+        name: nextMode.name,
+        description: nextMode.description,
+        activationAppMatcher: nextMode.activationAppMatcher ?? "",
+        activationDomainMatcher: nextMode.activationDomainMatcher ?? "",
+        languageOverride: nextMode.languageOverride ?? "",
+        livePreviewEnabled: nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+      })
+    );
+    setDictationProfile(nextMode.profile);
+    setDictationRoutePreference(nextMode.routePreference ?? dictationRoutePreference);
+    setDictationInsertionMode(nextMode.insertionMode);
+    setDictationContextSource(nextMode.contextSource);
+    setDictationLivePreviewEnabled(nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled);
+    setSaveToInbox(nextMode.saveToInbox);
+    setDictationCopyToClipboard(nextMode.copyToClipboard);
+    setDictationCommandModeEnabled(nextMode.commandModeEnabled);
+
+    await persistDictationPreferences({
+      modePreset: "custom",
+      selectedCustomModeId: nextMode.id,
+      customModes: nextModes,
+      profile: nextMode.profile,
+      routePreference: nextMode.routePreference ?? dictationRoutePreference,
+      livePreviewEnabled: nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+      insertionMode: nextMode.insertionMode,
+      contextSource: nextMode.contextSource,
+      saveToInbox: nextMode.saveToInbox,
+      copyToClipboard: nextMode.copyToClipboard,
+      commandModeEnabled: nextMode.commandModeEnabled,
+    });
+  };
+
   const handleDeleteCustomMode = async (modeId: string) => {
     const nextModes = dictationCustomModes.filter((mode) => mode.id !== modeId);
     setDictationCustomModes(nextModes);
@@ -1464,6 +1610,55 @@ export function DictationView() {
                     </button>
                   );
                 })}
+              </div>
+              <div className="space-y-3 border-t pt-4">
+                <div>
+                  <p className="text-sm font-medium">Recommended app styles</p>
+                  <p className="text-xs text-muted-foreground">
+                    Install ready-made auto-switch modes for the apps you use most.
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {RECOMMENDED_APP_STYLES.map((style) => {
+                    const installedMode = dictationCustomModes.find((mode) => mode.id === style.id);
+                    return (
+                      <div
+                        key={style.id}
+                        className="rounded-xl border border-border bg-muted/20 p-4"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="font-medium">{style.name}</p>
+                            <p className="mt-2 text-sm text-muted-foreground">{style.description}</p>
+                            <p className="mt-2 text-xs text-muted-foreground">
+                              {style.activationDomainMatcher
+                                ? `Domain ${style.activationDomainMatcher}`
+                                : `App ${style.activationAppMatcher}`}
+                              {" · "}
+                              {CONTEXT_SOURCE_LABELS[style.contextSource]}
+                              {" · "}
+                              {INSERTION_MODE_LABELS[style.insertionMode]}
+                            </p>
+                          </div>
+                          {installedMode && (
+                            <span className="rounded-full border bg-background px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                              Installed
+                            </span>
+                          )}
+                        </div>
+                        <div className="mt-3 flex gap-2">
+                          <Button
+                            variant={installedMode ? "outline" : "default"}
+                            size="sm"
+                            onClick={() => void handleInstallRecommendedStyle(style)}
+                          >
+                            {installedMode ? "Update and use" : "Install and use"}
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
               {dictationCustomModes.length > 0 && (
                 <div className="space-y-3 border-t pt-4">

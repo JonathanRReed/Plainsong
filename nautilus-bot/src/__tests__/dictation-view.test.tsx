@@ -216,6 +216,26 @@ describe("DictationView modes", () => {
     );
   });
 
+  it("installs a recommended app style as a custom mode", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("Recommended app styles");
+    fireEvent.click(screen.getAllByRole("button", { name: /install and use/i })[0]);
+
+    await waitFor(() => {
+      expect(tauriMocks.saveSettings).toHaveBeenCalled();
+    });
+
+    const saveCalls = tauriMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+    const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
+    expect(latestSettings.transcription.dictationModePreset).toBe("custom");
+    expect(latestSettings.transcription.dictationSelectedCustomModeId).toBe("builtin-slack-replies");
+    expect(latestSettings.transcription.dictationCustomModes).toHaveLength(1);
+    expect(latestSettings.transcription.dictationCustomModes[0].name).toBe("Slack Replies");
+    expect(latestSettings.transcription.dictationCustomModes[0].activationAppMatcher).toBe("Slack");
+    expect(latestSettings.transcription.dictationContextSource).toBe("application_context");
+  });
+
   it("refreshes dictation history when a dictation result event arrives", async () => {
     render(<DictationView />);
 
