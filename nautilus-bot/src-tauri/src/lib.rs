@@ -7470,13 +7470,23 @@ async fn reprocess_dictation_text(
         }
         "notes" => (bulletize_text(input), false, None, None),
         "voice" | "custom" => (
-            sanitize_dictation_output(input, input).trim().to_string(),
+            crate::text::format::smart_format_dictation_text(
+                sanitize_dictation_output(input, input).trim(),
+                &normalized_mode,
+            )
+            .trim()
+            .to_string(),
             false,
             None,
             None,
         ),
         _ => (
-            sanitize_dictation_output(input, input).trim().to_string(),
+            crate::text::format::smart_format_dictation_text(
+                sanitize_dictation_output(input, input).trim(),
+                &normalized_mode,
+            )
+            .trim()
+            .to_string(),
             false,
             None,
             None,
@@ -7972,6 +7982,9 @@ async fn stop_dictation_session_for_session(
         &settings_snapshot.transcription.dictation_command_prefix,
     )
     .to_string();
+    let normalized_mode_preset =
+        normalize_dictation_mode_preset(&settings_snapshot.transcription.dictation_mode_preset);
+    let local_smart_formatting_enabled = settings_snapshot.transcription.intelligent_punctuation;
     let snippets_enabled = settings_snapshot.transcription.dictation_snippets_enabled;
     let configured_mode = DictationInsertionMode::from_settings_value(insertion_mode);
 
@@ -8118,6 +8131,12 @@ async fn stop_dictation_session_for_session(
             apply_dictation_snippets(&result.text, &snippets, app_target.as_deref());
         result.text = expanded_text;
         snippet_applied_count = applied;
+    }
+
+    if local_smart_formatting_enabled && command_applied.is_none() && !result.text.trim().is_empty()
+    {
+        result.text =
+            crate::text::format::smart_format_dictation_text(&result.text, normalized_mode_preset);
     }
 
     let fallback_message = build_provider_fallback_message(
