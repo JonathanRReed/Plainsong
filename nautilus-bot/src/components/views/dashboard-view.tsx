@@ -6,8 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useProjects } from "@/hooks/use-projects";
 import { useRecordings } from "@/hooks/use-recordings";
-import { analyzeRecordings, askMemory, searchTranscripts, validateLicense } from "@/lib/tauri";
-import type { LicenseInfo, MeetingChatMessage } from "@/lib/tauri";
+import { analyzeRecordings, askMemory, getRelationshipMemory, searchTranscripts, validateLicense } from "@/lib/tauri";
+import type { CompanyMemoryProfile, LicenseInfo, MeetingChatMessage, PersonMemoryProfile, RelationshipMemory } from "@/lib/tauri";
 import { deriveEntitlement } from "@/hooks/use-license-features";
 import { useSetupStatus } from "@/hooks/use-setup-status";
 import { requestMainView } from "@/lib/navigation";
@@ -45,6 +45,9 @@ export function DashboardView() {
   const [memoryMessages, setMemoryMessages] = useState<MeetingChatMessage[]>([]);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
+  const [relationshipMemory, setRelationshipMemory] = useState<RelationshipMemory | null>(null);
+  const [relationshipMemoryLoading, setRelationshipMemoryLoading] = useState(true);
+  const [relationshipMemoryError, setRelationshipMemoryError] = useState<string | null>(null);
   const [license, setLicense] = useState<LicenseInfo | null>(null);
   const { dictationReady, meetingReady, loading: setupLoading } = useSetupStatus();
 
@@ -52,6 +55,37 @@ export function DashboardView() {
 
   useEffect(() => {
     void validateLicense().then(setLicense).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadRelationshipMemory = async () => {
+      setRelationshipMemoryLoading(true);
+      setRelationshipMemoryError(null);
+      try {
+        const result = await getRelationshipMemory();
+        if (!cancelled) {
+          setRelationshipMemory(result);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setRelationshipMemoryError(
+            error instanceof Error ? error.message : "Relationship memory could not be loaded"
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setRelationshipMemoryLoading(false);
+        }
+      }
+    };
+
+    void loadRelationshipMemory();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const recentRecordings = useMemo(() => recordings.slice(0, 10), [recordings]);
@@ -84,9 +118,9 @@ export function DashboardView() {
     ].join("\n");
   };
 
-  const runMemoryQuery = async () => {
-    if (!memoryQuery.trim()) return;
-    const query = memoryQuery.trim();
+  const runMemoryQuery = async (queryOverride?: string) => {
+    const query = (queryOverride ?? memoryQuery).trim();
+    if (!query) return;
     setMemoryLoading(true);
     setMemoryError(null);
     try {
@@ -109,13 +143,23 @@ export function DashboardView() {
           createdAt: new Date().toISOString(),
         },
       ]);
-      setMemoryQuery("");
+      if (!queryOverride) {
+        setMemoryQuery("");
+      }
     } catch (error) {
       setMemoryError(error instanceof Error ? error.message : String(error));
     } finally {
       setMemoryLoading(false);
     }
   };
+
+  const buildRelationshipPrompt = (
+    profile: PersonMemoryProfile | CompanyMemoryProfile,
+    kind: "person" | "company"
+  ) =>
+    kind === "person"
+      ? `What has ${profile.name} cared about across recent meetings? Include priorities, decisions, open questions, and next steps.`
+      : `What have we learned about ${profile.name} across recent meetings? Include priorities, risks, decisions, and next steps.`;
 
   const runGlobalSearch = async () => {
     if (!globalQuery.trim()) return;
@@ -310,6 +354,114 @@ export function DashboardView() {
                   ))}
                 </div>
               )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>People & Companies</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Local relationship memory built from speaker names, meeting notes, summaries, and transcripts.
+              </p>
+              {relationshipMemoryError ? (
+                <p className="text-sm text-destructive">{relationshipMemoryError}</p>
+              ) : null}
+              {relationshipMemoryLoading ? (
+                <p className="text-sm text-muted-foreground">Building local relationship memory…</p>
+              ) : null}
+              {!relationshipMemoryLoading &&
+              !relationshipMemoryError &&
+              relationshipMemory &&
+              relationshipMemory.people.length === 0 &&
+              relationshipMemory.companies.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  Record more meetings or name speakers to build people and company memory.
+                </p>
+              ) : null}
+              {!relationshipMemoryLoading && relationshipMemory ? (
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                        People
+                      </h3>
+                      <span className="text-xs text-muted-foreground">
+                        {relationshipMemory.people.length} profiles
+                      </span>
+                    </div>
+                    {relationshipMemory.people.slice(0, 4).map((person) => (
+                      <div key={person.id} className="rounded-lg border p-3 space-y-2">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="font-medium">{person.name}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {person.recordingCount} meetings · last seen{" "}
+                              {new Date(person.lastSeenAt).toLocaleDateString()}
+                            </p>
+                          </div>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void runMemoryQuery(buildRelationshipPrompt(person, "person"))}
+                            disabled={!entitlement.proEnabled || memoryLoading}
+                          >
+                            Ask Memory
+                          </Button>
+                        </div>
+                        {person.relatedCompanies.length > 0 ? (
+                          <p className="text-xs text-muted-foreground">
+                            Related companies: {person.relatedCompanies.join(", ")}
+                          </p>
+                        ) : null}
+                        {person.recentMeetings[0] ? (
+                          <p className="text-sm">{person.recentMeetings[0].snippet}</p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                        Companies
+                      </h3>
+                      <span className="text-xs text-muted-foreground">
+                        {relationshipMemory.companies.length} profiles
+                      </span>
+                    </div>
+                    {relationshipMemory.companies.slice(0, 4).map((company) => (
+                      <div key={company.id} className="rounded-lg border p-3 space-y-2">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="font-medium">{company.name}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {company.recordingCount} meetings · last seen{" "}
+                              {new Date(company.lastSeenAt).toLocaleDateString()}
+                            </p>
+                          </div>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => void runMemoryQuery(buildRelationshipPrompt(company, "company"))}
+                            disabled={!entitlement.proEnabled || memoryLoading}
+                          >
+                            Ask Memory
+                          </Button>
+                        </div>
+                        {company.relatedPeople.length > 0 ? (
+                          <p className="text-xs text-muted-foreground">
+                            Related people: {company.relatedPeople.join(", ")}
+                          </p>
+                        ) : null}
+                        {company.recentMeetings[0] ? (
+                          <p className="text-sm">{company.recentMeetings[0].snippet}</p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </CardContent>
           </Card>
 

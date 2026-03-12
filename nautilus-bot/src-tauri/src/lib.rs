@@ -245,6 +245,21 @@ struct AnalysisContextSegment {
     end_time: f64,
 }
 
+struct RelationshipMemorySource {
+    recording: models::Recording,
+    transcript: Option<models::Transcript>,
+    speaker_aliases: HashMap<String, db::SpeakerAlias>,
+}
+
+#[derive(Default)]
+struct RelationshipProfileAccumulator {
+    name: String,
+    recording_ids: HashSet<String>,
+    last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    related_entities: HashSet<String>,
+    recent_meetings: Vec<models::RelationshipMemoryEvidence>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GroundedSummaryResult {
@@ -3932,8 +3947,409 @@ async fn ask_memory(
 }
 
 #[tauri::command]
+async fn get_relationship_memory(
+    state: tauri::State<'_, AppState>,
+) -> Result<models::RelationshipMemory, String> {
+    let sources = {
+        let db = state.db.lock().await;
+        let recordings = db.get_recordings(None).map_err(|e| e.to_string())?;
+        let mut sources = Vec::with_capacity(recordings.len());
+
+        for recording in recordings {
+            let transcript = db
+                .get_transcript(&recording.id)
+                .map_err(|e| e.to_string())?;
+            let speaker_aliases = db
+                .get_speaker_aliases(&recording.id)
+                .map_err(|e| e.to_string())?;
+
+            sources.push(RelationshipMemorySource {
+                recording,
+                transcript,
+                speaker_aliases,
+            });
+        }
+
+        sources
+    };
+
+    Ok(build_relationship_memory(&sources))
+}
+
+#[tauri::command]
 async fn get_ollama_status(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     Ok(state.ollama_client.is_available().await)
+}
+
+fn build_relationship_memory(
+    sources: &[RelationshipMemorySource],
+) -> models::RelationshipMemory {
+    let mut people: HashMap<String, RelationshipProfileAccumulator> = HashMap::new();
+    let mut companies: HashMap<String, RelationshipProfileAccumulator> = HashMap::new();
+
+    for source in sources {
+        let mut people_in_recording = collect_people_from_source(source);
+        people_in_recording.sort();
+        people_in_recording.dedup();
+
+        let mut companies_in_recording = collect_companies_from_source(source);
+        companies_in_recording.sort();
+        companies_in_recording.dedup();
+
+        for person_name in &people_in_recording {
+            let key = normalize_relationship_key(person_name);
+            let entry = people.entry(key.clone()).or_insert_with(|| RelationshipProfileAccumulator {
+                name: person_name.clone(),
+                ..RelationshipProfileAccumulator::default()
+            });
+
+            entry.recording_ids.insert(source.recording.id.clone());
+            upsert_relationship_last_seen(entry, source.recording.created_at);
+            for company_name in &companies_in_recording {
+                entry.related_entities.insert(company_name.clone());
+            }
+            push_relationship_evidence(
+                &mut entry.recent_meetings,
+                models::RelationshipMemoryEvidence {
+                    recording_id: source.recording.id.clone(),
+                    recording_title: source.recording.title.clone(),
+                    created_at: source.recording.created_at,
+                    snippet: build_relationship_snippet(source, person_name),
+                },
+            );
+        }
+
+        for company_name in &companies_in_recording {
+            let key = normalize_relationship_key(company_name);
+            let entry = companies.entry(key.clone()).or_insert_with(|| RelationshipProfileAccumulator {
+                name: company_name.clone(),
+                ..RelationshipProfileAccumulator::default()
+            });
+
+            entry.recording_ids.insert(source.recording.id.clone());
+            upsert_relationship_last_seen(entry, source.recording.created_at);
+            for person_name in &people_in_recording {
+                entry.related_entities.insert(person_name.clone());
+            }
+            push_relationship_evidence(
+                &mut entry.recent_meetings,
+                models::RelationshipMemoryEvidence {
+                    recording_id: source.recording.id.clone(),
+                    recording_title: source.recording.title.clone(),
+                    created_at: source.recording.created_at,
+                    snippet: build_relationship_snippet(source, company_name),
+                },
+            );
+        }
+    }
+
+    let mut people_profiles = people
+        .into_iter()
+        .filter_map(|(id, profile)| {
+            profile.last_seen_at.map(|last_seen_at| models::PersonMemoryProfile {
+                id,
+                name: profile.name,
+                recording_count: profile.recording_ids.len() as u64,
+                last_seen_at,
+                related_companies: sorted_limited_entities(profile.related_entities, 6),
+                recent_meetings: profile.recent_meetings,
+            })
+        })
+        .collect::<Vec<_>>();
+    people_profiles.sort_by(|left, right| {
+        right
+            .recording_count
+            .cmp(&left.recording_count)
+            .then_with(|| right.last_seen_at.cmp(&left.last_seen_at))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    let mut company_profiles = companies
+        .into_iter()
+        .filter_map(|(id, profile)| {
+            profile.last_seen_at.map(|last_seen_at| models::CompanyMemoryProfile {
+                id,
+                name: profile.name,
+                recording_count: profile.recording_ids.len() as u64,
+                last_seen_at,
+                related_people: sorted_limited_entities(profile.related_entities, 6),
+                recent_meetings: profile.recent_meetings,
+            })
+        })
+        .collect::<Vec<_>>();
+    company_profiles.sort_by(|left, right| {
+        right
+            .recording_count
+            .cmp(&left.recording_count)
+            .then_with(|| right.last_seen_at.cmp(&left.last_seen_at))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    models::RelationshipMemory {
+        people: people_profiles,
+        companies: company_profiles,
+    }
+}
+
+fn collect_people_from_source(source: &RelationshipMemorySource) -> Vec<String> {
+    let mut names = source
+        .speaker_aliases
+        .values()
+        .filter_map(|(name, _, _)| name.clone())
+        .collect::<Vec<_>>();
+
+    if let Some(transcript) = &source.transcript {
+        let inferred = infer_speaker_aliases_from_segments(&transcript.segments);
+        for name in inferred.into_values() {
+            names.push(name);
+        }
+    }
+
+    names
+        .into_iter()
+        .map(|name| clean_memory_entity_name(&name))
+        .filter(|name| is_person_memory_candidate(name))
+        .collect()
+}
+
+fn collect_companies_from_source(source: &RelationshipMemorySource) -> Vec<String> {
+    let mut companies = HashSet::new();
+    for candidate in extract_company_candidates(&source.recording.title, true) {
+        companies.insert(candidate);
+    }
+    if let Some(summary) = source.recording.summary.as_deref() {
+        for candidate in extract_company_candidates(summary, false) {
+            companies.insert(candidate);
+        }
+    }
+    if let Some(notes) = source.recording.meeting_notes.as_deref() {
+        for candidate in extract_company_candidates(notes, false) {
+            companies.insert(candidate);
+        }
+    }
+    if let Some(transcript) = &source.transcript {
+        for candidate in extract_company_candidates(&transcript.full_text, false) {
+            companies.insert(candidate);
+        }
+    }
+
+    companies.into_iter().collect()
+}
+
+fn build_relationship_snippet(source: &RelationshipMemorySource, entity_name: &str) -> String {
+    let search_texts = [
+        source.recording.summary.as_deref(),
+        source.recording.meeting_notes.as_deref(),
+        source.transcript.as_ref().map(|transcript| transcript.full_text.as_str()),
+        Some(source.recording.title.as_str()),
+    ];
+
+    for text in search_texts.into_iter().flatten() {
+        if let Some(snippet) = find_entity_snippet(text, entity_name) {
+            return snippet;
+        }
+    }
+
+    source.recording.title.clone()
+}
+
+fn find_entity_snippet(text: &str, entity_name: &str) -> Option<String> {
+    let normalized_text = text.trim();
+    if normalized_text.is_empty() {
+        return None;
+    }
+
+    let lower = normalized_text.to_lowercase();
+    let entity_lower = entity_name.to_lowercase();
+    let index = lower.find(&entity_lower).unwrap_or(0);
+    let start = normalized_text[..index]
+        .rfind(['.', '\n'])
+        .map(|value| value + 1)
+        .unwrap_or(0);
+    let end = normalized_text[index..]
+        .find(['.', '\n'])
+        .map(|value| index + value + 1)
+        .unwrap_or_else(|| normalized_text.len());
+
+    let snippet = normalized_text[start..end].trim();
+    if snippet.is_empty() {
+        None
+    } else if snippet.chars().count() <= 180 {
+        Some(snippet.to_string())
+    } else {
+        Some(snippet.chars().take(177).collect::<String>() + "...")
+    }
+}
+
+fn extract_company_candidates(text: &str, allow_title_patterns: bool) -> Vec<String> {
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+
+    lazy_static::lazy_static! {
+        static ref COMPANY_SUFFIX_RE: Regex = Regex::new(
+            r"\b([A-Z][A-Za-z0-9&.\-]*(?:\s+[A-Z][A-Za-z0-9&.\-]*){0,3}\s+(?:AI|Inc|LLC|Ltd|Corp|Co|Company|Technologies|Technology|Systems|Software|Labs|Health|Group|Studio))\b"
+        ).expect("company suffix regex");
+        static ref TITLE_COMPANY_RE: Regex = Regex::new(
+            r"(?i)\b([A-Z][A-Za-z0-9&.\-]*(?:\s+[A-Z][A-Za-z0-9&.\-]*){0,2})\s+(?:sync|review|call|meeting|demo|retro|standup|follow-up|discovery|planning|kickoff|update|notes|brief|interview|debrief|check-in)\b"
+        ).expect("title company regex");
+        static ref WITH_COMPANY_RE: Regex = Regex::new(
+            r"(?i)\bwith\s+([A-Z][A-Za-z0-9&.\-]*(?:\s+[A-Z][A-Za-z0-9&.\-]*){0,2})\b"
+        ).expect("with company regex");
+        static ref ACRONYM_COMPANY_RE: Regex = Regex::new(r"\b[A-Z][A-Z0-9]{2,7}\b").expect("acronym company regex");
+    }
+
+    let mut candidates = Vec::new();
+    for captures in COMPANY_SUFFIX_RE.captures_iter(text) {
+        if let Some(candidate) = captures.get(1) {
+            candidates.push(candidate.as_str().to_string());
+        }
+    }
+    if allow_title_patterns {
+        for captures in TITLE_COMPANY_RE.captures_iter(text) {
+            if let Some(candidate) = captures.get(1) {
+                candidates.push(candidate.as_str().to_string());
+            }
+        }
+        for captures in WITH_COMPANY_RE.captures_iter(text) {
+            if let Some(candidate) = captures.get(1) {
+                candidates.push(candidate.as_str().to_string());
+            }
+        }
+    }
+    for captures in ACRONYM_COMPANY_RE.captures_iter(text) {
+        if let Some(candidate) = captures.get(0) {
+            candidates.push(candidate.as_str().to_string());
+        }
+    }
+
+    let mut deduped = HashSet::new();
+    candidates
+        .into_iter()
+        .map(|candidate| clean_memory_entity_name(&candidate))
+        .filter(|candidate| is_company_memory_candidate(candidate))
+        .filter(|candidate| deduped.insert(normalize_relationship_key(candidate)))
+        .collect()
+}
+
+fn clean_memory_entity_name(name: &str) -> String {
+    name.trim()
+        .trim_matches(|character: char| !character.is_alphanumeric() && character != '&' && character != '.' && character != '-')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_person_memory_candidate(name: &str) -> bool {
+    if name.is_empty() || is_generic_memory_person_name(name) {
+        return false;
+    }
+    let words = name.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() || words.len() > 4 {
+        return false;
+    }
+    words.iter().all(|word| {
+        let trimmed = word.trim_matches(|character: char| !character.is_alphanumeric());
+        trimmed.len() >= 2
+            && trimmed.chars().next().map(|character| character.is_uppercase()).unwrap_or(false)
+            && trimmed.chars().all(|character| character.is_alphabetic() || character == '\'' || character == '-')
+    })
+}
+
+fn is_company_memory_candidate(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let normalized = normalize_relationship_key(name);
+    if normalized.len() < 2 || normalized.len() > 40 {
+        return false;
+    }
+    let banned = [
+        "meeting",
+        "review",
+        "sync",
+        "standup",
+        "follow up",
+        "notes",
+        "brief",
+        "interview",
+        "demo",
+        "kickoff",
+        "planning",
+        "update",
+        "check in",
+    ];
+    if banned.contains(&normalized.as_str()) {
+        return false;
+    }
+
+    let words = name.split_whitespace().collect::<Vec<_>>();
+    if words.len() > 1
+        && !words.iter().all(|word| {
+            let trimmed = word.trim_matches(|character: char| !character.is_alphanumeric());
+            trimmed
+                .chars()
+                .next()
+                .map(|character| character.is_uppercase())
+                .unwrap_or(false)
+        })
+    {
+        return false;
+    }
+
+    true
+}
+
+fn is_generic_memory_person_name(name: &str) -> bool {
+    let normalized = normalize_relationship_key(name);
+    normalized == "me"
+        || normalized == "them"
+        || normalized == "speaker"
+        || normalized.starts_with("speaker ")
+        || normalized.starts_with("participant ")
+        || normalized == "unknown"
+        || normalized == "unknown speaker"
+}
+
+fn normalize_relationship_key(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn upsert_relationship_last_seen(
+    profile: &mut RelationshipProfileAccumulator,
+    created_at: chrono::DateTime<chrono::Utc>,
+) {
+    if profile.last_seen_at.map(|current| created_at > current).unwrap_or(true) {
+        profile.last_seen_at = Some(created_at);
+    }
+}
+
+fn push_relationship_evidence(
+    evidence: &mut Vec<models::RelationshipMemoryEvidence>,
+    next: models::RelationshipMemoryEvidence,
+) {
+    evidence.push(next);
+    evidence.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    evidence.truncate(3);
+}
+
+fn sorted_limited_entities(entities: HashSet<String>, limit: usize) -> Vec<String> {
+    let mut values = entities.into_iter().collect::<Vec<_>>();
+    values.sort();
+    values.truncate(limit);
+    values
 }
 
 #[tauri::command]
@@ -12731,6 +13147,7 @@ pub fn run() {
             deactivate_license,
             get_entitlement,
             ask_memory,
+            get_relationship_memory,
             check_for_updates,
             install_update,
             get_update_status,
@@ -13092,6 +13509,64 @@ mod tests {
         assert_eq!(aliases.get("S1").map(String::as_str), Some("Jonathan"));
     }
 
+    fn sample_recording(
+        id: &str,
+        title: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+        summary: Option<&str>,
+        meeting_notes: Option<&str>,
+    ) -> models::Recording {
+        models::Recording {
+            id: id.to_string(),
+            title: title.to_string(),
+            project_id: "inbox".to_string(),
+            duration: 1800,
+            created_at,
+            updated_at: created_at,
+            source_type: "meeting".to_string(),
+            audio_path: String::new(),
+            status: "completed".to_string(),
+            summary: summary.map(str::to_string),
+            action_items: None,
+            meeting_notes: meeting_notes.map(str::to_string),
+            meeting_template_id: None,
+            meeting_capture_mode: Some("me_and_them".to_string()),
+            notes_updated_at: None,
+            consent_prompt_shown: false,
+            consent_notice_mode: None,
+            consent_notice_surface: None,
+            consent_notice_message: None,
+            consent_notice_updated_at: None,
+        }
+    }
+
+    fn sample_transcript(
+        recording_id: &str,
+        created_at: chrono::DateTime<chrono::Utc>,
+        text: &str,
+    ) -> models::Transcript {
+        models::Transcript {
+            id: format!("transcript-{}", recording_id),
+            recording_id: recording_id.to_string(),
+            segments: vec![models::TranscriptSegment {
+                id: format!("seg-{}", recording_id),
+                start_time: 0.0,
+                end_time: 30.0,
+                text: text.to_string(),
+                speaker_id: Some("speaker_1".to_string()),
+                confidence: 0.95,
+            }],
+            full_text: text.to_string(),
+            language: "en".to_string(),
+            confidence: 0.95,
+            model: "test".to_string(),
+            model_id: Some("test-model".to_string()),
+            requested_provider: Some("distil_whisper".to_string()),
+            actual_provider: Some("distil_whisper".to_string()),
+            created_at,
+        }
+    }
+
     #[test]
     fn infers_next_speaker_name() {
         let segments = vec![
@@ -13123,6 +13598,55 @@ mod tests {
             resolve_speaker_name("them", None, None, None, 1).as_deref(),
             Some("Them")
         );
+    }
+
+    #[test]
+    fn extract_company_candidates_finds_title_and_suffix_patterns() {
+        let title_matches = extract_company_candidates("ACME pricing review", true);
+        assert!(title_matches.contains(&"ACME".to_string()));
+
+        let text_matches = extract_company_candidates(
+            "We discussed a new pilot with Nimbus Labs and ACME AI.",
+            false,
+        );
+        assert!(text_matches.contains(&"Nimbus Labs".to_string()));
+        assert!(text_matches.contains(&"ACME AI".to_string()));
+    }
+
+    #[test]
+    fn build_relationship_memory_aggregates_people_and_companies() {
+        let now = chrono::Utc::now();
+        let recording = sample_recording(
+            "rec-1",
+            "ACME pricing review",
+            now,
+            Some("Jonathan Reed pushed to keep ACME pricing flat through Q3."),
+            Some("Open question: support packaging for ACME."),
+        );
+        let transcript = sample_transcript(
+            "rec-1",
+            now,
+            "Jonathan Reed said ACME wants pricing stability through Q3.",
+        );
+
+        let mut speaker_aliases = HashMap::new();
+        speaker_aliases.insert(
+            "speaker_1".to_string(),
+            (Some("Jonathan Reed".to_string()), Some("#ff0000".to_string()), 10),
+        );
+
+        let memory = build_relationship_memory(&[RelationshipMemorySource {
+            recording,
+            transcript: Some(transcript),
+            speaker_aliases,
+        }]);
+
+        assert_eq!(memory.people.len(), 1);
+        assert_eq!(memory.people[0].name, "Jonathan Reed");
+        assert_eq!(memory.people[0].related_companies, vec!["ACME"]);
+        assert_eq!(memory.companies.len(), 1);
+        assert_eq!(memory.companies[0].name, "ACME");
+        assert_eq!(memory.companies[0].related_people, vec!["Jonathan Reed"]);
     }
 
     #[test]

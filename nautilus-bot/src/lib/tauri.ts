@@ -67,6 +67,36 @@ export interface MeetingChatMessage {
   createdAt: string;
 }
 
+export interface RelationshipMemoryEvidence {
+  recordingId: string;
+  recordingTitle: string;
+  createdAt: string;
+  snippet: string;
+}
+
+export interface PersonMemoryProfile {
+  id: string;
+  name: string;
+  recordingCount: number;
+  lastSeenAt: string;
+  relatedCompanies: string[];
+  recentMeetings: RelationshipMemoryEvidence[];
+}
+
+export interface CompanyMemoryProfile {
+  id: string;
+  name: string;
+  recordingCount: number;
+  lastSeenAt: string;
+  relatedPeople: string[];
+  recentMeetings: RelationshipMemoryEvidence[];
+}
+
+export interface RelationshipMemory {
+  people: PersonMemoryProfile[];
+  companies: CompanyMemoryProfile[];
+}
+
 export interface MeetingConsentAutomationStatus {
   mode: "auto_ready" | "manual_required" | string;
   surface?: "zoom" | "google_meet" | string | null;
@@ -625,6 +655,10 @@ export async function extractActionItemsGrounded(
 /** Ask a question across all meeting transcripts (AutoRAG Memory). Requires Pro or trial. */
 export async function askMemory(query: string): Promise<LlmAnalysisResult> {
   return await invoke("ask_memory", { query });
+}
+
+export async function getRelationshipMemory(): Promise<RelationshipMemory> {
+  return await invoke("get_relationship_memory");
 }
 
 export async function searchTranscripts(

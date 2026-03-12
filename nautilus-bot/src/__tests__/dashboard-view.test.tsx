@@ -2,8 +2,9 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DashboardView } from "@/components/views/dashboard-view";
 
-const { askMemory } = vi.hoisted(() => ({
+const { askMemory, getRelationshipMemory } = vi.hoisted(() => ({
   askMemory: vi.fn(),
+  getRelationshipMemory: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-projects", () => ({
@@ -63,6 +64,7 @@ vi.mock("@/lib/onboarding", () => ({
 vi.mock("@/lib/tauri", () => ({
   analyzeRecordings: vi.fn(),
   askMemory,
+  getRelationshipMemory,
   searchTranscripts: vi.fn(),
   validateLicense: vi.fn(async () => ({
     key: "",
@@ -82,6 +84,42 @@ vi.mock("@/lib/tauri", () => ({
 describe("DashboardView memory chat", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    getRelationshipMemory.mockResolvedValue({
+      people: [
+        {
+          id: "person-1",
+          name: "Jonathan Reed",
+          recordingCount: 2,
+          lastSeenAt: "2026-03-10T15:00:00.000Z",
+          relatedCompanies: ["ACME"],
+          recentMeetings: [
+            {
+              recordingId: "rec-1",
+              recordingTitle: "ACME pricing review",
+              createdAt: "2026-03-10T15:00:00.000Z",
+              snippet: "Jonathan Reed pushed to keep pricing flat through Q3.",
+            },
+          ],
+        },
+      ],
+      companies: [
+        {
+          id: "company-1",
+          name: "ACME",
+          recordingCount: 1,
+          lastSeenAt: "2026-03-10T15:00:00.000Z",
+          relatedPeople: ["Jonathan Reed"],
+          recentMeetings: [
+            {
+              recordingId: "rec-1",
+              recordingTitle: "ACME pricing review",
+              createdAt: "2026-03-10T15:00:00.000Z",
+              snippet: "ACME wants to hold pricing flat through Q3.",
+            },
+          ],
+        },
+      ],
+    });
   });
 
   it("keeps follow-up memory questions in a local cross-meeting thread", async () => {
@@ -135,5 +173,26 @@ describe("DashboardView memory chat", () => {
     expect(secondPrompt).toContain("Assistant: You agreed to hold pricing at the current plan for Q3.");
     expect(secondPrompt).toContain("New user question: What was still unresolved?");
     expect(screen.getByRole("button", { name: "Clear chat" })).toBeInTheDocument();
+    expect(screen.getByText("People & Companies")).toBeInTheDocument();
+    expect(screen.getByText("Jonathan Reed")).toBeInTheDocument();
+    expect(screen.getByText("ACME")).toBeInTheDocument();
+  });
+
+  it("runs targeted memory prompts from relationship cards", async () => {
+    askMemory.mockResolvedValue({
+      response: "ACME cares about holding pricing flat while support packaging remains open.",
+      citations: [],
+    });
+
+    render(<DashboardView />);
+
+    await screen.findByText("People & Companies");
+    fireEvent.click(screen.getAllByRole("button", { name: "Ask Memory" })[1]);
+
+    await waitFor(() => {
+      expect(askMemory).toHaveBeenCalledTimes(1);
+    });
+
+    expect((askMemory.mock.calls[0][0] as string)).toContain("What have we learned about ACME across recent meetings?");
   });
 });
