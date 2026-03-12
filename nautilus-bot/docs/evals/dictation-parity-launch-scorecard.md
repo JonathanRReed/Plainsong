@@ -54,10 +54,10 @@ Status values:
 | DP-03 | Provider-integrity telemetry | `PARTIAL` | `requestedProvider`, `actualProvider`, `isFallback`, `insertionModeUsed`, `commandApplied`, `snippetAppliedCount`, and `endToEndMs` are present for benchmark rows. | benchmark schema validation + event sample |
 | DP-04 | Command mode v1 | `PARTIAL` | Launch command set achieves `>= 95%` intent success on fixture corpus. | benchmark gate output + command corpus log |
 | DP-05 | Snippets v1 | `PARTIAL` | Snippet expansion achieves `>= 99%` success, including app-scoped snippets. | benchmark gate output + snippet fixture list |
-| DP-06 | Dictionary v1 | `BLOCKED` | Protected terms and replacements persist correctly across supported apps and GA languages. | dictionary fixture report + packaged QA |
-| DP-07 | Smart formatting and correction | `BLOCKED` | Formatting and bounded correction measurably improve output without unacceptable false edits. | formatter benchmark report + QA notes |
-| DP-08 | Hands-free mode | `BLOCKED` | Hands-free can start, stop, and recover reliably with visible cues and low false-trigger rate. | long-session QA notes + video |
-| DP-09 | Context-aware styles | `BLOCKED` | App-aware style transforms improve output in the approved launch app matrix and never block dictation. | style benchmark rows + QA notes |
+| DP-06 | Dictionary v1 | `PARTIAL` | Protected terms and replacements persist correctly across supported apps and GA languages. | dictionary fixture report + packaged QA |
+| DP-07 | Smart formatting and correction | `PARTIAL` | Formatting and bounded correction measurably improve output without unacceptable false edits. | formatter benchmark report + QA notes |
+| DP-08 | Hands-free mode | `PARTIAL` | Hands-free can start, stop, and recover reliably with visible cues and low false-trigger rate. | long-session QA notes + video |
+| DP-09 | Context-aware styles | `PARTIAL` | App-aware style transforms improve output in the approved launch app matrix and never block dictation. | style benchmark rows + QA notes |
 | DP-10 | GA language certification | `BLOCKED` | Top 10 to 20 languages have documented provider-model guidance and benchmark evidence. | language certification matrix + benchmark artifacts |
 | DP-11 | Latency parity trend | `BLOCKED` | Candidate p50 `end_to_end_ms` improves by `>= 25%` versus established baseline. | `verify-benchmark-gates.mjs` output |
 | DP-12 | Trust and recovery UX | `PARTIAL` | Users can see recording, processing, fallback, and delivery states and recover from failure quickly. | packaged QA notes + event samples |
@@ -130,21 +130,27 @@ What the current codebase already supports:
 
 - command mode and telemetry fields
 - snippet expansion and app-scoped snippet behavior
+- dictionary CRUD, SQLite persistence, and runtime dictionary normalization
+- deterministic smart formatting in the live dictation path
+- deterministic selected-text correction commands including replace, append, prepend, delete phrase, and case transforms
+- hands-free dictation mode across onboarding, settings, popup, and runtime
 - insertion mode telemetry and end-to-end timing
 - language override plumbing
 - context source plumbing
+- app-aware custom modes with activation matchers, inherited base styles, and mode-specific prompts
 - keep-warm policy controls
 - benchmark generation and verification scripts
+- dictation history and popup metadata that preserve custom mode identity and base style
 
 What is still missing or not launch-certified:
 
 - benchmark run JSON artifacts
 - packaged app evidence for current dictation claims
-- dictionary product surface
-- hands-free product surface
+- launch-grade dictionary evidence across verified apps and GA languages
 - launch-grade smart formatting and correction evidence
+- launch-grade hands-free reliability evidence
 - GA language certification evidence
-- context-aware styles limited to a verified app matrix
+- context-aware styles limited to a verified app matrix with packaged evidence
 
 ## Phase 0 Deliverables
 
