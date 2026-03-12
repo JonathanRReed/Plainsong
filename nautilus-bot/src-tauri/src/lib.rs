@@ -22,7 +22,7 @@ mod transcription;
 pub mod update;
 
 use crate::asr::manager::RuntimeStatus;
-use crate::dictation_parity::SnippetRule;
+use crate::dictation_parity::{DictionaryRule, SnippetRule};
 use crate::events::{
     DictationStateChangedEvent, DictationTextReadyEvent, MeetingRecordingStateChangedEvent,
     RecordingStatusChangedEvent,
@@ -4382,6 +4382,48 @@ async fn create_project(
 }
 
 #[tauri::command]
+async fn list_dictation_dictionary_entries(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<models::DictationDictionaryEntry>, String> {
+    let db = state.db.lock().await;
+    db.list_dictation_dictionary_entries()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_dictation_dictionary_entry(
+    state: tauri::State<'_, AppState>,
+    request: models::CreateDictationDictionaryEntryRequest,
+) -> Result<models::DictationDictionaryEntry, String> {
+    let mut db = state.db.lock().await;
+    db.create_dictation_dictionary_entry(&request)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn update_dictation_dictionary_entry(
+    state: tauri::State<'_, AppState>,
+    entryId: String,
+    request: models::UpdateDictationDictionaryEntryRequest,
+) -> Result<models::DictationDictionaryEntry, String> {
+    let mut db = state.db.lock().await;
+    db.update_dictation_dictionary_entry(&entryId, &request)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn delete_dictation_dictionary_entry(
+    state: tauri::State<'_, AppState>,
+    entryId: String,
+) -> Result<(), String> {
+    let mut db = state.db.lock().await;
+    db.delete_dictation_dictionary_entry(&entryId)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn list_dictation_snippets(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<models::DictationSnippet>, String> {
@@ -8054,6 +8096,18 @@ async fn stop_dictation_session_for_session(
         }
     }
 
+    if command_applied.is_none() && !result.text.trim().is_empty() {
+        let dictionary_entries = {
+            let db = state.db.lock().await;
+            db.list_dictation_dictionary_entries().unwrap_or_default()
+        };
+        let (normalized_text, applied) =
+            apply_dictation_dictionary_entries(&result.text, &dictionary_entries, app_target.as_deref());
+        if applied > 0 {
+            result.text = normalized_text;
+        }
+    }
+
     let mut snippet_applied_count = 0usize;
     if snippets_enabled && command_applied.is_none() && !result.text.trim().is_empty() {
         let snippets = {
@@ -10965,6 +11019,24 @@ fn apply_dictation_snippets(
     crate::dictation_parity::apply_dictation_snippets(input, &rules, app_target)
 }
 
+fn apply_dictation_dictionary_entries(
+    input: &str,
+    entries: &[models::DictationDictionaryEntry],
+    app_target: Option<&str>,
+) -> (String, usize) {
+    let rules = entries
+        .iter()
+        .map(|entry| DictionaryRule {
+            spoken_form: entry.spoken_form.clone(),
+            replacement: entry.replacement.clone(),
+            app_scope: entry.app_scope.clone(),
+            case_sensitive: entry.case_sensitive,
+            enabled: entry.enabled,
+        })
+        .collect::<Vec<_>>();
+    crate::dictation_parity::apply_dictation_dictionary(input, &rules, app_target)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_dictation_text_ready_payload(
     session_id: u64,
@@ -12445,6 +12517,10 @@ pub fn run() {
             verify_evidence_bundle,
             get_projects,
             create_project,
+            list_dictation_dictionary_entries,
+            create_dictation_dictionary_entry,
+            update_dictation_dictionary_entry,
+            delete_dictation_dictionary_entry,
             list_dictation_snippets,
             create_dictation_snippet,
             update_dictation_snippet,
@@ -13330,6 +13406,9 @@ mod tests {
             name: "Gmail Replies".to_string(),
             description: String::new(),
             profile: "normal_speed".to_string(),
+            route_preference: Some("local".to_string()),
+            language_override: None,
+            live_preview_enabled: Some(true),
             insertion_mode: "paste".to_string(),
             context_source: "selected_text".to_string(),
             save_to_inbox: false,
@@ -13573,7 +13652,9 @@ mod tests {
             Some("clipboard"),
             Some(42),
             Some("cloud"),
+            Some("best_available"),
             Some("local"),
+            Some("distil-large-v3.5"),
         );
         let payload = serde_json::to_value(payload).expect("payload should serialize");
 

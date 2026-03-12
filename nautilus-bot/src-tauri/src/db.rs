@@ -806,6 +806,25 @@ impl Database {
         );
 
         self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS dictation_dictionary_entries (
+                id TEXT PRIMARY KEY,
+                spoken_form TEXT NOT NULL,
+                replacement TEXT NOT NULL,
+                app_scope TEXT,
+                case_sensitive INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dictation_dictionary_entries_spoken_form
+             ON dictation_dictionary_entries(spoken_form)",
+            [],
+        )?;
+
+        self.conn.execute(
             "CREATE TABLE IF NOT EXISTS dictation_snippets (
                 id TEXT PRIMARY KEY,
                 trigger TEXT NOT NULL,
@@ -1770,6 +1789,163 @@ impl Database {
         })?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    pub fn list_dictation_dictionary_entries(&self) -> Result<Vec<DictationDictionaryEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, spoken_form, replacement, app_scope, case_sensitive, enabled, created_at, updated_at
+             FROM dictation_dictionary_entries
+             ORDER BY spoken_form ASC, created_at ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(DictationDictionaryEntry {
+                id: row.get(0)?,
+                spoken_form: row.get(1)?,
+                replacement: row.get(2)?,
+                app_scope: row.get(3)?,
+                case_sensitive: row.get::<_, i64>(4)? != 0,
+                enabled: row.get::<_, i64>(5)? != 0,
+                created_at: row
+                    .get::<_, String>(6)?
+                    .parse()
+                    .unwrap_or_else(|_| Utc::now()),
+                updated_at: row
+                    .get::<_, String>(7)?
+                    .parse()
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    pub fn create_dictation_dictionary_entry(
+        &mut self,
+        request: &CreateDictationDictionaryEntryRequest,
+    ) -> Result<DictationDictionaryEntry> {
+        let spoken_form = request.spoken_form.trim();
+        if spoken_form.is_empty() {
+            anyhow::bail!("Dictionary spoken form cannot be empty");
+        }
+        let replacement = request.replacement.trim();
+        if replacement.is_empty() {
+            anyhow::bail!("Dictionary replacement cannot be empty");
+        }
+
+        let now = Utc::now();
+        let entry = DictationDictionaryEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            spoken_form: spoken_form.to_string(),
+            replacement: replacement.to_string(),
+            app_scope: request
+                .app_scope
+                .as_ref()
+                .map(|scope| scope.trim().to_string())
+                .filter(|scope| !scope.is_empty()),
+            case_sensitive: request.case_sensitive,
+            enabled: request.enabled,
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.conn.execute(
+            "INSERT INTO dictation_dictionary_entries (
+                id, spoken_form, replacement, app_scope, case_sensitive, enabled, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                &entry.id,
+                &entry.spoken_form,
+                &entry.replacement,
+                &entry.app_scope,
+                if entry.case_sensitive { 1 } else { 0 },
+                if entry.enabled { 1 } else { 0 },
+                entry.created_at.to_rfc3339(),
+                entry.updated_at.to_rfc3339(),
+            ],
+        )?;
+
+        Ok(entry)
+    }
+
+    pub fn update_dictation_dictionary_entry(
+        &mut self,
+        entry_id: &str,
+        request: &UpdateDictationDictionaryEntryRequest,
+    ) -> Result<DictationDictionaryEntry> {
+        let existing = self
+            .list_dictation_dictionary_entries()?
+            .into_iter()
+            .find(|entry| entry.id == entry_id)
+            .ok_or_else(|| anyhow::anyhow!("Dictionary entry '{}' not found", entry_id))?;
+
+        let spoken_form = request
+            .spoken_form
+            .as_deref()
+            .unwrap_or(existing.spoken_form.as_str())
+            .trim()
+            .to_string();
+        if spoken_form.is_empty() {
+            anyhow::bail!("Dictionary spoken form cannot be empty");
+        }
+
+        let replacement = request
+            .replacement
+            .as_deref()
+            .unwrap_or(existing.replacement.as_str())
+            .trim()
+            .to_string();
+        if replacement.is_empty() {
+            anyhow::bail!("Dictionary replacement cannot be empty");
+        }
+
+        let app_scope = match &request.app_scope {
+            Some(value) => value
+                .as_ref()
+                .map(|scope| scope.trim().to_string())
+                .filter(|scope| !scope.is_empty()),
+            None => existing.app_scope.clone(),
+        };
+        let case_sensitive = request.case_sensitive.unwrap_or(existing.case_sensitive);
+        let enabled = request.enabled.unwrap_or(existing.enabled);
+        let updated_at = Utc::now();
+
+        self.conn.execute(
+            "UPDATE dictation_dictionary_entries
+             SET spoken_form = ?1, replacement = ?2, app_scope = ?3, case_sensitive = ?4, enabled = ?5, updated_at = ?6
+             WHERE id = ?7",
+            params![
+                &spoken_form,
+                &replacement,
+                &app_scope,
+                if case_sensitive { 1 } else { 0 },
+                if enabled { 1 } else { 0 },
+                updated_at.to_rfc3339(),
+                entry_id,
+            ],
+        )?;
+
+        Ok(DictationDictionaryEntry {
+            id: entry_id.to_string(),
+            spoken_form,
+            replacement,
+            app_scope,
+            case_sensitive,
+            enabled,
+            created_at: existing.created_at,
+            updated_at,
+        })
+    }
+
+    pub fn delete_dictation_dictionary_entry(&mut self, entry_id: &str) -> Result<()> {
+        let deleted = self.conn.execute(
+            "DELETE FROM dictation_dictionary_entries WHERE id = ?1",
+            params![entry_id],
+        )?;
+        if deleted == 0 {
+            anyhow::bail!("Dictionary entry '{}' not found", entry_id);
+        }
+        Ok(())
     }
 
     pub fn create_dictation_snippet(
@@ -3265,6 +3441,43 @@ mod tests {
 
         db.delete_dictation_snippet(&created.id).unwrap();
         assert!(db.list_dictation_snippets().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_dictation_dictionary_entry_crud() {
+        let mut db = in_memory_db();
+        let created = db
+            .create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
+                spoken_form: "open ai".to_string(),
+                replacement: "OpenAI".to_string(),
+                app_scope: Some("Slack".to_string()),
+                case_sensitive: false,
+                enabled: true,
+            })
+            .unwrap();
+        assert_eq!(created.spoken_form, "open ai");
+
+        let list = db.list_dictation_dictionary_entries().unwrap();
+        assert_eq!(list.len(), 1);
+
+        let updated = db
+            .update_dictation_dictionary_entry(
+                &created.id,
+                &UpdateDictationDictionaryEntryRequest {
+                    spoken_form: Some("nautilus bot".to_string()),
+                    replacement: Some("NautilusBot".to_string()),
+                    app_scope: Some(None),
+                    case_sensitive: Some(true),
+                    enabled: Some(true),
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.spoken_form, "nautilus bot");
+        assert!(updated.app_scope.is_none());
+        assert!(updated.case_sensitive);
+
+        db.delete_dictation_dictionary_entry(&created.id).unwrap();
+        assert!(db.list_dictation_dictionary_entries().unwrap().is_empty());
     }
 
     #[test]

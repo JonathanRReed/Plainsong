@@ -17,6 +17,18 @@ pub enum DictationCommandAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DictionaryRule {
+    pub spoken_form: String,
+    pub replacement: String,
+    pub app_scope: Option<String>,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SnippetRule {
     pub trigger: String,
     pub expansion: String,
@@ -179,6 +191,116 @@ fn snippet_app_scope_matches(snippet_scope: Option<&str>, app_target: Option<&st
         return false;
     };
     app_name.to_lowercase().contains(&scope.to_lowercase())
+}
+
+fn replace_dictionary_case_sensitive_all(
+    haystack: &str,
+    needle: &str,
+    replacement: &str,
+) -> (String, usize) {
+    let trimmed = needle.trim();
+    if trimmed.is_empty() {
+        return (haystack.to_string(), 0);
+    }
+
+    let escaped = regex::escape(trimmed);
+    let pattern = format!(r"(^|[^A-Za-z0-9_])({})([^A-Za-z0-9_]|$)", escaped);
+    let Ok(re) = regex::Regex::new(&pattern) else {
+        return (haystack.to_string(), 0);
+    };
+
+    let applied = re.find_iter(haystack).count();
+    if applied == 0 {
+        return (haystack.to_string(), 0);
+    }
+
+    (
+        re.replace_all(haystack, |captures: &regex::Captures<'_>| {
+            format!("{}{}{}", &captures[1], replacement, &captures[3])
+        })
+        .to_string(),
+        applied,
+    )
+}
+
+fn replace_dictionary_case_insensitive_all(
+    haystack: &str,
+    needle: &str,
+    replacement: &str,
+) -> (String, usize) {
+    let trimmed = needle.trim();
+    if trimmed.is_empty() {
+        return (haystack.to_string(), 0);
+    }
+
+    let escaped = regex::escape(trimmed);
+    let pattern = format!(r"(^|[^A-Za-z0-9_])({})([^A-Za-z0-9_]|$)", escaped);
+    let Ok(re) = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(true)
+        .build()
+    else {
+        return (haystack.to_string(), 0);
+    };
+
+    let applied = re.find_iter(haystack).count();
+    if applied == 0 {
+        return (haystack.to_string(), 0);
+    }
+
+    (
+        re.replace_all(haystack, |captures: &regex::Captures<'_>| {
+            format!("{}{}{}", &captures[1], replacement, &captures[3])
+        })
+        .to_string(),
+        applied,
+    )
+}
+
+pub fn apply_dictation_dictionary(
+    input: &str,
+    rules: &[DictionaryRule],
+    app_target: Option<&str>,
+) -> (String, usize) {
+    if input.trim().is_empty() || rules.is_empty() {
+        return (input.to_string(), 0);
+    }
+
+    let mut output = input.to_string();
+    let mut applied_total = 0usize;
+    let mut ordered = rules.to_vec();
+    ordered.sort_by(|a, b| b.spoken_form.len().cmp(&a.spoken_form.len()));
+
+    for rule in ordered {
+        if !rule.enabled {
+            continue;
+        }
+        if !snippet_app_scope_matches(rule.app_scope.as_deref(), app_target) {
+            continue;
+        }
+        if rule.spoken_form.trim().is_empty() {
+            continue;
+        }
+
+        let (next, applied) = if rule.case_sensitive {
+            replace_dictionary_case_sensitive_all(
+                output.as_str(),
+                rule.spoken_form.as_str(),
+                rule.replacement.as_str(),
+            )
+        } else {
+            replace_dictionary_case_insensitive_all(
+                output.as_str(),
+                rule.spoken_form.as_str(),
+                rule.replacement.as_str(),
+            )
+        };
+        if applied > 0 {
+            output = next;
+            applied_total += applied;
+        }
+    }
+
+    (output, applied_total)
 }
 
 pub fn apply_dictation_snippets(
@@ -565,6 +687,55 @@ pub fn generate_dictation_benchmark_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dictionary_replacements_respect_word_boundaries_and_longest_match() {
+        let rules = vec![
+            DictionaryRule {
+                spoken_form: "open".to_string(),
+                replacement: "OPEN".to_string(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+            },
+            DictionaryRule {
+                spoken_form: "open ai".to_string(),
+                replacement: "OpenAI".to_string(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+            },
+        ];
+
+        let (output, applied) = apply_dictation_dictionary(
+            "please email open ai today and reopen the task",
+            &rules,
+            None,
+        );
+        assert_eq!(output, "please email OpenAI today and reopen the task");
+        assert_eq!(applied, 1);
+    }
+
+    #[test]
+    fn dictionary_replacements_respect_app_scope_matching() {
+        let rules = vec![DictionaryRule {
+            spoken_form: "follow up".to_string(),
+            replacement: "follow-up".to_string(),
+            app_scope: Some("gmail".to_string()),
+            case_sensitive: false,
+            enabled: true,
+        }];
+
+        let (non_matching, non_matching_count) =
+            apply_dictation_dictionary("follow up tomorrow", &rules, Some("Slack"));
+        assert_eq!(non_matching, "follow up tomorrow");
+        assert_eq!(non_matching_count, 0);
+
+        let (matching, matching_count) =
+            apply_dictation_dictionary("follow up tomorrow", &rules, Some("Gmail"));
+        assert_eq!(matching, "follow-up tomorrow");
+        assert_eq!(matching_count, 1);
+    }
 
     #[test]
     fn fixture_benchmark_run_summarizes_command_and_snippet_success() {
