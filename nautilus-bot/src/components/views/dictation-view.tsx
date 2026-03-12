@@ -1579,7 +1579,10 @@ export function DictationView() {
       const result = await reprocessDictationText(
         selectedTranscript.fullText,
         reprocessModePreset,
-        selectedHistoryDetails?.appTarget ?? selectedHistoryDetails?.contextAppName ?? null
+        selectedHistoryDetails?.activationMatcher ??
+          selectedHistoryDetails?.appTarget ??
+          selectedHistoryDetails?.contextAppName ??
+          null
       );
       setReprocessedResult(result);
     } catch (error) {

@@ -531,6 +531,19 @@ fn trim_chatty_terminal_period(text: &str) -> String {
     trimmed.strip_suffix('.').unwrap_or(trimmed).to_string()
 }
 
+fn merge_inline_conjunction_sentences(text: &str) -> String {
+    [
+        (". And ", " and "),
+        (". But ", " but "),
+        (". So ", " so "),
+        (". Then ", " then "),
+    ]
+    .into_iter()
+    .fold(text.to_string(), |output, (needle, replacement)| {
+        output.replace(needle, replacement)
+    })
+}
+
 fn normalize_for_app_style(
     text: String,
     mode_preset: &str,
@@ -561,10 +574,11 @@ fn normalize_for_app_style(
             .trim()
             .to_string(),
         DictationAppStyle::Worklog => {
+            let merged = merge_inline_conjunction_sentences(trimmed);
             if mode_preset == "messages" {
-                trim_chatty_terminal_period(trimmed)
+                trim_chatty_terminal_period(&merged)
             } else {
-                ensure_terminal_punctuation(trimmed, '.')
+                ensure_terminal_punctuation(&merged, '.')
             }
         }
         DictationAppStyle::Generic => trimmed.to_string(),
@@ -794,5 +808,28 @@ mod tests {
         let result = smart_format_dictation_text_for_app(input, "voice", Some("Notion"));
         assert!(result.contains("\n\n"));
         assert!(result.ends_with('.'));
+    }
+
+    #[test]
+    fn smart_format_dictation_uses_email_style_for_browser_domain_hints() {
+        let input = "hi jonathan can you review the launch plan question mark";
+        let result = smart_format_dictation_text_for_app(input, "voice", Some("mail.google.com"));
+        assert_eq!(result, "Hi jonathan can you review the launch plan?");
+    }
+
+    #[test]
+    fn smart_format_dictation_uses_document_style_for_browser_domain_hints() {
+        let input = "first section period new paragraph second section period";
+        let result =
+            smart_format_dictation_text_for_app(input, "voice", Some("docs.google.com"));
+        assert!(result.contains("\n\n"));
+        assert!(result.ends_with('.'));
+    }
+
+    #[test]
+    fn smart_format_dictation_uses_worklog_style_for_browser_domain_hints() {
+        let input = "followed up with procurement and sent revised timeline";
+        let result = smart_format_dictation_text_for_app(input, "voice", Some("linear.app"));
+        assert_eq!(result, "Followed up with procurement and sent revised timeline.");
     }
 }
