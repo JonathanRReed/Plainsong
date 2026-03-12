@@ -2545,8 +2545,10 @@ export function DictationView() {
                     Lets voice commands transform existing text. Try &quot;command rewrite professional&quot;
                     , &quot;command bulletize selection&quot;, &quot;command replace roadmap with launch plan&quot;,
                     or editing commands like &quot;command replace selection with approved plan&quot;,
-                    &quot;command append today&quot;, and &quot;command delete phrase roadmap&quot;.
-                    Correction commands like &quot;command undo that&quot; work without text context.
+                    &quot;command append today&quot;, &quot;command delete phrase roadmap&quot;, and
+                    case changes like &quot;command uppercase selection&quot; or
+                    &quot;command title case selection&quot;. Correction commands like
+                    &quot;command undo that&quot; work without text context.
                     Application context captures the frontmost app, window title, and selected text when available.
                   </p>
                 </div>

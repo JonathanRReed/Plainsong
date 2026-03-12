@@ -11,14 +11,15 @@ pub enum DictationCommandAction {
     UndoLastInsert,
     DeleteLastSentence,
     ReplaceEntireSelection(String),
-    ReplaceSelection {
-        target: String,
-        replacement: String,
-    },
+    ReplaceSelection { target: String, replacement: String },
     AppendToSelection(String),
     PrependToSelection(String),
     DeletePhrase(String),
     DeleteSelection,
+    UppercaseSelection,
+    LowercaseSelection,
+    TitleCaseSelection,
+    SentenceCaseSelection,
     RewriteShorter(String),
     RewriteProfessional(String),
     Bulletize(String),
@@ -402,11 +403,7 @@ fn join_with_spacing(left: &str, right: &str) -> String {
     }
 }
 
-fn parse_phrase_swap_command(
-    raw: &str,
-    verb: &str,
-    joiner: &str,
-) -> Option<(String, String)> {
+fn parse_phrase_swap_command(raw: &str, verb: &str, joiner: &str) -> Option<(String, String)> {
     let payload = command_payload(raw, verb)?;
     let normalized = payload.to_ascii_lowercase();
     let delimiter = format!(" {} ", joiner);
@@ -417,6 +414,77 @@ fn parse_phrase_swap_command(
         return None;
     }
     Some((target.to_string(), replacement.to_string()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectionCaseTransform {
+    Uppercase,
+    Lowercase,
+    TitleCase,
+    SentenceCase,
+}
+
+fn apply_selection_case_transform(
+    input: &str,
+    transform: SelectionCaseTransform,
+) -> Result<String, String> {
+    let source = input.trim();
+    if source.is_empty() {
+        return Err("Change Case needs some text to work with.".to_string());
+    }
+
+    Ok(match transform {
+        SelectionCaseTransform::Uppercase => source.to_uppercase(),
+        SelectionCaseTransform::Lowercase => source.to_lowercase(),
+        SelectionCaseTransform::TitleCase => title_case_text(source),
+        SelectionCaseTransform::SentenceCase => sentence_case_text(source),
+    })
+}
+
+fn title_case_text(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut start_of_word = true;
+
+    for ch in input.chars() {
+        if ch.is_alphanumeric() {
+            if start_of_word {
+                output.extend(ch.to_uppercase());
+                start_of_word = false;
+            } else {
+                output.extend(ch.to_lowercase());
+            }
+            continue;
+        }
+
+        output.push(ch);
+        start_of_word = ch != '\'';
+    }
+
+    output
+}
+
+fn sentence_case_text(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut capitalize_next = true;
+
+    for ch in input.chars() {
+        if ch.is_alphabetic() {
+            if capitalize_next {
+                output.extend(ch.to_uppercase());
+                capitalize_next = false;
+            } else {
+                output.extend(ch.to_lowercase());
+            }
+            continue;
+        }
+
+        output.push(ch);
+        if matches!(ch, '.' | '!' | '?' | '\n') {
+            capitalize_next = true;
+        }
+    }
+
+    output
 }
 
 fn normalize_command_prefix(prefix: &str) -> &str {
@@ -550,6 +618,38 @@ pub fn parse_dictation_command(
         return Some((
             "delete_selection".to_string(),
             DictationCommandAction::DeleteSelection,
+        ));
+    }
+    if remainder.eq_ignore_ascii_case("uppercase selection")
+        || remainder.eq_ignore_ascii_case("make that uppercase")
+    {
+        return Some((
+            "uppercase_selection".to_string(),
+            DictationCommandAction::UppercaseSelection,
+        ));
+    }
+    if remainder.eq_ignore_ascii_case("lowercase selection")
+        || remainder.eq_ignore_ascii_case("make that lowercase")
+    {
+        return Some((
+            "lowercase_selection".to_string(),
+            DictationCommandAction::LowercaseSelection,
+        ));
+    }
+    if remainder.eq_ignore_ascii_case("title case selection")
+        || remainder.eq_ignore_ascii_case("make that title case")
+    {
+        return Some((
+            "title_case_selection".to_string(),
+            DictationCommandAction::TitleCaseSelection,
+        ));
+    }
+    if remainder.eq_ignore_ascii_case("sentence case selection")
+        || remainder.eq_ignore_ascii_case("make that sentence case")
+    {
+        return Some((
+            "sentence_case_selection".to_string(),
+            DictationCommandAction::SentenceCaseSelection,
         ));
     }
     if let Some(payload) = command_payload(&remainder, "rewrite shorter") {
@@ -735,6 +835,22 @@ pub fn delete_phrase_from_context(input: &str, target: &str) -> Result<(String, 
     Ok((normalized.trim().to_string(), applied))
 }
 
+pub fn uppercase_context_selection(input: &str) -> Result<String, String> {
+    apply_selection_case_transform(input, SelectionCaseTransform::Uppercase)
+}
+
+pub fn lowercase_context_selection(input: &str) -> Result<String, String> {
+    apply_selection_case_transform(input, SelectionCaseTransform::Lowercase)
+}
+
+pub fn title_case_context_selection(input: &str) -> Result<String, String> {
+    apply_selection_case_transform(input, SelectionCaseTransform::TitleCase)
+}
+
+pub fn sentence_case_context_selection(input: &str) -> Result<String, String> {
+    apply_selection_case_transform(input, SelectionCaseTransform::SentenceCase)
+}
+
 fn command_output(action: &DictationCommandAction, original_input: &str) -> String {
     match action {
         DictationCommandAction::InsertText(text) => text.clone(),
@@ -746,7 +862,11 @@ fn command_output(action: &DictationCommandAction, original_input: &str) -> Stri
         | DictationCommandAction::AppendToSelection(_)
         | DictationCommandAction::PrependToSelection(_)
         | DictationCommandAction::DeletePhrase(_)
-        | DictationCommandAction::DeleteSelection => original_input.to_string(),
+        | DictationCommandAction::DeleteSelection
+        | DictationCommandAction::UppercaseSelection
+        | DictationCommandAction::LowercaseSelection
+        | DictationCommandAction::TitleCaseSelection
+        | DictationCommandAction::SentenceCaseSelection => original_input.to_string(),
         DictationCommandAction::RewriteShorter(text)
         | DictationCommandAction::RewriteProfessional(text)
         | DictationCommandAction::Bulletize(text) => {
@@ -1130,6 +1250,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_dictation_command_supports_case_transform_commands() {
+        let (uppercase_command, uppercase_action) =
+            parse_dictation_command("command uppercase selection", DEFAULT_COMMAND_PREFIX)
+                .expect("parses uppercase selection");
+        assert_eq!(uppercase_command, "uppercase_selection");
+        assert_eq!(uppercase_action, DictationCommandAction::UppercaseSelection);
+
+        let (title_case_command, title_case_action) =
+            parse_dictation_command("command make that title case", DEFAULT_COMMAND_PREFIX)
+                .expect("parses title case synonym");
+        assert_eq!(title_case_command, "title_case_selection");
+        assert_eq!(
+            title_case_action,
+            DictationCommandAction::TitleCaseSelection
+        );
+
+        let (sentence_case_command, sentence_case_action) =
+            parse_dictation_command("command sentence case selection", DEFAULT_COMMAND_PREFIX)
+                .expect("parses sentence case selection");
+        assert_eq!(sentence_case_command, "sentence_case_selection");
+        assert_eq!(
+            sentence_case_action,
+            DictationCommandAction::SentenceCaseSelection
+        );
+    }
+
+    #[test]
     fn apply_contextual_phrase_replacement_is_case_insensitive() {
         let (output, applied) = apply_contextual_phrase_replacement(
             "Roadmap review for the roadmap team",
@@ -1161,5 +1308,22 @@ mod tests {
         .expect("delete phrase succeeds");
         assert_eq!(output, "Please remove, then share the update.");
         assert_eq!(applied, 2);
+    }
+
+    #[test]
+    fn selection_case_transforms_apply_deterministically() {
+        let uppercase = uppercase_context_selection("launch update").expect("uppercase succeeds");
+        assert_eq!(uppercase, "LAUNCH UPDATE");
+
+        let lowercase = lowercase_context_selection("Launch UPDATE").expect("lowercase succeeds");
+        assert_eq!(lowercase, "launch update");
+
+        let title_case = title_case_context_selection("follow-up for o'neil and ACME")
+            .expect("title case succeeds");
+        assert_eq!(title_case, "Follow-Up For O'neil And Acme");
+
+        let sentence_case = sentence_case_context_selection("SHIP IT. please REVIEW this!")
+            .expect("sentence case succeeds");
+        assert_eq!(sentence_case, "Ship it. Please review this!");
     }
 }

@@ -1160,7 +1160,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Label>Command mode</Label>
                         <p className="text-sm text-muted-foreground">
                           Enable corrections like &quot;command undo that&quot; and
-                          &quot;command replace roadmap with launch plan&quot;.
+                          &quot;command replace roadmap with launch plan&quot;, plus case fixes like
+                          &quot;command uppercase selection&quot;.
                         </p>
                       </div>
                       <Switch
@@ -1783,7 +1784,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Label>Command mode</Label>
                         <p className="text-sm text-muted-foreground">
                           Enable corrections like &quot;command undo that&quot; and
-                          &quot;command replace roadmap with launch plan&quot;.
+                          &quot;command replace roadmap with launch plan&quot;, plus case fixes like
+                          &quot;command uppercase selection&quot;.
                         </p>
                       </div>
                       <Switch
@@ -2086,7 +2088,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Label>Command mode</Label>
                         <p className="text-sm text-muted-foreground">
                           Enable corrections like &quot;command undo that&quot; and
-                          &quot;command replace roadmap with launch plan&quot;.
+                          &quot;command replace roadmap with launch plan&quot;, plus case fixes like
+                          &quot;command uppercase selection&quot;.
                         </p>
                       </div>
                       <Switch
@@ -2876,7 +2879,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Label>Command mode</Label>
                         <p className="text-sm text-muted-foreground">
                           Enable corrections like &quot;command undo that&quot; and
-                          &quot;command replace roadmap with launch plan&quot;.
+                          &quot;command replace roadmap with launch plan&quot;, plus case fixes like
+                          &quot;command uppercase selection&quot;.
                         </p>
                       </div>
                       <Switch
@@ -3572,7 +3576,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Label>Command mode</Label>
                         <p className="text-sm text-muted-foreground">
                           Enable corrections like &quot;command undo that&quot; and
-                          &quot;command replace roadmap with launch plan&quot;.
+                          &quot;command replace roadmap with launch plan&quot;, plus case fixes like
+                          &quot;command uppercase selection&quot;.
                         </p>
                       </div>
                       <Switch

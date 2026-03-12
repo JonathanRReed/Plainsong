@@ -8607,6 +8607,47 @@ async fn stop_dictation_session_for_session(
                     )?;
                     result.text.clear();
                 }
+                DictationCommandAction::UppercaseSelection => {
+                    let command_input = resolve_contextual_command_input(
+                        "",
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Uppercase Selection",
+                    )?;
+                    result.text =
+                        crate::dictation_parity::uppercase_context_selection(command_input.as_str())?;
+                }
+                DictationCommandAction::LowercaseSelection => {
+                    let command_input = resolve_contextual_command_input(
+                        "",
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Lowercase Selection",
+                    )?;
+                    result.text =
+                        crate::dictation_parity::lowercase_context_selection(command_input.as_str())?;
+                }
+                DictationCommandAction::TitleCaseSelection => {
+                    let command_input = resolve_contextual_command_input(
+                        "",
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Title Case Selection",
+                    )?;
+                    result.text =
+                        crate::dictation_parity::title_case_context_selection(command_input.as_str())?;
+                }
+                DictationCommandAction::SentenceCaseSelection => {
+                    let command_input = resolve_contextual_command_input(
+                        "",
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Sentence Case Selection",
+                    )?;
+                    result.text = crate::dictation_parity::sentence_case_context_selection(
+                        command_input.as_str(),
+                    )?;
+                }
             }
             command_applied = Some(command_key);
         }
