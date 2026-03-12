@@ -6925,6 +6925,9 @@ async fn start_dictation_session(
         tauri::async_runtime::spawn_blocking(get_frontmost_app_bundle_id)
             .await
             .unwrap_or(None);
+    #[cfg(target_os = "macos")]
+    let context_target_browser_url: Option<String> = None;
+    #[cfg(not(target_os = "macos"))]
     let context_target_browser_url =
         tauri::async_runtime::spawn_blocking(get_frontmost_browser_url)
             .await
@@ -10677,37 +10680,39 @@ JSON.stringify({
 }
 
 #[cfg(target_os = "macos")]
-fn capture_hotkey_target_context() -> (Option<String>, Option<String>, Option<String>) {
+fn capture_hotkey_target_context(
+    include_browser_url: bool,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let browser_url = if include_browser_url {
+        normalize_optional_trimmed(get_frontmost_browser_url())
+    } else {
+        None
+    };
+
     if let Some(frontmost) = workspace_frontmost_application() {
         let app_name = normalize_optional_trimmed(frontmost.name);
         let app_bundle_id = normalize_optional_trimmed(frontmost.bundle_id);
         let sanitized = sanitize_dictation_target(app_name, app_bundle_id);
         if sanitized.0.is_some() || sanitized.1.is_some() {
-            return (
-                sanitized.0,
-                sanitized.1,
-                normalize_optional_trimmed(get_frontmost_browser_url()),
-            );
+            return (sanitized.0, sanitized.1, browser_url);
         }
     }
 
     let sanitized = sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
-    (
-        sanitized.0,
-        sanitized.1,
-        normalize_optional_trimmed(get_frontmost_browser_url()),
-    )
+    (sanitized.0, sanitized.1, browser_url)
 }
 
 #[cfg(target_os = "macos")]
 fn capture_hotkey_target_application() -> (Option<String>, Option<String>) {
-    let (app_name, app_bundle_id, _) = capture_hotkey_target_context();
+    let (app_name, app_bundle_id, _) = capture_hotkey_target_context(false);
     (app_name, app_bundle_id)
 }
 
 #[cfg(target_os = "macos")]
 fn capture_pending_hotkey_target(state: &AppState) {
-    let (app_name, app_bundle_id, browser_url) = capture_hotkey_target_context();
+    // Keep hotkey target capture free of AppleScript/browser automation so
+    // dictation never triggers macOS permission UI before insertion completes.
+    let (app_name, app_bundle_id, browser_url) = capture_hotkey_target_context(false);
     let captured_at_ms = chrono::Utc::now().timestamp_millis();
     if let Some(target) = build_pending_dictation_target(
         app_name.clone(),
@@ -10799,7 +10804,7 @@ fn update_last_external_target(
 
 #[cfg(target_os = "macos")]
 fn note_frontmost_application(state: &AppState) {
-    let (app_name, app_bundle_id, browser_url) = capture_hotkey_target_context();
+    let (app_name, app_bundle_id, browser_url) = capture_hotkey_target_context(false);
     update_last_external_target(state, app_name, app_bundle_id, browser_url);
 }
 
@@ -10961,28 +10966,6 @@ fn get_frontmost_app_name() -> Option<String> {
     None
 }
 
-#[cfg(target_os = "macos")]
-fn get_frontmost_window_title() -> Option<String> {
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(
-            "tell application \"System Events\" to tell (first application process whose frontmost is true) to try\nget value of attribute \"AXTitle\" of front window\non error\nreturn \"\"\nend try",
-        )
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let title = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if title.is_empty() {
-        None
-    } else {
-        Some(title)
-    }
-}
-
 #[cfg(target_os = "windows")]
 fn get_frontmost_window_title() -> Option<String> {
     let script = r#"
@@ -11073,7 +11056,7 @@ fn meeting_consent_notice_text() -> &'static str {
 
 #[cfg(target_os = "macos")]
 fn resolve_recent_external_target_context(state: &AppState) -> Option<PendingDictationTarget> {
-    let (app_name, app_bundle_id, browser_url) = capture_hotkey_target_context();
+    let (app_name, app_bundle_id, browser_url) = capture_hotkey_target_context(true);
     build_pending_dictation_target(
         app_name,
         app_bundle_id,
@@ -19466,7 +19449,7 @@ fn dispatch_paste_from_clipboard(
 fn capture_selected_text_via_clipboard(target_app: Option<&str>) -> Result<Option<String>, String> {
     if !can_dispatch_hotkeys() {
         return Err(
-            "Selected text capture needs either macOS post-event access or Automation for System Events."
+            "Selected text capture needs macOS keyboard-event access or direct Accessibility insertion."
                 .to_string(),
         );
     }
@@ -19539,7 +19522,6 @@ fn capture_application_context_text(target_app: Option<&str>) -> Result<Option<S
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .or_else(get_frontmost_app_name);
-    let window_title = get_frontmost_window_title();
     let selected_text = capture_selected_text_via_clipboard(target_app)
         .ok()
         .flatten()
@@ -19548,9 +19530,6 @@ fn capture_application_context_text(target_app: Option<&str>) -> Result<Option<S
     let mut sections = Vec::new();
     if let Some(name) = app_name {
         sections.push(format!("Active app: {}", name));
-    }
-    if let Some(title) = window_title {
-        sections.push(format!("Window title: {}", title));
     }
     if let Some(selection) = selected_text {
         sections.push(format!("Selected text:\n{}", selection));
