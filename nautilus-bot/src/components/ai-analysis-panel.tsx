@@ -40,6 +40,12 @@ interface AiAnalysisPanelProps {
       templateId: string | null;
       citations: LlmCitation[];
     }) => void;
+    isVisible?: (payload: {
+      response: string;
+      query: string;
+      templateId: string | null;
+      citations: LlmCitation[];
+    }) => boolean;
   }>;
   actionItemActions?: Array<{
     label: string;
@@ -563,24 +569,33 @@ export function AiAnalysisPanel({
 
             {responseActions.length > 0 && (
               <div className="mt-4 flex flex-wrap gap-2 border-t pt-4">
-                {responseActions.map((action) => (
-                  <Button
-                    key={action.label}
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={() =>
-                      action.onAction({
-                        response: lastResult.response,
-                        query: lastQuery,
-                        templateId: lastTemplateId,
-                        citations: lastResult.citations,
-                      })
-                    }
-                  >
-                    {action.label}
-                  </Button>
-                ))}
+                {responseActions
+                  .filter((action) =>
+                    action.isVisible?.({
+                      response: lastResult.response,
+                      query: lastQuery,
+                      templateId: lastTemplateId,
+                      citations: lastResult.citations,
+                    }) ?? true
+                  )
+                  .map((action) => (
+                    <Button
+                      key={action.label}
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        action.onAction({
+                          response: lastResult.response,
+                          query: lastQuery,
+                          templateId: lastTemplateId,
+                          citations: lastResult.citations,
+                        })
+                      }
+                    >
+                      {action.label}
+                    </Button>
+                  ))}
               </div>
             )}
           </CardContent>
