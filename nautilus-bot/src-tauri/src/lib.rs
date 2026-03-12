@@ -7886,6 +7886,7 @@ async fn reprocess_dictation_text(
     } else {
         normalized_mode.clone()
     };
+    let formatting_hint = resolve_dictation_formatting_hint(app_target.as_deref(), None, None);
 
     let (output_text, used_ai, provider, model_id) = match effective_mode.as_str() {
         "messages" | "email" | "meeting_follow_up" => {
@@ -7925,7 +7926,7 @@ async fn reprocess_dictation_text(
             crate::text::format::smart_format_dictation_text_for_app(
                 sanitize_dictation_output(input, input).trim(),
                 &effective_mode,
-                app_target.as_deref(),
+                formatting_hint.as_deref(),
             )
             .trim()
             .to_string(),
@@ -7937,7 +7938,7 @@ async fn reprocess_dictation_text(
             crate::text::format::smart_format_dictation_text_for_app(
                 sanitize_dictation_output(input, input).trim(),
                 &effective_mode,
-                app_target.as_deref(),
+                formatting_hint.as_deref(),
             )
             .trim()
             .to_string(),
@@ -8711,12 +8712,17 @@ async fn stop_dictation_session_for_session(
         snippet_applied_count = applied;
     }
 
+    let formatting_hint = resolve_dictation_formatting_hint(
+        app_target.as_deref(),
+        resolved_activation_matcher.as_deref(),
+        dictation_options.context_app_name.as_deref(),
+    );
     if local_smart_formatting_enabled && command_applied.is_none() && !result.text.trim().is_empty()
     {
         result.text = crate::text::format::smart_format_dictation_text_for_app(
             &result.text,
             normalized_mode_preset,
-            app_target.as_deref(),
+            formatting_hint.as_deref(),
         );
     }
 
@@ -14223,6 +14229,27 @@ mod tests {
     }
 
     #[test]
+    fn resolve_dictation_formatting_hint_prefers_activation_matcher() {
+        assert_eq!(
+            resolve_dictation_formatting_hint(
+                Some("Google Chrome"),
+                Some("mail.google.com"),
+                Some("Google Chrome")
+            )
+            .as_deref(),
+            Some("mail.google.com")
+        );
+        assert_eq!(
+            resolve_dictation_formatting_hint(Some("Slack"), None, Some("Notes")).as_deref(),
+            Some("Slack")
+        );
+        assert_eq!(
+            resolve_dictation_formatting_hint(None, None, Some("Notion")).as_deref(),
+            Some("Notion")
+        );
+    }
+
+    #[test]
     fn extract_host_from_url_handles_common_variants() {
         assert_eq!(
             extract_host_from_url("https://docs.google.com/document/d/123"),
@@ -15322,6 +15349,29 @@ fn sync_dictation_overlay_runtime_metadata(
         state.dictation_route_preference = dictation_route_preference.map(str::to_string);
         state.dictation_resolved_hosting = dictation_resolved_hosting.map(str::to_string);
     }
+}
+
+fn resolve_dictation_formatting_hint(
+    app_target: Option<&str>,
+    activation_matcher: Option<&str>,
+    context_app_name: Option<&str>,
+) -> Option<String> {
+    activation_matcher
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            app_target
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            context_app_name
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
 }
 
 fn apply_runtime_dictation_custom_mode(
