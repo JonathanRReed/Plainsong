@@ -232,6 +232,44 @@ pub struct SearchHit {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RelationshipMemoryEvidence {
+    pub recording_id: String,
+    pub recording_title: String,
+    pub created_at: DateTime<Utc>,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonMemoryProfile {
+    pub id: String,
+    pub name: String,
+    pub recording_count: u64,
+    pub last_seen_at: DateTime<Utc>,
+    pub related_companies: Vec<String>,
+    pub recent_meetings: Vec<RelationshipMemoryEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanyMemoryProfile {
+    pub id: String,
+    pub name: String,
+    pub recording_count: u64,
+    pub last_seen_at: DateTime<Utc>,
+    pub related_people: Vec<String>,
+    pub recent_meetings: Vec<RelationshipMemoryEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelationshipMemory {
+    pub people: Vec<PersonMemoryProfile>,
+    pub companies: Vec<CompanyMemoryProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AsrBenchmarkEntry {
     pub id: String,
     pub provider_type: String,
