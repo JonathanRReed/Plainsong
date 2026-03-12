@@ -3904,6 +3904,18 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         </Label>
                         <p className="text-sm text-muted-foreground">How Memory searches your transcripts when you ask a question</p>
                       </div>
+
+                      <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 p-3">
+                        <div className="space-y-0.5">
+                          <p className="text-sm font-medium">Cross-meeting memory chat</p>
+                          <p className="text-xs text-muted-foreground">
+                            Open the Dashboard memory thread to ask follow-up questions across all meetings.
+                          </p>
+                        </div>
+                        <Button variant="secondary" size="sm" onClick={() => requestMainView("dashboard")}>
+                          Open Memory Workspace
+                        </Button>
+                      </div>
                       
                       <div className="space-y-2">
                         <Label>Search mode</Label>
