@@ -99,7 +99,7 @@ pub struct AsrProviderFactory;
 pub enum AsrProviderType {
     Whisper,
     Parakeet,
-    Canary,
+    WhisperCandle,
     DistilWhisper,
     MacosAppleSpeech,
     Moonshine,
@@ -115,7 +115,7 @@ impl AsrProviderType {
         vec![
             AsrProviderType::Whisper,
             AsrProviderType::Parakeet,
-            AsrProviderType::Canary,
+            AsrProviderType::WhisperCandle,
             AsrProviderType::DistilWhisper,
             AsrProviderType::MacosAppleSpeech,
             AsrProviderType::Moonshine,
@@ -131,8 +131,8 @@ impl AsrProviderType {
     pub fn display_name(&self) -> &'static str {
         match self {
             AsrProviderType::Whisper => "OpenAI Whisper",
-            AsrProviderType::Parakeet => "NVIDIA Parakeet TDT",
-            AsrProviderType::Canary => "NVIDIA Canary Qwen",
+            AsrProviderType::Parakeet => "NVIDIA Parakeet",
+            AsrProviderType::WhisperCandle => "Whisper Candle",
             AsrProviderType::DistilWhisper => "Distil Whisper",
             AsrProviderType::MacosAppleSpeech => "Apple Native Speech",
             AsrProviderType::Moonshine => "UsefulSensors Moonshine",
@@ -147,11 +147,11 @@ impl AsrProviderType {
     pub fn default_model_id(&self) -> &'static str {
         match self {
             AsrProviderType::Whisper => "base.en",
-            AsrProviderType::Parakeet => "parakeet-tdt-ctc-110m",
-            AsrProviderType::Canary => "canary-qwen-2.5b",
+            AsrProviderType::Parakeet => "parakeet-ctc-0.6b",
+            AsrProviderType::WhisperCandle => "whisper-large-v3-turbo",
             AsrProviderType::DistilWhisper => "distil-large-v3.5",
             AsrProviderType::MacosAppleSpeech => "macos_apple_speech",
-            AsrProviderType::Moonshine => "moonshine",
+            AsrProviderType::Moonshine => "moonshine-base",
             AsrProviderType::Voxtral => "voxtral-local",
             AsrProviderType::WindowsSdkDictation => "windows_sdk_dictation",
             AsrProviderType::ElevenLabsScribe => "scribe_v1",
@@ -204,13 +204,23 @@ impl AsrProviderType {
                     label: "large-v3 (best accuracy)".to_string(),
                 },
             ],
-            AsrProviderType::Parakeet => vec![ModelOption {
-                id: "parakeet-tdt-ctc-110m".to_string(),
-                label: "Parakeet TDT CTC 110M".to_string(),
-            }],
-            AsrProviderType::Canary => vec![ModelOption {
-                id: "canary-qwen-2.5b".to_string(),
-                label: "Canary Qwen 2.5B".to_string(),
+            AsrProviderType::Parakeet => vec![
+                ModelOption {
+                    id: "parakeet-ctc-0.6b".to_string(),
+                    label: "Parakeet CTC 0.6B (stable)".to_string(),
+                },
+                ModelOption {
+                    id: "parakeet-ctc-1.1b".to_string(),
+                    label: "Parakeet CTC 1.1B (experimental)".to_string(),
+                },
+                ModelOption {
+                    id: "parakeet-tdt-ctc-110m".to_string(),
+                    label: "Parakeet TDT CTC 110M legacy (experimental)".to_string(),
+                },
+            ],
+            AsrProviderType::WhisperCandle => vec![ModelOption {
+                id: "whisper-large-v3-turbo".to_string(),
+                label: "Whisper Large V3 Turbo via Candle (experimental)".to_string(),
             }],
             AsrProviderType::DistilWhisper => vec![ModelOption {
                 id: "distil-large-v3.5".to_string(),
@@ -220,10 +230,16 @@ impl AsrProviderType {
                 id: "macos_apple_speech".to_string(),
                 label: "Managed by macOS".to_string(),
             }],
-            AsrProviderType::Moonshine => vec![ModelOption {
-                id: "moonshine".to_string(),
-                label: "Moonshine".to_string(),
-            }],
+            AsrProviderType::Moonshine => vec![
+                ModelOption {
+                    id: "moonshine-tiny".to_string(),
+                    label: "Moonshine Tiny (stable, edge)".to_string(),
+                },
+                ModelOption {
+                    id: "moonshine-base".to_string(),
+                    label: "Moonshine Base (stable)".to_string(),
+                },
+            ],
             AsrProviderType::Voxtral => vec![
                 ModelOption {
                     id: "voxtral-local".to_string(),
@@ -281,15 +297,21 @@ impl AsrProviderFactory {
     ) -> Box<dyn AsrProvider> {
         match provider_type {
             AsrProviderType::Whisper => Box::new(whisper::WhisperProvider::new(selected_model_id)),
-            AsrProviderType::Parakeet => Box::new(parakeet::ParakeetProvider::new()),
-            AsrProviderType::Canary => Box::new(canary::CanaryProvider::new()),
+            AsrProviderType::Parakeet => {
+                Box::new(parakeet::ParakeetProvider::new(selected_model_id))
+            }
+            AsrProviderType::WhisperCandle => {
+                Box::new(canary::CanaryProvider::new(selected_model_id))
+            }
             AsrProviderType::DistilWhisper => Box::new(distil_whisper::DistilWhisperProvider::new(
                 selected_model_id,
             )),
             AsrProviderType::MacosAppleSpeech => {
                 Box::new(macos_apple_speech_provider::MacosAppleSpeechProvider::new())
             }
-            AsrProviderType::Moonshine => Box::new(moonshine::MoonshineProvider::new()),
+            AsrProviderType::Moonshine => {
+                Box::new(moonshine::MoonshineProvider::new(selected_model_id))
+            }
             AsrProviderType::Voxtral => Box::new(voxtral::VoxtralProvider::new(selected_model_id)),
             AsrProviderType::WindowsSdkDictation => {
                 Box::new(windows_sdk_dictation_provider::WindowsSdkDictationProvider::new())

@@ -728,15 +728,15 @@ export function AsrProviderManager({
   const providerSetupCommand = (providerType: AsrProviderType): string => {
     switch (providerType) {
       case "parakeet":
-        return "Use the Download button to fetch encoder.onnx + tokens.txt (no Python needed)";
-      case "canary":
-        return "Use the Download button to fetch the Whisper Large V3 Turbo model (no Python needed)";
+        return "Use the Download button to fetch the selected Parakeet model. CTC 0.6B is the stable default; larger and legacy variants are available on demand.";
+      case "whisper_candle":
+        return "Use the Download button to fetch Whisper Large V3 Turbo for the native Candle runtime. This path is experimental and best used for dictation.";
       case "distil_whisper":
         return "Use the Download button to fetch the Distil-Whisper Large v3.5 model (no Python needed)";
       case "macos_apple_speech":
         return "Grant Nautilus Speech Recognition access in macOS System Settings > Privacy & Security > Speech Recognition";
       case "moonshine":
-        return "Use the Download button to fetch the Moonshine ONNX model (no Python needed)";
+        return "Use the Download button to fetch the selected Moonshine bundle. Tiny is the smallest edge model; Base is the default stable option.";
       case "voxtral":
         return "Choose Voxtral local/cloud mode. Local mode requires Python (torch, transformers, librosa, soundfile) plus downloaded model assets. Cloud mode requires MISTRAL_API_KEY.";
       case "windows_sdk_dictation":
@@ -2074,10 +2074,10 @@ export function AsrProviderManager({
                   </p>
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">🏆 Canary (Enabled when runtime ready)</p>
+                  <p className="font-medium mb-1">🧪 Whisper Candle (Experimental)</p>
                   <p className="text-muted-foreground">
-                    Uses local model artifacts plus a Python runtime bridge; selectable when both
-                    download and runtime health checks pass.
+                    Uses Whisper Large V3 Turbo through the native Candle runtime. Best for
+                    Apple Silicon dictation experiments after the local bundle is downloaded.
                   </p>
                 </div>
               </div>

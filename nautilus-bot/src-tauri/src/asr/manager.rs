@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 // Parakeet: native ONNX inference — sherpa-onnx format (encoder.onnx + tokens.txt)
 const PARAKEET_ONNX_NAMES: [&str; 1] = ["encoder.onnx"];
 const PARAKEET_VOCAB_NAMES: [&str; 1] = ["tokens.txt"];
-// Canary: Whisper Large V3 Turbo via Candle (no Python)
+// Whisper Candle: Whisper Large V3 Turbo via Candle (no Python)
 const CANARY_REQUIRED_FILES: [&str; 4] = [
     "model.safetensors",
     "config.json",
@@ -93,10 +93,14 @@ impl AsrManager {
 
         match provider_type {
             AsrProviderType::Parakeet => match candidate {
-                "parakeet-tdt-0.6b-v3" | "parakeet-tdt-ctc-110m" => {
+                "parakeet-tdt-0.6b-v3" | "parakeet-ctc-0.6b" => {
+                    "parakeet-ctc-0.6b".to_string()
+                }
+                "parakeet-ctc-1.1b" => "parakeet-ctc-1.1b".to_string(),
+                "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => {
                     "parakeet-tdt-ctc-110m".to_string()
                 }
-                _ => "parakeet-tdt-ctc-110m".to_string(),
+                _ => "parakeet-ctc-0.6b".to_string(),
             },
             AsrProviderType::Voxtral => match candidate {
                 "voxtral-mini-4b" => "voxtral-local".to_string(),
@@ -113,6 +117,7 @@ impl AsrManager {
     ) -> Box<dyn AsrProvider> {
         match provider_type {
             AsrProviderType::Whisper
+            | AsrProviderType::Parakeet
             | AsrProviderType::DistilWhisper
             | AsrProviderType::Voxtral
             | AsrProviderType::ElevenLabsScribe
@@ -211,6 +216,47 @@ impl AsrManager {
     pub async fn clear_runtime_errors(&self) {
         self.last_runtime_errors.write().await.clear();
         self.invalidate_provider_info_cache().await;
+    }
+
+    pub fn supports_short_keep_warm(
+        &self,
+        provider_type: AsrProviderType,
+        model_id: &str,
+    ) -> bool {
+        let normalized = Self::normalize_model_id(provider_type, model_id);
+        match provider_type {
+            AsrProviderType::Whisper
+            | AsrProviderType::WhisperCandle
+            | AsrProviderType::DistilWhisper
+            | AsrProviderType::Moonshine => true,
+            AsrProviderType::Parakeet => normalized == "parakeet-tdt-ctc-110m",
+            _ => false,
+        }
+    }
+
+    pub fn cool_down_local_route(&self, provider_type: AsrProviderType, model_id: &str) {
+        let normalized = Self::normalize_model_id(provider_type, model_id);
+        match provider_type {
+            AsrProviderType::Whisper => super::whisper::clear_cached_model(&normalized),
+            AsrProviderType::WhisperCandle => {
+                super::canary::clear_cached_runtime(&self.models_dir.join("canary"));
+            }
+            AsrProviderType::DistilWhisper => {
+                super::distil_whisper::clear_cached_runtime();
+            }
+            AsrProviderType::Moonshine => {
+                let model_dir = if normalized == "moonshine-tiny" {
+                    self.models_dir.join("moonshine_tiny")
+                } else {
+                    self.models_dir.join("moonshine")
+                };
+                super::moonshine::clear_cached_runtime(&model_dir);
+            }
+            AsrProviderType::Parakeet if normalized == "parakeet-tdt-ctc-110m" => {
+                super::parakeet::clear_cached_session();
+            }
+            _ => {}
+        }
     }
 
     pub async fn invalidate_provider_info_cache(&self) {
@@ -946,39 +992,84 @@ fn runtime_diagnostics_for_provider(
             }
         }
         AsrProviderType::Parakeet => {
-            let model_dir = models_root.join("parakeet");
-            let has_onnx = PARAKEET_ONNX_NAMES
-                .iter()
-                .any(|f| is_valid_onnx_artifact(&model_dir.join(f)));
-            let has_vocab = PARAKEET_VOCAB_NAMES
-                .iter()
-                .any(|f| is_valid_token_list_artifact(&model_dir.join(f), 128));
-            let model_ready = has_onnx && has_vocab;
-            let mut missing_files = Vec::new();
-            if !has_onnx {
-                missing_files.push("encoder.onnx (valid ONNX export)".to_string());
-            }
-            if !has_vocab {
-                missing_files.push("tokens.txt (valid token list)".to_string());
-            }
-            if !model_ready {
+            let normalized_model = AsrManager::normalize_model_id(provider_type, selected_model_id);
+            if normalized_model == "parakeet-tdt-ctc-110m" {
+                let model_dir = models_root.join("parakeet");
+                let has_onnx = PARAKEET_ONNX_NAMES
+                    .iter()
+                    .any(|f| is_valid_onnx_artifact(&model_dir.join(f)));
+                let has_vocab = PARAKEET_VOCAB_NAMES
+                    .iter()
+                    .any(|f| is_valid_token_list_artifact(&model_dir.join(f), 128));
+                let model_ready = has_onnx && has_vocab;
+                let mut missing_files = Vec::new();
+                if !has_onnx {
+                    missing_files.push("encoder.onnx (valid ONNX export)".to_string());
+                }
+                if !has_vocab {
+                    missing_files.push("tokens.txt (valid token list)".to_string());
+                }
+                if !model_ready {
+                    return RuntimeDiagnosticsInternal {
+                        runtime_status: RuntimeStatus::MissingModel,
+                        runtime_message: Some(
+                            "Parakeet legacy model not downloaded. Download encoder.onnx + tokens.txt from Settings -> ASR Models."
+                                .to_string(),
+                        ),
+                        runtime_details: RuntimeDetails {
+                            model_path: Some(model_dir.to_string_lossy().to_string()),
+                            python_path: None,
+                            missing_files,
+                            setup_action: Some(
+                                "Download Parakeet legacy artifacts (encoder.onnx + tokens.txt) in Settings -> ASR Models.".to_string(),
+                            ),
+                        },
+                    };
+                }
                 return RuntimeDiagnosticsInternal {
-                    runtime_status: RuntimeStatus::MissingModel,
+                    runtime_status: if provider_available {
+                        RuntimeStatus::Ready
+                    } else {
+                        RuntimeStatus::Error
+                    },
                     runtime_message: Some(
-                        "Parakeet model not downloaded. Download encoder.onnx + tokens.txt \
-                         from Settings -> ASR Models."
-                            .to_string(),
+                        last_error
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "Parakeet legacy ONNX runtime ready.".to_string()),
                     ),
                     runtime_details: RuntimeDetails {
                         model_path: Some(model_dir.to_string_lossy().to_string()),
                         python_path: None,
-                        missing_files,
+                        missing_files: Vec::new(),
+                        setup_action: None,
+                    },
+                };
+            }
+
+            let model_dir = models_root.join(normalized_model.replace('-', "_"));
+            let manifest = model_dir.join("manifest.json");
+            let detected_python = super::python_runtime::find_python_for_provider("parakeet_ctc")
+                .or_else(super::python_runtime::managed_python_path);
+            if !manifest.exists() {
+                return RuntimeDiagnosticsInternal {
+                    runtime_status: RuntimeStatus::MissingModel,
+                    runtime_message: Some(
+                        format!(
+                            "Parakeet model '{}' is not downloaded yet.",
+                            normalized_model
+                        ),
+                    ),
+                    runtime_details: RuntimeDetails {
+                        model_path: Some(model_dir.to_string_lossy().to_string()),
+                        python_path: detected_python,
+                        missing_files: vec!["manifest.json".to_string()],
                         setup_action: Some(
-                            "Download Parakeet artifacts (encoder.onnx + tokens.txt) in Settings -> ASR Models.".to_string(),
+                            "Download the selected Parakeet bundle in Settings -> ASR Models.".to_string(),
                         ),
                     },
                 };
             }
+
             RuntimeDiagnosticsInternal {
                 runtime_status: if provider_available {
                     RuntimeStatus::Ready
@@ -986,19 +1077,19 @@ fn runtime_diagnostics_for_provider(
                     RuntimeStatus::Error
                 },
                 runtime_message: Some(
-                    last_error
-                        .map(ToString::to_string)
-                        .unwrap_or_else(|| "Parakeet ONNX runtime ready.".to_string()),
+                    last_error.map(ToString::to_string).unwrap_or_else(|| {
+                        format!("Parakeet runtime ready for {}.", normalized_model)
+                    }),
                 ),
                 runtime_details: RuntimeDetails {
                     model_path: Some(model_dir.to_string_lossy().to_string()),
-                    python_path: None,
+                    python_path: detected_python,
                     missing_files: Vec::new(),
                     setup_action: None,
                 },
             }
         }
-        AsrProviderType::Canary => {
+        AsrProviderType::WhisperCandle => {
             let model_dir = models_root.join("canary");
             let model_ready = CANARY_REQUIRED_FILES
                 .iter()
@@ -1013,10 +1104,10 @@ fn runtime_diagnostics_for_provider(
                 ),
                 MissingModelCopy {
                     message:
-                        "Canary model not downloaded. Download Whisper Large V3 Turbo safetensors first.",
-                    setup_action: "Download Canary model assets in Settings -> ASR Models.",
+                        "Whisper Candle model not downloaded. Download Whisper Large V3 Turbo safetensors first.",
+                    setup_action: "Download Whisper Candle model assets in Settings -> ASR Models.",
                 },
-                "Canary (Whisper Large V3 Turbo) native Candle inference ready.",
+                "Whisper Candle native local runtime ready.",
                 last_error,
             )
         }
@@ -1096,15 +1187,21 @@ fn runtime_diagnostics_for_provider(
             }
         }
         AsrProviderType::Moonshine => {
-            let model_dir = models_root.join("moonshine");
+            let normalized_model = AsrManager::normalize_model_id(provider_type, selected_model_id);
+            let model_dir = if normalized_model == "moonshine-tiny" {
+                models_root.join("moonshine_tiny")
+            } else {
+                models_root.join("moonshine")
+            };
             let model_ready = is_valid_onnx_artifact(&model_dir.join("encoder_model.onnx"))
                 && is_valid_onnx_artifact(&model_dir.join("decoder_model_merged.onnx"))
                 && is_valid_json_artifact(&model_dir.join("tokenizer.json"), 1024);
+            let missing_files = missing_or_invalid_moonshine_files(model_dir.as_path());
             runtime_native_model(
                 provider_available,
                 model_dir,
                 model_ready,
-                &missing_or_invalid_moonshine_files(models_root.join("moonshine").as_path()),
+                &missing_files,
                 MissingModelCopy {
                     message:
                         "Moonshine ONNX model not downloaded. Download encoder_model.onnx + decoder_model_merged.onnx first.",

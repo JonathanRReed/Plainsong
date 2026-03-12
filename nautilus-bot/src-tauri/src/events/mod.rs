@@ -7,6 +7,7 @@ pub struct DictationStateChangedEvent {
     pub started_at_ms: Option<i64>,
     pub message: Option<String>,
     pub preview: Option<String>,
+    pub partial_text: Option<String>,
     pub session_id: Option<u64>,
     pub stop_reason: Option<String>,
     pub outcome: Option<String>,
@@ -19,6 +20,9 @@ pub struct DictationStateChangedEvent {
     pub activation_matcher: Option<String>,
     pub dictation_provider: Option<String>,
     pub dictation_model_id: Option<String>,
+    pub requested_route: Option<String>,
+    pub resolved_route: Option<String>,
+    pub provider_model_label: Option<String>,
     pub dictation_route_preference: Option<String>,
     pub dictation_resolved_hosting: Option<String>,
 }
@@ -78,5 +82,7 @@ pub struct DictationTextReadyEvent {
     pub context_source: Option<String>,
     pub context_chars: Option<usize>,
     pub route_preference: Option<String>,
+    pub resolved_route: Option<String>,
     pub resolved_hosting: Option<String>,
+    pub provider_model_label: Option<String>,
 }

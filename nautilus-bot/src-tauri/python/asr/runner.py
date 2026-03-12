@@ -16,6 +16,10 @@ _VOXTRAL_RUNTIME = {
     "device": None,
     "dtype": None,
 }
+_PARAKEET_RUNTIME = {
+    "model_spec": None,
+    "pipe": None,
+}
 
 
 def emit(payload):
@@ -33,6 +37,14 @@ def model_spec_for(provider: str, model_dir: Path) -> str:
         if (model_dir / "config.json").exists():
             return str(model_dir)
         return "mistralai/Voxtral-Mini-4B-Realtime-2602"
+    if provider == "parakeet_ctc":
+        manifest = model_dir / "manifest.json"
+        if manifest.exists():
+            payload = json.loads(manifest.read_text())
+            model_id = str(payload.get("model_id", "")).strip()
+            if model_id:
+                return model_id
+        return "nvidia/parakeet-ctc-0.6b"
     raise ValueError(f"Unsupported provider: {provider}")
 
 
@@ -175,14 +187,21 @@ def run_probe(provider: str):
         import transformers  # noqa: F401
         import soundfile  # noqa: F401
         import librosa  # noqa: F401
+    if provider == "parakeet_ctc":
+        import torch  # noqa: F401
+        import transformers  # noqa: F401
+        import soundfile  # noqa: F401
+        import librosa  # noqa: F401
     if provider == "voxtral_local":
         from transformers import AutoProcessor, VoxtralRealtimeForConditionalGeneration  # noqa: F401
         from mistral_common.tokens.tokenizers.audio import Audio  # noqa: F401
         _require_transformers("5.2.0")
+    if provider == "parakeet_ctc":
+        from transformers import pipeline  # noqa: F401
     return {"ok": True}
 
 
-def run_download(provider: str, model_dir: Path):
+def run_download(provider: str, model_dir: Path, model_id: str | None = None):
     from huggingface_hub import snapshot_download
 
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -198,6 +217,23 @@ def run_download(provider: str, model_dir: Path):
             "tekken.json",
             "*.bin",
         ]
+    elif provider == "parakeet_ctc":
+        manifest = model_dir / "manifest.json"
+        repo_id = str(model_id or "nvidia/parakeet-ctc-0.6b")
+        if not repo_id.startswith("nvidia/"):
+            repo_id = f"nvidia/{repo_id}"
+        if manifest.exists() and not model_id:
+            payload = json.loads(manifest.read_text())
+            repo_id = str(payload.get("repo_id") or payload.get("model_id") or repo_id)
+        allow_patterns = [
+            "*.json",
+            "*.safetensors",
+            "*.model",
+            "*.txt",
+            "tokenizer*",
+            "preprocessor_config.json",
+            "config.json",
+        ]
     else:
         raise ValueError(f"Unsupported provider for download: {provider}")
 
@@ -208,7 +244,57 @@ def run_download(provider: str, model_dir: Path):
         allow_patterns=allow_patterns,
     )
 
+    if provider == "parakeet_ctc":
+        manifest = model_dir / "manifest.json"
+        if not manifest.exists():
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "provider": provider,
+                        "repo_id": repo_id,
+                        "model_id": repo_id,
+                    },
+                    ensure_ascii=True,
+                    indent=2,
+                )
+            )
+
     return {"ok": True}
+
+
+def _load_parakeet_pipeline(model_spec: str):
+    import torch
+    from transformers import pipeline
+
+    cached_spec = _PARAKEET_RUNTIME["model_spec"]
+    cached_pipe = _PARAKEET_RUNTIME["pipe"]
+    if cached_spec == model_spec and cached_pipe is not None:
+        return cached_pipe
+
+    device = 0 if torch.cuda.is_available() else -1
+    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    pipe = pipeline(
+        "automatic-speech-recognition",
+        model=model_spec,
+        dtype=dtype,
+        device=device,
+    )
+    _PARAKEET_RUNTIME["model_spec"] = model_spec
+    _PARAKEET_RUNTIME["pipe"] = pipe
+    return pipe
+
+
+def run_transcribe_parakeet(model_spec: str, audio_path: Path):
+    pipe = _load_parakeet_pipeline(model_spec)
+    output = pipe(str(audio_path))
+    text = _extract_text(output)
+    if not text:
+        raise RuntimeError("Parakeet local returned an empty transcription")
+    return {
+        "text": text,
+        "language": "en",
+        "confidence": 0.9,
+    }
 
 
 def _extract_text(payload):
@@ -318,6 +404,8 @@ def run_transcribe(provider: str, model_dir: Path, audio_path: Path):
     model_spec = model_spec_for(provider, model_dir)
     if provider == "voxtral_local":
         result = run_transcribe_voxtral(model_spec, audio_path)
+    elif provider == "parakeet_ctc":
+        result = run_transcribe_parakeet(model_spec, audio_path)
     else:
         raise ValueError(f"Unsupported provider for transcription: {provider}")
 
@@ -344,6 +432,7 @@ def run_serve(provider: str):
         action = str(request.get("action", "")).strip()
         model_dir_value = request.get("model_dir")
         audio_path_value = request.get("audio_path")
+        model_id_value = request.get("model_id")
 
         try:
             if action == "probe":
@@ -355,7 +444,7 @@ def run_serve(provider: str):
             model_dir = Path(str(model_dir_value)).expanduser().resolve()
 
             if action == "download":
-                emit_line(run_download(provider, model_dir))
+                emit_line(run_download(provider, model_dir, str(model_id_value) if model_id_value else None))
                 continue
 
             if action == "transcribe":
@@ -400,7 +489,7 @@ def main():
         model_dir = Path(args.model_dir).expanduser().resolve()
 
         if action == "download":
-            emit(run_download(provider, model_dir))
+            emit(run_download(provider, model_dir, args.model_id))
             return
 
         if action == "transcribe":

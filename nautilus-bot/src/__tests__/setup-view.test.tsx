@@ -30,9 +30,9 @@ const setupStatusMock = vi.hoisted(() => ({
   },
   meetingRoute: {
     providerType: "parakeet",
-    modelId: "parakeet-tdt-ctc-110m",
+    modelId: "parakeet-ctc-0.6b",
     provider: null,
-    summary: "Parakeet · CTC 110M",
+    summary: "Parakeet · CTC 0.6B",
     ready: false,
     reason: "Meetings need a meeting-grade ASR route.",
   },
@@ -59,14 +59,14 @@ const setupStatusMock = vi.hoisted(() => ({
         license: "NVIDIA",
         sourceUrl: "https://example.com/parakeet",
       },
-      selectedModelId: "parakeet-tdt-ctc-110m",
-      modelOptions: [{ id: "parakeet-tdt-ctc-110m", label: "CTC 110M" }],
+      selectedModelId: "parakeet-ctc-0.6b",
+      modelOptions: [{ id: "parakeet-ctc-0.6b", label: "CTC 0.6B" }],
       downloadStatus: "NotDownloaded",
       runtimeStatus: "missing_model",
       runtimeMessage: "Parakeet model not downloaded.",
       runtimeDetails: {
-        missingFiles: ["encoder.onnx", "tokens.txt"],
-        setupAction: "Download Parakeet artifacts.",
+        missingFiles: ["manifest.json"],
+        setupAction: "Download the selected Parakeet model bundle.",
       },
     },
     {
@@ -101,6 +101,13 @@ const tauriMocks = vi.hoisted(() => ({
   repairCursorInsertPermissions: vi.fn(async () => {}),
   repairLocalModelCache: vi.fn(async () => ({ repairedCount: 0, removedPaths: [], notes: [] })),
   requestDictationPermissions: vi.fn(async () => {}),
+  smokeTestCursorInsert: vi.fn(async () => ({
+    text: "Nautilus insert test",
+    targetApp: "Notes",
+    pasted: true,
+    copied: false,
+    error: null,
+  })),
   verifyDictationSetup: vi.fn(async () => ({
     ok: true,
     title: "Dictation verification",
@@ -208,6 +215,19 @@ describe("SetupView", () => {
       expect(tauriMocks.verifyDictationSetup).toHaveBeenCalled();
       expect(
         screen.getByText(/Dictation verification: Dictation is ready/i)
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("runs the insert-permission smoke test from setup", async () => {
+    render(<SetupView />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Test insert permissions" }));
+
+    await waitFor(() => {
+      expect(tauriMocks.smokeTestCursorInsert).toHaveBeenCalledWith("Nautilus insert test");
+      expect(
+        screen.getByText(/Insert permissions test: Sent a test insert to Notes/i)
       ).toBeInTheDocument();
     });
   });

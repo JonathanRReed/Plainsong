@@ -5,7 +5,7 @@ export type DictationRoutePreference = "local" | "cloud";
 const DOWNLOADABLE_PROVIDER_SET = new Set<AsrProviderType>([
   "whisper",
   "parakeet",
-  "canary",
+  "whisper_candle",
   "distil_whisper",
   "moonshine",
   "voxtral",
@@ -14,7 +14,6 @@ const DOWNLOADABLE_PROVIDER_SET = new Set<AsrProviderType>([
 const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
   "distil_whisper",
   "parakeet",
-  "canary",
   "voxtral",
   "groq",
   "openai_cloud",
@@ -26,6 +25,7 @@ const DICTATION_ONLY_PROVIDER_SET = new Set<AsrProviderType>([
   "windows_sdk_dictation",
   "moonshine",
   "whisper",
+  "whisper_candle",
 ]);
 
 const CLOUD_PROVIDER_SET = new Set<AsrProviderType>([
@@ -79,9 +79,7 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
     case "distil_whisper":
       return normalizedModelId.startsWith("distil");
     case "parakeet":
-      return normalizedModelId.startsWith("parakeet");
-    case "canary":
-      return normalizedModelId.startsWith("canary");
+      return normalizedModelId.startsWith("parakeet-ctc");
     case "voxtral":
       return normalizedModelId.startsWith("voxtral");
     case "groq":

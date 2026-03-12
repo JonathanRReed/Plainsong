@@ -81,6 +81,7 @@ pub struct AppState {
     dictation_session_tracker: Arc<Mutex<DictationSessionTracker>>,
     dictation_runtime_state: Arc<Mutex<DictationSessionState>>,
     dictation_start_options: Arc<Mutex<models::DictationStartOptions>>,
+    dictation_keep_warm_state: Arc<Mutex<DictationKeepWarmState>>,
     pending_dictation_target: Arc<StdMutex<Option<PendingDictationTarget>>>,
     last_external_target: Arc<StdMutex<Option<PendingDictationTarget>>>,
     dictation_overlay_state: Arc<StdMutex<DictationOverlayState>>,
@@ -121,6 +122,7 @@ const DICTATION_IDLE_RESET_SUCCESS_MS: u64 = 650;
 const DICTATION_IDLE_RESET_STARTUP_ERROR_MS: u64 = 900;
 const DICTATION_IDLE_RESET_SHORT_ERROR_MS: u64 = 900;
 const DICTATION_IDLE_RESET_ERROR_MS: u64 = 1300;
+const DICTATION_KEEP_WARM_SHORT_SECS: u64 = 75;
 #[cfg(target_os = "macos")]
 const HOTKEY_TARGET_MAX_AGE_MS: i64 = 5_000;
 #[cfg(target_os = "macos")]
@@ -199,6 +201,18 @@ struct DictationSessionTracker {
     startup_latency_ms: Option<u64>,
     insertion_mode_at_start: Option<DictationInsertionMode>,
     copy_to_clipboard_at_start: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DictationKeepWarmRoute {
+    provider: asr::AsrProviderType,
+    model_id: String,
+}
+
+#[derive(Debug, Default)]
+struct DictationKeepWarmState {
+    generation: u64,
+    active_route: Option<DictationKeepWarmRoute>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -295,6 +309,7 @@ struct DictationOverlayState {
     started_at_ms: Option<i64>,
     message: Option<String>,
     preview: Option<String>,
+    partial_text: Option<String>,
     session_id: Option<u64>,
     stop_reason: Option<String>,
     outcome: Option<String>,
@@ -307,6 +322,9 @@ struct DictationOverlayState {
     activation_matcher: Option<String>,
     dictation_provider: Option<String>,
     dictation_model_id: Option<String>,
+    requested_route: Option<String>,
+    resolved_route: Option<String>,
+    provider_model_label: Option<String>,
     dictation_route_preference: Option<String>,
     dictation_resolved_hosting: Option<String>,
 }
@@ -318,6 +336,7 @@ impl Default for DictationOverlayState {
             started_at_ms: None,
             message: None,
             preview: None,
+            partial_text: None,
             session_id: None,
             stop_reason: None,
             outcome: None,
@@ -330,6 +349,9 @@ impl Default for DictationOverlayState {
             activation_matcher: None,
             dictation_provider: None,
             dictation_model_id: None,
+            requested_route: None,
+            resolved_route: None,
+            provider_model_label: None,
             dictation_route_preference: None,
             dictation_resolved_hosting: None,
         }
@@ -1943,6 +1965,18 @@ async fn start_recording(
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
         meeting_template_id: options.template.clone(),
+        meeting_capture_mode: Some(
+            options
+                .meeting_capture_mode
+                .clone()
+                .unwrap_or_else(|| {
+                    if options.system_audio {
+                        "me_and_them".to_string()
+                    } else {
+                        "mic_only".to_string()
+                    }
+                }),
+        ),
         notes_updated_at: options
             .meeting_notes
             .as_ref()
@@ -5203,6 +5237,14 @@ fn dictation_history_details_from_audit(
             .get("model_id")
             .and_then(|value| value.as_str())
             .map(str::to_string),
+        route_preference: details
+            .get("route_preference")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        resolved_hosting: details
+            .get("resolved_hosting")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
         startup_latency_ms: details
             .get("startup_latency_ms")
             .and_then(|value| value.as_u64()),
@@ -5259,6 +5301,8 @@ fn dictation_history_details_is_empty(details: &models::DictationHistoryDetails)
         && details.requested_provider.is_none()
         && details.actual_provider.is_none()
         && details.model_id.is_none()
+        && details.route_preference.is_none()
+        && details.resolved_hosting.is_none()
         && details.startup_latency_ms.is_none()
         && details.transcription_latency_ms.is_none()
         && details.insert_latency_ms.is_none()
@@ -6499,6 +6543,16 @@ async fn start_dictation_session(
     options.requested_model_id = Some(dictation_model_id.clone());
     options.route_preference =
         Some(dictation_route_preference_to_settings_value(resolved_route_preference).to_string());
+    options.resolved_route = Some(format!(
+        "{}/{}",
+        asr_provider_to_settings_value(dictation_provider),
+        dictation_model_id
+    ));
+    options.provider_model_label = Some(format!(
+        "{} · {}",
+        dictation_provider.display_name(),
+        dictation_model_id
+    ));
     options.resolved_hosting =
         Some(hosting_environment_to_settings_value(resolved_hosting).to_string());
 
@@ -6752,6 +6806,7 @@ async fn start_dictation_session(
     } else {
         None
     };
+    let keep_warm_resolved_hosting = options.resolved_hosting.clone();
 
     {
         let mut active_options = state.dictation_start_options.lock().await;
@@ -6836,6 +6891,14 @@ async fn start_dictation_session(
         let mut runtime_state = state.dictation_runtime_state.lock().await;
         *runtime_state = DictationSessionState::Recording;
     }
+
+    suspend_matching_dictation_keep_warm_route(
+        state,
+        dictation_provider,
+        &dictation_model_id,
+        keep_warm_resolved_hosting.as_deref(),
+    )
+    .await;
 
     if state
         .dictation_release_pending
@@ -7005,6 +7068,9 @@ async fn start_inline_dictation_stream(
                 if active_dictation_session_id(state.inner()).await != Some(session_id) {
                     break;
                 }
+                if !dictation_live_preview_enabled(state.inner()).await {
+                    continue;
+                }
                 let runtime_state = *state.dictation_runtime_state.lock().await;
                 if runtime_state != DictationSessionState::Recording {
                     continue;
@@ -7096,6 +7162,9 @@ async fn start_apple_live_dictation_session(
             let state = emit_app.state::<AppState>();
             if active_dictation_session_id(state.inner()).await != Some(session_id) {
                 break;
+            }
+            if !dictation_live_preview_enabled(state.inner()).await {
+                continue;
             }
             let runtime_state = *state.dictation_runtime_state.lock().await;
             if runtime_state != DictationSessionState::Recording {
@@ -7415,6 +7484,30 @@ async fn stop_dictation_session_for_session(
         None,
     );
     state.dictation_stream_stop.store(false, Ordering::SeqCst);
+    let dictation_options = state.dictation_start_options.lock().await.clone();
+    let settings_snapshot = state.settings_manager.lock().await.settings().clone();
+    let resolved_hosting = dictation_options.resolved_hosting.clone();
+    let dictation_provider = dictation_options
+        .requested_provider
+        .as_deref()
+        .and_then(asr_provider_from_settings_value)
+        .unwrap_or_else(|| {
+            resolve_transcription_provider_and_model(
+                &settings_snapshot.transcription,
+                TranscriptionScope::Dictation,
+            )
+            .0
+        });
+    let dictation_model_id = dictation_options
+        .requested_model_id
+        .clone()
+        .unwrap_or_else(|| {
+            resolve_transcription_provider_and_model(
+                &settings_snapshot.transcription,
+                TranscriptionScope::Dictation,
+            )
+            .1
+        });
 
     let audio_data = {
         let mut audio = state.audio_capture.lock().await;
@@ -7497,6 +7590,13 @@ async fn stop_dictation_session_for_session(
                         *runtime = None;
                     }
                 }
+                apply_dictation_keep_warm_policy(
+                    state,
+                    dictation_provider,
+                    dictation_model_id.as_str(),
+                    resolved_hosting.as_deref(),
+                )
+                .await;
                 return Err(message);
             }
         }
@@ -7516,8 +7616,6 @@ async fn stop_dictation_session_for_session(
         None,
     );
 
-    let dictation_options = state.dictation_start_options.lock().await.clone();
-    let settings_snapshot = state.settings_manager.lock().await.settings().clone();
     let startup_latency_ms = {
         let tracker = state.dictation_session_tracker.lock().await;
         if tracker.active_session_id == Some(session_id) {
@@ -7527,28 +7625,6 @@ async fn stop_dictation_session_for_session(
         }
     };
     let route_preference = dictation_options.route_preference.clone();
-    let resolved_hosting = dictation_options.resolved_hosting.clone();
-    let dictation_provider = dictation_options
-        .requested_provider
-        .as_deref()
-        .and_then(asr_provider_from_settings_value)
-        .unwrap_or_else(|| {
-            resolve_transcription_provider_and_model(
-                &settings_snapshot.transcription,
-                TranscriptionScope::Dictation,
-            )
-            .0
-        });
-    let dictation_model_id = dictation_options
-        .requested_model_id
-        .clone()
-        .unwrap_or_else(|| {
-            resolve_transcription_provider_and_model(
-                &settings_snapshot.transcription,
-                TranscriptionScope::Dictation,
-            )
-            .1
-        });
 
     let raw_has_audio = wav_has_non_silent_audio(&audio_data, 0.01);
     let raw_duration_seconds = compute_wav_duration_seconds_from_bytes(&audio_data) as f64;
@@ -7668,6 +7744,13 @@ async fn stop_dictation_session_for_session(
                     );
                 }
             }
+            apply_dictation_keep_warm_policy(
+                state,
+                dictation_provider,
+                dictation_model_id.as_str(),
+                resolved_hosting.as_deref(),
+            )
+            .await;
             return Err(message);
         }
     };
@@ -7830,6 +7913,13 @@ async fn stop_dictation_session_for_session(
                 );
             }
         }
+        apply_dictation_keep_warm_policy(
+            state,
+            result.actual_provider,
+            result.model_id.as_str(),
+            resolved_hosting.as_deref(),
+        )
+        .await;
         return Err(message);
     }
 
@@ -7997,6 +8087,16 @@ async fn stop_dictation_session_for_session(
         "none".to_string()
     };
     if !result.text.trim().is_empty() {
+        emit_dictation_state(
+            app,
+            "delivering",
+            None,
+            Some("Delivering result"),
+            None,
+            Some(session_id),
+            Some(stop_reason),
+            None,
+        );
         if !matches!(configured_mode, DictationInsertionMode::ClipboardOnly) {
             prepare_dictation_overlay_for_external_insert(
                 app,
@@ -8148,7 +8248,9 @@ async fn stop_dictation_session_for_session(
             .as_ref()
             .map(|text| text.chars().count()),
         route_preference.as_deref(),
+        dictation_options.resolved_route.as_deref(),
         resolved_hosting.as_deref(),
+        dictation_options.provider_model_label.as_deref(),
     );
 
     if let Err(error) = app.emit("dictation-text-ready", &payload) {
@@ -8272,6 +8374,7 @@ async fn stop_dictation_session_for_session(
             action_items: None,
             meeting_notes: None,
             meeting_template_id: None,
+            meeting_capture_mode: None,
             notes_updated_at: None,
             consent_prompt_shown: false,
             consent_notice_mode: None,
@@ -8400,6 +8503,8 @@ async fn stop_dictation_session_for_session(
         "dictation_model_id": dictation_model_id,
         "recording_id": persisted_recording_id,
         "dictation_mode_preset": settings_snapshot.transcription.dictation_mode_preset,
+        "route_preference": dictation_options.route_preference,
+        "resolved_hosting": dictation_options.resolved_hosting,
         "activation_matcher": resolved_activation_matcher,
         "context_source": dictation_options.context_source,
         "context_app_name": dictation_options.context_app_name,
@@ -8426,6 +8531,13 @@ async fn stop_dictation_session_for_session(
     drop(db);
 
     let _ = enforce_dictation_retention_policy(state, Some(app), "dictation-completed").await;
+    apply_dictation_keep_warm_policy(
+        state,
+        result.actual_provider,
+        result.model_id.as_str(),
+        resolved_hosting.as_deref(),
+    )
+    .await;
 
     set_dictation_hotkey_flags(state, false, false).await;
     Ok(result.text)
@@ -8437,6 +8549,7 @@ async fn force_stop_dictation_session(
     source: &str,
 ) -> Result<String, String> {
     let session_id = active_dictation_session_id(state).await;
+    let dictation_options = state.dictation_start_options.lock().await.clone();
     state.dictation_stream_stop.store(false, Ordering::SeqCst);
     {
         let mut audio = state.audio_capture.lock().await;
@@ -8493,6 +8606,22 @@ async fn force_stop_dictation_session(
     });
     if let Err(e) = db.log_audit_event("dictation_force_stopped", Some(details), "warn") {
         tracing::warn!("Failed to log audit event: {}", e);
+    }
+
+    if let (Some(provider), Some(model_id)) = (
+        dictation_options
+            .requested_provider
+            .as_deref()
+            .and_then(asr_provider_from_settings_value),
+        dictation_options.requested_model_id.as_ref(),
+    ) {
+        apply_dictation_keep_warm_policy(
+            state,
+            provider,
+            model_id.as_str(),
+            dictation_options.resolved_hosting.as_deref(),
+        )
+        .await;
     }
 
     Ok("Dictation force stopped".to_string())
@@ -8644,6 +8773,15 @@ async fn active_dictation_session_id(state: &AppState) -> Option<u64> {
         .active_session_id
 }
 
+async fn dictation_live_preview_enabled(state: &AppState) -> bool {
+    state
+        .dictation_start_options
+        .lock()
+        .await
+        .live_preview_enabled
+        .unwrap_or(true)
+}
+
 async fn set_dictation_hotkey_flags(state: &AppState, active: bool, release_pending: bool) {
     {
         let mut hotkey_active = state.dictation_hotkey_active.lock().await;
@@ -8652,6 +8790,126 @@ async fn set_dictation_hotkey_flags(state: &AppState, active: bool, release_pend
     state
         .dictation_release_pending
         .store(release_pending, Ordering::SeqCst);
+}
+
+fn normalize_dictation_keep_warm_value(value: &str) -> &'static str {
+    match value.trim() {
+        "off" => "off",
+        "long" => "long",
+        _ => "short",
+    }
+}
+
+async fn suspend_matching_dictation_keep_warm_route(
+    state: &AppState,
+    provider: asr::AsrProviderType,
+    model_id: &str,
+    resolved_hosting: Option<&str>,
+) {
+    if resolved_hosting != Some("local")
+        || !state.asr_manager.supports_short_keep_warm(provider, model_id)
+    {
+        return;
+    }
+
+    let keep_warm_value = {
+        let settings_manager = state.settings_manager.lock().await;
+        normalize_dictation_keep_warm_value(
+            &settings_manager.settings().transcription.dictation_keep_warm,
+        )
+    };
+    if keep_warm_value != "short" {
+        return;
+    }
+
+    let current_route = DictationKeepWarmRoute {
+        provider,
+        model_id: model_id.to_string(),
+    };
+    let mut keep_warm_state = state.dictation_keep_warm_state.lock().await;
+    if keep_warm_state.active_route.as_ref() == Some(&current_route) {
+        keep_warm_state.generation += 1;
+    }
+}
+
+async fn replace_dictation_keep_warm_route(
+    state: &AppState,
+    next_route: Option<DictationKeepWarmRoute>,
+) -> (u64, Option<DictationKeepWarmRoute>) {
+    let mut keep_warm_state = state.dictation_keep_warm_state.lock().await;
+    keep_warm_state.generation += 1;
+    let generation = keep_warm_state.generation;
+    let previous_route = keep_warm_state.active_route.take();
+    keep_warm_state.active_route = next_route;
+    (generation, previous_route)
+}
+
+async fn apply_dictation_keep_warm_policy(
+    state: &AppState,
+    provider: asr::AsrProviderType,
+    model_id: &str,
+    resolved_hosting: Option<&str>,
+) {
+    let keep_warm_value = {
+        let settings_manager = state.settings_manager.lock().await;
+        normalize_dictation_keep_warm_value(
+            &settings_manager.settings().transcription.dictation_keep_warm,
+        )
+    };
+
+    let eligible = keep_warm_value == "short"
+        && resolved_hosting == Some("local")
+        && state.asr_manager.supports_short_keep_warm(provider, model_id);
+
+    let current_route = DictationKeepWarmRoute {
+        provider,
+        model_id: model_id.to_string(),
+    };
+
+    if !eligible {
+        let (_, previous_route) = replace_dictation_keep_warm_route(state, None).await;
+        if previous_route.as_ref() != Some(&current_route) {
+            if let Some(previous_route) = previous_route {
+                state
+                    .asr_manager
+                    .cool_down_local_route(previous_route.provider, &previous_route.model_id);
+            }
+        }
+        state.asr_manager.cool_down_local_route(provider, model_id);
+        return;
+    }
+
+    let (generation, previous_route) =
+        replace_dictation_keep_warm_route(state, Some(current_route.clone())).await;
+    if previous_route.as_ref() != Some(&current_route) {
+        if let Some(previous_route) = previous_route {
+            state
+                .asr_manager
+                .cool_down_local_route(previous_route.provider, &previous_route.model_id);
+        }
+    }
+
+    let keep_warm_state = Arc::clone(&state.dictation_keep_warm_state);
+    let asr_manager = Arc::clone(&state.asr_manager);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(DICTATION_KEEP_WARM_SHORT_SECS)).await;
+
+        let should_cool = {
+            let mut keep_warm_state = keep_warm_state.lock().await;
+            if keep_warm_state.generation == generation
+                && keep_warm_state.active_route.as_ref() == Some(&current_route)
+            {
+                keep_warm_state.active_route = None;
+                true
+            } else {
+                false
+            }
+        };
+
+        if should_cool {
+            asr_manager.cool_down_local_route(current_route.provider, &current_route.model_id);
+        }
+    });
 }
 
 fn schedule_dictation_idle_reset(
@@ -8714,6 +8972,9 @@ fn emit_dictation_state(
     let mut activation_matcher = None;
     let mut dictation_provider = None;
     let mut dictation_model_id = None;
+    let mut requested_route = None;
+    let mut resolved_route = None;
+    let mut provider_model_label = None;
     let mut dictation_route_preference = None;
     let mut dictation_resolved_hosting = None;
 
@@ -8722,6 +8983,7 @@ fn emit_dictation_state(
         state.started_at_ms = started_at_ms;
         state.message = message.map(str::to_string);
         state.preview = preview.map(str::to_string);
+        state.partial_text = preview.map(str::to_string);
         state.session_id = session_id;
         state.stop_reason = stop_reason.map(str::to_string);
         state.outcome = outcome.map(str::to_string);
@@ -8735,6 +8997,9 @@ fn emit_dictation_state(
             state.activation_matcher = None;
             state.dictation_provider = None;
             state.dictation_model_id = None;
+            state.requested_route = None;
+            state.resolved_route = None;
+            state.provider_model_label = None;
             state.dictation_route_preference = None;
             state.dictation_resolved_hosting = None;
         }
@@ -8747,6 +9012,9 @@ fn emit_dictation_state(
         activation_matcher = state.activation_matcher.clone();
         dictation_provider = state.dictation_provider.clone();
         dictation_model_id = state.dictation_model_id.clone();
+        requested_route = state.requested_route.clone();
+        resolved_route = state.resolved_route.clone();
+        provider_model_label = state.provider_model_label.clone();
         dictation_route_preference = state.dictation_route_preference.clone();
         dictation_resolved_hosting = state.dictation_resolved_hosting.clone();
     }
@@ -8756,6 +9024,7 @@ fn emit_dictation_state(
         started_at_ms,
         message: message.map(str::to_string),
         preview: preview.map(str::to_string),
+        partial_text: preview.map(str::to_string),
         session_id,
         stop_reason: stop_reason.map(str::to_string),
         outcome: outcome.map(str::to_string),
@@ -8768,6 +9037,9 @@ fn emit_dictation_state(
         activation_matcher,
         dictation_provider,
         dictation_model_id,
+        requested_route,
+        resolved_route,
+        provider_model_label,
         dictation_route_preference,
         dictation_resolved_hosting,
     };
@@ -9212,6 +9484,13 @@ async fn handle_primary_tray_action(app: AppHandle, action: String) {
                 template: None,
                 meeting_notes: None,
                 consent_prompt_shown: true,
+                meeting_capture_mode: Some(
+                    if system_audio {
+                        "me_and_them".to_string()
+                    } else {
+                        "mic_only".to_string()
+                    },
+                ),
             };
             if let Err(error) = start_recording(app.clone(), state, options).await {
                 tracing::warn!("Failed to start meeting from tray: {}", error);
@@ -10708,7 +10987,9 @@ fn build_dictation_text_ready_payload(
     context_source: Option<&str>,
     context_chars: Option<usize>,
     route_preference: Option<&str>,
+    resolved_route: Option<&str>,
     resolved_hosting: Option<&str>,
+    provider_model_label: Option<&str>,
 ) -> DictationTextReadyEvent {
     let is_fallback = result.requested_provider != result.actual_provider
         || result
@@ -10746,7 +11027,9 @@ fn build_dictation_text_ready_payload(
         context_source: context_source.map(str::to_string),
         context_chars,
         route_preference: route_preference.map(str::to_string),
+        resolved_route: resolved_route.map(str::to_string),
         resolved_hosting: resolved_hosting.map(str::to_string),
+        provider_model_label: provider_model_label.map(str::to_string),
     }
 }
 
@@ -11879,6 +12162,7 @@ pub fn run() {
             dictation_session_tracker: Arc::new(Mutex::new(DictationSessionTracker::default())),
             dictation_runtime_state: Arc::new(Mutex::new(DictationSessionState::Idle)),
             dictation_start_options: Arc::new(Mutex::new(initial_dictation_options)),
+            dictation_keep_warm_state: Arc::new(Mutex::new(DictationKeepWarmState::default())),
             pending_dictation_target: Arc::new(StdMutex::new(None)),
             last_external_target: Arc::new(StdMutex::new(None)),
             dictation_overlay_state: Arc::new(StdMutex::new(DictationOverlayState::default())),
@@ -13571,11 +13855,11 @@ mod tests {
         let mut transcription = settings::TranscriptionSettings::default();
         transcription.use_shared_asr_selection = true;
         transcription.default_provider = "moonshine".to_string();
-        transcription.selected_model_id = "moonshine".to_string();
+        transcription.selected_model_id = "moonshine-base".to_string();
         transcription.dictation_provider = "moonshine".to_string();
-        transcription.dictation_model_id = "moonshine".to_string();
+        transcription.dictation_model_id = "moonshine-base".to_string();
         transcription.meeting_provider = "moonshine".to_string();
-        transcription.meeting_model_id = "moonshine".to_string();
+        transcription.meeting_model_id = "moonshine-base".to_string();
 
         normalize_contextual_asr_settings(&mut transcription);
 
@@ -13629,7 +13913,7 @@ mod tests {
             ),
             provider_info_for_test(
                 asr::AsrProviderType::Parakeet,
-                "parakeet-tdt-ctc-110m",
+                "parakeet-ctc-0.6b",
                 asr::manager::RuntimeStatus::Ready,
                 true,
             ),
@@ -13652,7 +13936,7 @@ mod tests {
         .expect("meeting candidate should be selected");
 
         assert_eq!(selection.0, asr::AsrProviderType::Parakeet);
-        assert_eq!(selection.1, "parakeet-tdt-ctc-110m");
+        assert_eq!(selection.1, "parakeet-ctc-0.6b");
     }
 
     #[test]
@@ -13669,7 +13953,7 @@ mod tests {
             confidence: 0.9,
             processing_time_ms: 10,
             model_name: "Parakeet".to_string(),
-            model_id: "parakeet-tdt-ctc-110m".to_string(),
+            model_id: "parakeet-ctc-0.6b".to_string(),
             requested_provider: asr::AsrProviderType::Parakeet,
             actual_provider: asr::AsrProviderType::Parakeet,
             requested_engine: None,
@@ -13689,7 +13973,7 @@ mod tests {
             confidence: 0.85,
             processing_time_ms: 10,
             model_name: "Parakeet".to_string(),
-            model_id: "parakeet-tdt-ctc-110m".to_string(),
+            model_id: "parakeet-ctc-0.6b".to_string(),
             requested_provider: asr::AsrProviderType::Parakeet,
             actual_provider: asr::AsrProviderType::Parakeet,
             requested_engine: None,
@@ -13701,7 +13985,7 @@ mod tests {
         let transcript = build_source_aware_models_transcript(
             "recording-1",
             asr::AsrProviderType::Parakeet,
-            "parakeet-tdt-ctc-110m",
+            "parakeet-ctc-0.6b",
             vec![("me", me), ("them", them)],
         );
 
@@ -13845,8 +14129,12 @@ fn dictation_options_from_settings(settings: &settings::Settings) -> models::Dic
         )
         .to_string(),
         route_preference: Some(settings.transcription.dictation_route_preference.clone()),
+        language_override: settings.transcription.language.clone(),
+        live_preview_enabled: Some(settings.transcription.dictation_live_preview_enabled),
         requested_provider: None,
         requested_model_id: None,
+        resolved_route: None,
+        provider_model_label: None,
         resolved_hosting: None,
         captured_context_text: None,
         context_app_name: None,
@@ -13882,6 +14170,7 @@ fn normalize_dictation_custom_mode(
         .route_preference
         .clone()
         .map(|preference| normalize_dictation_route_preference(&preference).to_string());
+    mode.language_override = normalize_optional_trimmed(mode.language_override.clone());
     mode.insertion_mode = normalize_dictation_insertion_mode(&mode.insertion_mode).to_string();
     mode.context_source = normalize_dictation_context_source(&mode.context_source).to_string();
     mode.dictation_provider =
@@ -14021,6 +14310,19 @@ fn sync_dictation_overlay_runtime_metadata(
         state.activation_matcher = activation_matcher.map(str::to_string);
         state.dictation_provider = dictation_provider.map(str::to_string);
         state.dictation_model_id = dictation_model_id.map(str::to_string);
+        state.requested_route = dictation_route_preference.map(str::to_string);
+        state.resolved_route = match (dictation_provider, dictation_model_id) {
+            (Some(provider), Some(model_id)) => Some(format!("{} / {}", provider, model_id)),
+            (Some(provider), None) => Some(provider.to_string()),
+            (None, Some(model_id)) => Some(model_id.to_string()),
+            _ => None,
+        };
+        state.provider_model_label = match (dictation_provider, dictation_model_id) {
+            (Some(provider), Some(model_id)) => Some(format!("{} · {}", provider, model_id)),
+            (Some(provider), None) => Some(provider.to_string()),
+            (None, Some(model_id)) => Some(model_id.to_string()),
+            _ => None,
+        };
         state.dictation_route_preference = dictation_route_preference.map(str::to_string);
         state.dictation_resolved_hosting = dictation_resolved_hosting.map(str::to_string);
     }
@@ -14033,6 +14335,12 @@ fn apply_runtime_dictation_custom_mode(
     settings.transcription.dictation_profile = mode.profile.clone();
     if let Some(route_preference) = mode.route_preference.as_ref() {
         settings.transcription.dictation_route_preference = route_preference.clone();
+    }
+    if let Some(language_override) = mode.language_override.as_ref() {
+        settings.transcription.language = Some(language_override.clone());
+    }
+    if let Some(live_preview_enabled) = mode.live_preview_enabled {
+        settings.transcription.dictation_live_preview_enabled = live_preview_enabled;
     }
     settings.transcription.dictation_insertion_mode = mode.insertion_mode.clone();
     settings.transcription.dictation_context_source = mode.context_source.clone();
@@ -15308,7 +15616,7 @@ fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static st
     match provider {
         asr::AsrProviderType::Whisper => "whisper",
         asr::AsrProviderType::Parakeet => "parakeet",
-        asr::AsrProviderType::Canary => "canary",
+        asr::AsrProviderType::WhisperCandle => "whisper_candle",
         asr::AsrProviderType::DistilWhisper => "distil_whisper",
         asr::AsrProviderType::MacosAppleSpeech => "macos_apple_speech",
         asr::AsrProviderType::Moonshine => "moonshine",
@@ -15324,7 +15632,7 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
     match value {
         "whisper" => Some(asr::AsrProviderType::Whisper),
         "parakeet" => Some(asr::AsrProviderType::Parakeet),
-        "canary" => Some(asr::AsrProviderType::Canary),
+        "whisper_candle" | "canary" => Some(asr::AsrProviderType::WhisperCandle),
         "distil_whisper" => Some(asr::AsrProviderType::DistilWhisper),
         "macos_apple_speech" => Some(asr::AsrProviderType::MacosAppleSpeech),
         "moonshine" => Some(asr::AsrProviderType::Moonshine),
@@ -15438,7 +15746,6 @@ fn meeting_provider_is_supported(provider: asr::AsrProviderType) -> bool {
     matches!(
         provider,
         asr::AsrProviderType::Parakeet
-            | asr::AsrProviderType::Canary
             | asr::AsrProviderType::DistilWhisper
             | asr::AsrProviderType::Voxtral
             | asr::AsrProviderType::ElevenLabsScribe
@@ -15485,7 +15792,7 @@ fn ensure_meeting_route_supported(
     }
 
     Err(format!(
-        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Distil Whisper, Parakeet, Canary, Voxtral, ElevenLabs, OpenAI, or Groq in Settings -> ASR / Providers.",
+        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Distil Whisper, Parakeet, Voxtral, ElevenLabs, OpenAI, or Groq in Settings -> ASR / Providers.",
         provider.display_name(),
         model_id
     ))
@@ -15506,7 +15813,6 @@ fn preferred_meeting_provider_candidates(
     let local_defaults = [
         Some(asr::AsrProviderType::DistilWhisper),
         Some(asr::AsrProviderType::Parakeet),
-        Some(asr::AsrProviderType::Canary),
         Some(asr::AsrProviderType::Voxtral),
     ];
     let cloud_defaults = [
@@ -15569,7 +15875,7 @@ fn preferred_dictation_provider_candidates(
         asr::AsrProviderType::Whisper,
         asr::AsrProviderType::Moonshine,
         asr::AsrProviderType::Parakeet,
-        asr::AsrProviderType::Canary,
+        asr::AsrProviderType::WhisperCandle,
         asr::AsrProviderType::Voxtral,
     ];
     let cloud_defaults = [
@@ -16050,13 +16356,23 @@ fn normalize_asr_model_id(provider_type: asr::AsrProviderType, model_id: &str) -
 
     match provider_type {
         asr::AsrProviderType::Parakeet => match candidate {
-            "parakeet-tdt-0.6b-v3" | "parakeet-tdt-ctc-110m" => "parakeet-tdt-ctc-110m".to_string(),
-            _ => "parakeet-tdt-ctc-110m".to_string(),
+            "parakeet-tdt-0.6b-v3" | "parakeet-ctc-0.6b" => "parakeet-ctc-0.6b".to_string(),
+            "parakeet-ctc-1.1b" => "parakeet-ctc-1.1b".to_string(),
+            "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => {
+                "parakeet-tdt-ctc-110m".to_string()
+            }
+            _ => "parakeet-ctc-0.6b".to_string(),
         },
+        asr::AsrProviderType::WhisperCandle => "whisper-large-v3-turbo".to_string(),
         asr::AsrProviderType::Voxtral => match candidate {
             "voxtral-mini-4b" => "voxtral-local".to_string(),
             "voxtral-local" | "voxtral-cloud" => candidate.to_string(),
             _ => "voxtral-local".to_string(),
+        },
+        asr::AsrProviderType::Moonshine => match candidate {
+            "moonshine" | "moonshine-base" => "moonshine-base".to_string(),
+            "moonshine-tiny" => "moonshine-tiny".to_string(),
+            _ => "moonshine-base".to_string(),
         },
         asr::AsrProviderType::MacosAppleSpeech => "macos_apple_speech".to_string(),
         asr::AsrProviderType::WindowsSdkDictation => "windows_sdk_dictation".to_string(),
@@ -16474,13 +16790,19 @@ fn repair_local_model_cache_at(models_root: &Path) -> LocalModelRepairReport {
         remove_download_temp_files(&parakeet_dir, &mut removed_paths, &mut notes);
     }
 
-    let moonshine_dir = models_root.join("moonshine");
-    if moonshine_dir.exists() {
+    for (moonshine_dir, label) in [
+        (models_root.join("moonshine"), "Moonshine Base"),
+        (models_root.join("moonshine_tiny"), "Moonshine Tiny"),
+    ] {
+        if !moonshine_dir.exists() {
+            continue;
+        }
+
         let encoder_model = moonshine_dir.join("encoder_model.onnx");
         if encoder_model.exists() && !is_valid_onnx_artifact(&encoder_model) {
             remove_artifact(
                 &encoder_model,
-                "invalid Moonshine encoder_model.onnx",
+                &format!("invalid {} encoder_model.onnx", label),
                 &mut removed_paths,
                 &mut notes,
             );
@@ -16489,7 +16811,7 @@ fn repair_local_model_cache_at(models_root: &Path) -> LocalModelRepairReport {
         if decoder_model.exists() && !is_valid_onnx_artifact(&decoder_model) {
             remove_artifact(
                 &decoder_model,
-                "invalid Moonshine decoder_model_merged.onnx",
+                &format!("invalid {} decoder_model_merged.onnx", label),
                 &mut removed_paths,
                 &mut notes,
             );
@@ -16498,7 +16820,7 @@ fn repair_local_model_cache_at(models_root: &Path) -> LocalModelRepairReport {
         if tokenizer.exists() && !is_valid_json_artifact(&tokenizer, 1024) {
             remove_artifact(
                 &tokenizer,
-                "invalid Moonshine tokenizer.json",
+                &format!("invalid {} tokenizer.json", label),
                 &mut removed_paths,
                 &mut notes,
             );
@@ -16507,7 +16829,7 @@ fn repair_local_model_cache_at(models_root: &Path) -> LocalModelRepairReport {
         if legacy_encode.exists() && !is_valid_onnx_artifact(&legacy_encode) {
             remove_artifact(
                 &legacy_encode,
-                "invalid legacy Moonshine encode.onnx",
+                &format!("invalid legacy {} encode.onnx", label),
                 &mut removed_paths,
                 &mut notes,
             );
@@ -16516,7 +16838,7 @@ fn repair_local_model_cache_at(models_root: &Path) -> LocalModelRepairReport {
         if legacy_uncached.exists() && !is_valid_onnx_artifact(&legacy_uncached) {
             remove_artifact(
                 &legacy_uncached,
-                "invalid legacy Moonshine uncached_decode.onnx",
+                &format!("invalid legacy {} uncached_decode.onnx", label),
                 &mut removed_paths,
                 &mut notes,
             );
@@ -16524,29 +16846,29 @@ fn repair_local_model_cache_at(models_root: &Path) -> LocalModelRepairReport {
         remove_download_temp_files(&moonshine_dir, &mut removed_paths, &mut notes);
     }
 
-    let canary_dir = models_root.join("canary");
-    if canary_dir.exists() {
-        let model = canary_dir.join("model.safetensors");
+    let whisper_candle_dir = models_root.join("canary");
+    if whisper_candle_dir.exists() {
+        let model = whisper_candle_dir.join("model.safetensors");
         if model.exists() && !is_valid_binary_artifact(&model, 1024 * 1024) {
             remove_artifact(
                 &model,
-                "invalid Canary model.safetensors",
+                "invalid Whisper Candle model.safetensors",
                 &mut removed_paths,
                 &mut notes,
             );
         }
         for json_name in ["config.json", "tokenizer.json", "preprocessor_config.json"] {
-            let path = canary_dir.join(json_name);
+            let path = whisper_candle_dir.join(json_name);
             if path.exists() && !is_valid_json_artifact(&path, 128) {
                 remove_artifact(
                     &path,
-                    "invalid Canary JSON artifact",
+                    "invalid Whisper Candle JSON artifact",
                     &mut removed_paths,
                     &mut notes,
                 );
             }
         }
-        remove_download_temp_files(&canary_dir, &mut removed_paths, &mut notes);
+        remove_download_temp_files(&whisper_candle_dir, &mut removed_paths, &mut notes);
     }
 
     let distil_dir = models_root.join("distil_whisper");

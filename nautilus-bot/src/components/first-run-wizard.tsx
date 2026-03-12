@@ -49,12 +49,12 @@ const DICTATION_ONLY_PROVIDER_SET = new Set<AsrProviderType>([
   "windows_sdk_dictation",
   "moonshine",
   "whisper",
+  "whisper_candle",
 ]);
 
 const MEETING_PROVIDER_PRIORITY: AsrProviderType[] = [
   "distil_whisper",
   "parakeet",
-  "canary",
   "voxtral",
   "groq",
   "openai_cloud",

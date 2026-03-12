@@ -9,20 +9,16 @@ use std::path::{Path, PathBuf};
 use std::{cell::RefCell, thread_local};
 
 // ---------------------------------------------------------------------------
-// UsefulSensors Moonshine Base — native ONNX inference, no Python required.
+// UsefulSensors Moonshine — native ONNX inference, no Python required.
 // Uses the official merged ONNX export: encoder_model.onnx + decoder_model_merged.onnx.
 // Input: raw 16 kHz f32 PCM (no mel preprocessing — Moonshine operates on
 // raw waveform directly). Tokenizer: SentencePiece BPE (32 768 tokens).
 // ---------------------------------------------------------------------------
-const MOONSHINE_MODEL_ID: &str = "moonshine-base";
+const MOONSHINE_BASE_MODEL_ID: &str = "moonshine-base";
+const MOONSHINE_TINY_MODEL_ID: &str = "moonshine-tiny";
 const MOONSHINE_HF_REPO: &str = "UsefulSensors/moonshine";
 
 /// ONNX files and tokenizer shipped in the UsefulSensors/moonshine HF repo.
-const MOONSHINE_ENCODER_FILE: &str = "onnx/merged/base/float/encoder_model.onnx";
-const MOONSHINE_DECODER_FILE: &str = "onnx/merged/base/float/decoder_model_merged.onnx";
-const MOONSHINE_TOKENIZER_FILE: &str = "onnx/merged/base/float/tokenizer.json";
-
-/// Local filenames stored in the model dir.
 const MOONSHINE_LOCAL_ENCODER: &str = "encoder_model.onnx";
 const MOONSHINE_LOCAL_DECODER: &str = "decoder_model_merged.onnx";
 const MOONSHINE_LOCAL_TOKENIZER: &str = "tokenizer.json";
@@ -41,18 +37,82 @@ const MOONSHINE_NUM_KEY_VALUE_HEADS: usize = 8;
 #[cfg(feature = "asr-parakeet")]
 const MOONSHINE_HEAD_DIM: usize = 52;
 
+#[cfg(feature = "asr-parakeet")]
+struct MoonshineRuntime {
+    model_dir_key: String,
+    encoder: ort::session::Session,
+    decoder: ort::session::Session,
+    tokenizer: tokenizers::Tokenizer,
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn load_runtime(model_dir: &Path) -> Result<MoonshineRuntime> {
+    use ort::session::Session;
+    use tokenizers::Tokenizer;
+
+    let encoder = Session::builder()
+        .context("Failed to create Moonshine encoder builder")?
+        .commit_from_file(model_dir.join(MOONSHINE_LOCAL_ENCODER))
+        .context("Failed to load Moonshine encoder ONNX")?;
+
+    let decoder = Session::builder()
+        .context("Failed to create Moonshine decoder builder")?
+        .commit_from_file(model_dir.join(MOONSHINE_LOCAL_DECODER))
+        .context("Failed to load Moonshine decoder ONNX")?;
+
+    let tokenizer = Tokenizer::from_file(model_dir.join(MOONSHINE_LOCAL_TOKENIZER))
+        .map_err(|e| anyhow::anyhow!("Failed to load Moonshine tokenizer: {}", e))?;
+
+    Ok(MoonshineRuntime {
+        model_dir_key: model_dir.to_string_lossy().to_string(),
+        encoder,
+        decoder,
+        tokenizer,
+    })
+}
+
+#[cfg(feature = "asr-parakeet")]
+thread_local! {
+    static RUNTIME_CACHE: RefCell<Option<MoonshineRuntime>> = const { RefCell::new(None) };
+}
+
+#[cfg(feature = "asr-parakeet")]
+pub(crate) fn clear_cached_runtime(model_dir: &Path) {
+    let model_dir_key = model_dir.to_string_lossy().to_string();
+    RUNTIME_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache
+            .as_ref()
+            .map(|runtime| runtime.model_dir_key == model_dir_key)
+            .unwrap_or(false)
+        {
+            *cache = None;
+            tracing::info!("Cleared cached Moonshine runtime for {}", model_dir.display());
+        }
+    });
+}
+
+#[cfg(not(feature = "asr-parakeet"))]
+pub(crate) fn clear_cached_runtime(_model_dir: &Path) {}
+
 pub struct MoonshineProvider {
     model_dir: PathBuf,
+    model_id: String,
 }
 
 impl MoonshineProvider {
-    pub fn new() -> Self {
-        let model_dir = dirs::data_dir()
+    pub fn new(selected_model_id: Option<&str>) -> Self {
+        let model_id = normalize_moonshine_model_id(selected_model_id.unwrap_or(MOONSHINE_BASE_MODEL_ID));
+        let root_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Nautilus")
-            .join("models")
-            .join("moonshine");
-        Self { model_dir }
+            .join("models");
+        let model_dir = if model_id == MOONSHINE_BASE_MODEL_ID {
+            root_dir.join("moonshine")
+        } else {
+            root_dir.join("moonshine_tiny")
+        };
+        Self { model_dir, model_id }
     }
 
     fn has_required_files(&self) -> bool {
@@ -109,7 +169,30 @@ fn is_valid_tokenizer_file(path: &Path) -> bool {
 
 impl Default for MoonshineProvider {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
+    }
+}
+
+fn normalize_moonshine_model_id(model_id: &str) -> String {
+    match model_id.trim() {
+        "moonshine" | MOONSHINE_BASE_MODEL_ID => MOONSHINE_BASE_MODEL_ID.to_string(),
+        MOONSHINE_TINY_MODEL_ID => MOONSHINE_TINY_MODEL_ID.to_string(),
+        _ => MOONSHINE_BASE_MODEL_ID.to_string(),
+    }
+}
+
+fn moonshine_repo_paths(model_id: &str) -> (&'static str, &'static str, &'static str) {
+    match model_id {
+        MOONSHINE_TINY_MODEL_ID => (
+            "onnx/merged/tiny/float/encoder_model.onnx",
+            "onnx/merged/tiny/float/decoder_model_merged.onnx",
+            "onnx/merged/tiny/float/tokenizer.json",
+        ),
+        _ => (
+            "onnx/merged/base/float/encoder_model.onnx",
+            "onnx/merged/base/float/decoder_model_merged.onnx",
+            "onnx/merged/base/float/tokenizer.json",
+        ),
     }
 }
 
@@ -119,42 +202,7 @@ impl Default for MoonshineProvider {
 #[cfg(feature = "asr-parakeet")]
 fn run_moonshine_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
     use ndarray::{Array, IxDyn};
-    use ort::session::Session;
     use ort::value::Tensor;
-    use tokenizers::Tokenizer;
-
-    struct MoonshineRuntime {
-        model_dir_key: String,
-        encoder: Session,
-        decoder: Session,
-        tokenizer: Tokenizer,
-    }
-
-    fn load_runtime(model_dir: &Path) -> Result<MoonshineRuntime> {
-        let encoder = Session::builder()
-            .context("Failed to create Moonshine encoder builder")?
-            .commit_from_file(model_dir.join(MOONSHINE_LOCAL_ENCODER))
-            .context("Failed to load Moonshine encoder ONNX")?;
-
-        let decoder = Session::builder()
-            .context("Failed to create Moonshine decoder builder")?
-            .commit_from_file(model_dir.join(MOONSHINE_LOCAL_DECODER))
-            .context("Failed to load Moonshine decoder ONNX")?;
-
-        let tokenizer = Tokenizer::from_file(model_dir.join(MOONSHINE_LOCAL_TOKENIZER))
-            .map_err(|e| anyhow::anyhow!("Failed to load Moonshine tokenizer: {}", e))?;
-
-        Ok(MoonshineRuntime {
-            model_dir_key: model_dir.to_string_lossy().to_string(),
-            encoder,
-            decoder,
-            tokenizer,
-        })
-    }
-
-    thread_local! {
-        static RUNTIME_CACHE: RefCell<Option<MoonshineRuntime>> = const { RefCell::new(None) };
-    }
 
     // -----------------------------------------------------------------
     // 1. Load 16 kHz mono f32 samples (Moonshine takes raw waveform)
@@ -422,7 +470,11 @@ impl AsrProvider for MoonshineProvider {
     }
 
     fn description(&self) -> &str {
-        "UsefulSensors Moonshine Base — native ONNX, ultra-low latency, English only, no Python."
+        if self.model_id == MOONSHINE_TINY_MODEL_ID {
+            "UsefulSensors Moonshine Tiny — native ONNX, ultra-low latency, English only, no Python."
+        } else {
+            "UsefulSensors Moonshine Base — native ONNX, ultra-low latency, English only, no Python."
+        }
     }
 
     fn is_available(&self) -> bool {
@@ -430,16 +482,30 @@ impl AsrProvider for MoonshineProvider {
     }
 
     fn model_info(&self) -> ModelInfo {
-        ModelInfo {
-            name: "Moonshine Base".to_string(),
-            version: "base".to_string(),
-            size_mb: 246.0,
-            parameters: "61M".to_string(),
-            languages: vec!["en".to_string()],
-            word_error_rate: Some(4.0),
-            real_time_factor: Some(0.3),
-            license: "MIT".to_string(),
-            source_url: format!("https://huggingface.co/{}", MOONSHINE_HF_REPO),
+        if self.model_id == MOONSHINE_TINY_MODEL_ID {
+            ModelInfo {
+                name: "Moonshine Tiny".to_string(),
+                version: "tiny".to_string(),
+                size_mb: 120.0,
+                parameters: "27M".to_string(),
+                languages: vec!["en".to_string()],
+                word_error_rate: Some(5.4),
+                real_time_factor: Some(0.18),
+                license: "MIT".to_string(),
+                source_url: format!("https://huggingface.co/{}", MOONSHINE_HF_REPO),
+            }
+        } else {
+            ModelInfo {
+                name: "Moonshine Base".to_string(),
+                version: "base".to_string(),
+                size_mb: 246.0,
+                parameters: "61M".to_string(),
+                languages: vec!["en".to_string()],
+                word_error_rate: Some(4.0),
+                real_time_factor: Some(0.3),
+                license: "MIT".to_string(),
+                source_url: format!("https://huggingface.co/{}", MOONSHINE_HF_REPO),
+            }
         }
     }
 
@@ -526,8 +592,8 @@ impl AsrProvider for MoonshineProvider {
             language: "en".to_string(),
             confidence: 0.9,
             processing_time_ms: start.elapsed().as_millis() as u64,
-            model_name: "moonshine-base".to_string(),
-            model_id: MOONSHINE_MODEL_ID.to_string(),
+            model_name: self.model_id.clone(),
+            model_id: self.model_id.clone(),
             requested_provider: AsrProviderType::Moonshine,
             actual_provider: AsrProviderType::Moonshine,
             requested_engine: Some("provider_default".to_string()),
@@ -562,11 +628,13 @@ impl AsrProvider for MoonshineProvider {
 
         let manager = DownloadManager::new()?;
         let progress_cb = std::sync::Arc::new(progress_cb);
+        let (encoder_path, decoder_path, tokenizer_path) =
+            moonshine_repo_paths(self.model_id.as_str());
 
         let files = [
-            (MOONSHINE_ENCODER_FILE, MOONSHINE_LOCAL_ENCODER),
-            (MOONSHINE_DECODER_FILE, MOONSHINE_LOCAL_DECODER),
-            (MOONSHINE_TOKENIZER_FILE, MOONSHINE_LOCAL_TOKENIZER),
+            (encoder_path, MOONSHINE_LOCAL_ENCODER),
+            (decoder_path, MOONSHINE_LOCAL_DECODER),
+            (tokenizer_path, MOONSHINE_LOCAL_TOKENIZER),
         ];
         let n_files = files.len() as f32;
 
@@ -596,7 +664,7 @@ impl AsrProvider for MoonshineProvider {
                 .await?;
         }
 
-        tracing::info!("Moonshine model downloaded successfully");
+        tracing::info!("Moonshine model '{}' downloaded successfully", self.model_id);
         Ok(())
     }
 }

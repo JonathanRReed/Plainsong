@@ -365,6 +365,14 @@ function resolveRecordingCaptureMode(
     return sourceMode;
   }
 
+  if (recording?.meetingCaptureMode === "me_and_them") {
+    return "Me + Them";
+  }
+
+  if (recording?.meetingCaptureMode === "mic_only") {
+    return "Mic only";
+  }
+
   if (recording?.metadata?.systemAudio != null) {
     return formatCaptureMode(Boolean(recording.metadata.systemAudio));
   }

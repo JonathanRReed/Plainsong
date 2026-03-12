@@ -27,7 +27,15 @@ interface RecordingState {
 }
 
 interface DictationStateChangedEvent {
-  phase: "idle" | "primed" | "recording" | "stopping" | "transcribing" | "done" | "error";
+  phase:
+    | "idle"
+    | "primed"
+    | "recording"
+    | "stopping"
+    | "transcribing"
+    | "delivering"
+    | "done"
+    | "error";
   startedAtMs?: number | null;
   sessionId?: number | null;
 }

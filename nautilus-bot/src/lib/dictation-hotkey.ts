@@ -1,4 +1,11 @@
-export type DictationPhase = "idle" | "recording" | "stopping" | "transcribing" | "done" | "error";
+export type DictationPhase =
+  | "idle"
+  | "recording"
+  | "stopping"
+  | "transcribing"
+  | "delivering"
+  | "done"
+  | "error";
 export type HotkeyEvent = "pressed" | "released" | "emergency_stop" | "watchdog_timeout";
 
 export function nextDictationPhase(current: DictationPhase, event: HotkeyEvent): DictationPhase {

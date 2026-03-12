@@ -65,7 +65,9 @@ interface DictationTextReadyEvent {
   contextSource?: DictationContextSource | null;
   contextChars?: number | null;
   routePreference?: DictationRoutePreference | null;
+  resolvedRoute?: string | null;
   resolvedHosting?: DictationRoutePreference | null;
+  providerModelLabel?: string | null;
 }
 
 type DictationModePreset =
@@ -97,6 +99,8 @@ type DictationCustomModeDraft = {
   description: string;
   activationAppMatcher: string;
   activationDomainMatcher: string;
+  languageOverride: string;
+  livePreviewEnabled: boolean;
 };
 
 type DictationModeSummaryItem = {
@@ -238,6 +242,20 @@ function describeActivationRules(
   return "Manual only. This mode stays available, but Nautilus will not switch into it automatically.";
 }
 
+function createCustomModeDraft(
+  overrides?: Partial<DictationCustomModeDraft>
+): DictationCustomModeDraft {
+  return {
+    name: "Custom Mode",
+    description: "",
+    activationAppMatcher: "",
+    activationDomainMatcher: "",
+    languageOverride: "",
+    livePreviewEnabled: true,
+    ...overrides,
+  };
+}
+
 function summarizeMode(mode: {
   profile: "normal_speed" | "power_rewrite";
   routePreference?: DictationRoutePreference | null;
@@ -252,8 +270,10 @@ function summarizeMode(mode: {
   aiModelId?: string | null;
   activationAppMatcher?: string | null;
   activationDomainMatcher?: string | null;
+  languageOverride?: string | null;
+  livePreviewEnabled?: boolean | null;
 }): DictationModeSummaryItem[] {
-  return [
+  const summary: DictationModeSummaryItem[] = [
     { label: "Style", value: PROFILE_LABELS[mode.profile] },
     {
       label: "Route",
@@ -294,6 +314,19 @@ function summarizeMode(mode: {
           : "Manual only",
     },
   ];
+
+  if (mode.languageOverride?.trim()) {
+    summary.push({ label: "Language", value: mode.languageOverride.trim() });
+  }
+
+  if (typeof mode.livePreviewEnabled === "boolean") {
+    summary.push({
+      label: "Preview",
+      value: mode.livePreviewEnabled ? "Live partials on" : "Live partials off",
+    });
+  }
+
+  return summary;
 }
 
 export function DictationView() {
@@ -306,6 +339,10 @@ export function DictationView() {
   const [transcribedText, setTranscribedText] = useState("");
   const [lastProvider, setLastProvider] = useState<string | null>(null);
   const [lastModelId, setLastModelId] = useState<string | null>(null);
+  const [lastRoutePreference, setLastRoutePreference] =
+    useState<DictationRoutePreference | null>(null);
+  const [lastResolvedRoute, setLastResolvedRoute] = useState<string | null>(null);
+  const [lastProviderModelLabel, setLastProviderModelLabel] = useState<string | null>(null);
   const [lastResolvedHosting, setLastResolvedHosting] =
     useState<DictationRoutePreference | null>(null);
   const [fallbackStatus, setFallbackStatus] = useState<string | null>(null);
@@ -329,16 +366,16 @@ export function DictationView() {
     useState<DictationModePreset>(DEFAULT_DICTATION_MODE);
   const [dictationCustomModes, setDictationCustomModes] = useState<DictationCustomMode[]>([]);
   const [selectedCustomModeId, setSelectedCustomModeId] = useState<string | null>(null);
-  const [customModeDraft, setCustomModeDraft] = useState<DictationCustomModeDraft>({
-    name: "Custom Mode",
-    description: "",
-    activationAppMatcher: "",
-    activationDomainMatcher: "",
-  });
+  const [customModeDraft, setCustomModeDraft] = useState<DictationCustomModeDraft>(
+    createCustomModeDraft()
+  );
   const [defaultProjectId, setDefaultProjectId] = useState("inbox");
   const [dictationPushToTalk, setDictationPushToTalk] = useState(true);
   const [dictationRoutePreference, setDictationRoutePreference] =
     useState<DictationRoutePreference>("local");
+  const [dictationRouteOverrideEnabled, setDictationRouteOverrideEnabled] = useState(true);
+  const [dictationKeepWarm, setDictationKeepWarm] = useState<"off" | "short" | "long">("short");
+  const [dictationLivePreviewEnabled, setDictationLivePreviewEnabled] = useState(true);
   const [nextCaptureRoutePreference, setNextCaptureRoutePreference] = useState<
     DictationRoutePreference | null
   >(null);
@@ -415,6 +452,8 @@ export function DictationView() {
         aiModelId: currentAiModelId,
         activationAppMatcher: selectedCustomMode?.activationAppMatcher ?? null,
         activationDomainMatcher: selectedCustomMode?.activationDomainMatcher ?? null,
+        languageOverride: selectedCustomMode?.languageOverride ?? null,
+        livePreviewEnabled: dictationLivePreviewEnabled,
       }),
     [
       currentAiModelId,
@@ -426,10 +465,12 @@ export function DictationView() {
       dictationContextSource,
       dictationCopyToClipboard,
       dictationInsertionMode,
+      dictationLivePreviewEnabled,
       dictationProfile,
       saveToInbox,
       selectedCustomMode?.activationAppMatcher,
       selectedCustomMode?.activationDomainMatcher,
+      selectedCustomMode?.languageOverride,
     ]
   );
 
@@ -548,6 +589,13 @@ export function DictationView() {
         setDefaultProjectId(settings.transcription.dictationProjectId || "inbox");
         setDictationPushToTalk(settings.transcription.dictationPushToTalk);
         setDictationRoutePreference(nextRoutePreference);
+        setDictationRouteOverrideEnabled(
+          settings.transcription.dictationRouteOverrideEnabled ?? true
+        );
+        setDictationKeepWarm(settings.transcription.dictationKeepWarm ?? "short");
+        setDictationLivePreviewEnabled(
+          settings.transcription.dictationLivePreviewEnabled ?? true
+        );
         setDictationContextSource(nextContextSource);
         setDictationCopyToClipboard(nextCopyToClipboard);
         setDictationCommandModeEnabled(nextCommandModeEnabled);
@@ -611,6 +659,9 @@ export function DictationView() {
       projectId: string;
       pushToTalk: boolean;
       routePreference: DictationRoutePreference;
+      routeOverrideEnabled: boolean;
+      keepWarm: "off" | "short" | "long";
+      livePreviewEnabled: boolean;
       copyToClipboard: boolean;
       commandModeEnabled: boolean;
       commandPrefix: string;
@@ -627,6 +678,11 @@ export function DictationView() {
       const nextCustomModes = updates.customModes ?? dictationCustomModes;
       const nextContextSource = updates.contextSource ?? dictationContextSource;
       const nextRoutePreference = updates.routePreference ?? dictationRoutePreference;
+      const nextRouteOverrideEnabled =
+        updates.routeOverrideEnabled ?? dictationRouteOverrideEnabled;
+      const nextKeepWarm = updates.keepWarm ?? dictationKeepWarm;
+      const nextLivePreviewEnabled =
+        updates.livePreviewEnabled ?? dictationLivePreviewEnabled;
       const nextCopyToClipboard = updates.copyToClipboard ?? dictationCopyToClipboard;
       const nextCommandModeEnabled =
         updates.commandModeEnabled ?? dictationCommandModeEnabled;
@@ -650,6 +706,9 @@ export function DictationView() {
       settings.transcription.dictationCustomModes = nextCustomModes;
       settings.transcription.dictationContextSource = nextContextSource;
       settings.transcription.dictationRoutePreference = nextRoutePreference;
+      settings.transcription.dictationRouteOverrideEnabled = nextRouteOverrideEnabled;
+      settings.transcription.dictationKeepWarm = nextKeepWarm;
+      settings.transcription.dictationLivePreviewEnabled = nextLivePreviewEnabled;
       settings.transcription.dictationProjectId = updates.projectId ?? defaultProjectId;
       settings.transcription.dictationPushToTalk = updates.pushToTalk ?? dictationPushToTalk;
       settings.transcription.dictationCopyToClipboard = nextCopyToClipboard;
@@ -740,6 +799,9 @@ export function DictationView() {
     description: (overrides?.description ?? customModeDraft.description).trim(),
     profile: overrides?.profile ?? dictationProfile,
     routePreference: overrides?.routePreference ?? dictationRoutePreference,
+    languageOverride:
+      overrides?.languageOverride ?? (customModeDraft.languageOverride.trim() || null),
+    livePreviewEnabled: overrides?.livePreviewEnabled ?? customModeDraft.livePreviewEnabled,
     insertionMode: overrides?.insertionMode ?? dictationInsertionMode,
     contextSource: overrides?.contextSource ?? dictationContextSource,
     saveToInbox: overrides?.saveToInbox ?? saveToInbox,
@@ -760,16 +822,21 @@ export function DictationView() {
   const applySavedCustomMode = (mode: DictationCustomMode) => {
     setDictationModePreset("custom");
     setSelectedCustomModeId(mode.id);
-    setCustomModeDraft({
-      name: mode.name,
-      description: mode.description,
-      activationAppMatcher: mode.activationAppMatcher ?? "",
-      activationDomainMatcher: mode.activationDomainMatcher ?? "",
-    });
+    setCustomModeDraft(
+      createCustomModeDraft({
+        name: mode.name,
+        description: mode.description,
+        activationAppMatcher: mode.activationAppMatcher ?? "",
+        activationDomainMatcher: mode.activationDomainMatcher ?? "",
+        languageOverride: mode.languageOverride ?? "",
+        livePreviewEnabled: mode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+      })
+    );
     setDictationProfile(mode.profile);
     setDictationRoutePreference(mode.routePreference ?? dictationRoutePreference);
     setDictationInsertionMode(mode.insertionMode);
     setDictationContextSource(mode.contextSource);
+    setDictationLivePreviewEnabled(mode.livePreviewEnabled ?? dictationLivePreviewEnabled);
     setSaveToInbox(mode.saveToInbox);
     setDictationCopyToClipboard(mode.copyToClipboard);
     setDictationCommandModeEnabled(mode.commandModeEnabled);
@@ -782,6 +849,7 @@ export function DictationView() {
       selectedCustomModeId: mode.id,
       profile: mode.profile,
       routePreference: mode.routePreference ?? dictationRoutePreference,
+      livePreviewEnabled: mode.livePreviewEnabled ?? dictationLivePreviewEnabled,
       insertionMode: mode.insertionMode,
       contextSource: mode.contextSource,
       saveToInbox: mode.saveToInbox,
@@ -795,6 +863,10 @@ export function DictationView() {
         if (mode.dictationModelId) settings.transcription.dictationModelId = mode.dictationModelId;
         settings.transcription.dictationRoutePreference =
           mode.routePreference ?? settings.transcription.dictationRoutePreference ?? "local";
+        settings.transcription.dictationLivePreviewEnabled =
+          mode.livePreviewEnabled ?? settings.transcription.dictationLivePreviewEnabled;
+        settings.transcription.language =
+          mode.languageOverride ?? settings.transcription.language ?? null;
         if (mode.aiProvider) settings.privacy.llmProvider = mode.aiProvider;
         settings.privacy.llmModelId = mode.aiModelId ?? settings.privacy.llmModelId ?? null;
         await saveSettings(settings);
@@ -816,16 +888,21 @@ export function DictationView() {
     setDictationCustomModes(nextModes);
     setDictationModePreset("custom");
     setSelectedCustomModeId(nextMode.id);
-    setCustomModeDraft({
-      name: nextMode.name,
-      description: nextMode.description,
-      activationAppMatcher: nextMode.activationAppMatcher ?? "",
-      activationDomainMatcher: nextMode.activationDomainMatcher ?? "",
-    });
+    setCustomModeDraft(
+      createCustomModeDraft({
+        name: nextMode.name,
+        description: nextMode.description,
+        activationAppMatcher: nextMode.activationAppMatcher ?? "",
+        activationDomainMatcher: nextMode.activationDomainMatcher ?? "",
+        languageOverride: nextMode.languageOverride ?? "",
+        livePreviewEnabled: nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+      })
+    );
     await persistDictationPreferences({
       modePreset: "custom",
       selectedCustomModeId: nextMode.id,
       customModes: nextModes,
+      livePreviewEnabled: nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
     });
     try {
       const settings = await getSettings();
@@ -836,6 +913,10 @@ export function DictationView() {
       settings.transcription.dictationModelId = nextMode.dictationModelId ?? settings.transcription.dictationModelId;
       settings.transcription.dictationRoutePreference =
         nextMode.routePreference ?? settings.transcription.dictationRoutePreference ?? "local";
+      settings.transcription.dictationLivePreviewEnabled =
+        nextMode.livePreviewEnabled ?? settings.transcription.dictationLivePreviewEnabled;
+      settings.transcription.language =
+        nextMode.languageOverride ?? settings.transcription.language ?? null;
       settings.privacy.llmProvider = nextMode.aiProvider ?? settings.privacy.llmProvider;
       settings.privacy.llmModelId = nextMode.aiModelId ?? settings.privacy.llmModelId ?? null;
       await saveSettings(settings);
@@ -850,12 +931,9 @@ export function DictationView() {
     const shouldClearSelection = selectedCustomModeId === modeId;
     if (shouldClearSelection) {
       setSelectedCustomModeId(null);
-      setCustomModeDraft({
-        name: "Custom Mode",
-        description: "",
-        activationAppMatcher: "",
-        activationDomainMatcher: "",
-      });
+      setCustomModeDraft(
+        createCustomModeDraft({ livePreviewEnabled: dictationLivePreviewEnabled })
+      );
     }
     await persistDictationPreferences({
       selectedCustomModeId: shouldClearSelection ? null : selectedCustomModeId,
@@ -865,23 +943,26 @@ export function DictationView() {
 
   useEffect(() => {
     if (selectedCustomMode) {
-      setCustomModeDraft({
-        name: selectedCustomMode.name,
-        description: selectedCustomMode.description,
-        activationAppMatcher: selectedCustomMode.activationAppMatcher ?? "",
-        activationDomainMatcher: selectedCustomMode.activationDomainMatcher ?? "",
-      });
+      setCustomModeDraft(
+        createCustomModeDraft({
+          name: selectedCustomMode.name,
+          description: selectedCustomMode.description,
+          activationAppMatcher: selectedCustomMode.activationAppMatcher ?? "",
+          activationDomainMatcher: selectedCustomMode.activationDomainMatcher ?? "",
+          languageOverride: selectedCustomMode.languageOverride ?? "",
+          livePreviewEnabled:
+            selectedCustomMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+        })
+      );
       return;
     }
     if (dictationModePreset === "custom") {
       setCustomModeDraft((current) => ({
+        ...current,
         name: current.name || "Custom Mode",
-        description: current.description,
-        activationAppMatcher: current.activationAppMatcher,
-        activationDomainMatcher: current.activationDomainMatcher,
       }));
     }
-  }, [dictationModePreset, selectedCustomMode]);
+  }, [dictationLivePreviewEnabled, dictationModePreset, selectedCustomMode]);
 
   useEffect(() => {
     // Listen for hotkey visual feedback
@@ -941,6 +1022,9 @@ export function DictationView() {
         if (payload?.modelId) {
           setLastModelId(payload.modelId);
         }
+        setLastRoutePreference(payload?.routePreference ?? null);
+        setLastResolvedRoute(payload?.resolvedRoute ?? null);
+        setLastProviderModelLabel(payload?.providerModelLabel ?? null);
         setLastResolvedHosting(payload?.resolvedHosting ?? null);
         setStartupLatencyMs(payload?.startupLatencyMs ?? null);
         setLatencyMs(payload?.latencyMs ?? null);
@@ -1418,27 +1502,48 @@ export function DictationView() {
                     <p className="text-xs text-muted-foreground">
                       Use this when you want one manual capture to ignore the mode default.
                     </p>
-                    <div className="flex gap-2">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant={nextCaptureRoutePreference === null ? "default" : "outline"}
-                        onClick={() => setNextCaptureRoutePreference(null)}
-                      >
-                        Use default
-                      </Button>
-                      {(["local", "cloud"] as const).map((route) => (
+                    <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={dictationRouteOverrideEnabled}
+                        onChange={(event) => {
+                          const next = event.target.checked;
+                          setDictationRouteOverrideEnabled(next);
+                          if (!next) {
+                            setNextCaptureRoutePreference(null);
+                          }
+                          void persistDictationPreferences({ routeOverrideEnabled: next });
+                        }}
+                      />
+                      Allow next-capture override
+                    </label>
+                    {dictationRouteOverrideEnabled ? (
+                      <div className="flex gap-2">
                         <Button
-                          key={`next-${route}`}
                           type="button"
                           size="sm"
-                          variant={nextCaptureRoutePreference === route ? "default" : "outline"}
-                          onClick={() => setNextCaptureRoutePreference(route)}
+                          variant={nextCaptureRoutePreference === null ? "default" : "outline"}
+                          onClick={() => setNextCaptureRoutePreference(null)}
                         >
-                          Next {route}
+                          Use default
                         </Button>
-                      ))}
-                    </div>
+                        {(["local", "cloud"] as const).map((route) => (
+                          <Button
+                            key={`next-${route}`}
+                            type="button"
+                            size="sm"
+                            variant={nextCaptureRoutePreference === route ? "default" : "outline"}
+                            onClick={() => setNextCaptureRoutePreference(route)}
+                          >
+                            Next {route}
+                          </Button>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Manual captures follow the active mode route until you re-enable overrides.
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1579,6 +1684,48 @@ export function DictationView() {
                         customModeDraft.activationDomainMatcher
                       )}
                     </div>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">Language override</label>
+                        <input
+                          type="text"
+                          aria-label="Language override"
+                          className="w-full rounded-md border bg-background p-2 text-sm"
+                          value={customModeDraft.languageOverride}
+                          onChange={(event) =>
+                            setCustomModeDraft((current) => ({
+                              ...current,
+                              languageOverride: event.target.value,
+                            }))
+                          }
+                          placeholder="Leave blank for auto"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Optional. Save a language tag like{" "}
+                          <span className="font-mono">en</span> or{" "}
+                          <span className="font-mono">es</span> with this mode.
+                        </p>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">Live preview</label>
+                        <label className="inline-flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={customModeDraft.livePreviewEnabled}
+                            onChange={(event) =>
+                              setCustomModeDraft((current) => ({
+                                ...current,
+                                livePreviewEnabled: event.target.checked,
+                              }))
+                            }
+                          />
+                          Show live partial text in the popup for this mode
+                        </label>
+                        <p className="text-xs text-muted-foreground">
+                          Turn this off for cleaner captures when partial text is distracting.
+                        </p>
+                      </div>
+                    </div>
                     <p className="mt-2 text-xs text-muted-foreground">
                       Domain rules are checked first. If both are empty, this mode stays available
                       for manual capture only.
@@ -1665,14 +1812,26 @@ export function DictationView() {
                       size="lg" 
                       onClick={() => {
                         const routePreference =
-                          nextCaptureRoutePreference ?? dictationRoutePreference;
-                        setNextCaptureRoutePreference(null);
+                          dictationRouteOverrideEnabled && nextCaptureRoutePreference
+                            ? nextCaptureRoutePreference
+                            : dictationRoutePreference;
+                        if (dictationRouteOverrideEnabled) {
+                          setNextCaptureRoutePreference(null);
+                        }
                         void startDictation({
                           saveToInbox,
                           projectId: defaultProjectId,
                           profile: dictationProfile,
                           contextSource: dictationContextSource,
                           routePreference,
+                          languageOverride:
+                            dictationModePreset === "custom"
+                              ? customModeDraft.languageOverride.trim() || null
+                              : null,
+                          livePreviewEnabled:
+                            dictationModePreset === "custom"
+                              ? customModeDraft.livePreviewEnabled
+                              : dictationLivePreviewEnabled,
                         });
                       }}
                       className="mt-4"
@@ -1814,6 +1973,13 @@ export function DictationView() {
                     {lastResolvedHosting && (
                       <span>Route: {lastResolvedHosting === "cloud" ? "Cloud" : "Local"}</span>
                     )}
+                    {lastRoutePreference && (
+                      <span>
+                        Requested: {lastRoutePreference === "cloud" ? "Cloud" : "Local"}
+                      </span>
+                    )}
+                    {lastResolvedRoute && <span>Resolved: {lastResolvedRoute}</span>}
+                    {lastProviderModelLabel && <span>Route label: {lastProviderModelLabel}</span>}
                     {lastProvider && <span>Engine: {lastProvider}</span>}
                     {lastModelId && <span>Model: {lastModelId}</span>}
                     {insertionModeUsed && <span>Inserted via: {insertionModeUsed}</span>}
@@ -1967,6 +2133,45 @@ export function DictationView() {
                   </select>
                   <p className="text-xs text-muted-foreground">
                     Hold-to-talk starts on key press and transcribes on release.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Live preview</label>
+                  <select
+                    className="w-full p-2 border rounded-md bg-background"
+                    value={dictationLivePreviewEnabled ? "on" : "off"}
+                    onChange={(event) => {
+                      const next = event.target.value === "on";
+                      setDictationLivePreviewEnabled(next);
+                      void persistDictationPreferences({ livePreviewEnabled: next });
+                    }}
+                  >
+                    <option value="on">Show live partials</option>
+                    <option value="off">Hide live partials</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Controls whether popup and inline flows show partial dictation text while you speak.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Keep warm</label>
+                  <select
+                    className="w-full p-2 border rounded-md bg-background"
+                    value={dictationKeepWarm}
+                    onChange={(event) => {
+                      const next = event.target.value as "off" | "short" | "long";
+                      setDictationKeepWarm(next);
+                      void persistDictationPreferences({ keepWarm: next });
+                    }}
+                  >
+                    <option value="off">Off</option>
+                    <option value="short">Short</option>
+                    <option value="long">Long</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Keeps the active dictation route warmer between captures to reduce startup latency.
                   </p>
                 </div>
 
@@ -2447,6 +2652,30 @@ export function DictationView() {
                         </p>
                         <p className="mt-1 text-sm font-medium">
                           {selectedHistoryDetails.contextSource ?? "Unavailable"}
+                        </p>
+                      </div>
+                      <div className="rounded-md border bg-muted/30 px-3 py-2">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Requested route
+                        </p>
+                        <p className="mt-1 text-sm font-medium">
+                          {selectedHistoryDetails.routePreference
+                            ? selectedHistoryDetails.routePreference === "cloud"
+                              ? "Cloud"
+                              : "Local"
+                            : "Unavailable"}
+                        </p>
+                      </div>
+                      <div className="rounded-md border bg-muted/30 px-3 py-2">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Resolved hosting
+                        </p>
+                        <p className="mt-1 text-sm font-medium">
+                          {selectedHistoryDetails.resolvedHosting
+                            ? selectedHistoryDetails.resolvedHosting === "cloud"
+                              ? "Cloud"
+                              : "Local"
+                            : "Unavailable"}
                         </p>
                       </div>
                       <div className="rounded-md border bg-muted/30 px-3 py-2">

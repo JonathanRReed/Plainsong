@@ -25,6 +25,8 @@ export interface DictationStartOptions {
   profile: "normal_speed" | "power_rewrite";
   contextSource?: "none" | "clipboard" | "selected_text" | "application_context";
   routePreference?: "local" | "cloud";
+  languageOverride?: string | null;
+  livePreviewEnabled?: boolean;
 }
 
 export interface DictationHistoryDetails {
@@ -40,6 +42,8 @@ export interface DictationHistoryDetails {
   requestedProvider: string | null;
   actualProvider: string | null;
   modelId: string | null;
+  routePreference: string | null;
+  resolvedHosting: string | null;
   startupLatencyMs: number | null;
   transcriptionLatencyMs: number | null;
   insertLatencyMs: number | null;
@@ -105,6 +109,21 @@ export async function getDictationHistoryDetails(
 
 export async function forceStopDictation(): Promise<string> {
   return await invoke("force_stop_dictation");
+}
+
+export interface CursorInsertSmokeTestResult {
+  text: string;
+  targetApp?: string | null;
+  targetBundleId?: string | null;
+  pasted: boolean;
+  copied: boolean;
+  error?: string | null;
+}
+
+export async function smokeTestCursorInsert(
+  text?: string
+): Promise<CursorInsertSmokeTestResult> {
+  return await invoke("smoke_test_cursor_insert", { text });
 }
 
 export async function getDictationAudioLevel(): Promise<number> {

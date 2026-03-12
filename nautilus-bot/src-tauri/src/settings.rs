@@ -154,6 +154,12 @@ pub struct TranscriptionSettings {
     pub dictation_push_to_talk: bool,
     /// Dictation route preference: local or cloud.
     pub dictation_route_preference: String,
+    /// Dictation: allow quick one-shot route override for the next manual capture.
+    pub dictation_route_override_enabled: bool,
+    /// Dictation: keep the current route warm between captures.
+    pub dictation_keep_warm: String,
+    /// Dictation: show live partial text in popup/inline surfaces.
+    pub dictation_live_preview_enabled: bool,
     /// Dictation: Smart Format — LLM polishes text before insert
     pub dictation_ai_formatting: bool,
     /// Dictation mode preset: voice, messages, email, notes, meeting_follow_up, custom
@@ -220,6 +226,8 @@ pub struct DictationCustomMode {
     pub description: String,
     pub profile: String,
     pub route_preference: Option<String>,
+    pub language_override: Option<String>,
+    pub live_preview_enabled: Option<bool>,
     pub insertion_mode: String,
     pub context_source: String,
     pub save_to_inbox: bool,
@@ -260,6 +268,9 @@ impl Default for TranscriptionSettings {
             // Toggle mode is safer for new users and avoids silent hold-to-talk confusion.
             dictation_push_to_talk: false,
             dictation_route_preference: "local".to_string(),
+            dictation_route_override_enabled: true,
+            dictation_keep_warm: "short".to_string(),
+            dictation_live_preview_enabled: true,
             dictation_ai_formatting: false,
             dictation_mode_preset: "voice".to_string(),
             dictation_selected_custom_mode_id: None,
@@ -535,7 +546,138 @@ fn normalize_keyboard_shortcuts(shortcuts: &mut KeyboardShortcuts) {
     shortcuts.toggle_dictation_alternates.clear();
 }
 
+fn normalize_transcription_provider_value(provider: &str) -> String {
+    match provider.trim() {
+        "canary" => "whisper_candle".to_string(),
+        "whisper_candle" => "whisper_candle".to_string(),
+        "whisper" => "whisper".to_string(),
+        "parakeet" => "parakeet".to_string(),
+        "distil_whisper" => "distil_whisper".to_string(),
+        "macos_apple_speech" => "macos_apple_speech".to_string(),
+        "moonshine" => "moonshine".to_string(),
+        "voxtral" => "voxtral".to_string(),
+        "windows_sdk_dictation" => "windows_sdk_dictation".to_string(),
+        "elevenlabs_scribe" => "elevenlabs_scribe".to_string(),
+        "openai_cloud" => "openai_cloud".to_string(),
+        "groq" => "groq".to_string(),
+        _ => "distil_whisper".to_string(),
+    }
+}
+
+fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
+    match provider {
+        "whisper" => match model_id.trim() {
+            "tiny" | "tiny.en" | "base" | "base.en" | "small" | "small.en" | "medium"
+            | "medium.en" | "large-v3" | "large-v3-turbo" => model_id.trim().to_string(),
+            _ => "base.en".to_string(),
+        },
+        "parakeet" => match model_id.trim() {
+            "parakeet-ctc-0.6b" | "parakeet-tdt-0.6b-v2" | "parakeet-tdt-0.6b-v3" => {
+                "parakeet-ctc-0.6b".to_string()
+            }
+            "parakeet-ctc-1.1b" => "parakeet-ctc-1.1b".to_string(),
+            "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => {
+                "parakeet-tdt-ctc-110m".to_string()
+            }
+            _ => "parakeet-ctc-0.6b".to_string(),
+        },
+        "whisper_candle" => "whisper-large-v3-turbo".to_string(),
+        "distil_whisper" => "distil-large-v3.5".to_string(),
+        "macos_apple_speech" => "macos_apple_speech".to_string(),
+        "moonshine" => match model_id.trim() {
+            "moonshine" | "moonshine-base" => "moonshine-base".to_string(),
+            "moonshine-tiny" => "moonshine-tiny".to_string(),
+            _ => "moonshine-base".to_string(),
+        },
+        "voxtral" => match model_id.trim() {
+            "voxtral-cloud" => "voxtral-cloud".to_string(),
+            _ => "voxtral-local".to_string(),
+        },
+        "windows_sdk_dictation" => "windows_sdk_dictation".to_string(),
+        "elevenlabs_scribe" => match model_id.trim() {
+            "" => "scribe_v1".to_string(),
+            value => value.to_string(),
+        },
+        "openai_cloud" => match model_id.trim() {
+            "" => "whisper-1".to_string(),
+            value => value.to_string(),
+        },
+        "groq" => match model_id.trim() {
+            "" => "whisper-large-v3-turbo".to_string(),
+            value => value.to_string(),
+        },
+        _ => "distil-large-v3.5".to_string(),
+    }
+}
+
+fn normalize_dictation_keep_warm(value: &str) -> String {
+    match value.trim() {
+        "off" => "off".to_string(),
+        "long" => "long".to_string(),
+        _ => "short".to_string(),
+    }
+}
+
 fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSettings) {
+    transcription.default_provider =
+        normalize_transcription_provider_value(&transcription.default_provider);
+    transcription.dictation_provider =
+        normalize_transcription_provider_value(&transcription.dictation_provider);
+    transcription.meeting_provider =
+        normalize_transcription_provider_value(&transcription.meeting_provider);
+
+    transcription.selected_model_id = normalize_transcription_model_id(
+        transcription.default_provider.as_str(),
+        &transcription.selected_model_id,
+    );
+    transcription.dictation_model_id = normalize_transcription_model_id(
+        transcription.dictation_provider.as_str(),
+        &transcription.dictation_model_id,
+    );
+    transcription.meeting_model_id = normalize_transcription_model_id(
+        transcription.meeting_provider.as_str(),
+        &transcription.meeting_model_id,
+    );
+
+    let mut normalized_provider_models = HashMap::new();
+    for (provider, model_id) in std::mem::take(&mut transcription.provider_model_ids) {
+        let normalized_provider = normalize_transcription_provider_value(&provider);
+        let normalized_model =
+            normalize_transcription_model_id(normalized_provider.as_str(), &model_id);
+        normalized_provider_models.insert(normalized_provider, normalized_model);
+    }
+    transcription.provider_model_ids = normalized_provider_models;
+
+    transcription.dictation_keep_warm =
+        normalize_dictation_keep_warm(&transcription.dictation_keep_warm);
+
+    for mode in &mut transcription.dictation_custom_modes {
+        if let Some(provider) = mode.dictation_provider.as_mut() {
+            *provider = normalize_transcription_provider_value(provider);
+        }
+
+        if let Some(model_id) = mode.dictation_model_id.as_mut() {
+            let normalized_provider = mode
+                .dictation_provider
+                .as_deref()
+                .map(normalize_transcription_provider_value)
+                .unwrap_or_else(|| transcription.dictation_provider.clone());
+            *model_id = normalize_transcription_model_id(normalized_provider.as_str(), model_id);
+        }
+
+        mode.language_override = mode
+            .language_override
+            .clone()
+            .and_then(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            });
+    }
+
     // Migrate legacy Notes preset behavior away from inline insertion.
     if transcription.dictation_mode_preset == "notes"
         && transcription.dictation_insertion_mode == "inline"

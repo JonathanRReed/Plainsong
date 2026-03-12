@@ -19,6 +19,18 @@ fn onnx_session_cache() -> &'static Mutex<Option<Session>> {
 }
 
 #[cfg(feature = "asr-parakeet")]
+pub(crate) fn clear_cached_session() {
+    if let Ok(mut cache) = onnx_session_cache().lock() {
+        if cache.take().is_some() {
+            tracing::info!("Cleared cached Parakeet ONNX session");
+        }
+    }
+}
+
+#[cfg(not(feature = "asr-parakeet"))]
+pub(crate) fn clear_cached_session() {}
+
+#[cfg(feature = "asr-parakeet")]
 fn get_or_create_session(
     onnx_path: &Path,
 ) -> Result<std::sync::MutexGuard<'static, Option<Session>>> {
@@ -55,6 +67,9 @@ fn get_or_create_session(
 // ---------------------------------------------------------------------------
 const PARAKEET_ONNX_FILE: &str = "model.onnx";
 const PARAKEET_VOCAB_FILE: &str = "tokens.txt";
+const PARAKEET_CTC_06B_MODEL_ID: &str = "parakeet-ctc-0.6b";
+const PARAKEET_CTC_11B_MODEL_ID: &str = "parakeet-ctc-1.1b";
+const PARAKEET_LEGACY_MODEL_ID: &str = "parakeet-tdt-ctc-110m";
 
 // CTC ONNX export hosted on HuggingFace (public, no auth required).
 const PARAKEET_HF_REPO: &str = "csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000";
@@ -65,6 +80,9 @@ const PARAKEET_ONNX_SOURCES: [&str; 2] = [
 const PARAKEET_TOKENS_SOURCES: [&str; 1] = [
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000/resolve/main/tokens.txt",
 ];
+const PARAKEET_CTC_06B_REPO: &str = "nvidia/parakeet-ctc-0.6b";
+const PARAKEET_CTC_11B_REPO: &str = "nvidia/parakeet-ctc-1.1b";
+const PARAKEET_PYTHON_PROVIDER: &str = "parakeet_ctc";
 
 /// Returns true only if the file exists, is non-trivially sized, and does NOT
 /// start with an HTML/JSON error marker (which would indicate a failed download).
@@ -134,17 +152,25 @@ fn is_valid_tokens_file(path: &Path) -> bool {
 
 pub struct ParakeetProvider {
     model_dir: PathBuf,
+    model_id: String,
 }
 
 impl ParakeetProvider {
-    pub fn new() -> Self {
-        let model_dir = dirs::data_dir()
+    pub fn new(selected_model_id: Option<&str>) -> Self {
+        let model_id = normalize_parakeet_model_id(
+            selected_model_id.unwrap_or(PARAKEET_CTC_06B_MODEL_ID),
+        );
+        let models_root = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Nautilus")
-            .join("models")
-            .join("parakeet");
+            .join("models");
+        let model_dir = if model_id == PARAKEET_LEGACY_MODEL_ID {
+            models_root.join("parakeet")
+        } else {
+            models_root.join(model_id.replace('-', "_"))
+        };
 
-        Self { model_dir }
+        Self { model_dir, model_id }
     }
 
     fn onnx_path(&self) -> PathBuf {
@@ -156,10 +182,24 @@ impl ParakeetProvider {
     }
 
     fn has_required_files(&self) -> bool {
-        is_valid_tokens_file(&self.vocab_path()) && is_valid_onnx_file(&self.onnx_path())
+        if self.is_legacy_model() {
+            is_valid_tokens_file(&self.vocab_path()) && is_valid_onnx_file(&self.onnx_path())
+        } else {
+            self.python_marker_path().exists()
+        }
     }
 
     fn missing_or_invalid_reason(&self) -> Option<String> {
+        if !self.is_legacy_model() {
+            if !self.python_marker_path().exists() {
+                return Some(format!(
+                    "Parakeet model '{}' is not downloaded yet. Download the model bundle in Settings -> ASR Models.",
+                    self.model_id
+                ));
+            }
+            return None;
+        }
+
         if !self.vocab_path().exists() {
             return Some(
                 "Parakeet tokens.txt is missing. Download Parakeet artifacts in Settings -> ASR Models."
@@ -201,11 +241,37 @@ impl ParakeetProvider {
             Err(_) => 0.0,
         }
     }
+
+    fn is_legacy_model(&self) -> bool {
+        self.model_id == PARAKEET_LEGACY_MODEL_ID
+    }
+
+    fn repo_id(&self) -> &'static str {
+        match self.model_id.as_str() {
+            PARAKEET_CTC_11B_MODEL_ID => PARAKEET_CTC_11B_REPO,
+            _ => PARAKEET_CTC_06B_REPO,
+        }
+    }
+
+    fn python_marker_path(&self) -> PathBuf {
+        self.model_dir.join("manifest.json")
+    }
 }
 
 impl Default for ParakeetProvider {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
+    }
+}
+
+fn normalize_parakeet_model_id(model_id: &str) -> String {
+    match model_id.trim() {
+        "parakeet-tdt-0.6b-v3" | PARAKEET_CTC_06B_MODEL_ID => {
+            PARAKEET_CTC_06B_MODEL_ID.to_string()
+        }
+        PARAKEET_CTC_11B_MODEL_ID => PARAKEET_CTC_11B_MODEL_ID.to_string(),
+        "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => PARAKEET_LEGACY_MODEL_ID.to_string(),
+        _ => PARAKEET_CTC_06B_MODEL_ID.to_string(),
     }
 }
 
@@ -533,13 +599,21 @@ fn run_parakeet_onnx(_onnx_path: &Path, _vocab_path: &Path, _audio_path: &Path) 
 #[async_trait]
 impl AsrProvider for ParakeetProvider {
     fn name(&self) -> &str {
-        "NVIDIA Parakeet TDT"
+        "NVIDIA Parakeet"
     }
 
     fn description(&self) -> &str {
-        "NVIDIA Parakeet TDT CTC 110M — native ONNX inference with local artifacts \
-         encoder.onnx + tokens.txt. Download uses public Hugging Face CTC ONNX sources and \
-         normalizes files into the local parakeet model folder."
+        match self.model_id.as_str() {
+            PARAKEET_LEGACY_MODEL_ID => {
+                "NVIDIA Parakeet TDT CTC 110M legacy path — native ONNX inference with local artifacts."
+            }
+            PARAKEET_CTC_11B_MODEL_ID => {
+                "NVIDIA Parakeet CTC 1.1B — experimental managed Python runtime path using official Hugging Face weights."
+            }
+            _ => {
+                "NVIDIA Parakeet CTC 0.6B — managed Python runtime path using official Hugging Face weights."
+            }
+        }
     }
 
     fn is_available(&self) -> bool {
@@ -547,22 +621,46 @@ impl AsrProvider for ParakeetProvider {
     }
 
     fn model_info(&self) -> ModelInfo {
-        ModelInfo {
-            name: "Parakeet TDT CTC 110M".to_string(),
-            version: "110m".to_string(),
-            size_mb: 170.0,
-            parameters: "110M".to_string(),
-            languages: vec![
-                "en", "es", "fr", "de", "bg", "hr", "cs", "da", "nl", "et", "fi", "el", "hu", "it",
-                "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "sv", "ru", "uk",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-            word_error_rate: Some(6.05),
-            real_time_factor: Some(0.7),
-            license: "CC-BY-4.0".to_string(),
-            source_url: format!("https://huggingface.co/{}", PARAKEET_HF_REPO),
+        match self.model_id.as_str() {
+            PARAKEET_LEGACY_MODEL_ID => ModelInfo {
+                name: "Parakeet TDT CTC 110M".to_string(),
+                version: "110m".to_string(),
+                size_mb: 170.0,
+                parameters: "110M".to_string(),
+                languages: vec![
+                    "en", "es", "fr", "de", "bg", "hr", "cs", "da", "nl", "et", "fi", "el", "hu",
+                    "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "sv", "ru", "uk",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                word_error_rate: Some(6.05),
+                real_time_factor: Some(0.7),
+                license: "CC-BY-4.0".to_string(),
+                source_url: format!("https://huggingface.co/{}", PARAKEET_HF_REPO),
+            },
+            PARAKEET_CTC_11B_MODEL_ID => ModelInfo {
+                name: "Parakeet CTC 1.1B".to_string(),
+                version: "1.1b".to_string(),
+                size_mb: 4300.0,
+                parameters: "1.1B".to_string(),
+                languages: vec!["en".to_string()],
+                word_error_rate: Some(4.0),
+                real_time_factor: Some(1.8),
+                license: "CC-BY-4.0".to_string(),
+                source_url: format!("https://huggingface.co/{}", self.repo_id()),
+            },
+            _ => ModelInfo {
+                name: "Parakeet CTC 0.6B".to_string(),
+                version: "0.6b".to_string(),
+                size_mb: 2300.0,
+                parameters: "600M".to_string(),
+                languages: vec!["en".to_string()],
+                word_error_rate: Some(4.5),
+                real_time_factor: Some(1.2),
+                license: "CC-BY-4.0".to_string(),
+                source_url: format!("https://huggingface.co/{}", self.repo_id()),
+            },
         }
     }
 
@@ -571,27 +669,41 @@ impl AsrProvider for ParakeetProvider {
             return Err(anyhow::anyhow!(reason));
         }
         let start = std::time::Instant::now();
-        let onnx_path = self.onnx_path();
-        let vocab_path = self.vocab_path();
         let audio_path_owned = audio_path.to_path_buf();
         let audio_path_for_dur = audio_path_owned.clone();
+        let text = if self.is_legacy_model() {
+            let onnx_path = self.onnx_path();
+            let vocab_path = self.vocab_path();
+
+            tracing::info!(
+                "Parakeet legacy transcription starting: onnx={}, vocab={}, audio={}",
+                onnx_path.display(),
+                vocab_path.display(),
+                audio_path_owned.display()
+            );
+
+            tokio::task::spawn_blocking(move || {
+                run_parakeet_onnx(&onnx_path, &vocab_path, &audio_path_owned)
+            })
+            .await
+            .context("Parakeet legacy inference task panicked")??
+        } else {
+            let output = crate::asr::python_runtime::run_python_asr_action(
+                PARAKEET_PYTHON_PROVIDER,
+                "transcribe",
+                Some(self.model_id.as_str()),
+                &self.model_dir,
+                Some(&audio_path_owned),
+                900,
+            )
+            .await
+            .context("Parakeet Python runtime transcription failed")?;
+            output.text.unwrap_or_default().trim().to_string()
+        };
 
         tracing::info!(
-            "Parakeet transcription starting: onnx={}, vocab={}, audio={}",
-            onnx_path.display(),
-            vocab_path.display(),
-            audio_path_owned.display()
-        );
-
-        // Parakeet is optimized for ultra-fast short dictation - skip VAD overhead
-        let text = tokio::task::spawn_blocking(move || {
-            run_parakeet_onnx(&onnx_path, &vocab_path, &audio_path_owned)
-        })
-        .await
-        .context("Parakeet inference task panicked")??;
-
-        tracing::info!(
-            "Parakeet transcription complete: {} chars in {}ms",
+            "Parakeet transcription complete: model={}, {} chars in {}ms",
+            self.model_id,
             text.len(),
             start.elapsed().as_millis()
         );
@@ -610,12 +722,26 @@ impl AsrProvider for ParakeetProvider {
             language: "en".to_string(),
             confidence: 0.88,
             processing_time_ms: start.elapsed().as_millis() as u64,
-            model_name: "parakeet-tdt-ctc-110m".to_string(),
-            model_id: "parakeet-tdt-ctc-110m".to_string(),
+            model_name: self.model_id.clone(),
+            model_id: self.model_id.clone(),
             requested_provider: AsrProviderType::Parakeet,
             actual_provider: AsrProviderType::Parakeet,
-            requested_engine: Some("provider_default".to_string()),
-            actual_engine: Some("provider_default".to_string()),
+            requested_engine: Some(
+                if self.is_legacy_model() {
+                    "provider_default"
+                } else {
+                    "managed_python"
+                }
+                .to_string(),
+            ),
+            actual_engine: Some(
+                if self.is_legacy_model() {
+                    "provider_default"
+                } else {
+                    "managed_python"
+                }
+                .to_string(),
+            ),
             optimization_applied: false,
             fallback_reason: None,
         })
@@ -638,6 +764,25 @@ impl AsrProvider for ParakeetProvider {
     }
 
     async fn download_models(&self, progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()> {
+        if !self.is_legacy_model() {
+            std::fs::create_dir_all(&self.model_dir)
+                .context("Failed to create Parakeet model directory")?;
+            let progress_cb = std::sync::Arc::new(progress_cb);
+            progress_cb(5.0);
+            crate::asr::python_runtime::run_python_asr_action(
+                PARAKEET_PYTHON_PROVIDER,
+                "download",
+                Some(self.model_id.as_str()),
+                &self.model_dir,
+                None,
+                1800,
+            )
+            .await
+            .context("Parakeet Python runtime download failed")?;
+            progress_cb(100.0);
+            return Ok(());
+        }
+
         use crate::download::DownloadManager;
 
         std::fs::create_dir_all(&self.model_dir)
@@ -729,7 +874,7 @@ impl AsrProvider for ParakeetProvider {
             }
         }
 
-        tracing::info!("Parakeet TDT model downloaded successfully");
+        tracing::info!("Parakeet legacy TDT model downloaded successfully");
         Ok(())
     }
 }

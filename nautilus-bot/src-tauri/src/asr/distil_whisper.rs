@@ -61,6 +61,19 @@ impl Default for DistilWhisperProvider {
     }
 }
 
+#[cfg(feature = "asr-canary")]
+pub(crate) fn clear_cached_runtime() {
+    let model_dir = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Nautilus")
+        .join("models")
+        .join("distil_whisper");
+    super::canary::clear_cached_runtime(&model_dir);
+}
+
+#[cfg(not(feature = "asr-canary"))]
+pub(crate) fn clear_cached_runtime() {}
+
 // ---------------------------------------------------------------------------
 // Native Candle inference (feature-gated via asr-canary since it shares deps)
 // ---------------------------------------------------------------------------
