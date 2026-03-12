@@ -212,6 +212,7 @@ export function DictationPopup() {
   const [outcome, setOutcome] = useState<string | null>(null);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("full");
   const [pushToTalk, setPushToTalk] = useState(true);
+  const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [modePreset, setModePreset] = useState<DictationModePreset>("voice");
   const [contextSource, setContextSource] = useState<DictationContextSource>("none");
@@ -238,6 +239,7 @@ export function DictationPopup() {
   const refreshPopupSettings = async () => {
     const settings = await getSettings();
     setPushToTalk(Boolean(settings.transcription.dictationPushToTalk));
+    setHandsFreeEnabled(Boolean(settings.transcription.dictationHandsFreeEnabled));
     setModePreset((settings.transcription.dictationModePreset ?? "voice") as DictationModePreset);
     setSelectedCustomModeId(settings.transcription.dictationSelectedCustomModeId ?? null);
     setCustomModes(settings.transcription.dictationCustomModes ?? []);
@@ -629,7 +631,7 @@ export function DictationPopup() {
               {contextMeta.label}
             </div>
             <div className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300">
-              {pushToTalk ? "Hold to talk" : "Toggle capture"}
+              {handsFreeEnabled ? "Hands-free" : pushToTalk ? "Hold to talk" : "Toggle capture"}
             </div>
           </div>
         )}
@@ -667,7 +669,9 @@ export function DictationPopup() {
                         />
                       </div>
                       <p className="text-xs text-slate-300 mt-1.5">
-                        {pushToTalk
+                        {handsFreeEnabled
+                          ? `Speak naturally. Nautilus stops after silence${dictationInsertionMode === "clipboard_only" ? " and copies to clipboard" : ""}. Press again to stop sooner.`
+                          : pushToTalk
                           ? `Release hotkey to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`
                           : `Press the hotkey again to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`}
                       </p>

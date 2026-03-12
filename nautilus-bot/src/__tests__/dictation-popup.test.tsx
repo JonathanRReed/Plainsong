@@ -36,6 +36,7 @@ const popupMocks = vi.hoisted(() => {
     getSettings: vi.fn(async () => ({
       transcription: {
         dictationPushToTalk: false,
+        dictationHandsFreeEnabled: false,
         dictationModePreset: "voice",
         dictationSelectedCustomModeId: null,
         dictationCustomModes: [{ id: "slack-replies", name: "Slack Replies" }],
@@ -144,6 +145,7 @@ describe("DictationPopup", () => {
     const pendingSettings = deferred<{
       transcription: {
         dictationPushToTalk: boolean;
+        dictationHandsFreeEnabled: boolean;
         dictationModePreset: string;
         dictationSelectedCustomModeId: null;
         dictationCustomModes: { id: string; name: string }[];
@@ -169,6 +171,7 @@ describe("DictationPopup", () => {
       pendingSettings.resolve({
         transcription: {
           dictationPushToTalk: false,
+          dictationHandsFreeEnabled: false,
           dictationModePreset: "voice",
           dictationSelectedCustomModeId: null,
           dictationCustomModes: [{ id: "slack-replies", name: "Slack Replies" }],
@@ -234,6 +237,31 @@ describe("DictationPopup", () => {
     });
 
     expect(screen.getByText("00:02")).toBeInTheDocument();
+  });
+
+  it("shows hands-free recording guidance when that mode is enabled", async () => {
+    popupMocks.getSettings.mockResolvedValueOnce({
+      transcription: {
+        dictationPushToTalk: false,
+        dictationHandsFreeEnabled: true,
+        dictationModePreset: "voice",
+        dictationSelectedCustomModeId: null,
+        dictationCustomModes: [{ id: "slack-replies", name: "Slack Replies" }],
+        dictationContextSource: "none",
+        dictationProvider: "distil_whisper",
+        dictationModelId: "distil-large-v3.5",
+        dictationInsertionMode: "auto",
+      },
+    });
+
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    expect(await screen.findByText("Hands-free")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Speak naturally\. Nautilus stops after silence\. Press again to stop sooner\./i)
+    ).toBeInTheDocument();
   });
 
   it("resets the timer cleanly when a new session starts after idle", async () => {

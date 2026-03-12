@@ -162,6 +162,9 @@ const PROFILE_LABELS = {
   power_rewrite: "Power rewrite",
 } as const;
 
+const shortcutMode = (pushToTalk: boolean, handsFreeEnabled: boolean) =>
+  handsFreeEnabled ? "hands_free" : pushToTalk ? "hold_to_talk" : "toggle";
+
 const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
   {
     id: "voice",
@@ -376,6 +379,7 @@ export function DictationView() {
   );
   const [defaultProjectId, setDefaultProjectId] = useState("inbox");
   const [dictationPushToTalk, setDictationPushToTalk] = useState(true);
+  const [dictationHandsFreeEnabled, setDictationHandsFreeEnabled] = useState(false);
   const [dictationRoutePreference, setDictationRoutePreference] =
     useState<DictationRoutePreference>("local");
   const [dictationRouteOverrideEnabled, setDictationRouteOverrideEnabled] = useState(true);
@@ -600,6 +604,7 @@ export function DictationView() {
         setCurrentAiModelId(settings.privacy.llmModelId ?? null);
         setDefaultProjectId(settings.transcription.dictationProjectId || "inbox");
         setDictationPushToTalk(settings.transcription.dictationPushToTalk);
+        setDictationHandsFreeEnabled(settings.transcription.dictationHandsFreeEnabled ?? false);
         setDictationRoutePreference(nextRoutePreference);
         setDictationRouteOverrideEnabled(
           settings.transcription.dictationRouteOverrideEnabled ?? true
@@ -686,6 +691,7 @@ export function DictationView() {
       contextSource: DictationContextSource;
       projectId: string;
       pushToTalk: boolean;
+      handsFreeEnabled: boolean;
       routePreference: DictationRoutePreference;
       routeOverrideEnabled: boolean;
       keepWarm: "off" | "short" | "long";
@@ -708,6 +714,7 @@ export function DictationView() {
       const nextRoutePreference = updates.routePreference ?? dictationRoutePreference;
       const nextRouteOverrideEnabled =
         updates.routeOverrideEnabled ?? dictationRouteOverrideEnabled;
+      const nextHandsFreeEnabled = updates.handsFreeEnabled ?? dictationHandsFreeEnabled;
       const nextKeepWarm = updates.keepWarm ?? dictationKeepWarm;
       const nextLivePreviewEnabled =
         updates.livePreviewEnabled ?? dictationLivePreviewEnabled;
@@ -739,6 +746,7 @@ export function DictationView() {
       settings.transcription.dictationLivePreviewEnabled = nextLivePreviewEnabled;
       settings.transcription.dictationProjectId = updates.projectId ?? defaultProjectId;
       settings.transcription.dictationPushToTalk = updates.pushToTalk ?? dictationPushToTalk;
+      settings.transcription.dictationHandsFreeEnabled = nextHandsFreeEnabled;
       settings.transcription.dictationCopyToClipboard = nextCopyToClipboard;
       settings.transcription.dictationCommandModeEnabled = nextCommandModeEnabled;
       settings.transcription.dictationCommandPrefix =
@@ -1362,7 +1370,11 @@ export function DictationView() {
               <Keyboard className="h-4 w-4" />
               <span className="font-mono font-medium">{hotkeyLabel}</span>
               <span className="text-muted-foreground ml-2">
-                {dictationPushToTalk ? "hold to talk" : "toggle"}
+                {dictationHandsFreeEnabled
+                  ? "hands-free"
+                  : dictationPushToTalk
+                    ? "hold to talk"
+                    : "toggle"}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -1858,7 +1870,10 @@ export function DictationView() {
                 Capture
               </CardTitle>
               <CardDescription>
-                {dictationInstruction(hotkeyShortcut, dictationPushToTalk ? "hold_to_talk" : "toggle")}
+                {dictationInstruction(
+                  hotkeyShortcut,
+                  shortcutMode(dictationPushToTalk, dictationHandsFreeEnabled)
+                )}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -1891,7 +1906,9 @@ export function DictationView() {
                     <div className="text-center">
                       <p className="text-lg font-medium">Ready to capture</p>
                       <p className="text-muted-foreground mt-1">
-                        {dictationPushToTalk
+                        {dictationHandsFreeEnabled
+                          ? `Press ${hotkeyLabel} to start. It stops after silence or when you press again`
+                          : dictationPushToTalk
                           ? `Hold ${hotkeyLabel} to record and release to transcribe`
                           : `Press ${hotkeyLabel} to start, press again to transcribe`}
                       </p>
@@ -2210,18 +2227,22 @@ export function DictationView() {
                   <label className="text-sm font-medium">Hotkey behavior</label>
                   <select
                     className="w-full p-2 border rounded-md bg-background"
-                    value={dictationPushToTalk ? "hold_to_talk" : "toggle"}
+                    value={shortcutMode(dictationPushToTalk, dictationHandsFreeEnabled)}
                     onChange={(event) => {
-                      const pushToTalk = event.target.value === "hold_to_talk";
+                      const nextMode = event.target.value as "hold_to_talk" | "toggle" | "hands_free";
+                      const pushToTalk = nextMode === "hold_to_talk";
+                      const handsFreeEnabled = nextMode === "hands_free";
                       setDictationPushToTalk(pushToTalk);
-                      void persistDictationPreferences({ pushToTalk });
+                      setDictationHandsFreeEnabled(handsFreeEnabled);
+                      void persistDictationPreferences({ pushToTalk, handsFreeEnabled });
                     }}
                   >
                     <option value="hold_to_talk">Hold-to-talk</option>
                     <option value="toggle">Toggle press</option>
+                    <option value="hands_free">Hands-free</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Hold-to-talk starts on key press and transcribes on release.
+                    Hands-free starts on press and stops after silence or a second press.
                   </p>
                 </div>
 

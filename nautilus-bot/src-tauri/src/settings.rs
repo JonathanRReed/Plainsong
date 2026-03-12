@@ -152,6 +152,8 @@ pub struct TranscriptionSettings {
     pub dictation_auto_request_permissions: bool,
     /// Dictation: Use Push-to-Talk (start on press, stop on release)
     pub dictation_push_to_talk: bool,
+    /// Dictation: Hands-free mode (start on press, stop on silence or next press)
+    pub dictation_hands_free_enabled: bool,
     /// Dictation route preference: local or cloud.
     pub dictation_route_preference: String,
     /// Dictation: allow quick one-shot route override for the next manual capture.
@@ -267,6 +269,7 @@ impl Default for TranscriptionSettings {
             dictation_auto_request_permissions: true,
             // Toggle mode is safer for new users and avoids silent hold-to-talk confusion.
             dictation_push_to_talk: false,
+            dictation_hands_free_enabled: false,
             dictation_route_preference: "local".to_string(),
             dictation_route_override_enabled: true,
             dictation_keep_warm: "short".to_string(),
