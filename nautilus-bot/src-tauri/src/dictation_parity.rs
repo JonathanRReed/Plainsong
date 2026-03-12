@@ -10,6 +10,10 @@ pub enum DictationCommandAction {
     InsertText(String),
     UndoLastInsert,
     DeleteLastSentence,
+    ReplaceSelection {
+        target: String,
+        replacement: String,
+    },
     RewriteShorter(String),
     RewriteProfessional(String),
     Bulletize(String),
@@ -359,6 +363,29 @@ fn command_payload<'a>(raw: &'a str, phrase: &str) -> Option<&'a str> {
     Some(tail.trim_start_matches([' ', ':', ',']).trim())
 }
 
+fn trim_command_value(raw: &str) -> &str {
+    raw.trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'))
+        .trim()
+}
+
+fn parse_phrase_swap_command(
+    raw: &str,
+    verb: &str,
+    joiner: &str,
+) -> Option<(String, String)> {
+    let payload = command_payload(raw, verb)?;
+    let normalized = payload.to_ascii_lowercase();
+    let delimiter = format!(" {} ", joiner);
+    let boundary = normalized.find(&delimiter)?;
+    let target = trim_command_value(payload.get(..boundary)?);
+    let replacement = trim_command_value(payload.get(boundary + delimiter.len()..)?);
+    if target.is_empty() || replacement.is_empty() {
+        return None;
+    }
+    Some((target.to_string(), replacement.to_string()))
+}
+
 fn normalize_command_prefix(prefix: &str) -> &str {
     let trimmed = prefix.trim();
     if trimmed.is_empty() {
@@ -408,10 +435,38 @@ pub fn parse_dictation_command(
             DictationCommandAction::UndoLastInsert,
         ));
     }
+    if remainder.eq_ignore_ascii_case("undo that")
+        || remainder.eq_ignore_ascii_case("undo it")
+        || remainder.eq_ignore_ascii_case("scratch that")
+        || remainder.eq_ignore_ascii_case("never mind")
+    {
+        return Some((
+            "undo_last_insert".to_string(),
+            DictationCommandAction::UndoLastInsert,
+        ));
+    }
     if remainder.eq_ignore_ascii_case("delete last sentence") {
         return Some((
             "delete_last_sentence".to_string(),
             DictationCommandAction::DeleteLastSentence,
+        ));
+    }
+    if let Some((target, replacement)) = parse_phrase_swap_command(&remainder, "replace", "with") {
+        return Some((
+            "replace_selection".to_string(),
+            DictationCommandAction::ReplaceSelection {
+                target,
+                replacement,
+            },
+        ));
+    }
+    if let Some((target, replacement)) = parse_phrase_swap_command(&remainder, "change", "to") {
+        return Some((
+            "replace_selection".to_string(),
+            DictationCommandAction::ReplaceSelection {
+                target,
+                replacement,
+            },
         ));
     }
     if let Some(payload) = command_payload(&remainder, "rewrite shorter") {
@@ -492,12 +547,45 @@ pub fn default_dictation_command_prompt(command_key: &str) -> Option<&'static st
     }
 }
 
+pub fn apply_contextual_phrase_replacement(
+    input: &str,
+    target: &str,
+    replacement: &str,
+) -> Result<(String, usize), String> {
+    let source = input.trim();
+    if source.is_empty() {
+        return Err("Replace Text needs some text to work with.".to_string());
+    }
+
+    let trimmed_target = trim_command_value(target);
+    if trimmed_target.is_empty() {
+        return Err("Replace Text needs a phrase to replace.".to_string());
+    }
+
+    let trimmed_replacement = trim_command_value(replacement);
+    if trimmed_replacement.is_empty() {
+        return Err("Replace Text needs replacement text.".to_string());
+    }
+
+    let (output, applied) =
+        replace_case_insensitive_all(source, trimmed_target, trimmed_replacement);
+    if applied == 0 {
+        return Err(format!(
+            "Replace Text could not find '{}' in the current text.",
+            trimmed_target
+        ));
+    }
+
+    Ok((output, applied))
+}
+
 fn command_output(action: &DictationCommandAction, original_input: &str) -> String {
     match action {
         DictationCommandAction::InsertText(text) => text.clone(),
         DictationCommandAction::UndoLastInsert | DictationCommandAction::DeleteLastSentence => {
             String::new()
         }
+        DictationCommandAction::ReplaceSelection { .. } => original_input.to_string(),
         DictationCommandAction::RewriteShorter(text)
         | DictationCommandAction::RewriteProfessional(text)
         | DictationCommandAction::Bulletize(text) => {
@@ -808,5 +896,43 @@ mod tests {
         assert_eq!(run.rows[1].snippet_applied_count, 1);
         assert_eq!(run.rows[1].actual_provider, "distil_whisper");
         assert!(run.rows[1].is_fallback);
+    }
+
+    #[test]
+    fn parse_dictation_command_supports_undo_synonyms() {
+        let (command, action) =
+            parse_dictation_command("command scratch that", DEFAULT_COMMAND_PREFIX)
+                .expect("parses synonym");
+        assert_eq!(command, "undo_last_insert");
+        assert_eq!(action, DictationCommandAction::UndoLastInsert);
+    }
+
+    #[test]
+    fn parse_dictation_command_supports_replace_selection() {
+        let (command, action) = parse_dictation_command(
+            "command replace roadmap with launch plan",
+            DEFAULT_COMMAND_PREFIX,
+        )
+        .expect("parses replace command");
+        assert_eq!(command, "replace_selection");
+        assert_eq!(
+            action,
+            DictationCommandAction::ReplaceSelection {
+                target: "roadmap".to_string(),
+                replacement: "launch plan".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn apply_contextual_phrase_replacement_is_case_insensitive() {
+        let (output, applied) = apply_contextual_phrase_replacement(
+            "Roadmap review for the roadmap team",
+            "roadmap",
+            "launch plan",
+        )
+        .expect("replacement succeeds");
+        assert_eq!(output, "launch plan review for the launch plan team");
+        assert_eq!(applied, 2);
     }
 }

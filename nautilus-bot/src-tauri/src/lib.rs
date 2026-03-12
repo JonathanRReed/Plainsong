@@ -8109,6 +8109,23 @@ async fn stop_dictation_session_for_session(
                         .map_err(|e| format!("Command '{}' failed: {}", command_key, e))?;
                     result.text.clear();
                 }
+                DictationCommandAction::ReplaceSelection {
+                    target,
+                    replacement,
+                } => {
+                    let command_input = resolve_contextual_command_input(
+                        "",
+                        dictation_options.captured_context_text.as_deref(),
+                        &dictation_options.context_source,
+                        "Replace Text",
+                    )?;
+                    let (updated_text, _) = crate::dictation_parity::apply_contextual_phrase_replacement(
+                        command_input.as_str(),
+                        target.as_str(),
+                        replacement.as_str(),
+                    )?;
+                    result.text = updated_text;
+                }
             }
             command_applied = Some(command_key);
         }
