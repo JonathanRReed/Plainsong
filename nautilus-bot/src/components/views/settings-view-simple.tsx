@@ -1154,6 +1154,80 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         }
                       />
                     </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Command mode</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Enable corrections like &quot;command undo that&quot; and
+                          &quot;command replace roadmap with launch plan&quot;.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationCommandModeEnabled ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCommandModeEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Command prefix</Label>
+                      <Input
+                        value={settings.transcription.dictationCommandPrefix ?? "command"}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCommandPrefix: e.target.value,
+                            },
+                          })
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Use the wake word that starts correction and transform commands.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Snippets</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Expand saved text shortcuts after dictionary normalization.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationSnippetsEnabled ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationSnippetsEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+                      <div className="space-y-0.5">
+                        <Label>Dictionary and snippet rules</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Manage exact replacements and snippet content from the Dictation workspace.
+                        </p>
+                      </div>
+                      <Button variant="secondary" onClick={() => requestMainView("dictation")}>
+                        Open Dictation
+                      </Button>
+                    </div>
                     
                     <div className="space-y-2">
                       <Label>Custom Dictation Prompt</Label>
@@ -1702,6 +1776,80 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         }
                       />
                     </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Command mode</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Enable corrections like &quot;command undo that&quot; and
+                          &quot;command replace roadmap with launch plan&quot;.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationCommandModeEnabled ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCommandModeEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Command prefix</Label>
+                      <Input
+                        value={settings.transcription.dictationCommandPrefix ?? "command"}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCommandPrefix: e.target.value,
+                            },
+                          })
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Use the wake word that starts correction and transform commands.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Snippets</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Expand saved text shortcuts after dictionary normalization.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationSnippetsEnabled ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationSnippetsEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+                      <div className="space-y-0.5">
+                        <Label>Dictionary and snippet rules</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Manage exact replacements and snippet content from the Dictation workspace.
+                        </p>
+                      </div>
+                      <Button variant="secondary" onClick={() => requestMainView("dictation")}>
+                        Open Dictation
+                      </Button>
+                    </div>
                     
                     <div className="space-y-2">
                       <Label>Custom Dictation Prompt</Label>
@@ -1929,6 +2077,80 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           })
                         }
                       />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Command mode</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Enable corrections like &quot;command undo that&quot; and
+                          &quot;command replace roadmap with launch plan&quot;.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationCommandModeEnabled ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCommandModeEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Command prefix</Label>
+                      <Input
+                        value={settings.transcription.dictationCommandPrefix ?? "command"}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCommandPrefix: e.target.value,
+                            },
+                          })
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Use the wake word that starts correction and transform commands.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Snippets</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Expand saved text shortcuts after dictionary normalization.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationSnippetsEnabled ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationSnippetsEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+                      <div className="space-y-0.5">
+                        <Label>Dictionary and snippet rules</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Manage exact replacements and snippet content from the Dictation workspace.
+                        </p>
+                      </div>
+                      <Button variant="secondary" onClick={() => requestMainView("dictation")}>
+                        Open Dictation
+                      </Button>
                     </div>
                     
                     <div className="space-y-2">
@@ -2645,6 +2867,80 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         }
                       />
                     </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Command mode</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Enable corrections like &quot;command undo that&quot; and
+                          &quot;command replace roadmap with launch plan&quot;.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationCommandModeEnabled ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCommandModeEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Command prefix</Label>
+                      <Input
+                        value={settings.transcription.dictationCommandPrefix ?? "command"}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCommandPrefix: e.target.value,
+                            },
+                          })
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Use the wake word that starts correction and transform commands.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Snippets</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Expand saved text shortcuts after dictionary normalization.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationSnippetsEnabled ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationSnippetsEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+                      <div className="space-y-0.5">
+                        <Label>Dictionary and snippet rules</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Manage exact replacements and snippet content from the Dictation workspace.
+                        </p>
+                      </div>
+                      <Button variant="secondary" onClick={() => requestMainView("dictation")}>
+                        Open Dictation
+                      </Button>
+                    </div>
                     
                     <div className="space-y-2">
                       <Label>Custom Dictation Prompt</Label>
@@ -3265,6 +3561,80 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           })
                         }
                       />
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Command mode</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Enable corrections like &quot;command undo that&quot; and
+                          &quot;command replace roadmap with launch plan&quot;.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationCommandModeEnabled ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCommandModeEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>Command prefix</Label>
+                      <Input
+                        value={settings.transcription.dictationCommandPrefix ?? "command"}
+                        onChange={(e: any) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationCommandPrefix: e.target.value,
+                            },
+                          })
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Use the wake word that starts correction and transform commands.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label>Snippets</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Expand saved text shortcuts after dictionary normalization.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={settings.transcription.dictationSnippetsEnabled ?? true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationSnippetsEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
+                      <div className="space-y-0.5">
+                        <Label>Dictionary and snippet rules</Label>
+                        <p className="text-sm text-muted-foreground">
+                          Manage exact replacements and snippet content from the Dictation workspace.
+                        </p>
+                      </div>
+                      <Button variant="secondary" onClick={() => requestMainView("dictation")}>
+                        Open Dictation
+                      </Button>
                     </div>
                     
                     <div className="space-y-2">
