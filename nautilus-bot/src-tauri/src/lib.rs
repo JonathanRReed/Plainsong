@@ -13853,7 +13853,7 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 {
                     let _ = ensure_microphone_permission(false);
-                    let _ = crate::asr::platform::macos_speech::ensure_speech_authorized(false);
+                    let _ = crate::asr::platform::macos_speech::speech_authorization_status();
                 }
                 if let Err(error) = state.asr_manager.get_all_providers_info().await {
                     tracing::debug!("ASR provider cache warmup failed: {}", error);

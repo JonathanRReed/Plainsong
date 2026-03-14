@@ -13,18 +13,6 @@ use anyhow::Context;
     target_arch = "aarch64",
     nautilus_macos_speech_helper
 ))]
-use block2::RcBlock;
-#[cfg(all(
-    target_os = "macos",
-    target_arch = "aarch64",
-    nautilus_macos_speech_helper
-))]
-use objc2_speech::{SFSpeechRecognizer, SFSpeechRecognizerAuthorizationStatus};
-#[cfg(all(
-    target_os = "macos",
-    target_arch = "aarch64",
-    nautilus_macos_speech_helper
-))]
 use serde::Deserialize;
 #[cfg(all(
     target_os = "macos",
@@ -32,12 +20,6 @@ use serde::Deserialize;
     nautilus_macos_speech_helper
 ))]
 use std::process::{Command, Output, Stdio};
-#[cfg(all(
-    target_os = "macos",
-    target_arch = "aarch64",
-    nautilus_macos_speech_helper
-))]
-use std::sync::{Arc, Condvar, Mutex};
 #[cfg(all(
     target_os = "macos",
     target_arch = "aarch64",
@@ -75,6 +57,18 @@ const HELPER_BASE_NAME: &str = "nautilus-macos-speech-helper";
     nautilus_macos_speech_helper
 ))]
 const HELPER_TARGET_NAME: &str = "nautilus-macos-speech-helper-aarch64-apple-darwin";
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
+const AUTH_STATUS_ARG: &str = "--authorization-status";
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
+const AUTH_REQUEST_ARG: &str = "--request-authorization";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpeechAuthorizationStatus {
@@ -150,6 +144,17 @@ struct MacosSpeechPayload {
     text: String,
     language: String,
     confidence: Option<f64>,
+}
+
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
+#[derive(Debug, Deserialize)]
+struct MacosSpeechAuthorizationPayload {
+    status: String,
+    code: isize,
 }
 
 #[cfg(all(
@@ -469,84 +474,30 @@ fn run_helper_with_timeout(helper: &Path, audio_path: &Path, timeout: Duration) 
     nautilus_macos_speech_helper
 ))]
 pub fn ensure_speech_authorized(prompt_if_needed: bool) -> Result<()> {
-    unsafe {
-        let status = SFSpeechRecognizer::authorizationStatus();
-        if status == SFSpeechRecognizerAuthorizationStatus::Authorized {
-            return Ok(());
-        }
-        if status == SFSpeechRecognizerAuthorizationStatus::Denied {
-            return Err(anyhow::anyhow!(
-                "macOS Speech permission denied. Enable Nautilus in System Settings > Privacy & Security > Speech Recognition."
-            ));
-        }
-        if status == SFSpeechRecognizerAuthorizationStatus::Restricted {
-            return Err(anyhow::anyhow!(
-                "macOS Speech permission is restricted by system policy."
-            ));
-        }
-        if status != SFSpeechRecognizerAuthorizationStatus::NotDetermined {
-            return Err(anyhow::anyhow!(
-                "Unexpected macOS Speech authorization status: {}",
-                status.0
-            ));
-        }
-
-        if !prompt_if_needed {
-            return Err(anyhow::anyhow!(
-                "Speech recognition permission has not been granted yet. Enable auto-request permissions or grant it in System Settings > Privacy & Security > Speech Recognition."
-            ));
-        }
-
-        if !is_packaged_app_context() {
-            return Err(anyhow::anyhow!(
-                "Speech recognition permission has not been granted yet. Run the packaged Nautilus app and allow Speech Recognition access, then retry."
-            ));
-        }
-
-        let state = Arc::new((
-            Mutex::new(None::<SFSpeechRecognizerAuthorizationStatus>),
-            Condvar::new(),
+    if prompt_if_needed && !is_packaged_app_context() {
+        return Err(anyhow::anyhow!(
+            "Speech recognition permission has not been granted yet. Run the packaged Nautilus app and allow Speech Recognition access, then retry."
         ));
-        let state_clone = Arc::clone(&state);
-        let block = RcBlock::new(move |new_status: SFSpeechRecognizerAuthorizationStatus| {
-            let (lock, condvar) = &*state_clone;
-            if let Ok(mut guard) = lock.lock() {
-                *guard = Some(new_status);
-                condvar.notify_one();
-            }
-        });
-        SFSpeechRecognizer::requestAuthorization(&block);
+    }
 
-        let (lock, condvar) = &*state;
-        let guard = lock
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Failed to acquire macOS Speech authorization lock"))?;
-        let (mut guard, wait_result) = condvar
-            .wait_timeout_while(guard, Duration::from_secs(20), |current| current.is_none())
-            .map_err(|_| anyhow::anyhow!("Failed while waiting for macOS Speech authorization"))?;
-
-        if wait_result.timed_out() {
-            return Err(anyhow::anyhow!(
-                "Timed out waiting for macOS Speech authorization response."
-            ));
-        }
-
-        match guard.take() {
-            Some(SFSpeechRecognizerAuthorizationStatus::Authorized) => Ok(()),
-            Some(SFSpeechRecognizerAuthorizationStatus::Denied) => Err(anyhow::anyhow!(
-                "macOS Speech permission denied. Enable Nautilus in System Settings > Privacy & Security > Speech Recognition."
-            )),
-            Some(SFSpeechRecognizerAuthorizationStatus::Restricted) => Err(anyhow::anyhow!(
-                "macOS Speech permission is restricted by system policy."
-            )),
-            Some(other) => Err(anyhow::anyhow!(
-                "macOS Speech authorization was not granted (status: {}).",
-                other.0
-            )),
-            None => Err(anyhow::anyhow!(
-                "macOS Speech authorization callback returned no status."
-            )),
-        }
+    match helper_authorization_status(prompt_if_needed)? {
+        SpeechAuthorizationStatus::Authorized => Ok(()),
+        SpeechAuthorizationStatus::NotDetermined => Err(anyhow::anyhow!(
+            "Speech recognition permission has not been granted yet. Enable auto-request permissions or grant it in System Settings > Privacy & Security > Speech Recognition."
+        )),
+        SpeechAuthorizationStatus::Denied => Err(anyhow::anyhow!(
+            "macOS Speech permission denied. Enable Nautilus in System Settings > Privacy & Security > Speech Recognition."
+        )),
+        SpeechAuthorizationStatus::Restricted => Err(anyhow::anyhow!(
+            "macOS Speech permission is restricted by system policy."
+        )),
+        SpeechAuthorizationStatus::Unavailable => Err(anyhow::anyhow!(
+            "macOS Apple Speech native engine is unavailable in this build"
+        )),
+        SpeechAuthorizationStatus::Unknown(code) => Err(anyhow::anyhow!(
+            "Unexpected macOS Speech authorization status: {}",
+            code
+        )),
     }
 }
 
@@ -556,20 +507,7 @@ pub fn ensure_speech_authorized(prompt_if_needed: bool) -> Result<()> {
     nautilus_macos_speech_helper
 ))]
 pub fn speech_authorization_status() -> SpeechAuthorizationStatus {
-    unsafe {
-        let status = SFSpeechRecognizer::authorizationStatus();
-        if status == SFSpeechRecognizerAuthorizationStatus::Authorized {
-            SpeechAuthorizationStatus::Authorized
-        } else if status == SFSpeechRecognizerAuthorizationStatus::NotDetermined {
-            SpeechAuthorizationStatus::NotDetermined
-        } else if status == SFSpeechRecognizerAuthorizationStatus::Denied {
-            SpeechAuthorizationStatus::Denied
-        } else if status == SFSpeechRecognizerAuthorizationStatus::Restricted {
-            SpeechAuthorizationStatus::Restricted
-        } else {
-            SpeechAuthorizationStatus::Unknown(status.0)
-        }
-    }
+    helper_authorization_status(false).unwrap_or(SpeechAuthorizationStatus::Unavailable)
 }
 
 #[cfg(all(
@@ -588,6 +526,72 @@ fn is_packaged_app_context() -> bool {
             .map(|ext| ext.eq_ignore_ascii_case("app"))
             .unwrap_or(false)
     })
+}
+
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
+fn helper_authorization_status(prompt_if_needed: bool) -> Result<SpeechAuthorizationStatus> {
+    let helper = resolve_helper_binary_path()?;
+    let auth_arg = if prompt_if_needed {
+        AUTH_REQUEST_ARG
+    } else {
+        AUTH_STATUS_ARG
+    };
+    let output = Command::new(&helper)
+        .arg(auth_arg)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| {
+            format!(
+                "Failed to start macOS Speech authorization helper at '{}'",
+                helper.display()
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let trimmed = stderr.trim();
+        return Err(anyhow::anyhow!(
+            "macOS Speech authorization helper failed: {}",
+            if trimmed.is_empty() {
+                "unknown error".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        ));
+    }
+
+    let payload: MacosSpeechAuthorizationPayload =
+        serde_json::from_slice(&output.stdout).with_context(|| {
+            format!(
+                "Failed to parse macOS Speech authorization helper output as JSON: {}",
+                String::from_utf8_lossy(&output.stdout)
+            )
+        })?;
+
+    Ok(map_authorization_status_payload(&payload))
+}
+
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    nautilus_macos_speech_helper
+))]
+fn map_authorization_status_payload(
+    payload: &MacosSpeechAuthorizationPayload,
+) -> SpeechAuthorizationStatus {
+    match payload.status.trim() {
+        "authorized" => SpeechAuthorizationStatus::Authorized,
+        "not_determined" => SpeechAuthorizationStatus::NotDetermined,
+        "denied" => SpeechAuthorizationStatus::Denied,
+        "restricted" => SpeechAuthorizationStatus::Restricted,
+        "unavailable" => SpeechAuthorizationStatus::Unavailable,
+        _ => SpeechAuthorizationStatus::Unknown(payload.code),
+    }
 }
 
 #[cfg(not(all(
@@ -681,4 +685,52 @@ fn is_executable_file(path: &Path) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{map_authorization_status_payload, MacosSpeechAuthorizationPayload, SpeechAuthorizationStatus};
+
+    #[test]
+    fn helper_authorization_payload_maps_known_statuses() {
+        assert_eq!(
+            map_authorization_status_payload(&MacosSpeechAuthorizationPayload {
+                status: "authorized".to_string(),
+                code: 3,
+            }),
+            SpeechAuthorizationStatus::Authorized
+        );
+        assert_eq!(
+            map_authorization_status_payload(&MacosSpeechAuthorizationPayload {
+                status: "not_determined".to_string(),
+                code: 0,
+            }),
+            SpeechAuthorizationStatus::NotDetermined
+        );
+        assert_eq!(
+            map_authorization_status_payload(&MacosSpeechAuthorizationPayload {
+                status: "denied".to_string(),
+                code: 1,
+            }),
+            SpeechAuthorizationStatus::Denied
+        );
+        assert_eq!(
+            map_authorization_status_payload(&MacosSpeechAuthorizationPayload {
+                status: "restricted".to_string(),
+                code: 2,
+            }),
+            SpeechAuthorizationStatus::Restricted
+        );
+    }
+
+    #[test]
+    fn helper_authorization_payload_preserves_unknown_code() {
+        assert_eq!(
+            map_authorization_status_payload(&MacosSpeechAuthorizationPayload {
+                status: "mystery".to_string(),
+                code: 99,
+            }),
+            SpeechAuthorizationStatus::Unknown(99)
+        );
+    }
 }
