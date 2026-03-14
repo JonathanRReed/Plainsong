@@ -855,6 +855,25 @@ impl Database {
             [],
         )?;
 
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS dictation_correction_suggestions (
+                id TEXT PRIMARY KEY,
+                original_text TEXT NOT NULL,
+                corrected_text TEXT NOT NULL,
+                spoken_form TEXT NOT NULL,
+                replacement TEXT NOT NULL,
+                app_target TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dictation_correction_suggestions_spoken_form
+             ON dictation_correction_suggestions(spoken_form)",
+            [],
+        )?;
+
         // Use FTS5 for cross-recording transcript retrieval.
         let fts_ready = self
             .conn
@@ -957,15 +976,18 @@ impl Database {
             "ALTER TABLE recordings ADD COLUMN consent_prompt_shown INTEGER NOT NULL DEFAULT 0",
             [],
         );
-        let _ = self
-            .conn
-            .execute("ALTER TABLE recordings ADD COLUMN consent_notice_mode TEXT", []);
-        let _ = self
-            .conn
-            .execute("ALTER TABLE recordings ADD COLUMN consent_notice_surface TEXT", []);
-        let _ = self
-            .conn
-            .execute("ALTER TABLE recordings ADD COLUMN consent_notice_message TEXT", []);
+        let _ = self.conn.execute(
+            "ALTER TABLE recordings ADD COLUMN consent_notice_mode TEXT",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE recordings ADD COLUMN consent_notice_surface TEXT",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE recordings ADD COLUMN consent_notice_message TEXT",
+            [],
+        );
         let _ = self.conn.execute(
             "ALTER TABLE recordings ADD COLUMN consent_notice_updated_at TEXT",
             [],
@@ -1944,6 +1966,156 @@ impl Database {
         )?;
         if deleted == 0 {
             anyhow::bail!("Dictionary entry '{}' not found", entry_id);
+        }
+        Ok(())
+    }
+
+    pub fn list_dictation_correction_suggestions(
+        &self,
+    ) -> Result<Vec<DictationCorrectionSuggestion>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, original_text, corrected_text, spoken_form, replacement, app_target, created_at, updated_at
+             FROM dictation_correction_suggestions
+             ORDER BY updated_at DESC, created_at DESC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(DictationCorrectionSuggestion {
+                id: row.get(0)?,
+                original_text: row.get(1)?,
+                corrected_text: row.get(2)?,
+                spoken_form: row.get(3)?,
+                replacement: row.get(4)?,
+                app_target: row.get(5)?,
+                created_at: row
+                    .get::<_, String>(6)?
+                    .parse()
+                    .unwrap_or_else(|_| Utc::now()),
+                updated_at: row
+                    .get::<_, String>(7)?
+                    .parse()
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    pub fn upsert_dictation_correction_suggestion(
+        &mut self,
+        original_text: &str,
+        corrected_text: &str,
+        spoken_form: &str,
+        replacement: &str,
+        app_target: Option<&str>,
+    ) -> Result<(String, DictationCorrectionSuggestion)> {
+        let normalized_spoken_form = spoken_form.trim();
+        let normalized_replacement = replacement.trim();
+        if normalized_spoken_form.is_empty() || normalized_replacement.is_empty() {
+            anyhow::bail!("Correction suggestion fields cannot be empty");
+        }
+
+        let normalized_app_target = app_target
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let existing = self
+            .list_dictation_correction_suggestions()?
+            .into_iter()
+            .find(|suggestion| {
+                suggestion
+                    .spoken_form
+                    .eq_ignore_ascii_case(normalized_spoken_form)
+                    && suggestion.replacement == normalized_replacement
+                    && match (
+                        suggestion.app_target.as_deref(),
+                        normalized_app_target.as_deref(),
+                    ) {
+                        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            });
+
+        let now = Utc::now();
+        if let Some(existing) = existing {
+            self.conn.execute(
+                "UPDATE dictation_correction_suggestions
+                 SET original_text = ?1, corrected_text = ?2, spoken_form = ?3, replacement = ?4, app_target = ?5, updated_at = ?6
+                 WHERE id = ?7",
+                params![
+                    original_text.trim(),
+                    corrected_text.trim(),
+                    normalized_spoken_form,
+                    normalized_replacement,
+                    &normalized_app_target,
+                    now.to_rfc3339(),
+                    &existing.id,
+                ],
+            )?;
+
+            Ok((
+                "updated".to_string(),
+                DictationCorrectionSuggestion {
+                    id: existing.id,
+                    original_text: original_text.trim().to_string(),
+                    corrected_text: corrected_text.trim().to_string(),
+                    spoken_form: normalized_spoken_form.to_string(),
+                    replacement: normalized_replacement.to_string(),
+                    app_target: normalized_app_target,
+                    created_at: existing.created_at,
+                    updated_at: now,
+                },
+            ))
+        } else {
+            let suggestion = DictationCorrectionSuggestion {
+                id: uuid::Uuid::new_v4().to_string(),
+                original_text: original_text.trim().to_string(),
+                corrected_text: corrected_text.trim().to_string(),
+                spoken_form: normalized_spoken_form.to_string(),
+                replacement: normalized_replacement.to_string(),
+                app_target: normalized_app_target,
+                created_at: now,
+                updated_at: now,
+            };
+
+            self.conn.execute(
+                "INSERT INTO dictation_correction_suggestions (
+                    id, original_text, corrected_text, spoken_form, replacement, app_target, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    &suggestion.id,
+                    &suggestion.original_text,
+                    &suggestion.corrected_text,
+                    &suggestion.spoken_form,
+                    &suggestion.replacement,
+                    &suggestion.app_target,
+                    suggestion.created_at.to_rfc3339(),
+                    suggestion.updated_at.to_rfc3339(),
+                ],
+            )?;
+
+            Ok(("created".to_string(), suggestion))
+        }
+    }
+
+    pub fn get_dictation_correction_suggestion(
+        &self,
+        suggestion_id: &str,
+    ) -> Result<Option<DictationCorrectionSuggestion>> {
+        Ok(self
+            .list_dictation_correction_suggestions()?
+            .into_iter()
+            .find(|suggestion| suggestion.id == suggestion_id))
+    }
+
+    pub fn delete_dictation_correction_suggestion(&mut self, suggestion_id: &str) -> Result<()> {
+        let deleted = self.conn.execute(
+            "DELETE FROM dictation_correction_suggestions WHERE id = ?1",
+            params![suggestion_id],
+        )?;
+        if deleted == 0 {
+            anyhow::bail!("Correction suggestion '{}' not found", suggestion_id);
         }
         Ok(())
     }
@@ -3478,6 +3650,44 @@ mod tests {
 
         db.delete_dictation_dictionary_entry(&created.id).unwrap();
         assert!(db.list_dictation_dictionary_entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_dictation_correction_suggestion_upsert_and_delete() {
+        let mut db = in_memory_db();
+        let (first_action, first) = db
+            .upsert_dictation_correction_suggestion(
+                "jon will join",
+                "John will join",
+                "jon",
+                "John",
+                Some("Slack"),
+            )
+            .unwrap();
+        assert_eq!(first_action, "created");
+
+        let (second_action, second) = db
+            .upsert_dictation_correction_suggestion(
+                "jon will join tomorrow",
+                "John will join tomorrow",
+                "jon",
+                "John",
+                Some("Slack"),
+            )
+            .unwrap();
+        assert_eq!(second_action, "updated");
+        assert_eq!(first.id, second.id);
+
+        let suggestions = db.list_dictation_correction_suggestions().unwrap();
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].corrected_text, "John will join tomorrow");
+
+        db.delete_dictation_correction_suggestion(&second.id)
+            .unwrap();
+        assert!(db
+            .list_dictation_correction_suggestions()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

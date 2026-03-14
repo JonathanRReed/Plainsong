@@ -87,7 +87,10 @@ pub(crate) fn clear_cached_runtime(model_dir: &Path) {
             .unwrap_or(false)
         {
             *cache = None;
-            tracing::info!("Cleared cached Moonshine runtime for {}", model_dir.display());
+            tracing::info!(
+                "Cleared cached Moonshine runtime for {}",
+                model_dir.display()
+            );
         }
     });
 }
@@ -102,7 +105,8 @@ pub struct MoonshineProvider {
 
 impl MoonshineProvider {
     pub fn new(selected_model_id: Option<&str>) -> Self {
-        let model_id = normalize_moonshine_model_id(selected_model_id.unwrap_or(MOONSHINE_BASE_MODEL_ID));
+        let model_id =
+            normalize_moonshine_model_id(selected_model_id.unwrap_or(MOONSHINE_BASE_MODEL_ID));
         let root_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Nautilus")
@@ -112,7 +116,10 @@ impl MoonshineProvider {
         } else {
             root_dir.join("moonshine_tiny")
         };
-        Self { model_dir, model_id }
+        Self {
+            model_dir,
+            model_id,
+        }
     }
 
     fn has_required_files(&self) -> bool {
@@ -664,7 +671,10 @@ impl AsrProvider for MoonshineProvider {
                 .await?;
         }
 
-        tracing::info!("Moonshine model '{}' downloaded successfully", self.model_id);
+        tracing::info!(
+            "Moonshine model '{}' downloaded successfully",
+            self.model_id
+        );
         Ok(())
     }
 }

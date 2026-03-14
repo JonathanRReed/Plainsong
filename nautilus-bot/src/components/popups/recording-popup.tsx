@@ -350,7 +350,7 @@ export function RecordingPopup() {
 
   const statusLabel = isTranscribing ? "Processing" : "Live meeting";
   const captureModeLabel = systemAudioActive ? "Me + Them" : "Mic only";
-  const notesSummary = meetingNotes.trim() || "Open the workspace to keep meeting notes current.";
+  const notesSummary = meetingNotes.trim() || "Open the meeting view to keep notes current.";
   const consentStatus = describeMeetingConsent({
     consentPromptShown,
     consentNoticeMode,
@@ -380,7 +380,7 @@ export function RecordingPopup() {
             className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/8 text-white hover:bg-white/15"
             onMouseDown={(event) => event.stopPropagation()}
             onClick={() => void openMainApp("recordings", recordingId)}
-            aria-label="Open workspace"
+            aria-label="Open meeting view"
           >
             <AppWindow className="h-3.5 w-3.5" />
           </button>

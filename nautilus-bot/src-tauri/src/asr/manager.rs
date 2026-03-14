@@ -93,9 +93,7 @@ impl AsrManager {
 
         match provider_type {
             AsrProviderType::Parakeet => match candidate {
-                "parakeet-tdt-0.6b-v3" | "parakeet-ctc-0.6b" => {
-                    "parakeet-ctc-0.6b".to_string()
-                }
+                "parakeet-tdt-0.6b-v3" | "parakeet-ctc-0.6b" => "parakeet-ctc-0.6b".to_string(),
                 "parakeet-ctc-1.1b" => "parakeet-ctc-1.1b".to_string(),
                 "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => {
                     "parakeet-tdt-ctc-110m".to_string()
@@ -218,11 +216,7 @@ impl AsrManager {
         self.invalidate_provider_info_cache().await;
     }
 
-    pub fn supports_short_keep_warm(
-        &self,
-        provider_type: AsrProviderType,
-        model_id: &str,
-    ) -> bool {
+    pub fn supports_short_keep_warm(&self, provider_type: AsrProviderType, model_id: &str) -> bool {
         let normalized = Self::normalize_model_id(provider_type, model_id);
         match provider_type {
             AsrProviderType::Whisper
@@ -1053,18 +1047,17 @@ fn runtime_diagnostics_for_provider(
             if !manifest.exists() {
                 return RuntimeDiagnosticsInternal {
                     runtime_status: RuntimeStatus::MissingModel,
-                    runtime_message: Some(
-                        format!(
-                            "Parakeet model '{}' is not downloaded yet.",
-                            normalized_model
-                        ),
-                    ),
+                    runtime_message: Some(format!(
+                        "Parakeet model '{}' is not downloaded yet.",
+                        normalized_model
+                    )),
                     runtime_details: RuntimeDetails {
                         model_path: Some(model_dir.to_string_lossy().to_string()),
                         python_path: detected_python,
                         missing_files: vec!["manifest.json".to_string()],
                         setup_action: Some(
-                            "Download the selected Parakeet bundle in Settings -> ASR Models.".to_string(),
+                            "Download the selected Parakeet bundle in Settings -> ASR Models."
+                                .to_string(),
                         ),
                     },
                 };
@@ -1076,11 +1069,9 @@ fn runtime_diagnostics_for_provider(
                 } else {
                     RuntimeStatus::Error
                 },
-                runtime_message: Some(
-                    last_error.map(ToString::to_string).unwrap_or_else(|| {
-                        format!("Parakeet runtime ready for {}.", normalized_model)
-                    }),
-                ),
+                runtime_message: Some(last_error.map(ToString::to_string).unwrap_or_else(|| {
+                    format!("Parakeet runtime ready for {}.", normalized_model)
+                })),
                 runtime_details: RuntimeDetails {
                     model_path: Some(model_dir.to_string_lossy().to_string()),
                     python_path: detected_python,

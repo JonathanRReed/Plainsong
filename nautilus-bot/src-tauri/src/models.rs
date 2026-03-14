@@ -184,6 +184,11 @@ pub struct DictationHistoryDetails {
     pub app_target: Option<String>,
     pub activation_matcher: Option<String>,
     pub command_applied: Option<String>,
+    pub dictionary_applied_count: Option<u64>,
+    pub snippet_applied_count: Option<u64>,
+    pub formatting_applied: Option<bool>,
+    pub recent_insert_reused: Option<bool>,
+    pub pipeline_stage_keys: Vec<String>,
     pub prompt_source: Option<String>,
     pub prompt_preview: Option<String>,
     pub requested_provider: Option<String>,
@@ -195,6 +200,21 @@ pub struct DictationHistoryDetails {
     pub transcription_latency_ms: Option<u64>,
     pub insert_latency_ms: Option<u64>,
     pub end_to_end_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationInsights {
+    pub total_dictations: u64,
+    pub dictated_words: u64,
+    pub average_words_per_dictation: u64,
+    pub active_days: u64,
+    pub last_seven_days_dictations: u64,
+    pub commands_used: u64,
+    pub backtracks_used: u64,
+    pub snippets_triggered: u64,
+    pub top_app_target: Option<String>,
+    pub top_app_target_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -362,6 +382,39 @@ pub struct LearnDictationCorrectionResult {
     pub spoken_form: Option<String>,
     pub replacement: Option<String>,
     pub entry: Option<DictationDictionaryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationDictionaryCsvImportResult {
+    pub created_count: usize,
+    pub updated_count: usize,
+    pub skipped_count: usize,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationCorrectionSuggestion {
+    pub id: String,
+    pub original_text: String,
+    pub corrected_text: String,
+    pub spoken_form: String,
+    pub replacement: String,
+    pub app_target: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueDictationCorrectionSuggestionResult {
+    pub queued: bool,
+    pub action: Option<String>,
+    pub reason: Option<String>,
+    pub spoken_form: Option<String>,
+    pub replacement: Option<String>,
+    pub suggestion: Option<DictationCorrectionSuggestion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -5,7 +5,9 @@ mod commands;
 mod crypto;
 mod db;
 mod diarization;
+mod dictation_dictionary_csv;
 mod dictation_parity;
+mod dictation_pipeline;
 mod download;
 mod events;
 mod export;
@@ -22,7 +24,8 @@ mod transcription;
 pub mod update;
 
 use crate::asr::manager::RuntimeStatus;
-use crate::dictation_parity::{DictionaryRule, SnippetRule};
+#[cfg(test)]
+use crate::dictation_parity::SnippetRule;
 use crate::events::{
     DictationStateChangedEvent, DictationTextReadyEvent, MeetingRecordingStateChangedEvent,
     RecordingStatusChangedEvent,
@@ -88,6 +91,7 @@ pub struct AppState {
     recording_overlay_state: Arc<StdMutex<RecordingOverlayState>>,
     accessibility_trust_observed: Arc<AtomicBool>,
     last_cursor_insert_status: Arc<StdMutex<Option<CursorInsertStatus>>>,
+    recent_dictation_delivery: Arc<Mutex<Option<RecentDictationDelivery>>>,
     streaming_transcriber: Arc<streaming::StreamingTranscriber>,
     dictation_stream_stop: Arc<AtomicBool>,
     dictation_inline_state: Arc<Mutex<InlineDictationState>>,
@@ -226,6 +230,16 @@ struct InlineDictationState {
     original_clipboard: Option<String>,
     keep_text_in_clipboard: bool,
 }
+
+#[derive(Debug, Clone)]
+struct RecentDictationDelivery {
+    text: String,
+    app_target: Option<String>,
+    app_bundle_id: Option<String>,
+    delivered_at: chrono::DateTime<chrono::Utc>,
+}
+
+const RECENT_DICTATION_DELIVERY_WINDOW_SECS: i64 = 45;
 
 #[cfg(target_os = "macos")]
 struct AppleLiveDictationRuntime {
@@ -1703,7 +1717,11 @@ async fn verify_dictation_setup(
     let mut details = vec![
         format!(
             "Microphone: {}",
-            if permissions.microphone_ready { "ready" } else { "needs access" }
+            if permissions.microphone_ready {
+                "ready"
+            } else {
+                "needs access"
+            }
         ),
         format!(
             "Cursor insert: {}",
@@ -1794,7 +1812,11 @@ async fn verify_meeting_setup(
     let mut details = vec![
         format!(
             "Microphone: {}",
-            if permissions.microphone_ready { "ready" } else { "needs access" }
+            if permissions.microphone_ready {
+                "ready"
+            } else {
+                "needs access"
+            }
         ),
         format!(
             "System audio: {}",
@@ -1983,18 +2005,13 @@ async fn start_recording(
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
         meeting_template_id: options.template.clone(),
-        meeting_capture_mode: Some(
-            options
-                .meeting_capture_mode
-                .clone()
-                .unwrap_or_else(|| {
-                    if options.system_audio {
-                        "me_and_them".to_string()
-                    } else {
-                        "mic_only".to_string()
-                    }
-                }),
-        ),
+        meeting_capture_mode: Some(options.meeting_capture_mode.clone().unwrap_or_else(|| {
+            if options.system_audio {
+                "me_and_them".to_string()
+            } else {
+                "mic_only".to_string()
+            }
+        })),
         notes_updated_at: options
             .meeting_notes
             .as_ref()
@@ -2053,7 +2070,8 @@ async fn start_recording(
         }
         Some(result)
     } else {
-        if let Err(error) = db.update_recording_consent_state(&recording_id, false, None, None, None)
+        if let Err(error) =
+            db.update_recording_consent_state(&recording_id, false, None, None, None)
         {
             tracing::warn!("Failed to persist consent prompt state: {}", error);
         }
@@ -2162,7 +2180,9 @@ async fn start_recording(
         Some(chrono::Utc::now().timestamp_millis()),
         Some(options.system_audio),
         Some(options.consent_prompt_shown),
-        consent_notice_result.as_ref().map(|result| result.message.as_str()),
+        consent_notice_result
+            .as_ref()
+            .map(|result| result.message.as_str()),
     );
     emit_recording_status_with_markers(
         &app,
@@ -3235,7 +3255,10 @@ async fn open_recording_audio(
 async fn open_export_path(targetPath: String) -> Result<(), String> {
     let canonical = canonicalize_existing_absolute_path(&targetPath, "targetPath")?;
     if !canonical.is_file() {
-        return Err(format!("targetPath must point to a file, got: {}", canonical.display()));
+        return Err(format!(
+            "targetPath must point to a file, got: {}",
+            canonical.display()
+        ));
     }
     ensure_path_in_approved_roots(&canonical, "targetPath")?;
     open_path_in_default_app(&canonical)
@@ -3984,9 +4007,7 @@ async fn get_ollama_status(state: tauri::State<'_, AppState>) -> Result<bool, St
     Ok(state.ollama_client.is_available().await)
 }
 
-fn build_relationship_memory(
-    sources: &[RelationshipMemorySource],
-) -> models::RelationshipMemory {
+fn build_relationship_memory(sources: &[RelationshipMemorySource]) -> models::RelationshipMemory {
     let mut people: HashMap<String, RelationshipProfileAccumulator> = HashMap::new();
     let mut companies: HashMap<String, RelationshipProfileAccumulator> = HashMap::new();
 
@@ -4001,10 +4022,13 @@ fn build_relationship_memory(
 
         for person_name in &people_in_recording {
             let key = normalize_relationship_key(person_name);
-            let entry = people.entry(key.clone()).or_insert_with(|| RelationshipProfileAccumulator {
-                name: person_name.clone(),
-                ..RelationshipProfileAccumulator::default()
-            });
+            let entry =
+                people
+                    .entry(key.clone())
+                    .or_insert_with(|| RelationshipProfileAccumulator {
+                        name: person_name.clone(),
+                        ..RelationshipProfileAccumulator::default()
+                    });
 
             entry.recording_ids.insert(source.recording.id.clone());
             upsert_relationship_last_seen(entry, source.recording.created_at);
@@ -4024,10 +4048,13 @@ fn build_relationship_memory(
 
         for company_name in &companies_in_recording {
             let key = normalize_relationship_key(company_name);
-            let entry = companies.entry(key.clone()).or_insert_with(|| RelationshipProfileAccumulator {
-                name: company_name.clone(),
-                ..RelationshipProfileAccumulator::default()
-            });
+            let entry =
+                companies
+                    .entry(key.clone())
+                    .or_insert_with(|| RelationshipProfileAccumulator {
+                        name: company_name.clone(),
+                        ..RelationshipProfileAccumulator::default()
+                    });
 
             entry.recording_ids.insert(source.recording.id.clone());
             upsert_relationship_last_seen(entry, source.recording.created_at);
@@ -4049,14 +4076,16 @@ fn build_relationship_memory(
     let mut people_profiles = people
         .into_iter()
         .filter_map(|(id, profile)| {
-            profile.last_seen_at.map(|last_seen_at| models::PersonMemoryProfile {
-                id,
-                name: profile.name,
-                recording_count: profile.recording_ids.len() as u64,
-                last_seen_at,
-                related_companies: sorted_limited_entities(profile.related_entities, 6),
-                recent_meetings: profile.recent_meetings,
-            })
+            profile
+                .last_seen_at
+                .map(|last_seen_at| models::PersonMemoryProfile {
+                    id,
+                    name: profile.name,
+                    recording_count: profile.recording_ids.len() as u64,
+                    last_seen_at,
+                    related_companies: sorted_limited_entities(profile.related_entities, 6),
+                    recent_meetings: profile.recent_meetings,
+                })
         })
         .collect::<Vec<_>>();
     people_profiles.sort_by(|left, right| {
@@ -4070,14 +4099,16 @@ fn build_relationship_memory(
     let mut company_profiles = companies
         .into_iter()
         .filter_map(|(id, profile)| {
-            profile.last_seen_at.map(|last_seen_at| models::CompanyMemoryProfile {
-                id,
-                name: profile.name,
-                recording_count: profile.recording_ids.len() as u64,
-                last_seen_at,
-                related_people: sorted_limited_entities(profile.related_entities, 6),
-                recent_meetings: profile.recent_meetings,
-            })
+            profile
+                .last_seen_at
+                .map(|last_seen_at| models::CompanyMemoryProfile {
+                    id,
+                    name: profile.name,
+                    recording_count: profile.recording_ids.len() as u64,
+                    last_seen_at,
+                    related_people: sorted_limited_entities(profile.related_entities, 6),
+                    recent_meetings: profile.recent_meetings,
+                })
         })
         .collect::<Vec<_>>();
     company_profiles.sort_by(|left, right| {
@@ -4143,7 +4174,10 @@ fn build_relationship_snippet(source: &RelationshipMemorySource, entity_name: &s
     let search_texts = [
         source.recording.summary.as_deref(),
         source.recording.meeting_notes.as_deref(),
-        source.transcript.as_ref().map(|transcript| transcript.full_text.as_str()),
+        source
+            .transcript
+            .as_ref()
+            .map(|transcript| transcript.full_text.as_str()),
         Some(source.recording.title.as_str()),
     ];
 
@@ -4237,7 +4271,9 @@ fn extract_company_candidates(text: &str, allow_title_patterns: bool) -> Vec<Str
 
 fn clean_memory_entity_name(name: &str) -> String {
     name.trim()
-        .trim_matches(|character: char| !character.is_alphanumeric() && character != '&' && character != '.' && character != '-')
+        .trim_matches(|character: char| {
+            !character.is_alphanumeric() && character != '&' && character != '.' && character != '-'
+        })
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -4254,8 +4290,14 @@ fn is_person_memory_candidate(name: &str) -> bool {
     words.iter().all(|word| {
         let trimmed = word.trim_matches(|character: char| !character.is_alphanumeric());
         trimmed.len() >= 2
-            && trimmed.chars().next().map(|character| character.is_uppercase()).unwrap_or(false)
-            && trimmed.chars().all(|character| character.is_alphabetic() || character == '\'' || character == '-')
+            && trimmed
+                .chars()
+                .next()
+                .map(|character| character.is_uppercase())
+                .unwrap_or(false)
+            && trimmed
+                .chars()
+                .all(|character| character.is_alphabetic() || character == '\'' || character == '-')
     })
 }
 
@@ -4334,7 +4376,11 @@ fn upsert_relationship_last_seen(
     profile: &mut RelationshipProfileAccumulator,
     created_at: chrono::DateTime<chrono::Utc>,
 ) {
-    if profile.last_seen_at.map(|current| created_at > current).unwrap_or(true) {
+    if profile
+        .last_seen_at
+        .map(|current| created_at > current)
+        .unwrap_or(true)
+    {
         profile.last_seen_at = Some(created_at);
     }
 }
@@ -4847,71 +4893,198 @@ async fn learn_dictation_correction(
     state: tauri::State<'_, AppState>,
     request: models::LearnDictationCorrectionRequest,
 ) -> Result<models::LearnDictationCorrectionResult, String> {
-    let candidate = match crate::dictation_parity::infer_learned_correction(
-        &request.original_text,
-        &request.corrected_text,
-        request.force,
-    ) {
-        Ok(value) => value,
-        Err(reason) => {
-            return Ok(models::LearnDictationCorrectionResult {
-                learned: false,
-                action: None,
-                reason: Some(reason),
-                spoken_form: None,
-                replacement: None,
-                entry: None,
-            });
+    let candidate = match infer_learned_correction_result(&request) {
+        Ok(candidate) => candidate,
+        Err(result) => return Ok(result),
+    };
+
+    let mut db = state.db.lock().await;
+    apply_learned_correction_candidate(&mut db, candidate)
+}
+
+#[tauri::command]
+async fn export_dictation_dictionary_csv(
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let db = state.db.lock().await;
+    let entries = db
+        .list_dictation_dictionary_entries()
+        .map_err(|e| e.to_string())?;
+    Ok(dictation_dictionary_csv::export_dictionary_entries_csv(
+        &entries,
+    ))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn import_dictation_dictionary_csv(
+    state: tauri::State<'_, AppState>,
+    csvText: String,
+) -> Result<models::DictationDictionaryCsvImportResult, String> {
+    let requests = match dictation_dictionary_csv::parse_dictionary_entries_csv(&csvText) {
+        Ok(requests) => requests,
+        Err(errors) => {
+            return Ok(models::DictationDictionaryCsvImportResult {
+                created_count: 0,
+                updated_count: 0,
+                skipped_count: 0,
+                errors,
+            })
         }
     };
 
     let mut db = state.db.lock().await;
-    let existing = db
+    let existing_entries = db
         .list_dictation_dictionary_entries()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|entry| {
-            entry.app_scope.is_none()
-                && entry
-                    .spoken_form
-                    .eq_ignore_ascii_case(candidate.spoken_form.as_str())
+        .map_err(|e| e.to_string())?;
+
+    let mut created_count = 0usize;
+    let mut updated_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut errors = Vec::new();
+
+    for request in requests {
+        let normalized_spoken_form = request.spoken_form.trim();
+        let normalized_app_scope = request
+            .app_scope
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        let existing = existing_entries.iter().find(|entry| {
+            entry
+                .spoken_form
+                .eq_ignore_ascii_case(normalized_spoken_form)
+                && scopes_match(entry.app_scope.as_deref(), normalized_app_scope)
         });
 
-    let (action, entry) = if let Some(existing) = existing {
-        let updated = db
-            .update_dictation_dictionary_entry(
-                &existing.id,
+        if let Some(existing) = existing {
+            let replacement_changed = existing.replacement != request.replacement.trim();
+            let case_changed = existing.case_sensitive != request.case_sensitive;
+            let enabled_changed = existing.enabled != request.enabled;
+
+            if !replacement_changed && !case_changed && !enabled_changed {
+                skipped_count += 1;
+                continue;
+            }
+
+            if let Err(error) = db.update_dictation_dictionary_entry(
+                existing.id.as_str(),
                 &models::UpdateDictationDictionaryEntryRequest {
-                    spoken_form: Some(candidate.spoken_form.clone()),
-                    replacement: Some(candidate.replacement.clone()),
-                    app_scope: Some(None),
-                    case_sensitive: Some(false),
-                    enabled: Some(true),
+                    spoken_form: Some(request.spoken_form.clone()),
+                    replacement: Some(request.replacement.clone()),
+                    app_scope: Some(request.app_scope.clone()),
+                    case_sensitive: Some(request.case_sensitive),
+                    enabled: Some(request.enabled),
                 },
-            )
-            .map_err(|e| e.to_string())?;
-        ("updated".to_string(), updated)
-    } else {
-        let created = db
-            .create_dictation_dictionary_entry(&models::CreateDictationDictionaryEntryRequest {
-                spoken_form: candidate.spoken_form.clone(),
-                replacement: candidate.replacement.clone(),
-                app_scope: None,
-                case_sensitive: false,
-                enabled: true,
+            ) {
+                errors.push(format!(
+                    "Failed to update '{}': {}",
+                    request.spoken_form, error
+                ));
+            } else {
+                updated_count += 1;
+            }
+        } else if let Err(error) = db.create_dictation_dictionary_entry(&request) {
+            errors.push(format!(
+                "Failed to create '{}': {}",
+                request.spoken_form, error
+            ));
+        } else {
+            created_count += 1;
+        }
+    }
+
+    Ok(models::DictationDictionaryCsvImportResult {
+        created_count,
+        updated_count,
+        skipped_count,
+        errors,
+    })
+}
+
+#[tauri::command]
+async fn list_dictation_correction_suggestions(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<models::DictationCorrectionSuggestion>, String> {
+    let db = state.db.lock().await;
+    db.list_dictation_correction_suggestions()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn queue_dictation_correction_suggestion(
+    state: tauri::State<'_, AppState>,
+    request: models::LearnDictationCorrectionRequest,
+) -> Result<models::QueueDictationCorrectionSuggestionResult, String> {
+    let candidate = match infer_learned_correction_result(&request) {
+        Ok(candidate) => candidate,
+        Err(result) => {
+            return Ok(models::QueueDictationCorrectionSuggestionResult {
+                queued: false,
+                action: None,
+                reason: result.reason,
+                spoken_form: result.spoken_form,
+                replacement: result.replacement,
+                suggestion: None,
             })
-            .map_err(|e| e.to_string())?;
-        ("created".to_string(), created)
+        }
     };
 
-    Ok(models::LearnDictationCorrectionResult {
-        learned: true,
+    let mut db = state.db.lock().await;
+    let (action, suggestion) = db
+        .upsert_dictation_correction_suggestion(
+            &request.original_text,
+            &request.corrected_text,
+            candidate.spoken_form.as_str(),
+            candidate.replacement.as_str(),
+            request.app_target.as_deref(),
+        )
+        .map_err(|e| e.to_string())?;
+
+    Ok(models::QueueDictationCorrectionSuggestionResult {
+        queued: true,
         action: Some(action),
         reason: None,
         spoken_form: Some(candidate.spoken_form),
         replacement: Some(candidate.replacement),
-        entry: Some(entry),
+        suggestion: Some(suggestion),
     })
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn approve_dictation_correction_suggestion(
+    state: tauri::State<'_, AppState>,
+    suggestionId: String,
+) -> Result<models::LearnDictationCorrectionResult, String> {
+    let mut db = state.db.lock().await;
+    let suggestion = db
+        .get_dictation_correction_suggestion(&suggestionId)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Correction suggestion '{}' not found", suggestionId))?;
+
+    let result = apply_learned_correction_candidate(
+        &mut db,
+        crate::dictation_parity::LearnedCorrectionCandidate {
+            spoken_form: suggestion.spoken_form.clone(),
+            replacement: suggestion.replacement.clone(),
+        },
+    )?;
+    db.delete_dictation_correction_suggestion(&suggestionId)
+        .map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+async fn reject_dictation_correction_suggestion(
+    state: tauri::State<'_, AppState>,
+    suggestionId: String,
+) -> Result<(), String> {
+    let mut db = state.db.lock().await;
+    db.delete_dictation_correction_suggestion(&suggestionId)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -5701,6 +5874,80 @@ async fn get_dictation_history_details(
 }
 
 #[tauri::command]
+async fn get_dictation_insights(
+    state: tauri::State<'_, AppState>,
+) -> Result<models::DictationInsights, String> {
+    let db = state.db.lock().await;
+    let recordings = db.get_recordings(None).map_err(|e| e.to_string())?;
+    let dictation_recordings = recordings
+        .into_iter()
+        .filter(|recording| recording.source_type == "dictation")
+        .collect::<Vec<_>>();
+
+    let mut insights = models::DictationInsights::default();
+    let mut active_days = HashSet::new();
+    let mut app_target_counts: HashMap<String, u64> = HashMap::new();
+    let last_seven_day_cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+
+    for recording in &dictation_recordings {
+        insights.total_dictations += 1;
+        active_days.insert(recording.created_at.date_naive());
+        if recording.created_at >= last_seven_day_cutoff {
+            insights.last_seven_days_dictations += 1;
+        }
+
+        if let Some(transcript) = db
+            .get_transcript(&recording.id)
+            .map_err(|error| error.to_string())?
+        {
+            insights.dictated_words += transcript.full_text.split_whitespace().count() as u64;
+        }
+
+        if let Some(action) = db
+            .get_latest_insertion_action(&recording.id)
+            .map_err(|error| error.to_string())?
+        {
+            if action.command_applied.is_some() {
+                insights.commands_used += 1;
+            }
+            if action
+                .command_applied
+                .as_deref()
+                .map(|value| value.starts_with("backtrack_"))
+                .unwrap_or(false)
+            {
+                insights.backtracks_used += 1;
+            }
+            if action.snippet_applied_count > 0 {
+                insights.snippets_triggered += action.snippet_applied_count as u64;
+            }
+            if let Some(app_target) = action
+                .app_target
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                *app_target_counts.entry(app_target.to_string()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    insights.active_days = active_days.len() as u64;
+    insights.average_words_per_dictation = if insights.total_dictations > 0 {
+        insights.dictated_words / insights.total_dictations
+    } else {
+        0
+    };
+    if let Some((app_target, count)) = app_target_counts.into_iter().max_by_key(|(_, count)| *count)
+    {
+        insights.top_app_target = Some(app_target);
+        insights.top_app_target_count = count;
+    }
+
+    Ok(insights)
+}
+
+#[tauri::command]
 #[allow(non_snake_case)]
 async fn get_meeting_transcript_details(
     state: tauri::State<'_, AppState>,
@@ -5770,6 +6017,28 @@ fn dictation_history_details_from_audit(
             .get("command_applied")
             .and_then(|value| value.as_str())
             .map(str::to_string),
+        dictionary_applied_count: details
+            .get("dictionary_applied_count")
+            .and_then(|value| value.as_u64()),
+        snippet_applied_count: details
+            .get("snippet_applied_count")
+            .and_then(|value| value.as_u64()),
+        formatting_applied: details
+            .get("formatting_applied")
+            .and_then(|value| value.as_bool()),
+        recent_insert_reused: details
+            .get("recent_insert_reused")
+            .and_then(|value| value.as_bool()),
+        pipeline_stage_keys: details
+            .get("pipeline_stage_keys")
+            .and_then(|value| value.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
         prompt_source: details
             .get("prompt_source")
             .and_then(|value| value.as_str())
@@ -5836,6 +6105,7 @@ fn merge_dictation_history_details(
         if action.command_applied.is_some() {
             details.command_applied = action.command_applied.clone();
         }
+        details.snippet_applied_count = Some(action.snippet_applied_count as u64);
     }
 
     details
@@ -5854,6 +6124,11 @@ fn dictation_history_details_is_empty(details: &models::DictationHistoryDetails)
         && details.app_target.is_none()
         && details.activation_matcher.is_none()
         && details.command_applied.is_none()
+        && details.dictionary_applied_count.is_none()
+        && details.snippet_applied_count.is_none()
+        && details.formatting_applied.is_none()
+        && details.recent_insert_reused.is_none()
+        && details.pipeline_stage_keys.is_empty()
         && details.prompt_source.is_none()
         && details.prompt_preview.is_none()
         && details.requested_provider.is_none()
@@ -6171,11 +6446,10 @@ async fn save_settings(
         settings.transcription.dictation_context_source =
             normalize_dictation_context_source(&settings.transcription.dictation_context_source)
                 .to_string();
-        settings.transcription.dictation_route_preference =
-            normalize_dictation_route_preference(
-                &settings.transcription.dictation_route_preference,
-            )
-            .to_string();
+        settings.transcription.dictation_route_preference = normalize_dictation_route_preference(
+            &settings.transcription.dictation_route_preference,
+        )
+        .to_string();
         let fallback_ai_provider = settings.privacy.llm_provider.clone();
         let fallback_ai_model = settings.privacy.llm_model_id.clone();
         for mode in &mut settings.transcription.dictation_custom_modes {
@@ -6627,7 +6901,7 @@ fn open_main_window_to(
         "main-view-requested",
         serde_json::json!({ "view": view, "recordingId": recording_id }),
     )
-        .map_err(|error| format!("Failed to request main view change: {}", error))?;
+    .map_err(|error| format!("Failed to request main view change: {}", error))?;
     Ok(())
 }
 
@@ -6831,7 +7105,11 @@ async fn resolve_ready_dictation_selection(
     let requested_hosting =
         provider_hosting_environment(requested_selection.0, &requested_selection.1);
 
-    if route_matches_hosting(route_preference, requested_selection.0, &requested_selection.1) {
+    if route_matches_hosting(
+        route_preference,
+        requested_selection.0,
+        &requested_selection.1,
+    ) {
         match ensure_asr_route_ready(
             state,
             requested_selection.0,
@@ -6871,8 +7149,7 @@ async fn resolve_ready_dictation_selection(
                     &preferred_candidates,
                     route_preference,
                 ) {
-                    let resolved_hosting =
-                        provider_hosting_environment(provider_type, &model_id);
+                    let resolved_hosting = provider_hosting_environment(provider_type, &model_id);
                     let warning = format!(
                         "Dictation route '{}' / '{}' was not ready. Using '{}' / '{}' for this capture.",
                         requested_selection.0.display_name(),
@@ -6913,11 +7190,9 @@ async fn resolve_ready_dictation_selection(
         default_provider,
         dictation_provider,
     );
-    if let Some((provider_type, model_id)) = select_ready_dictation_candidate(
-        &provider_infos,
-        &preferred_candidates,
-        route_preference,
-    ) {
+    if let Some((provider_type, model_id)) =
+        select_ready_dictation_candidate(&provider_infos, &preferred_candidates, route_preference)
+    {
         let resolved_hosting = provider_hosting_environment(provider_type, &model_id);
         let warning = format!(
             "This dictation mode prefers {} routing. Using '{}' / '{}' instead of '{}' / '{}'.",
@@ -7025,7 +7300,12 @@ async fn start_dictation_session(
     }
 
     if options.route_preference.is_none() {
-        options.route_preference = Some(settings_snapshot.transcription.dictation_route_preference.clone());
+        options.route_preference = Some(
+            settings_snapshot
+                .transcription
+                .dictation_route_preference
+                .clone(),
+        );
     }
 
     let (
@@ -7088,7 +7368,8 @@ async fn start_dictation_session(
         let _ = app.emit("asr-provider-warning", warning);
     }
 
-    options.requested_provider = Some(asr_provider_to_settings_value(dictation_provider).to_string());
+    options.requested_provider =
+        Some(asr_provider_to_settings_value(dictation_provider).to_string());
     options.requested_model_id = Some(dictation_model_id.clone());
     options.route_preference =
         Some(dictation_route_preference_to_settings_value(resolved_route_preference).to_string());
@@ -8540,6 +8821,32 @@ async fn stop_dictation_session_for_session(
             .ok()
             .and_then(|overlay_state| overlay_state.activation_matcher.clone())
     };
+    let recent_inserted_text = {
+        let now = chrono::Utc::now();
+        let mut recent_delivery = state.recent_dictation_delivery.lock().await;
+        let matched_text = recent_delivery.as_ref().and_then(|delivery| {
+            if recent_delivery_matches_target_and_is_fresh(
+                delivery,
+                app_target.as_deref(),
+                app_target_bundle_id.as_deref(),
+                now,
+            ) {
+                Some(delivery.text.clone())
+            } else {
+                None
+            }
+        });
+
+        let should_clear_stale_delivery = recent_delivery
+            .as_ref()
+            .map(|delivery| !recent_delivery_is_fresh(delivery, now))
+            .unwrap_or(false);
+        if should_clear_stale_delivery {
+            *recent_delivery = None;
+        }
+
+        matched_text
+    };
 
     let mut command_applied: Option<String> = None;
     if command_mode_enabled {
@@ -8633,11 +8940,10 @@ async fn stop_dictation_session_for_session(
                         &dictation_options.context_source,
                         "Replace Text",
                     )?;
-                    let updated_text =
-                        crate::dictation_parity::replace_context_selection(
-                            command_input.as_str(),
-                            replacement.as_str(),
-                        )?;
+                    let updated_text = crate::dictation_parity::replace_context_selection(
+                        command_input.as_str(),
+                        replacement.as_str(),
+                    )?;
                     result.text = updated_text;
                 }
                 DictationCommandAction::ReplaceSelection {
@@ -8650,11 +8956,12 @@ async fn stop_dictation_session_for_session(
                         &dictation_options.context_source,
                         "Replace Text",
                     )?;
-                    let (updated_text, _) = crate::dictation_parity::apply_contextual_phrase_replacement(
-                        command_input.as_str(),
-                        target.as_str(),
-                        replacement.as_str(),
-                    )?;
+                    let (updated_text, _) =
+                        crate::dictation_parity::apply_contextual_phrase_replacement(
+                            command_input.as_str(),
+                            target.as_str(),
+                            replacement.as_str(),
+                        )?;
                     result.text = updated_text;
                 }
                 DictationCommandAction::AppendToSelection(suffix) => {
@@ -8664,11 +8971,10 @@ async fn stop_dictation_session_for_session(
                         &dictation_options.context_source,
                         "Append Text",
                     )?;
-                    let updated_text =
-                        crate::dictation_parity::append_to_context_selection(
-                            command_input.as_str(),
-                            suffix.as_str(),
-                        )?;
+                    let updated_text = crate::dictation_parity::append_to_context_selection(
+                        command_input.as_str(),
+                        suffix.as_str(),
+                    )?;
                     result.text = updated_text;
                 }
                 DictationCommandAction::PrependToSelection(prefix) => {
@@ -8678,11 +8984,10 @@ async fn stop_dictation_session_for_session(
                         &dictation_options.context_source,
                         "Prepend Text",
                     )?;
-                    let updated_text =
-                        crate::dictation_parity::prepend_to_context_selection(
-                            command_input.as_str(),
-                            prefix.as_str(),
-                        )?;
+                    let updated_text = crate::dictation_parity::prepend_to_context_selection(
+                        command_input.as_str(),
+                        prefix.as_str(),
+                    )?;
                     result.text = updated_text;
                 }
                 DictationCommandAction::DeletePhrase(target) => {
@@ -8692,11 +8997,10 @@ async fn stop_dictation_session_for_session(
                         &dictation_options.context_source,
                         "Delete Phrase",
                     )?;
-                    let (updated_text, _) =
-                        crate::dictation_parity::delete_phrase_from_context(
-                            command_input.as_str(),
-                            target.as_str(),
-                        )?;
+                    let (updated_text, _) = crate::dictation_parity::delete_phrase_from_context(
+                        command_input.as_str(),
+                        target.as_str(),
+                    )?;
                     result.text = updated_text;
                 }
                 DictationCommandAction::DeleteSelection => {
@@ -8715,8 +9019,9 @@ async fn stop_dictation_session_for_session(
                         &dictation_options.context_source,
                         "Uppercase Selection",
                     )?;
-                    result.text =
-                        crate::dictation_parity::uppercase_context_selection(command_input.as_str())?;
+                    result.text = crate::dictation_parity::uppercase_context_selection(
+                        command_input.as_str(),
+                    )?;
                 }
                 DictationCommandAction::LowercaseSelection => {
                     let command_input = resolve_contextual_command_input(
@@ -8725,8 +9030,9 @@ async fn stop_dictation_session_for_session(
                         &dictation_options.context_source,
                         "Lowercase Selection",
                     )?;
-                    result.text =
-                        crate::dictation_parity::lowercase_context_selection(command_input.as_str())?;
+                    result.text = crate::dictation_parity::lowercase_context_selection(
+                        command_input.as_str(),
+                    )?;
                 }
                 DictationCommandAction::TitleCaseSelection => {
                     let command_input = resolve_contextual_command_input(
@@ -8735,8 +9041,9 @@ async fn stop_dictation_session_for_session(
                         &dictation_options.context_source,
                         "Title Case Selection",
                     )?;
-                    result.text =
-                        crate::dictation_parity::title_case_context_selection(command_input.as_str())?;
+                    result.text = crate::dictation_parity::title_case_context_selection(
+                        command_input.as_str(),
+                    )?;
                 }
                 DictationCommandAction::SentenceCaseSelection => {
                     let command_input = resolve_contextual_command_input(
@@ -8754,42 +9061,47 @@ async fn stop_dictation_session_for_session(
         }
     }
 
-    if command_applied.is_none() && !result.text.trim().is_empty() {
-        let dictionary_entries = {
-            let db = state.db.lock().await;
-            db.list_dictation_dictionary_entries().unwrap_or_default()
-        };
-        let (normalized_text, applied) =
-            apply_dictation_dictionary_entries(&result.text, &dictionary_entries, app_target.as_deref());
-        if applied > 0 {
-            result.text = normalized_text;
-        }
-    }
-
+    let mut dictionary_applied_count = 0usize;
     let mut snippet_applied_count = 0usize;
-    if snippets_enabled && command_applied.is_none() && !result.text.trim().is_empty() {
-        let snippets = {
+    let mut formatting_applied = false;
+    let mut recent_insert_reused = false;
+    let mut pipeline_stage_keys: Vec<String> = Vec::new();
+    if command_applied.is_none() && !result.text.trim().is_empty() {
+        let (dictionary_entries, snippets) = {
             let db = state.db.lock().await;
-            db.list_dictation_snippets().unwrap_or_default()
+            (
+                db.list_dictation_dictionary_entries().unwrap_or_default(),
+                db.list_dictation_snippets().unwrap_or_default(),
+            )
         };
-        let (expanded_text, applied) =
-            apply_dictation_snippets(&result.text, &snippets, app_target.as_deref());
-        result.text = expanded_text;
-        snippet_applied_count = applied;
-    }
 
-    let formatting_hint = resolve_dictation_formatting_hint(
-        app_target.as_deref(),
-        resolved_activation_matcher.as_deref(),
-        dictation_options.context_app_name.as_deref(),
-    );
-    if local_smart_formatting_enabled && command_applied.is_none() && !result.text.trim().is_empty()
-    {
-        result.text = crate::text::format::smart_format_dictation_text_for_app(
-            &result.text,
-            normalized_mode_preset,
-            formatting_hint.as_deref(),
+        let formatting_hint = resolve_dictation_formatting_hint(
+            app_target.as_deref(),
+            resolved_activation_matcher.as_deref(),
+            dictation_options.context_app_name.as_deref(),
         );
+        let pipeline_result = dictation_pipeline::apply_dictation_pipeline(
+            dictation_pipeline::DictationPipelineInput {
+                text: result.text.as_str(),
+                dictionary_entries: &dictionary_entries,
+                snippets: if snippets_enabled { &snippets } else { &[] },
+                app_target: app_target.as_deref(),
+                mode_preset: normalized_mode_preset,
+                formatting_hint: formatting_hint.as_deref(),
+                smart_formatting_enabled: local_smart_formatting_enabled,
+                recent_inserted_text: recent_inserted_text.as_deref(),
+            },
+        );
+        result.text = pipeline_result.text;
+        command_applied = pipeline_result.command_applied.or(command_applied);
+        dictionary_applied_count = pipeline_result.dictionary_applied_count;
+        snippet_applied_count = pipeline_result.snippet_applied_count;
+        formatting_applied = pipeline_result.formatting_applied;
+        recent_insert_reused = pipeline_result.recent_insert_reused;
+        pipeline_stage_keys = pipeline_result.pipeline_stage_keys;
+        if pipeline_result.undo_previous_insert {
+            send_native_undo_key().map_err(|error| format!("Backtrack failed: {}", error))?;
+        }
     }
 
     let fallback_message = build_provider_fallback_message(
@@ -8809,15 +9121,17 @@ async fn stop_dictation_session_for_session(
     let mut successful_insert_strategy: Option<CursorInsertStrategy> = None;
     let should_treat_as_command_only = matches!(
         command_applied.as_deref(),
-        Some("undo_last_insert") | Some("delete_last_sentence")
+        Some("undo_last_insert")
+            | Some("delete_last_sentence")
+            | Some("backtrack_undo_last_insert")
     );
     let mut insertion_mode_used = if should_treat_as_command_only && result.text.trim().is_empty() {
         "command_only".to_string()
     } else {
         "none".to_string()
     };
-    let should_deliver_text =
-        !result.text.trim().is_empty() || matches!(command_applied.as_deref(), Some("delete_selection"));
+    let should_deliver_text = !result.text.trim().is_empty()
+        || matches!(command_applied.as_deref(), Some("delete_selection"));
     if should_deliver_text {
         emit_dictation_state(
             app,
@@ -8948,6 +9262,21 @@ async fn stop_dictation_session_for_session(
             *last_status = Some(status);
         }
     }
+    if pasted && !result.text.trim().is_empty() {
+        let mut recent_delivery = state.recent_dictation_delivery.lock().await;
+        *recent_delivery = Some(RecentDictationDelivery {
+            text: result.text.clone(),
+            app_target: app_target.clone(),
+            app_bundle_id: app_target_bundle_id.clone(),
+            delivered_at: chrono::Utc::now(),
+        });
+    } else if matches!(
+        command_applied.as_deref(),
+        Some("undo_last_insert") | Some("backtrack_undo_last_insert")
+    ) {
+        let mut recent_delivery = state.recent_dictation_delivery.lock().await;
+        *recent_delivery = None;
+    }
     let end_to_end_ms = stop_pipeline_started.elapsed().as_millis() as u64;
 
     let payload = build_dictation_text_ready_payload(
@@ -8971,7 +9300,11 @@ async fn stop_dictation_session_for_session(
         end_to_end_ms,
         insertion_mode_used.as_str(),
         command_applied.as_deref(),
+        dictionary_applied_count,
         snippet_applied_count,
+        formatting_applied,
+        recent_insert_reused,
+        &pipeline_stage_keys,
         app_target.as_deref(),
         resolved_activation_matcher.as_deref(),
         Some(&dictation_options.context_source),
@@ -9228,51 +9561,211 @@ async fn stop_dictation_session_for_session(
     let context_preview =
         truncate_for_audit_preview(dictation_options.captured_context_text.as_deref(), 280);
     let mut details = serde_json::Map::new();
-    details.insert("stop_reason".to_string(), serde_json::to_value(stop_reason).unwrap_or(serde_json::Value::Null));
-    details.insert("session_id".to_string(), serde_json::to_value(session_id).unwrap_or(serde_json::Value::Null));
-    details.insert("model".to_string(), serde_json::to_value(&result.model_name).unwrap_or(serde_json::Value::Null));
-    details.insert("model_id".to_string(), serde_json::to_value(&result.model_id).unwrap_or(serde_json::Value::Null));
-    details.insert("language".to_string(), serde_json::to_value(&result.language).unwrap_or(serde_json::Value::Null));
-    details.insert("requested_provider".to_string(), serde_json::to_value(result.requested_provider).unwrap_or(serde_json::Value::Null));
-    details.insert("actual_provider".to_string(), serde_json::to_value(result.actual_provider).unwrap_or(serde_json::Value::Null));
-    details.insert("requested_engine".to_string(), serde_json::to_value(result.requested_engine).unwrap_or(serde_json::Value::Null));
-    details.insert("actual_engine".to_string(), serde_json::to_value(result.actual_engine).unwrap_or(serde_json::Value::Null));
-    details.insert("optimization_applied".to_string(), serde_json::to_value(result.optimization_applied).unwrap_or(serde_json::Value::Null));
-    details.insert("fallback_reason".to_string(), serde_json::to_value(result.fallback_reason).unwrap_or(serde_json::Value::Null));
-    details.insert("text_length".to_string(), serde_json::to_value(result.text.len()).unwrap_or(serde_json::Value::Null));
-    details.insert("pasted".to_string(), serde_json::to_value(pasted).unwrap_or(serde_json::Value::Null));
-    details.insert("copied".to_string(), serde_json::to_value(copied).unwrap_or(serde_json::Value::Null));
-    details.insert("paste_error".to_string(), serde_json::to_value(&paste_error).unwrap_or(serde_json::Value::Null));
-    details.insert("insertion_mode_requested".to_string(), serde_json::to_value(insertion_mode).unwrap_or(serde_json::Value::Null));
-    details.insert("insertion_mode_used".to_string(), serde_json::to_value(&insertion_mode_used).unwrap_or(serde_json::Value::Null));
-    details.insert("outcome".to_string(), serde_json::to_value(outcome).unwrap_or(serde_json::Value::Null));
-    details.insert("command_applied".to_string(), serde_json::to_value(&command_applied).unwrap_or(serde_json::Value::Null));
-    details.insert("snippet_applied_count".to_string(), serde_json::to_value(snippet_applied_count).unwrap_or(serde_json::Value::Null));
-    details.insert("app_target".to_string(), serde_json::to_value(&app_target).unwrap_or(serde_json::Value::Null));
-    details.insert("startup_latency_ms".to_string(), serde_json::to_value(startup_latency_ms).unwrap_or(serde_json::Value::Null));
-    details.insert("end_to_end_ms".to_string(), serde_json::to_value(end_to_end_ms).unwrap_or(serde_json::Value::Null));
-    details.insert("transcription_latency_ms".to_string(), serde_json::to_value(transcription_latency_ms).unwrap_or(serde_json::Value::Null));
-    details.insert("save_to_inbox".to_string(), serde_json::to_value(dictation_options.save_to_inbox).unwrap_or(serde_json::Value::Null));
-    details.insert("dictation_persisted".to_string(), serde_json::to_value(dictation_options.save_to_inbox && persist_dictation_record).unwrap_or(serde_json::Value::Null));
-    details.insert("dictation_retention_preset".to_string(), serde_json::to_value(dictation_retention_preset).unwrap_or(serde_json::Value::Null));
-    details.insert("dictation_project_id".to_string(), serde_json::to_value(&dictation_options.project_id).unwrap_or(serde_json::Value::Null));
-    details.insert("dictation_profile".to_string(), serde_json::to_value(dictation_profile_to_settings_value(&dictation_options.profile)).unwrap_or(serde_json::Value::Null));
-    details.insert("dictation_model_id".to_string(), serde_json::to_value(&dictation_model_id).unwrap_or(serde_json::Value::Null));
-    details.insert("recording_id".to_string(), serde_json::to_value(&persisted_recording_id).unwrap_or(serde_json::Value::Null));
-    details.insert("dictation_mode_preset".to_string(), serde_json::to_value(resolved_mode_preset).unwrap_or(serde_json::Value::Null));
-    details.insert("dictation_mode_label".to_string(), serde_json::to_value(&resolved_mode_label).unwrap_or(serde_json::Value::Null));
-    details.insert("dictation_base_mode_preset".to_string(), serde_json::to_value(resolved_mode_preset).unwrap_or(serde_json::Value::Null));
-    details.insert("dictation_base_mode_label".to_string(), serde_json::to_value(&resolved_base_mode_label).unwrap_or(serde_json::Value::Null));
-    details.insert("dictation_custom_mode_id".to_string(), serde_json::to_value(active_custom_mode.map(|mode| mode.id.as_str())).unwrap_or(serde_json::Value::Null));
-    details.insert("dictation_custom_mode_name".to_string(), serde_json::to_value(active_custom_mode.map(|mode| mode.name.as_str())).unwrap_or(serde_json::Value::Null));
-    details.insert("route_preference".to_string(), serde_json::to_value(&dictation_options.route_preference).unwrap_or(serde_json::Value::Null));
-    details.insert("resolved_hosting".to_string(), serde_json::to_value(&dictation_options.resolved_hosting).unwrap_or(serde_json::Value::Null));
-    details.insert("activation_matcher".to_string(), serde_json::to_value(&resolved_activation_matcher).unwrap_or(serde_json::Value::Null));
-    details.insert("context_source".to_string(), serde_json::to_value(&dictation_options.context_source).unwrap_or(serde_json::Value::Null));
-    details.insert("context_app_name".to_string(), serde_json::to_value(&dictation_options.context_app_name).unwrap_or(serde_json::Value::Null));
-    details.insert("context_preview".to_string(), serde_json::to_value(&context_preview).unwrap_or(serde_json::Value::Null));
-    details.insert("prompt_source".to_string(), serde_json::to_value(&prompt_source).unwrap_or(serde_json::Value::Null));
-    details.insert("prompt_preview".to_string(), serde_json::to_value(&prompt_preview).unwrap_or(serde_json::Value::Null));
+    details.insert(
+        "stop_reason".to_string(),
+        serde_json::to_value(stop_reason).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "session_id".to_string(),
+        serde_json::to_value(session_id).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "model".to_string(),
+        serde_json::to_value(&result.model_name).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "model_id".to_string(),
+        serde_json::to_value(&result.model_id).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "language".to_string(),
+        serde_json::to_value(&result.language).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "requested_provider".to_string(),
+        serde_json::to_value(result.requested_provider).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "actual_provider".to_string(),
+        serde_json::to_value(result.actual_provider).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "requested_engine".to_string(),
+        serde_json::to_value(result.requested_engine).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "actual_engine".to_string(),
+        serde_json::to_value(result.actual_engine).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "optimization_applied".to_string(),
+        serde_json::to_value(result.optimization_applied).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "fallback_reason".to_string(),
+        serde_json::to_value(result.fallback_reason).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "text_length".to_string(),
+        serde_json::to_value(result.text.len()).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "pasted".to_string(),
+        serde_json::to_value(pasted).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "copied".to_string(),
+        serde_json::to_value(copied).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "paste_error".to_string(),
+        serde_json::to_value(&paste_error).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "insertion_mode_requested".to_string(),
+        serde_json::to_value(insertion_mode).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "insertion_mode_used".to_string(),
+        serde_json::to_value(&insertion_mode_used).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "outcome".to_string(),
+        serde_json::to_value(outcome).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "command_applied".to_string(),
+        serde_json::to_value(&command_applied).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "dictionary_applied_count".to_string(),
+        serde_json::to_value(dictionary_applied_count).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "snippet_applied_count".to_string(),
+        serde_json::to_value(snippet_applied_count).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "formatting_applied".to_string(),
+        serde_json::to_value(formatting_applied).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "recent_insert_reused".to_string(),
+        serde_json::to_value(recent_insert_reused).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "pipeline_stage_keys".to_string(),
+        serde_json::to_value(&pipeline_stage_keys).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "app_target".to_string(),
+        serde_json::to_value(&app_target).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "startup_latency_ms".to_string(),
+        serde_json::to_value(startup_latency_ms).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "end_to_end_ms".to_string(),
+        serde_json::to_value(end_to_end_ms).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "transcription_latency_ms".to_string(),
+        serde_json::to_value(transcription_latency_ms).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "save_to_inbox".to_string(),
+        serde_json::to_value(dictation_options.save_to_inbox).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "dictation_persisted".to_string(),
+        serde_json::to_value(dictation_options.save_to_inbox && persist_dictation_record)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "dictation_retention_preset".to_string(),
+        serde_json::to_value(dictation_retention_preset).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "dictation_project_id".to_string(),
+        serde_json::to_value(&dictation_options.project_id).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "dictation_profile".to_string(),
+        serde_json::to_value(dictation_profile_to_settings_value(
+            &dictation_options.profile,
+        ))
+        .unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "dictation_model_id".to_string(),
+        serde_json::to_value(&dictation_model_id).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "recording_id".to_string(),
+        serde_json::to_value(&persisted_recording_id).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "dictation_mode_preset".to_string(),
+        serde_json::to_value(resolved_mode_preset).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "dictation_mode_label".to_string(),
+        serde_json::to_value(&resolved_mode_label).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "dictation_base_mode_preset".to_string(),
+        serde_json::to_value(resolved_mode_preset).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "dictation_base_mode_label".to_string(),
+        serde_json::to_value(&resolved_base_mode_label).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "dictation_custom_mode_id".to_string(),
+        serde_json::to_value(active_custom_mode.map(|mode| mode.id.as_str()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "dictation_custom_mode_name".to_string(),
+        serde_json::to_value(active_custom_mode.map(|mode| mode.name.as_str()))
+            .unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "route_preference".to_string(),
+        serde_json::to_value(&dictation_options.route_preference)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "resolved_hosting".to_string(),
+        serde_json::to_value(&dictation_options.resolved_hosting)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "activation_matcher".to_string(),
+        serde_json::to_value(&resolved_activation_matcher).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "context_source".to_string(),
+        serde_json::to_value(&dictation_options.context_source).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "context_app_name".to_string(),
+        serde_json::to_value(&dictation_options.context_app_name)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "context_preview".to_string(),
+        serde_json::to_value(&context_preview).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "prompt_source".to_string(),
+        serde_json::to_value(&prompt_source).unwrap_or(serde_json::Value::Null),
+    );
+    details.insert(
+        "prompt_preview".to_string(),
+        serde_json::to_value(&prompt_preview).unwrap_or(serde_json::Value::Null),
+    );
     let details = serde_json::Value::Object(details);
     if let Err(e) = db.log_audit_event("dictation_completed", Some(details), "info") {
         tracing::warn!("Failed to log audit event: {}", e);
@@ -9567,7 +10060,9 @@ async fn suspend_matching_dictation_keep_warm_route(
     resolved_hosting: Option<&str>,
 ) {
     if resolved_hosting != Some("local")
-        || !state.asr_manager.supports_short_keep_warm(provider, model_id)
+        || !state
+            .asr_manager
+            .supports_short_keep_warm(provider, model_id)
     {
         return;
     }
@@ -9575,7 +10070,10 @@ async fn suspend_matching_dictation_keep_warm_route(
     let keep_warm_value = {
         let settings_manager = state.settings_manager.lock().await;
         normalize_dictation_keep_warm_value(
-            &settings_manager.settings().transcription.dictation_keep_warm,
+            &settings_manager
+                .settings()
+                .transcription
+                .dictation_keep_warm,
         )
     };
     if keep_warm_value != "short" {
@@ -9613,13 +10111,18 @@ async fn apply_dictation_keep_warm_policy(
     let keep_warm_value = {
         let settings_manager = state.settings_manager.lock().await;
         normalize_dictation_keep_warm_value(
-            &settings_manager.settings().transcription.dictation_keep_warm,
+            &settings_manager
+                .settings()
+                .transcription
+                .dictation_keep_warm,
         )
     };
 
     let eligible = keep_warm_value == "short"
         && resolved_hosting == Some("local")
-        && state.asr_manager.supports_short_keep_warm(provider, model_id);
+        && state
+            .asr_manager
+            .supports_short_keep_warm(provider, model_id);
 
     let current_route = DictationKeepWarmRoute {
         provider,
@@ -10244,13 +10747,11 @@ async fn handle_primary_tray_action(app: AppHandle, action: String) {
                 template: None,
                 meeting_notes: None,
                 consent_prompt_shown: true,
-                meeting_capture_mode: Some(
-                    if system_audio {
-                        "me_and_them".to_string()
-                    } else {
-                        "mic_only".to_string()
-                    },
-                ),
+                meeting_capture_mode: Some(if system_audio {
+                    "me_and_them".to_string()
+                } else {
+                    "mic_only".to_string()
+                }),
             };
             if let Err(error) = start_recording(app.clone(), state, options).await {
                 tracing::warn!("Failed to start meeting from tray: {}", error);
@@ -10761,7 +11262,8 @@ fn capture_hotkey_target_context(
         }
     }
 
-    let sanitized = sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
+    let sanitized =
+        sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
     (sanitized.0, sanitized.1, browser_url)
 }
 
@@ -10782,8 +11284,7 @@ fn capture_pending_hotkey_target(state: &AppState) {
         app_bundle_id.clone(),
         browser_url.clone(),
         captured_at_ms,
-    )
-    {
+    ) {
         if let Ok(mut pending_target) = state.pending_dictation_target.lock() {
             *pending_target = Some(target.clone());
         }
@@ -11387,13 +11888,7 @@ fn looks_low_information_dictation(text: &str) -> bool {
         return true;
     }
 
-    const LOW_INFORMATION_PHRASES: &[&str] = &[
-        "you",
-        "you you",
-        "you you you",
-        "uh",
-        "um",
-    ];
+    const LOW_INFORMATION_PHRASES: &[&str] = &["you", "you you", "you you you", "uh", "um"];
 
     if LOW_INFORMATION_PHRASES.contains(&normalized.as_str()) {
         return true;
@@ -11670,6 +12165,7 @@ fn bulletize_text(text: &str) -> String {
     items.join("\n")
 }
 
+#[cfg(test)]
 fn apply_dictation_snippets(
     input: &str,
     snippets: &[models::DictationSnippet],
@@ -11688,22 +12184,121 @@ fn apply_dictation_snippets(
     crate::dictation_parity::apply_dictation_snippets(input, &rules, app_target)
 }
 
-fn apply_dictation_dictionary_entries(
-    input: &str,
-    entries: &[models::DictationDictionaryEntry],
+fn scopes_match(lhs: Option<&str>, rhs: Option<&str>) -> bool {
+    match (lhs, rhs) {
+        (Some(left), Some(right)) => left.trim().eq_ignore_ascii_case(right.trim()),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn recent_delivery_matches_target(
+    delivery: &RecentDictationDelivery,
     app_target: Option<&str>,
-) -> (String, usize) {
-    let rules = entries
-        .iter()
-        .map(|entry| DictionaryRule {
-            spoken_form: entry.spoken_form.clone(),
-            replacement: entry.replacement.clone(),
-            app_scope: entry.app_scope.clone(),
-            case_sensitive: entry.case_sensitive,
-            enabled: entry.enabled,
-        })
-        .collect::<Vec<_>>();
-    crate::dictation_parity::apply_dictation_dictionary(input, &rules, app_target)
+    app_bundle_id: Option<&str>,
+) -> bool {
+    if let (Some(delivery_bundle_id), Some(target_bundle_id)) =
+        (delivery.app_bundle_id.as_deref(), app_bundle_id)
+    {
+        return delivery_bundle_id.eq_ignore_ascii_case(target_bundle_id);
+    }
+
+    match (delivery.app_target.as_deref(), app_target) {
+        (Some(delivery_target), Some(target)) => delivery_target.eq_ignore_ascii_case(target),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn recent_delivery_is_fresh(
+    delivery: &RecentDictationDelivery,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    now.signed_duration_since(delivery.delivered_at)
+        <= chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS)
+}
+
+fn recent_delivery_matches_target_and_is_fresh(
+    delivery: &RecentDictationDelivery,
+    app_target: Option<&str>,
+    app_bundle_id: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    recent_delivery_matches_target(delivery, app_target, app_bundle_id)
+        && recent_delivery_is_fresh(delivery, now)
+}
+
+fn infer_learned_correction_result(
+    request: &models::LearnDictationCorrectionRequest,
+) -> Result<
+    crate::dictation_parity::LearnedCorrectionCandidate,
+    models::LearnDictationCorrectionResult,
+> {
+    crate::dictation_parity::infer_learned_correction(
+        &request.original_text,
+        &request.corrected_text,
+        request.force,
+    )
+    .map_err(|reason| models::LearnDictationCorrectionResult {
+        learned: false,
+        action: None,
+        reason: Some(reason),
+        spoken_form: None,
+        replacement: None,
+        entry: None,
+    })
+}
+
+fn apply_learned_correction_candidate(
+    db: &mut db::Database,
+    candidate: crate::dictation_parity::LearnedCorrectionCandidate,
+) -> Result<models::LearnDictationCorrectionResult, String> {
+    let existing = db
+        .list_dictation_dictionary_entries()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|entry| {
+            entry.app_scope.is_none()
+                && entry
+                    .spoken_form
+                    .eq_ignore_ascii_case(candidate.spoken_form.as_str())
+        });
+
+    let (action, entry) = if let Some(existing) = existing {
+        let updated = db
+            .update_dictation_dictionary_entry(
+                &existing.id,
+                &models::UpdateDictationDictionaryEntryRequest {
+                    spoken_form: Some(candidate.spoken_form.clone()),
+                    replacement: Some(candidate.replacement.clone()),
+                    app_scope: Some(None),
+                    case_sensitive: Some(false),
+                    enabled: Some(true),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        ("updated".to_string(), updated)
+    } else {
+        let created = db
+            .create_dictation_dictionary_entry(&models::CreateDictationDictionaryEntryRequest {
+                spoken_form: candidate.spoken_form.clone(),
+                replacement: candidate.replacement.clone(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+            })
+            .map_err(|e| e.to_string())?;
+        ("created".to_string(), created)
+    };
+
+    Ok(models::LearnDictationCorrectionResult {
+        learned: true,
+        action: Some(action),
+        reason: None,
+        spoken_form: Some(candidate.spoken_form),
+        replacement: Some(candidate.replacement),
+        entry: Some(entry),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11722,7 +12317,11 @@ fn build_dictation_text_ready_payload(
     end_to_end_ms: u64,
     insertion_mode_used: &str,
     command_applied: Option<&str>,
+    dictionary_applied_count: usize,
     snippet_applied_count: usize,
+    formatting_applied: bool,
+    recent_insert_reused: bool,
+    pipeline_stage_keys: &[String],
     app_target: Option<&str>,
     activation_matcher: Option<&str>,
     context_source: Option<&str>,
@@ -11762,7 +12361,11 @@ fn build_dictation_text_ready_payload(
         end_to_end_ms,
         insertion_mode_used: insertion_mode_used.to_string(),
         command_applied: command_applied.map(str::to_string),
+        dictionary_applied_count,
         snippet_applied_count,
+        formatting_applied,
+        recent_insert_reused,
+        pipeline_stage_keys: pipeline_stage_keys.to_vec(),
         app_target: app_target.map(str::to_string),
         activation_matcher: activation_matcher.map(str::to_string),
         context_source: context_source.map(str::to_string),
@@ -13004,6 +13607,7 @@ pub fn run() {
             recording_overlay_state: Arc::new(StdMutex::new(RecordingOverlayState::default())),
             accessibility_trust_observed: Arc::new(AtomicBool::new(false)),
             last_cursor_insert_status: Arc::new(StdMutex::new(None)),
+            recent_dictation_delivery: Arc::new(Mutex::new(None)),
             streaming_transcriber,
             dictation_stream_stop: Arc::new(AtomicBool::new(false)),
             dictation_inline_state: Arc::new(Mutex::new(InlineDictationState::default())),
@@ -13285,6 +13889,12 @@ pub fn run() {
             update_dictation_dictionary_entry,
             delete_dictation_dictionary_entry,
             learn_dictation_correction,
+            export_dictation_dictionary_csv,
+            import_dictation_dictionary_csv,
+            list_dictation_correction_suggestions,
+            queue_dictation_correction_suggestion,
+            approve_dictation_correction_suggestion,
+            reject_dictation_correction_suggestion,
             list_dictation_snippets,
             create_dictation_snippet,
             update_dictation_snippet,
@@ -13317,6 +13927,7 @@ pub fn run() {
             list_asr_benchmarks,
             get_audit_log,
             get_dictation_history_details,
+            get_dictation_insights,
             get_meeting_transcript_details,
             download_whisper_model,
             list_downloaded_models,
@@ -13359,7 +13970,9 @@ pub fn run() {
             list_backups,
             create_backup,
             create_backup_default,
+            create_settings_backup_default,
             restore_backup,
+            restore_backup_default,
             get_backup_config,
             save_backup_config,
             verify_backup_cloud_connection,
@@ -13857,7 +14470,11 @@ mod tests {
         let mut speaker_aliases = HashMap::new();
         speaker_aliases.insert(
             "speaker_1".to_string(),
-            (Some("Jonathan Reed".to_string()), Some("#ff0000".to_string()), 10),
+            (
+                Some("Jonathan Reed".to_string()),
+                Some("#ff0000".to_string()),
+                10,
+            ),
         );
 
         let memory = build_relationship_memory(&[RelationshipMemorySource {
@@ -14210,11 +14827,7 @@ mod tests {
         assert!(should_suppress_low_information_dictation("you", 0.3, true));
         assert!(should_suppress_low_information_dictation("you", 0.2, true));
         // Valid content is never suppressed
-        assert!(!should_suppress_low_information_dictation(
-            "ok",
-            0.85,
-            true
-        ));
+        assert!(!should_suppress_low_information_dictation("ok", 0.85, true));
         assert!(!should_suppress_low_information_dictation(
             "thank you",
             1.0,
@@ -14572,6 +15185,10 @@ mod tests {
             "paste",
             Some("newline"),
             1,
+            2,
+            true,
+            false,
+            &["backtrack".to_string(), "smart_formatting".to_string()],
             Some("Notes"),
             Some("slack"),
             Some("clipboard"),
@@ -14625,6 +15242,11 @@ mod tests {
             "app_target": "Legacy Notes",
             "activation_matcher": "slack",
             "command_applied": "legacy_command",
+            "dictionary_applied_count": 2,
+            "snippet_applied_count": 4,
+            "formatting_applied": true,
+            "recent_insert_reused": true,
+            "pipeline_stage_keys": ["dictionary", "backtrack", "smart_formatting"],
             "prompt_source": "default_dictation_format",
             "prompt_preview": "legacy prompt",
             "requested_provider": "voxtral",
@@ -14694,6 +15316,18 @@ mod tests {
         assert_eq!(details.end_to_end_ms, Some(320));
         assert_eq!(details.app_target.as_deref(), Some("Slack"));
         assert_eq!(details.command_applied.as_deref(), Some("rewrite_shorter"));
+        assert_eq!(details.dictionary_applied_count, Some(2));
+        assert_eq!(details.snippet_applied_count, Some(1));
+        assert_eq!(details.formatting_applied, Some(true));
+        assert_eq!(details.recent_insert_reused, Some(true));
+        assert_eq!(
+            details.pipeline_stage_keys,
+            vec![
+                "dictionary".to_string(),
+                "backtrack".to_string(),
+                "smart_formatting".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -14704,6 +15338,12 @@ mod tests {
         assert!(!dictation_history_details_is_empty(
             &models::DictationHistoryDetails {
                 app_target: Some("Slack".to_string()),
+                ..Default::default()
+            }
+        ));
+        assert!(!dictation_history_details_is_empty(
+            &models::DictationHistoryDetails {
+                pipeline_stage_keys: vec!["dictionary".to_string()],
                 ..Default::default()
             }
         ));
@@ -14815,6 +15455,55 @@ mod tests {
             dictation_retention_cutoff("custom", 0, now),
             Some(now - chrono::Duration::hours(1))
         );
+    }
+
+    #[test]
+    fn recent_delivery_requires_matching_target_when_only_one_side_has_it() {
+        let now = chrono::Utc::now();
+        let delivery = RecentDictationDelivery {
+            text: "ship it tomorrow".to_string(),
+            app_target: Some("Slack".to_string()),
+            app_bundle_id: None,
+            delivered_at: now,
+        };
+
+        assert!(!recent_delivery_matches_target(&delivery, None, None));
+        assert!(recent_delivery_matches_target(
+            &delivery,
+            Some("Slack"),
+            None
+        ));
+    }
+
+    #[test]
+    fn recent_delivery_freshness_window_expires() {
+        let now = chrono::Utc::now();
+        let fresh_delivery = RecentDictationDelivery {
+            text: "ship it tomorrow".to_string(),
+            app_target: Some("Slack".to_string()),
+            app_bundle_id: None,
+            delivered_at: now - chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS),
+        };
+        let stale_delivery = RecentDictationDelivery {
+            delivered_at: now
+                - chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS + 1),
+            ..fresh_delivery.clone()
+        };
+
+        assert!(recent_delivery_is_fresh(&fresh_delivery, now));
+        assert!(!recent_delivery_is_fresh(&stale_delivery, now));
+        assert!(recent_delivery_matches_target_and_is_fresh(
+            &fresh_delivery,
+            Some("Slack"),
+            None,
+            now
+        ));
+        assert!(!recent_delivery_matches_target_and_is_fresh(
+            &stale_delivery,
+            Some("Slack"),
+            None,
+            now
+        ));
     }
 
     #[test]
@@ -15203,6 +15892,19 @@ async fn default_dictation_start_options(state: &AppState) -> models::DictationS
 }
 
 fn dictation_options_from_settings(settings: &settings::Settings) -> models::DictationStartOptions {
+    let active_language_override =
+        if settings.transcription.language.is_none()
+            && settings.transcription.dictation_active_languages.len() == 1
+        {
+            settings
+                .transcription
+                .dictation_active_languages
+                .first()
+                .cloned()
+        } else {
+            None
+        };
+
     models::DictationStartOptions {
         save_to_inbox: settings.transcription.dictation_save_to_inbox,
         project_id: Some(settings.transcription.dictation_project_id.clone()),
@@ -15212,7 +15914,11 @@ fn dictation_options_from_settings(settings: &settings::Settings) -> models::Dic
         )
         .to_string(),
         route_preference: Some(settings.transcription.dictation_route_preference.clone()),
-        language_override: settings.transcription.language.clone(),
+        language_override: settings
+            .transcription
+            .language
+            .clone()
+            .or(active_language_override),
         live_preview_enabled: Some(settings.transcription.dictation_live_preview_enabled),
         requested_provider: None,
         requested_model_id: None,
@@ -16822,7 +17528,9 @@ fn provider_hosting_environment(
         asr::AsrProviderType::OpenAiCloud
         | asr::AsrProviderType::ElevenLabsScribe
         | asr::AsrProviderType::Groq => HostingEnvironment::Cloud,
-        asr::AsrProviderType::Voxtral if normalize_asr_model_id(provider, model_id) == "voxtral-cloud" => {
+        asr::AsrProviderType::Voxtral
+            if normalize_asr_model_id(provider, model_id) == "voxtral-cloud" =>
+        {
             HostingEnvironment::Cloud
         }
         _ => HostingEnvironment::Local,
@@ -17062,8 +17770,7 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
     let default_provider = asr_provider_from_settings_value(&transcription.default_provider)
         .unwrap_or(asr::AsrProviderType::DistilWhisper);
     transcription.dictation_route_preference =
-        normalize_dictation_route_preference(&transcription.dictation_route_preference)
-            .to_string();
+        normalize_dictation_route_preference(&transcription.dictation_route_preference).to_string();
     transcription.default_provider = asr_provider_to_settings_value(default_provider).to_string();
     transcription.selected_model_id =
         normalize_asr_model_id(default_provider, &transcription.selected_model_id);
@@ -17475,9 +18182,7 @@ fn normalize_asr_model_id(provider_type: asr::AsrProviderType, model_id: &str) -
         asr::AsrProviderType::Parakeet => match candidate {
             "parakeet-tdt-0.6b-v3" | "parakeet-ctc-0.6b" => "parakeet-ctc-0.6b".to_string(),
             "parakeet-ctc-1.1b" => "parakeet-ctc-1.1b".to_string(),
-            "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => {
-                "parakeet-tdt-ctc-110m".to_string()
-            }
+            "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => "parakeet-tdt-ctc-110m".to_string(),
             _ => "parakeet-ctc-0.6b".to_string(),
         },
         asr::AsrProviderType::WhisperCandle => "whisper-large-v3-turbo".to_string(),
@@ -19116,26 +19821,10 @@ fn dispatch_macos_keystroke(keycode: u16, modifiers: MacosKeyModifiers) -> Resul
 
         let result = (|| -> Result<(), String> {
             let modifier_keys = [
-                (
-                    modifiers.control,
-                    CONTROL_KEYCODE,
-                    "control",
-                ),
-                (
-                    modifiers.option,
-                    OPTION_KEYCODE,
-                    "option",
-                ),
-                (
-                    modifiers.shift,
-                    SHIFT_KEYCODE,
-                    "shift",
-                ),
-                (
-                    modifiers.command,
-                    COMMAND_KEYCODE,
-                    "command",
-                ),
+                (modifiers.control, CONTROL_KEYCODE, "control"),
+                (modifiers.option, OPTION_KEYCODE, "option"),
+                (modifiers.shift, SHIFT_KEYCODE, "shift"),
+                (modifiers.command, COMMAND_KEYCODE, "command"),
             ];
 
             for (enabled, modifier_keycode, label) in modifier_keys {
@@ -19350,9 +20039,7 @@ fn send_meeting_consent_notice_via_google_meet(
 }
 
 #[cfg(target_os = "macos")]
-fn send_meeting_consent_notice_internal(
-    state: &AppState,
-) -> MeetingConsentNoticeResult {
+fn send_meeting_consent_notice_internal(state: &AppState) -> MeetingConsentNoticeResult {
     let status = meeting_consent_automation_status(state);
     let notice_text = status.notice_text.clone();
     let manual_return = |surface: Option<String>, message: String| -> MeetingConsentNoticeResult {
@@ -19425,8 +20112,9 @@ fn send_meeting_consent_notice_internal(_state: &AppState) -> MeetingConsentNoti
     MeetingConsentNoticeResult {
         mode: "manual_required".to_string(),
         surface: None,
-        message: "Consent reminder stayed manual. Copy the notice from Nautilus before you continue."
-            .to_string(),
+        message:
+            "Consent reminder stayed manual. Copy the notice from Nautilus before you continue."
+                .to_string(),
         notice_text: meeting_consent_notice_text().to_string(),
     }
 }

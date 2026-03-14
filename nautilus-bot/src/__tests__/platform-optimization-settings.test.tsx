@@ -91,6 +91,32 @@ const providerFixture = [
     },
   },
   {
+    providerType: "moonshine",
+    name: "UsefulSensors Moonshine",
+    description: "Fast local dictation",
+    isAvailable: true,
+    inferenceEnabled: true,
+    modelInfo: {
+      name: "Moonshine Base",
+      version: "base",
+      sizeMb: 120,
+      parameters: "base",
+      languages: ["en"],
+      license: "Apache-2.0",
+      sourceUrl: "https://example.com/moonshine",
+    },
+    selectedModelId: "moonshine-base",
+    modelOptions: [{ id: "moonshine-base", label: "Moonshine Base" }],
+    downloadStatus: "Downloaded",
+    runtimeStatus: "ready",
+    runtimeDetails: {},
+    engineDiagnostics: {
+      activeEngine: "provider_default",
+      availableEngines: ["provider_default", "macos_mlx_sidecar"],
+      notes: [],
+    },
+  },
+  {
     providerType: "macos_apple_speech",
     name: "Apple Native Speech",
     description: "Use macOS native speech recognition.",
@@ -242,6 +268,17 @@ describe("Platform optimization settings", () => {
 
     expect(screen.queryByText("macOS Apple Speech engine")).not.toBeInTheDocument();
     expect(screen.queryByText("Windows SDK dictation engine")).not.toBeInTheDocument();
+  });
+
+  it("surfaces recommended solo local model lanes", async () => {
+    render(<AsrProviderManager />);
+
+    expect(await screen.findByText("Recommended local model lanes")).toBeInTheDocument();
+    expect(screen.getByText("Fast local dictation")).toBeInTheDocument();
+    expect(screen.getAllByText("UsefulSensors Moonshine").length).toBeGreaterThan(0);
+    expect(screen.getByText("Higher-quality local")).toBeInTheDocument();
+    expect(screen.getByText("Apple Silicon acceleration")).toBeInTheDocument();
+    expect(screen.getByText("Current solo routes")).toBeInTheDocument();
   });
 
   it("treats Apple Native as dictation-only when persisting transcription route settings", async () => {

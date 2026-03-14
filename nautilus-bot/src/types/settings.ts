@@ -93,6 +93,7 @@ export interface TranscriptionSettings {
   dictationCommandModeEnabled?: boolean;
   dictationCommandPrefix?: string;
   dictationInsertionMode?: "auto" | "paste" | "inline" | "clipboard_only";
+  dictationActiveLanguages?: string[];
   dictationSnippetsEnabled?: boolean;
   dictationAutoLearnCorrections?: boolean;
   dictationCustomPrompt: string | null;

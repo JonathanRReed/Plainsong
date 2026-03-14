@@ -488,7 +488,10 @@ impl DownloadManager {
         }
 
         // Check Moonshine models
-        for (dir_name, label) in [("moonshine", "Moonshine Base"), ("moonshine_tiny", "Moonshine Tiny")] {
+        for (dir_name, label) in [
+            ("moonshine", "Moonshine Base"),
+            ("moonshine_tiny", "Moonshine Tiny"),
+        ] {
             let model_dir = self.models_dir.join(dir_name);
             if !model_dir.exists() {
                 continue;

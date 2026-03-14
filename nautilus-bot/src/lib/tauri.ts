@@ -42,6 +42,11 @@ export interface DictationHistoryDetails {
   appTarget: string | null;
   activationMatcher: string | null;
   commandApplied: string | null;
+  dictionaryAppliedCount: number | null;
+  snippetAppliedCount: number | null;
+  formattingApplied: boolean | null;
+  recentInsertReused: boolean | null;
+  pipelineStageKeys: string[];
   promptSource: string | null;
   promptPreview: string | null;
   requestedProvider: string | null;
@@ -53,6 +58,19 @@ export interface DictationHistoryDetails {
   transcriptionLatencyMs: number | null;
   insertLatencyMs: number | null;
   endToEndMs: number | null;
+}
+
+export interface DictationInsights {
+  totalDictations: number;
+  dictatedWords: number;
+  averageWordsPerDictation: number;
+  activeDays: number;
+  lastSevenDaysDictations: number;
+  commandsUsed: number;
+  backtracksUsed: number;
+  snippetsTriggered: number;
+  topAppTarget: string | null;
+  topAppTargetCount: number;
 }
 
 export interface MeetingChatCitation {
@@ -141,6 +159,10 @@ export async function getDictationHistoryDetails(
   recordingId: string
 ): Promise<DictationHistoryDetails | null> {
   return await invoke("get_dictation_history_details", { recordingId });
+}
+
+export async function getDictationInsights(): Promise<DictationInsights> {
+  return await invoke("get_dictation_insights");
 }
 
 export async function forceStopDictation(): Promise<string> {
@@ -449,6 +471,33 @@ export interface LearnDictationCorrectionResult {
   entry?: DictationDictionaryEntry | null;
 }
 
+export interface DictationDictionaryCsvImportResult {
+  createdCount: number;
+  updatedCount: number;
+  skippedCount: number;
+  errors: string[];
+}
+
+export interface DictationCorrectionSuggestion {
+  id: string;
+  originalText: string;
+  correctedText: string;
+  spokenForm: string;
+  replacement: string;
+  appTarget: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface QueueDictationCorrectionSuggestionResult {
+  queued: boolean;
+  action?: "created" | "updated" | null;
+  reason?: string | null;
+  spokenForm?: string | null;
+  replacement?: string | null;
+  suggestion?: DictationCorrectionSuggestion | null;
+}
+
 export interface DictationSnippet {
   id: string;
   trigger: string;
@@ -516,6 +565,36 @@ export async function learnDictationCorrection(
   request: LearnDictationCorrectionRequest
 ): Promise<LearnDictationCorrectionResult> {
   return await invoke("learn_dictation_correction", { request });
+}
+
+export async function exportDictationDictionaryCsv(): Promise<string> {
+  return await invoke("export_dictation_dictionary_csv");
+}
+
+export async function importDictationDictionaryCsv(
+  csvText: string
+): Promise<DictationDictionaryCsvImportResult> {
+  return await invoke("import_dictation_dictionary_csv", { csvText });
+}
+
+export async function listDictationCorrectionSuggestions(): Promise<DictationCorrectionSuggestion[]> {
+  return await invoke("list_dictation_correction_suggestions");
+}
+
+export async function queueDictationCorrectionSuggestion(
+  request: LearnDictationCorrectionRequest
+): Promise<QueueDictationCorrectionSuggestionResult> {
+  return await invoke("queue_dictation_correction_suggestion", { request });
+}
+
+export async function approveDictationCorrectionSuggestion(
+  suggestionId: string
+): Promise<LearnDictationCorrectionResult> {
+  return await invoke("approve_dictation_correction_suggestion", { suggestionId });
+}
+
+export async function rejectDictationCorrectionSuggestion(suggestionId: string): Promise<void> {
+  await invoke("reject_dictation_correction_suggestion", { suggestionId });
 }
 
 export async function listDictationSnippets(): Promise<DictationSnippet[]> {
@@ -1021,6 +1100,14 @@ export async function listBackups(): Promise<BackupInfo[]> {
 
 export async function createBackupDefault(): Promise<BackupInfo> {
   return await invoke("create_backup_default");
+}
+
+export async function createSettingsBackupDefault(): Promise<BackupInfo> {
+  return await invoke("create_settings_backup_default");
+}
+
+export async function restoreBackupDefault(backupId: string): Promise<void> {
+  await invoke("restore_backup_default", { backupId });
 }
 
 export async function syncBackupToCloud(backupId: string): Promise<void> {

@@ -18,6 +18,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useTheme } from "@/components/theme-provider";
 import {
   createBackupDefault,
+  createSettingsBackupDefault,
   clearProviderSecret,
   getBackupConfig,
   getPermissionDiagnostics,
@@ -39,6 +40,7 @@ import {
   openPermissionSettings,
   repairCursorInsertPermissions,
   requestDictationPermissions,
+  restoreBackupDefault,
   saveSettings,
   saveBackupConfig,
   setProviderSecret,
@@ -109,6 +111,34 @@ const SHORTCUT_FIELD_CONFIG: Array<{ key: ShortcutFieldKey; label: string }> = [
 ];
 
 const SETTINGS_SAVE_DEBOUNCE_MS = 350;
+const DICTATION_ACTIVE_LANGUAGE_OPTIONS = [
+  { value: "en", label: "English" },
+  { value: "es", label: "Spanish" },
+  { value: "fr", label: "French" },
+  { value: "de", label: "German" },
+  { value: "it", label: "Italian" },
+  { value: "pt", label: "Portuguese" },
+  { value: "ja", label: "Japanese" },
+  { value: "ko", label: "Korean" },
+  { value: "zh", label: "Chinese" },
+  { value: "ru", label: "Russian" },
+  { value: "ar", label: "Arabic" },
+  { value: "hi", label: "Hindi" },
+] as const;
+
+function normalizeActiveLanguageSet(languages: string[] | undefined): string[] {
+  const allowed = new Set<string>(DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => option.value));
+  const normalized: string[] = [];
+  for (const language of languages ?? []) {
+    const value = language.trim().toLowerCase();
+    if (!allowed.has(value) || normalized.includes(value)) {
+      continue;
+    }
+    normalized.push(value);
+  }
+  return normalized;
+}
+
 function markSettingsPerf(markName: string) {
   if (!import.meta.env.DEV || typeof performance === "undefined") {
     return;
@@ -217,6 +247,14 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
   const settings = draftSettings;
   const { toast } = useToast();
+  const latestProfileSnapshot = useMemo(
+    () => backups.find((backup) => backup.backupType === "settings") ?? null,
+    [backups]
+  );
+  const latestFullBackup = useMemo(
+    () => backups.find((backup) => backup.backupType === "full") ?? null,
+    [backups]
+  );
   const microphonePermissionReady =
     permissionDiagnostics?.microphonePermissionReady ?? permissionDiagnostics?.microphoneReady ?? false;
   const dictationShortcutBehavior = resolveDictationHotkeyBehavior(settings);
@@ -1099,6 +1137,84 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     <option value="ar">Arabic</option>
                     <option value="hi">Hindi</option>
                   </select>
+                  <div className="rounded-md border border-border bg-muted/20 p-3">
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium">Dictation active language set</p>
+                      <p className="text-xs text-muted-foreground">
+                        Applies when Transcription language stays on auto-detect. Keep one language
+                        selected to lock dictation to it, or choose several to keep auto-detect
+                        inside a narrower set.
+                      </p>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => {
+                        const activeLanguages = normalizeActiveLanguageSet(
+                          settings.transcription.dictationActiveLanguages
+                        );
+                        const selected = activeLanguages.includes(option.value);
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            aria-pressed={selected}
+                            aria-label={`Toggle ${option.label} in dictation active languages`}
+                            className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                              selected
+                                ? "border-foreground bg-foreground text-background"
+                                : "border-border bg-background text-muted-foreground hover:text-foreground"
+                            }`}
+                            onClick={() => {
+                              const nextActiveLanguages = selected
+                                ? activeLanguages.filter((language) => language !== option.value)
+                                : [...activeLanguages, option.value];
+                              void updateSettings({
+                                ...settings,
+                                transcription: {
+                                  ...settings.transcription,
+                                  dictationActiveLanguages: normalizeActiveLanguageSet(
+                                    nextActiveLanguages
+                                  ),
+                                },
+                              });
+                            }}
+                          >
+                            {option.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="mt-3 text-xs text-muted-foreground">
+                      {normalizeActiveLanguageSet(settings.transcription.dictationActiveLanguages)
+                        .length === 0
+                        ? "No dictation language set saved yet. Auto-detect stays fully open."
+                        : normalizeActiveLanguageSet(settings.transcription.dictationActiveLanguages)
+                            .length === 1
+                          ? `Dictation will lock to ${
+                              DICTATION_ACTIVE_LANGUAGE_OPTIONS.find(
+                                (option) =>
+                                  option.value ===
+                                  normalizeActiveLanguageSet(
+                                    settings.transcription.dictationActiveLanguages
+                                  )[0]
+                              )?.label ??
+                              normalizeActiveLanguageSet(
+                                settings.transcription.dictationActiveLanguages
+                              )[0]
+                            } when the language select stays on auto-detect.`
+                          : `Dictation auto-detect will stay inside ${
+                              normalizeActiveLanguageSet(
+                                settings.transcription.dictationActiveLanguages
+                              )
+                                .map(
+                                  (language) =>
+                                    DICTATION_ACTIVE_LANGUAGE_OPTIONS.find(
+                                      (option) => option.value === language
+                                    )?.label ?? language
+                                )
+                                .join(", ")
+                            }.`}
+                    </p>
+                  </div>
                 </div>
 
                 {advancedTabs.asr && (
@@ -1244,7 +1360,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Label>Advanced dictation controls</Label>
                         <p className="text-sm text-muted-foreground">
                           Manage dictionary rules, snippets, routing, insertion, context, live preview,
-                          and custom dictation modes from the Dictation workspace.
+                          and custom dictation modes from Dictation Controls.
                         </p>
                       </div>
                       <Button variant="secondary" onClick={() => requestMainView("dictation")}>
@@ -1889,7 +2005,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Label>Advanced dictation controls</Label>
                         <p className="text-sm text-muted-foreground">
                           Manage dictionary rules, snippets, routing, insertion, context, live preview,
-                          and custom dictation modes from the Dictation workspace.
+                          and custom dictation modes from Dictation Controls.
                         </p>
                       </div>
                       <Button variant="secondary" onClick={() => requestMainView("dictation")}>
@@ -2214,7 +2330,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Label>Advanced dictation controls</Label>
                         <p className="text-sm text-muted-foreground">
                           Manage dictionary rules, snippets, routing, insertion, context, live preview,
-                          and custom dictation modes from the Dictation workspace.
+                          and custom dictation modes from Dictation Controls.
                         </p>
                       </div>
                       <Button variant="secondary" onClick={() => requestMainView("dictation")}>
@@ -2793,7 +2909,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   <div className="space-y-1">
                     <Label>Guided setup</Label>
                     <p className="text-sm text-muted-foreground">
-                      Guided setup now lives in the dedicated Setup workspace so normal users always have one obvious place to fix permissions, models, and meetings.
+                      Guided setup now lives in the dedicated Setup center so normal users always have one obvious place to fix permissions, models, and meetings.
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -3026,7 +3142,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Label>Advanced dictation controls</Label>
                         <p className="text-sm text-muted-foreground">
                           Manage dictionary rules, snippets, routing, insertion, context, live preview,
-                          and custom dictation modes from the Dictation workspace.
+                          and custom dictation modes from Dictation Controls.
                         </p>
                       </div>
                       <Button variant="secondary" onClick={() => requestMainView("dictation")}>
@@ -3143,9 +3259,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">
-                        <Label>Cloud backup sync</Label>
+                        <Label>Personal profile sync</Label>
                         <p className="text-sm text-muted-foreground">
-                          OneDrive, Google Drive, Proton Drive (via rclone), or iCloud
+                          Sync settings, shortcuts, dictation flows, dictionary, snippets, and preferences via cloud storage
                         </p>
                       </div>
                       <Switch
@@ -3219,6 +3335,48 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </div>
                     )}
 
+                    <div className="rounded-lg border p-3 bg-muted/10 space-y-2">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <Label className="text-sm">Personal Profile Sync</Label>
+                          <p className="text-sm text-muted-foreground">
+                            Profile snapshots save your personal setup without copying recordings or transcripts.
+                          </p>
+                        </div>
+                        <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                          Settings only
+                        </span>
+                      </div>
+                      <div className="grid gap-2 md:grid-cols-2">
+                        <div className="rounded border bg-background p-3">
+                          <p className="text-xs font-medium text-muted-foreground">Latest profile snapshot</p>
+                          <p className="mt-1 text-sm">
+                            {latestProfileSnapshot
+                              ? new Date(latestProfileSnapshot.timestamp).toLocaleString()
+                              : "No profile snapshot yet"}
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {latestProfileSnapshot
+                              ? `${latestProfileSnapshot.itemsCount} items · ${latestProfileSnapshot.id}`
+                              : "Create one before syncing to another device."}
+                          </p>
+                        </div>
+                        <div className="rounded border bg-background p-3">
+                          <p className="text-xs font-medium text-muted-foreground">Latest full backup</p>
+                          <p className="mt-1 text-sm">
+                            {latestFullBackup
+                              ? new Date(latestFullBackup.timestamp).toLocaleString()
+                              : "No full backup yet"}
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {latestFullBackup
+                              ? `${latestFullBackup.itemsCount} items · ${latestFullBackup.id}`
+                              : "Use this when you want recovery for recordings and transcripts too."}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
                     <div className="flex flex-wrap gap-2 mt-4">
                       <Button
                         variant="outline"
@@ -3237,7 +3395,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           }
                         }}
                       >
-                        Save Backup Config
+                        Save Sync Config
                       </Button>
                       <Button
                         variant="outline"
@@ -3285,6 +3443,73 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         Run Setup Checks
                       </Button>
                       <Button
+                        variant="secondary"
+                        disabled={backupBusy}
+                        onClick={async () => {
+                          setBackupBusy(true);
+                          setBackupStatus(null);
+                          setError(null);
+                          try {
+                            await saveBackupConfig(backupConfig);
+                            const info = await createSettingsBackupDefault();
+                            setBackupStatus(`Profile snapshot created: ${info.id}`);
+                            await refreshBackups();
+                          } catch (e) {
+                            setError(e instanceof Error ? e.message : "Profile snapshot failed");
+                          } finally {
+                            setBackupBusy(false);
+                          }
+                        }}
+                      >
+                        Create Profile Snapshot
+                      </Button>
+                      <Button
+                        variant="outline"
+                        disabled={backupBusy || !latestProfileSnapshot || !backupConfig.cloudSync}
+                        onClick={async () => {
+                          if (!latestProfileSnapshot) return;
+                          setBackupBusy(true);
+                          setBackupStatus(null);
+                          setError(null);
+                          try {
+                            await saveBackupConfig(backupConfig);
+                            await syncBackupToCloud(latestProfileSnapshot.id);
+                            setBackupStatus(`Synced profile snapshot ${latestProfileSnapshot.id} to cloud.`);
+                          } catch (e) {
+                            setError(e instanceof Error ? e.message : "Profile sync failed");
+                          } finally {
+                            setBackupBusy(false);
+                          }
+                        }}
+                      >
+                        Sync Latest Profile Snapshot
+                      </Button>
+                      <Button
+                        variant="outline"
+                        disabled={backupBusy || !latestProfileSnapshot || hasUnsavedChanges}
+                        onClick={async () => {
+                          if (!latestProfileSnapshot) return;
+                          setBackupBusy(true);
+                          setBackupStatus(null);
+                          setError(null);
+                          try {
+                            await restoreBackupDefault(latestProfileSnapshot.id);
+                            const restored = await getSettings();
+                            setDraftSettings(restored);
+                            setPersistedSettings(restored);
+                            setBackupStatus(
+                              `Restored profile snapshot ${latestProfileSnapshot.id}.`
+                            );
+                          } catch (e) {
+                            setError(e instanceof Error ? e.message : "Profile restore failed");
+                          } finally {
+                            setBackupBusy(false);
+                          }
+                        }}
+                      >
+                        Restore Latest Profile Snapshot
+                      </Button>
+                      <Button
                         disabled={backupBusy}
                         onClick={async () => {
                           setBackupBusy(true);
@@ -3302,7 +3527,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           }
                         }}
                       >
-                        Create Backup Now
+                        Create Full Backup
                       </Button>
                       <Button
                         variant="outline"
@@ -3324,11 +3549,16 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           }
                         }}
                       >
-                        Sync Latest Backup
+                        Sync Latest Full Backup
                       </Button>
                     </div>
 
                     {backupStatus && <p className="text-sm text-muted-foreground">{backupStatus}</p>}
+                    {hasUnsavedChanges ? (
+                      <p className="text-xs text-amber-600">
+                        Save or discard local settings edits before restoring a profile snapshot.
+                      </p>
+                    ) : null}
                     {backupSetupReport && (
                       <div className="rounded-lg border p-3 space-y-2 bg-muted/10">
                         <div className="flex items-center justify-between">
@@ -3744,7 +3974,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <Label>Advanced dictation controls</Label>
                         <p className="text-sm text-muted-foreground">
                           Manage dictionary rules, snippets, routing, insertion, context, live preview,
-                          and custom dictation modes from the Dictation workspace.
+                          and custom dictation modes from Dictation Controls.
                         </p>
                       </div>
                       <Button variant="secondary" onClick={() => requestMainView("dictation")}>
@@ -4019,11 +4249,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <div className="space-y-0.5">
                           <p className="text-sm font-medium">Cross-meeting memory chat</p>
                           <p className="text-xs text-muted-foreground">
-                            Open the Dashboard memory thread to ask follow-up questions across all meetings.
+                            Open the Memory view to ask follow-up questions across all meetings.
                           </p>
                         </div>
                         <Button variant="secondary" size="sm" onClick={() => requestMainView("dashboard")}>
-                          Open Memory Workspace
+                          Open Memory
                         </Button>
                       </div>
 
@@ -4043,11 +4273,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         <div className="space-y-0.5">
                           <p className="text-sm font-medium">Grounded meeting follow-up drafts</p>
                           <p className="text-xs text-muted-foreground">
-                            Open the Meetings workspace to draft transcript-backed follow-up emails and notes.
+                            Open Meetings to draft transcript-backed follow-up emails and notes.
                           </p>
                         </div>
                         <Button variant="secondary" size="sm" onClick={() => requestMainView("recordings")}>
-                          Open Meetings Workspace
+                          Open Meetings
                         </Button>
                       </div>
                       
