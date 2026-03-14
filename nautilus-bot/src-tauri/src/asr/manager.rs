@@ -5,7 +5,7 @@ use super::{
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
@@ -32,6 +32,7 @@ pub struct AsrManager {
     default_provider: RwLock<AsrProviderType>,
     selected_model_id: RwLock<String>,
     provider_model_ids: RwLock<HashMap<AsrProviderType, String>>,
+    mlx_accelerated_providers: RwLock<HashSet<AsrProviderType>>,
     silence_skip_enabled: RwLock<bool>,
     platform_optimization: RwLock<crate::settings::PlatformOptimizationSettings>,
     last_runtime_errors: RwLock<HashMap<AsrProviderType, String>>,
@@ -77,6 +78,7 @@ impl AsrManager {
                     .to_string(),
             ),
             provider_model_ids: RwLock::new(provider_model_ids),
+            mlx_accelerated_providers: RwLock::new(HashSet::new()),
             last_runtime_errors: RwLock::new(HashMap::new()),
             provider_info_cache: RwLock::new(None),
             models_dir,
@@ -114,16 +116,10 @@ impl AsrManager {
         selected_model_id: Option<&str>,
     ) -> Box<dyn AsrProvider> {
         match provider_type {
-            AsrProviderType::Whisper
-            | AsrProviderType::Parakeet
-            | AsrProviderType::DistilWhisper
-            | AsrProviderType::Voxtral
-            | AsrProviderType::ElevenLabsScribe
-            | AsrProviderType::OpenAiCloud
-            | AsrProviderType::Groq => {
-                AsrProviderFactory::create_with_model(provider_type, selected_model_id)
+            AsrProviderType::MacosAppleSpeech | AsrProviderType::WindowsSdkDictation => {
+                AsrProviderFactory::create(provider_type)
             }
-            _ => AsrProviderFactory::create(provider_type),
+            _ => AsrProviderFactory::create_with_model(provider_type, selected_model_id),
         }
     }
 
@@ -166,6 +162,38 @@ impl AsrManager {
 
     pub async fn provider_model_map(&self) -> HashMap<AsrProviderType, String> {
         self.provider_model_ids.read().await.clone()
+    }
+
+    pub async fn set_mlx_accelerated_providers(
+        &self,
+        providers: HashSet<AsrProviderType>,
+    ) {
+        *self.mlx_accelerated_providers.write().await = providers;
+        self.invalidate_provider_info_cache().await;
+    }
+
+    pub async fn mlx_accelerated_providers(&self) -> HashSet<AsrProviderType> {
+        self.mlx_accelerated_providers.read().await.clone()
+    }
+
+    pub async fn resolve_effective_provider_and_model(
+        &self,
+        provider_type: AsrProviderType,
+        model_id: &str,
+    ) -> (AsrProviderType, String, bool) {
+        let optimization = self.platform_optimization().await;
+        let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
+        let effective = Self::effective_provider_selection(
+            provider_type,
+            model_id,
+            &optimization,
+            &mlx_accelerated_providers,
+        );
+        (
+            effective.provider_type,
+            effective.model_id,
+            effective.mlx_accelerated,
+        )
     }
 
     pub async fn set_provider_model_map(&self, provider_map: HashMap<AsrProviderType, String>) {
@@ -216,21 +244,69 @@ impl AsrManager {
         self.invalidate_provider_info_cache().await;
     }
 
+    fn effective_provider_selection(
+        requested_provider: AsrProviderType,
+        requested_model_id: &str,
+        optimization: &crate::settings::PlatformOptimizationSettings,
+        mlx_accelerated_providers: &HashSet<AsrProviderType>,
+    ) -> EffectiveProviderSelection {
+        let normalized_model_id = Self::normalize_model_id(requested_provider, requested_model_id);
+        if requested_provider != AsrProviderType::MlxAudio
+            && cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            && optimization.macos.mlx_enabled
+            && mlx_accelerated_providers.contains(&requested_provider)
+        {
+            if let Some(mlx_model_id) = crate::asr::mlx_audio::mapped_model_for_visible_route(
+                requested_provider,
+                normalized_model_id.as_str(),
+            ) {
+                return EffectiveProviderSelection {
+                    provider_type: AsrProviderType::MlxAudio,
+                    model_id: mlx_model_id.to_string(),
+                    mlx_accelerated: true,
+                };
+            }
+        }
+
+        EffectiveProviderSelection {
+            provider_type: requested_provider,
+            model_id: normalized_model_id,
+            mlx_accelerated: false,
+        }
+    }
+
     pub fn supports_short_keep_warm(&self, provider_type: AsrProviderType, model_id: &str) -> bool {
         let normalized = Self::normalize_model_id(provider_type, model_id);
-        match provider_type {
+        let optimization = self.platform_optimization.blocking_read().clone();
+        let mlx_accelerated_providers = self.mlx_accelerated_providers.blocking_read().clone();
+        let effective = Self::effective_provider_selection(
+            provider_type,
+            normalized.as_str(),
+            &optimization,
+            &mlx_accelerated_providers,
+        );
+        match effective.provider_type {
             AsrProviderType::Whisper
             | AsrProviderType::WhisperCandle
             | AsrProviderType::DistilWhisper
-            | AsrProviderType::Moonshine => true,
-            AsrProviderType::Parakeet => normalized == "parakeet-tdt-ctc-110m",
+            | AsrProviderType::Moonshine
+            | AsrProviderType::MlxAudio => true,
+            AsrProviderType::Parakeet => effective.model_id == "parakeet-tdt-ctc-110m",
             _ => false,
         }
     }
 
     pub fn cool_down_local_route(&self, provider_type: AsrProviderType, model_id: &str) {
         let normalized = Self::normalize_model_id(provider_type, model_id);
-        match provider_type {
+        let optimization = self.platform_optimization.blocking_read().clone();
+        let mlx_accelerated_providers = self.mlx_accelerated_providers.blocking_read().clone();
+        let effective = Self::effective_provider_selection(
+            provider_type,
+            normalized.as_str(),
+            &optimization,
+            &mlx_accelerated_providers,
+        );
+        match effective.provider_type {
             AsrProviderType::Whisper => super::whisper::clear_cached_model(&normalized),
             AsrProviderType::WhisperCandle => {
                 super::canary::clear_cached_runtime(&self.models_dir.join("canary"));
@@ -239,14 +315,17 @@ impl AsrManager {
                 super::distil_whisper::clear_cached_runtime();
             }
             AsrProviderType::Moonshine => {
-                let model_dir = if normalized == "moonshine-tiny" {
+                let model_dir = if effective.model_id == "moonshine-tiny" {
                     self.models_dir.join("moonshine_tiny")
                 } else {
                     self.models_dir.join("moonshine")
                 };
                 super::moonshine::clear_cached_runtime(&model_dir);
             }
-            AsrProviderType::Parakeet if normalized == "parakeet-tdt-ctc-110m" => {
+            AsrProviderType::MlxAudio => {
+                let _ = effective.model_id;
+            }
+            AsrProviderType::Parakeet if effective.model_id == "parakeet-tdt-ctc-110m" => {
                 super::parakeet::clear_cached_session();
             }
             _ => {}
@@ -288,17 +367,26 @@ impl AsrManager {
         provider_type: AsrProviderType,
     ) -> RuntimeDiagnostics {
         let selected_model = self.provider_model_id(provider_type).await;
-        let provider = Self::provider_with_model(provider_type, Some(selected_model.as_str()));
+        let optimization = self.platform_optimization().await;
+        let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
+        let effective = Self::effective_provider_selection(
+            provider_type,
+            selected_model.as_str(),
+            &optimization,
+            &mlx_accelerated_providers,
+        );
+        let provider =
+            Self::provider_with_model(effective.provider_type, Some(effective.model_id.as_str()));
         let last_error = self
             .last_runtime_errors
             .read()
             .await
-            .get(&provider_type)
+            .get(&effective.provider_type)
             .cloned();
 
         let diagnostics = runtime_diagnostics_for_provider(
-            provider_type,
-            selected_model.as_str(),
+            effective.provider_type,
+            effective.model_id.as_str(),
             provider.is_available(),
             last_error.as_deref(),
         );
@@ -325,6 +413,13 @@ impl AsrManager {
         };
         let skip_silence = self.silence_skip_enabled().await;
         let optimization = self.platform_optimization().await;
+        let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
+        let effective_selection = Self::effective_provider_selection(
+            requested_provider,
+            resolved_model.as_str(),
+            &optimization,
+            &mlx_accelerated_providers,
+        );
 
         // Pre-process: remove silence from audio bytes if enabled
         let processed_bytes: Option<Vec<u8>> = if skip_silence {
@@ -346,7 +441,8 @@ impl AsrManager {
         let effective_audio_data = processed_bytes.as_deref().or(audio_data);
 
         let mut attempt_errors: Vec<String> = Vec::new();
-        let requested_engine = Self::select_requested_engine(requested_provider, &optimization);
+        let requested_engine =
+            Self::select_requested_engine(effective_selection.provider_type, &optimization);
         let exclusive_engine = requested_engine
             .map(|engine| Self::engine_selection_is_exclusive(engine, &optimization))
             .unwrap_or(false);
@@ -366,7 +462,7 @@ impl AsrManager {
             if engine != PlatformEngine::ProviderDefault {
                 if Self::engine_enabled(engine, &optimization)
                     && engine_probe.ready
-                    && engine.supports_provider(requested_provider)
+                    && engine.supports_provider(effective_selection.provider_type)
                 {
                     if !Self::engine_runtime_executable(engine) {
                         attempt_errors.push(format!(
@@ -426,13 +522,13 @@ impl AsrManager {
         match self
             .transcribe_with_provider_attempt(
                 requested_provider,
-                requested_provider,
-                resolved_model.as_str(),
+                effective_selection.provider_type,
+                effective_selection.model_id.as_str(),
                 file_path,
                 effective_audio_data,
                 provider_requested_engine,
                 PlatformEngine::ProviderDefault,
-                false,
+                effective_selection.mlx_accelerated,
                 None,
             )
             .await
@@ -570,11 +666,6 @@ impl AsrManager {
                     return Some(PlatformEngine::MacosAppleSpeech);
                 }
 
-                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-                if optimization.macos.mlx_enabled {
-                    return Some(PlatformEngine::MacosMlxSidecar);
-                }
-
                 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
                 if optimization.windows.windows_sdk_dictation_enabled {
                     return Some(PlatformEngine::WindowsSdkDictation);
@@ -694,30 +785,49 @@ impl AsrManager {
         let provider_models = self.provider_model_map().await;
         let last_errors = self.last_runtime_errors.read().await.clone();
         let optimization = self.platform_optimization().await;
+        let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
 
         let futures = AsrProviderType::all().into_iter().map(|provider_type| {
             let selected_model = provider_models
                 .get(&provider_type)
                 .cloned()
                 .unwrap_or_else(|| provider_type.default_model_id().to_string());
-            let last_error = last_errors.get(&provider_type).cloned();
             let optimization = optimization.clone();
+            let mlx_accelerated_providers = mlx_accelerated_providers.clone();
+            let effective = Self::effective_provider_selection(
+                provider_type,
+                selected_model.as_str(),
+                &optimization,
+                &mlx_accelerated_providers,
+            );
+            let last_error = last_errors.get(&effective.provider_type).cloned();
 
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let provider =
+                    let visible_provider =
                         Self::provider_with_model(provider_type, Some(selected_model.as_str()));
+                    let provider = Self::provider_with_model(
+                        effective.provider_type,
+                        Some(effective.model_id.as_str()),
+                    );
                     let is_available = provider.is_available();
                     let diagnostics = runtime_diagnostics_for_provider(
-                        provider_type,
-                        selected_model.as_str(),
+                        effective.provider_type,
+                        effective.model_id.as_str(),
                         is_available,
                         last_error.as_deref(),
                     );
                     ProviderInfo {
                         provider_type,
-                        name: provider.name().to_string(),
-                        description: provider.description().to_string(),
+                        name: visible_provider.name().to_string(),
+                        description: if effective.mlx_accelerated {
+                            format!(
+                                "{} MLX acceleration is enabled for the selected model.",
+                                visible_provider.description()
+                            )
+                        } else {
+                            visible_provider.description().to_string()
+                        },
                         is_available,
                         inference_enabled: Self::is_provider_transcription_enabled(provider_type),
                         model_info: provider.model_info(),
@@ -728,8 +838,10 @@ impl AsrManager {
                         runtime_message: diagnostics.runtime_message,
                         runtime_details: diagnostics.runtime_details,
                         engine_diagnostics: Self::engine_diagnostics_for_provider(
-                            provider_type,
+                            effective.provider_type,
+                            effective.model_id.as_str(),
                             &optimization,
+                            &mlx_accelerated_providers,
                         ),
                     }
                 })
@@ -755,9 +867,17 @@ impl AsrManager {
 
     fn engine_diagnostics_for_provider(
         provider_type: AsrProviderType,
+        selected_model_id: &str,
         optimization: &crate::settings::PlatformOptimizationSettings,
+        mlx_accelerated_providers: &HashSet<AsrProviderType>,
     ) -> EngineDiagnostics {
         let mut diagnostics = EngineDiagnostics::default();
+        let effective = Self::effective_provider_selection(
+            provider_type,
+            selected_model_id,
+            optimization,
+            mlx_accelerated_providers,
+        );
         let all_engines = [
             PlatformEngine::ProviderDefault,
             PlatformEngine::MacosMlxSidecar,
@@ -767,7 +887,7 @@ impl AsrManager {
         ];
 
         for engine in all_engines {
-            if !engine.supports_provider(provider_type) {
+            if !engine.supports_provider(effective.provider_type) {
                 continue;
             }
             let enabled = Self::engine_enabled(engine, optimization);
@@ -789,11 +909,19 @@ impl AsrManager {
             diagnostics.notes.extend(probe.notes);
         }
 
-        let active = Self::select_requested_engine(provider_type, optimization)
+        let active = Self::select_requested_engine(effective.provider_type, optimization)
+            .filter(|engine| {
+                *engine == PlatformEngine::ProviderDefault
+                    || (Self::engine_enabled(*engine, optimization)
+                        && engine.supports_provider(effective.provider_type)
+                        && engine.probe().ready
+                        && Self::engine_runtime_executable(*engine))
+            })
             .map(|engine| engine.id().to_string());
 
-        diagnostics.active_engine =
-            active.or_else(|| Some(PlatformEngine::ProviderDefault.id().to_string()));
+        diagnostics.active_engine = active.or_else(|| {
+            Some(PlatformEngine::ProviderDefault.id().to_string())
+        });
 
         diagnostics
     }
@@ -805,7 +933,16 @@ impl AsrManager {
         progress_cb: Box<dyn Fn(f32) + Send + Sync>,
     ) -> Result<()> {
         let selected_model = self.provider_model_id(provider_type).await;
-        let provider = Self::provider_with_model(provider_type, Some(selected_model.as_str()));
+        let optimization = self.platform_optimization().await;
+        let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
+        let effective = Self::effective_provider_selection(
+            provider_type,
+            selected_model.as_str(),
+            &optimization,
+            &mlx_accelerated_providers,
+        );
+        let provider =
+            Self::provider_with_model(effective.provider_type, Some(effective.model_id.as_str()));
         let result = provider.download_models(progress_cb).await;
         self.invalidate_provider_info_cache().await;
         result
@@ -906,6 +1043,13 @@ struct RuntimeDiagnosticsInternal {
     runtime_status: RuntimeStatus,
     runtime_message: Option<String>,
     runtime_details: RuntimeDetails,
+}
+
+#[derive(Debug, Clone)]
+struct EffectiveProviderSelection {
+    provider_type: AsrProviderType,
+    model_id: String,
+    mlx_accelerated: bool,
 }
 
 /// Benchmark result
@@ -1123,6 +1267,85 @@ fn runtime_diagnostics_for_provider(
                 "Distil-Whisper native Candle inference ready.",
                 last_error,
             )
+        }
+        AsrProviderType::MlxAudio => {
+            if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                return RuntimeDiagnosticsInternal {
+                    runtime_status: RuntimeStatus::MissingRuntime,
+                    runtime_message: Some("MLX Audio requires macOS on Apple Silicon.".to_string()),
+                    runtime_details: RuntimeDetails {
+                        model_path: None,
+                        python_path: None,
+                        missing_files: vec!["Apple Silicon (M-series)".to_string()],
+                        setup_action: Some(
+                            "Use an Apple Silicon Mac, or choose another ASR provider.".to_string(),
+                        ),
+                    },
+                };
+            }
+
+            let normalized_model = crate::asr::mlx_audio::normalize_model_id(selected_model_id);
+            let model_dir = crate::asr::mlx_audio::model_dir_for(normalized_model.as_str());
+            let model_ready = crate::asr::mlx_audio::model_is_ready(normalized_model.as_str());
+            let detected_python = super::python_runtime::find_python_for_provider("mlx_audio_stt")
+                .or_else(super::python_runtime::managed_python_path);
+
+            if detected_python.is_none() {
+                return RuntimeDiagnosticsInternal {
+                    runtime_status: RuntimeStatus::MissingRuntime,
+                    runtime_message: Some(
+                        "MLX Audio runtime missing: install mlx-audio 0.4.1+ in the managed runtime."
+                            .to_string(),
+                    ),
+                    runtime_details: RuntimeDetails {
+                        model_path: Some(model_dir.to_string_lossy().to_string()),
+                        python_path: None,
+                        missing_files: vec!["mlx-audio[stt]>=0.4.1".to_string()],
+                        setup_action: Some(
+                            "Use Download on the selected MLX Audio model to bootstrap the managed MLX runtime."
+                                .to_string(),
+                        ),
+                    },
+                };
+            }
+
+            if !model_ready {
+                return RuntimeDiagnosticsInternal {
+                    runtime_status: RuntimeStatus::MissingModel,
+                    runtime_message: Some(format!(
+                        "MLX Audio model '{}' is not downloaded yet.",
+                        normalized_model
+                    )),
+                    runtime_details: RuntimeDetails {
+                        model_path: Some(model_dir.to_string_lossy().to_string()),
+                        python_path: detected_python,
+                        missing_files: vec!["model artifacts".to_string()],
+                        setup_action: Some(
+                            "Download the selected MLX Audio model in Settings -> ASR / Providers."
+                                .to_string(),
+                        ),
+                    },
+                };
+            }
+
+            RuntimeDiagnosticsInternal {
+                runtime_status: if provider_available {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::Error
+                },
+                runtime_message: Some(
+                    last_error
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "MLX Audio runtime ready.".to_string()),
+                ),
+                runtime_details: RuntimeDetails {
+                    model_path: Some(model_dir.to_string_lossy().to_string()),
+                    python_path: detected_python,
+                    missing_files: Vec::new(),
+                    setup_action: None,
+                },
+            }
         }
         AsrProviderType::MacosAppleSpeech => {
             let probe = PlatformEngine::MacosAppleSpeech.probe();
@@ -1678,7 +1901,9 @@ mod tests {
         migrate_legacy_local_artifacts, missing_or_invalid_voxtral_local_files, AsrManager,
         AsrProviderType,
     };
+    use crate::asr::AsrProviderFactory;
     use crate::settings::PlatformOptimizationSettings;
+    use std::collections::HashSet;
     use std::path::PathBuf;
 
     fn temp_models_root() -> PathBuf {
@@ -1828,6 +2053,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mlx_acceleration_reuses_visible_provider_slot() {
+        let manager = AsrManager::new();
+        manager
+            .set_mlx_accelerated_providers(std::iter::once(AsrProviderType::Moonshine).collect())
+            .await;
+
+        let (provider, model_id, accelerated) = manager
+            .resolve_effective_provider_and_model(AsrProviderType::Moonshine, "moonshine-base")
+            .await;
+
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            assert_eq!(provider, AsrProviderType::MlxAudio);
+            assert_eq!(model_id, "UsefulSensors/moonshine-base");
+            assert!(accelerated);
+        } else {
+            assert_eq!(provider, AsrProviderType::Moonshine);
+            assert_eq!(model_id, "moonshine-base");
+            assert!(!accelerated);
+        }
+    }
+
+    #[tokio::test]
+    async fn mlx_audio_no_longer_reports_sidecar_as_active_engine() {
+        let diagnostics = AsrManager::engine_diagnostics_for_provider(
+            AsrProviderType::MlxAudio,
+            crate::asr::mlx_audio::default_model_id(),
+            &PlatformOptimizationSettings::default(),
+            &HashSet::new(),
+        );
+        assert_eq!(
+            diagnostics.active_engine.as_deref(),
+            Some("provider_default")
+        );
+        assert!(
+            !diagnostics
+                .available_engines
+                .iter()
+                .any(|engine| engine == "macos_mlx_sidecar")
+        );
+    }
+
+    #[tokio::test]
     async fn diagnostics_report_ready_native_engines_even_when_disabled() {
         let manager = AsrManager::new();
         manager
@@ -1870,5 +2137,116 @@ mod tests {
         let model = provider.model_info();
 
         assert_eq!(model.version, "whisper-large-v3");
+    }
+
+    #[tokio::test]
+    async fn moonshine_provider_honors_selected_model_id() {
+        let manager = AsrManager::new();
+        manager
+            .set_provider_model_id(AsrProviderType::Moonshine, "moonshine-tiny".to_string())
+            .await;
+
+        let provider = manager.get_provider(AsrProviderType::Moonshine).await;
+        let model = provider.model_info();
+
+        assert_eq!(model.name, "Moonshine Tiny");
+        assert_eq!(model.version, "tiny");
+    }
+
+    #[tokio::test]
+    async fn mlx_audio_provider_honors_selected_model_id() {
+        let manager = AsrManager::new();
+        manager
+            .set_provider_model_id(
+                AsrProviderType::MlxAudio,
+                "mlx-community/SenseVoiceSmall".to_string(),
+            )
+            .await;
+
+        let provider = manager.get_provider(AsrProviderType::MlxAudio).await;
+        let model = provider.model_info();
+
+        assert_eq!(model.version, "mlx-community/SenseVoiceSmall");
+    }
+
+    #[tokio::test]
+    async fn provider_info_reports_selected_model_ids_for_configured_routes() {
+        let manager = AsrManager::new();
+        manager
+            .set_provider_model_id(AsrProviderType::Whisper, "base.en".to_string())
+            .await;
+        manager
+            .set_provider_model_id(AsrProviderType::Parakeet, "parakeet-ctc-1.1b".to_string())
+            .await;
+        manager
+            .set_provider_model_id(AsrProviderType::Moonshine, "moonshine-tiny".to_string())
+            .await;
+        manager
+            .set_provider_model_id(AsrProviderType::Voxtral, "voxtral-cloud".to_string())
+            .await;
+        manager
+            .set_provider_model_id(
+                AsrProviderType::OpenAiCloud,
+                "gpt-4o-mini-transcribe".to_string(),
+            )
+            .await;
+        manager
+            .set_provider_model_id(AsrProviderType::Groq, "whisper-large-v3".to_string())
+            .await;
+
+        let providers = manager
+            .get_all_providers_info()
+            .await
+            .expect("providers should load");
+
+        let selected_model_id = |provider_type| {
+            providers
+                .iter()
+                .find(|provider| provider.provider_type == provider_type)
+                .map(|provider| provider.selected_model_id.as_str())
+                .expect("provider info should exist")
+        };
+
+        assert_eq!(selected_model_id(AsrProviderType::Whisper), "base.en");
+        assert_eq!(
+            selected_model_id(AsrProviderType::Parakeet),
+            "parakeet-ctc-1.1b"
+        );
+        assert_eq!(
+            selected_model_id(AsrProviderType::Moonshine),
+            "moonshine-tiny"
+        );
+        assert_eq!(selected_model_id(AsrProviderType::Voxtral), "voxtral-cloud");
+        assert_eq!(
+            selected_model_id(AsrProviderType::OpenAiCloud),
+            "gpt-4o-mini-transcribe"
+        );
+        assert_eq!(selected_model_id(AsrProviderType::Groq), "whisper-large-v3");
+    }
+
+    #[test]
+    fn create_with_model_constructs_every_provider_option() {
+        for provider_type in AsrProviderType::all() {
+            for model_option in provider_type.model_options() {
+                let provider = AsrProviderFactory::create_with_model(
+                    provider_type,
+                    Some(model_option.id.as_str()),
+                );
+                let model = provider.model_info();
+
+                assert!(
+                    !provider.name().trim().is_empty(),
+                    "provider name should exist for {:?} {}",
+                    provider_type,
+                    model_option.id
+                );
+                assert!(
+                    !model.name.trim().is_empty(),
+                    "model info should exist for {:?} {}",
+                    provider_type,
+                    model_option.id
+                );
+            }
+        }
     }
 }

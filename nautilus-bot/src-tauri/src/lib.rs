@@ -338,6 +338,7 @@ struct MeetingConsentNoticeResult {
 #[serde(rename_all = "camelCase")]
 struct DictationOverlayState {
     phase: String,
+    dismissed: bool,
     started_at_ms: Option<i64>,
     message: Option<String>,
     preview: Option<String>,
@@ -365,6 +366,7 @@ impl Default for DictationOverlayState {
     fn default() -> Self {
         Self {
             phase: "idle".to_string(),
+            dismissed: false,
             started_at_ms: None,
             message: None,
             preview: None,
@@ -394,6 +396,7 @@ impl Default for DictationOverlayState {
 #[serde(rename_all = "camelCase")]
 struct RecordingOverlayState {
     phase: String,
+    dismissed: bool,
     recording_id: Option<String>,
     started_at_ms: Option<i64>,
     system_audio_active: Option<bool>,
@@ -422,6 +425,7 @@ impl Default for RecordingOverlayState {
     fn default() -> Self {
         Self {
             phase: "idle".to_string(),
+            dismissed: false,
             recording_id: None,
             started_at_ms: None,
             system_audio_active: None,
@@ -1398,6 +1402,24 @@ fn get_recording_overlay_state(state: tauri::State<'_, AppState>) -> RecordingOv
         .lock()
         .map(|value| value.clone())
         .unwrap_or_else(|_| RecordingOverlayState::default())
+}
+
+#[tauri::command]
+fn dismiss_dictation_overlay(app: AppHandle) -> Result<(), String> {
+    if let Ok(mut state) = app.state::<AppState>().dictation_overlay_state.lock() {
+        state.dismissed = true;
+    }
+    hide_overlay_window(&app, DICTATION_OVERLAY_LABEL);
+    Ok(())
+}
+
+#[tauri::command]
+fn dismiss_recording_overlay(app: AppHandle) -> Result<(), String> {
+    if let Ok(mut state) = app.state::<AppState>().recording_overlay_state.lock() {
+        state.dismissed = true;
+    }
+    hide_overlay_window(&app, RECORDING_OVERLAY_LABEL);
+    Ok(())
 }
 
 // Diarization commands
@@ -4654,7 +4676,7 @@ async fn list_elevenlabs_asr_models() -> Result<Vec<String>, String> {
         .map_err(|e| e.to_string())?;
 
     if !response.status().is_success() {
-        return Ok(vec!["scribe_v1".to_string()]);
+        return Ok(vec!["scribe_v2".to_string()]);
     }
 
     let parsed = response
@@ -4665,10 +4687,11 @@ async fn list_elevenlabs_asr_models() -> Result<Vec<String>, String> {
     let mut models: Vec<String> = parsed
         .models
         .into_iter()
+        .filter(|entry| entry.model_id != "scribe_v2_realtime")
         .map(|entry| entry.model_id)
         .collect();
     if models.is_empty() {
-        models.push("scribe_v1".to_string());
+        models.push("scribe_v2".to_string());
     }
     models.sort();
     models.dedup();
@@ -5715,7 +5738,15 @@ async fn set_asr_provider_model(
     }
 
     normalize_contextual_asr_settings(&mut settings_manager.settings_mut().transcription);
-    settings_manager.save().map_err(|e| e.to_string())
+    let transcription = settings_manager.settings().transcription.clone();
+    settings_manager.save().map_err(|e| e.to_string())?;
+    state
+        .asr_manager
+        .set_mlx_accelerated_providers(mlx_accelerated_provider_set_from_settings(
+            &transcription,
+        ))
+        .await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -5743,7 +5774,7 @@ async fn get_asr_provider_model_options(
         asr::AsrProviderType::ElevenLabsScribe => {
             let models = list_elevenlabs_asr_models()
                 .await
-                .unwrap_or_else(|_| vec!["scribe_v1".to_string()]);
+                .unwrap_or_else(|_| vec!["scribe_v2".to_string()]);
             models
                 .into_iter()
                 .map(|id| asr::ModelOption {
@@ -5938,7 +5969,9 @@ async fn get_dictation_insights(
     } else {
         0
     };
-    if let Some((app_target, count)) = app_target_counts.into_iter().max_by_key(|(_, count)| *count)
+    if let Some((app_target, count)) = app_target_counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
     {
         insights.top_app_target = Some(app_target);
         insights.top_app_target_count = count;
@@ -6283,6 +6316,12 @@ async fn reset_app_state(
         .await;
     state
         .asr_manager
+        .set_mlx_accelerated_providers(mlx_accelerated_provider_set_from_settings(
+            &defaults.transcription,
+        ))
+        .await;
+    state
+        .asr_manager
         .set_default_provider(default_provider)
         .await;
     state
@@ -6404,6 +6443,12 @@ async fn save_settings(
         state
             .asr_manager
             .set_provider_model_map(provider_model_map)
+            .await;
+        state
+            .asr_manager
+            .set_mlx_accelerated_providers(mlx_accelerated_provider_set_from_settings(
+                &settings.transcription,
+            ))
             .await;
         state
             .asr_manager
@@ -6949,12 +6994,19 @@ async fn ensure_asr_route_ready(
     model_id: &str,
     context: &str,
 ) -> Result<(), String> {
+    let (effective_provider, effective_model_id, mlx_accelerated) = state
+        .asr_manager
+        .resolve_effective_provider_and_model(provider_type, model_id)
+        .await;
     let diagnostics = state
         .asr_manager
         .get_runtime_diagnostics(provider_type)
         .await;
-    let provider_available =
-        asr::AsrProviderFactory::create_with_model(provider_type, Some(model_id)).is_available();
+    let provider_available = asr::AsrProviderFactory::create_with_model(
+        effective_provider,
+        Some(effective_model_id.as_str()),
+    )
+    .is_available();
 
     if matches!(
         diagnostics.runtime_status,
@@ -6971,9 +7023,10 @@ async fn ensure_asr_route_ready(
         "Open Settings -> ASR Models and complete the required runtime/model setup.".to_string()
     });
     Err(format!(
-        "ASR route '{} / {}' is not ready for {}. {} {}",
+        "ASR route '{} / {}{}' is not ready for {}. {} {}",
         provider_type.display_name(),
         model_id,
+        if mlx_accelerated { " via MLX" } else { "" },
         context,
         runtime_message,
         setup_action
@@ -7128,6 +7181,30 @@ async fn resolve_ready_dictation_selection(
                 ))
             }
             Err(requested_error) => {
+                if let Some(model_id) = preferred_same_provider_dictation_fallback_model(
+                    requested_selection.0,
+                    &requested_selection.1,
+                    route_preference,
+                    state.asr_manager.models_dir(),
+                ) {
+                    let resolved_hosting =
+                        provider_hosting_environment(requested_selection.0, &model_id);
+                    let warning = format!(
+                        "Dictation route '{}' / '{}' was not ready. Using '{}' / '{}' for this capture.",
+                        requested_selection.0.display_name(),
+                        requested_selection.1,
+                        requested_selection.0.display_name(),
+                        model_id
+                    );
+                    return Ok((
+                        requested_selection.0,
+                        model_id,
+                        route_preference,
+                        resolved_hosting,
+                        Some(warning),
+                    ));
+                }
+
                 let default_provider =
                     asr_provider_from_settings_value(&transcription.default_provider)
                         .unwrap_or(asr::AsrProviderType::DistilWhisper);
@@ -9881,7 +9958,7 @@ async fn should_show_dictation_overlay(state: &AppState) -> bool {
     state
         .dictation_overlay_state
         .lock()
-        .map(|overlay| !matches!(overlay.phase.as_str(), "idle" | "done"))
+        .map(|overlay| !overlay.dismissed && !matches!(overlay.phase.as_str(), "idle" | "done"))
         .unwrap_or(false)
 }
 
@@ -9905,7 +9982,7 @@ async fn should_show_recording_overlay(state: &AppState) -> bool {
     state
         .recording_overlay_state
         .lock()
-        .map(|overlay| overlay.phase != "idle")
+        .map(|overlay| !overlay.dismissed && overlay.phase != "idle")
         .unwrap_or(false)
 }
 
@@ -10242,6 +10319,8 @@ fn emit_dictation_state(
     let mut dictation_resolved_hosting = None;
 
     if let Ok(mut state) = app.state::<AppState>().dictation_overlay_state.lock() {
+        let previous_phase = state.phase.clone();
+        let previous_session_id = state.session_id;
         state.phase = phase.to_string();
         state.started_at_ms = started_at_ms;
         state.message = message.map(str::to_string);
@@ -10251,6 +10330,7 @@ fn emit_dictation_state(
         state.stop_reason = stop_reason.map(str::to_string);
         state.outcome = outcome.map(str::to_string);
         if phase == "idle" {
+            state.dismissed = false;
             state.resolved_mode_preset = None;
             state.resolved_custom_mode_id = None;
             state.resolved_mode_label = None;
@@ -10265,6 +10345,8 @@ fn emit_dictation_state(
             state.provider_model_label = None;
             state.dictation_route_preference = None;
             state.dictation_resolved_hosting = None;
+        } else if previous_phase == "idle" || previous_session_id != session_id {
+            state.dismissed = false;
         }
         resolved_mode_preset = state.resolved_mode_preset.clone();
         resolved_custom_mode_id = state.resolved_custom_mode_id.clone();
@@ -10342,12 +10424,19 @@ fn emit_recording_state(
     );
 
     if let Ok(mut state) = app.state::<AppState>().recording_overlay_state.lock() {
+        let previous_phase = state.phase.clone();
+        let previous_recording_id = state.recording_id.clone();
         state.phase = phase.to_string();
         state.recording_id = recording_id.map(str::to_string);
         state.started_at_ms = started_at_ms;
         state.system_audio_active = system_audio_active;
         state.consent_prompt_shown = consent_prompt_shown;
         state.message = message.map(str::to_string);
+        if phase == "idle" {
+            state.dismissed = false;
+        } else if previous_phase == "idle" || previous_recording_id.as_deref() != recording_id {
+            state.dismissed = false;
+        }
     }
 
     let payload = MeetingRecordingStateChangedEvent {
@@ -12203,6 +12292,10 @@ fn recent_delivery_matches_target(
         return delivery_bundle_id.eq_ignore_ascii_case(target_bundle_id);
     }
 
+    if app_target.is_none() && app_bundle_id.is_none() {
+        return true;
+    }
+
     match (delivery.app_target.as_deref(), app_target) {
         (Some(delivery_target), Some(target)) => delivery_target.eq_ignore_ascii_case(target),
         (None, None) => true,
@@ -13626,6 +13719,7 @@ pub fn run() {
                     configured_provider,
                     silence_skip,
                     platform_optimization,
+                    mlx_accelerated_providers,
                     mut provider_model_map,
                 ) = {
                     let settings_manager = state.settings_manager.lock().await;
@@ -13634,6 +13728,7 @@ pub fn run() {
                         transcription.default_provider.clone(),
                         transcription.silence_skip_enabled,
                         transcription.platform_optimization.clone(),
+                        mlx_accelerated_provider_set_from_settings(transcription),
                         provider_model_map_from_settings(transcription),
                     )
                 };
@@ -13641,6 +13736,10 @@ pub fn run() {
                 state
                     .asr_manager
                     .set_provider_model_map(provider_model_map.clone())
+                    .await;
+                state
+                    .asr_manager
+                    .set_mlx_accelerated_providers(mlx_accelerated_providers.clone())
                     .await;
                 state
                     .asr_manager
@@ -13678,6 +13777,10 @@ pub fn run() {
                 state
                     .asr_manager
                     .set_provider_model_map(provider_model_map.clone())
+                    .await;
+                state
+                    .asr_manager
+                    .set_mlx_accelerated_providers(mlx_accelerated_providers)
                     .await;
                 state.asr_manager.set_default_provider(resolved_provider).await;
 
@@ -13935,6 +14038,8 @@ pub fn run() {
             get_available_space,
             get_dictation_overlay_state,
             get_recording_overlay_state,
+            dismiss_dictation_overlay,
+            dismiss_recording_overlay,
             open_main_window,
             open_main_window_to,
             check_system_audio_availability,
@@ -15458,7 +15563,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_delivery_requires_matching_target_when_only_one_side_has_it() {
+    fn recent_delivery_falls_back_when_current_target_is_unknown() {
         let now = chrono::Utc::now();
         let delivery = RecentDictationDelivery {
             text: "ship it tomorrow".to_string(),
@@ -15467,10 +15572,15 @@ mod tests {
             delivered_at: now,
         };
 
-        assert!(!recent_delivery_matches_target(&delivery, None, None));
+        assert!(recent_delivery_matches_target(&delivery, None, None));
         assert!(recent_delivery_matches_target(
             &delivery,
             Some("Slack"),
+            None
+        ));
+        assert!(!recent_delivery_matches_target(
+            &delivery,
+            Some("Notion"),
             None
         ));
     }
@@ -15641,6 +15751,24 @@ mod tests {
         assert_eq!(transcription.meeting_model_id, "distil-large-v3.5");
     }
 
+    #[test]
+    fn legacy_mlx_audio_selection_migrates_to_visible_provider_toggle() {
+        let mut transcription = settings::TranscriptionSettings::default();
+        transcription.default_provider = "mlx_audio".to_string();
+        transcription.selected_model_id = "UsefulSensors/moonshine-base".to_string();
+        transcription.dictation_provider = "mlx_audio".to_string();
+        transcription.dictation_model_id = "UsefulSensors/moonshine-base".to_string();
+
+        normalize_contextual_asr_settings(&mut transcription);
+
+        assert_eq!(transcription.default_provider, "moonshine");
+        assert_eq!(transcription.selected_model_id, "moonshine-base");
+        assert!(transcription
+            .mlx_accelerated_providers
+            .iter()
+            .any(|provider| provider == "moonshine"));
+    }
+
     fn provider_info_for_test(
         provider_type: asr::AsrProviderType,
         model_id: &str,
@@ -15709,6 +15837,56 @@ mod tests {
 
         assert_eq!(selection.0, asr::AsrProviderType::Parakeet);
         assert_eq!(selection.1, "parakeet-ctc-0.6b");
+    }
+
+    #[test]
+    fn mlx_audio_moonshine_model_is_not_meeting_grade() {
+        assert!(!meeting_model_is_supported(
+            asr::AsrProviderType::MlxAudio,
+            "UsefulSensors/moonshine-base"
+        ));
+        assert!(meeting_model_is_supported(
+            asr::AsrProviderType::MlxAudio,
+            "mlx-community/SenseVoiceSmall"
+        ));
+    }
+
+    #[test]
+    fn moonshine_tiny_can_fall_back_to_ready_base_for_local_dictation() {
+        let root = temp_models_root();
+        let moonshine_dir = root.join("moonshine");
+        std::fs::create_dir_all(&moonshine_dir).expect("create moonshine dir");
+
+        let mut onnx_payload = vec![1u8; 5000];
+        onnx_payload[0] = 1;
+        std::fs::write(moonshine_dir.join("encoder_model.onnx"), &onnx_payload)
+            .expect("write encoder");
+        std::fs::write(
+            moonshine_dir.join("decoder_model_merged.onnx"),
+            &onnx_payload,
+        )
+        .expect("write decoder");
+        std::fs::write(
+            moonshine_dir.join("tokenizer.json"),
+            format!(
+                "{{\"tokens\":[{}]}}",
+                std::iter::repeat_n("\"hello\"", 300)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        )
+        .expect("write tokenizer");
+
+        let selection = preferred_same_provider_dictation_fallback_model(
+            asr::AsrProviderType::Moonshine,
+            "moonshine-tiny",
+            DictationRoutePreference::Local,
+            &root,
+        );
+
+        assert_eq!(selection.as_deref(), Some("moonshine-base"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -15892,18 +16070,17 @@ async fn default_dictation_start_options(state: &AppState) -> models::DictationS
 }
 
 fn dictation_options_from_settings(settings: &settings::Settings) -> models::DictationStartOptions {
-    let active_language_override =
-        if settings.transcription.language.is_none()
-            && settings.transcription.dictation_active_languages.len() == 1
-        {
-            settings
-                .transcription
-                .dictation_active_languages
-                .first()
-                .cloned()
-        } else {
-            None
-        };
+    let active_language_override = if settings.transcription.language.is_none()
+        && settings.transcription.dictation_active_languages.len() == 1
+    {
+        settings
+            .transcription
+            .dictation_active_languages
+            .first()
+            .cloned()
+    } else {
+        None
+    };
 
     models::DictationStartOptions {
         save_to_inbox: settings.transcription.dictation_save_to_inbox,
@@ -17430,6 +17607,7 @@ fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static st
         asr::AsrProviderType::Parakeet => "parakeet",
         asr::AsrProviderType::WhisperCandle => "whisper_candle",
         asr::AsrProviderType::DistilWhisper => "distil_whisper",
+        asr::AsrProviderType::MlxAudio => "mlx_audio",
         asr::AsrProviderType::MacosAppleSpeech => "macos_apple_speech",
         asr::AsrProviderType::Moonshine => "moonshine",
         asr::AsrProviderType::Voxtral => "voxtral",
@@ -17446,6 +17624,7 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
         "parakeet" => Some(asr::AsrProviderType::Parakeet),
         "whisper_candle" | "canary" => Some(asr::AsrProviderType::WhisperCandle),
         "distil_whisper" => Some(asr::AsrProviderType::DistilWhisper),
+        "mlx_audio" => Some(asr::AsrProviderType::MlxAudio),
         "macos_apple_speech" => Some(asr::AsrProviderType::MacosAppleSpeech),
         "moonshine" => Some(asr::AsrProviderType::Moonshine),
         "voxtral" => Some(asr::AsrProviderType::Voxtral),
@@ -17561,6 +17740,7 @@ fn meeting_provider_is_supported(provider: asr::AsrProviderType) -> bool {
         provider,
         asr::AsrProviderType::Parakeet
             | asr::AsrProviderType::DistilWhisper
+            | asr::AsrProviderType::MlxAudio
             | asr::AsrProviderType::Voxtral
             | asr::AsrProviderType::ElevenLabsScribe
             | asr::AsrProviderType::OpenAiCloud
@@ -17574,10 +17754,19 @@ fn meeting_model_is_supported(provider: asr::AsrProviderType, model_id: &str) ->
     }
 
     let candidate = normalize_asr_model_id(provider, model_id);
-    provider
-        .model_options()
-        .iter()
-        .any(|option| option.id == candidate)
+    match provider {
+        asr::AsrProviderType::MlxAudio => {
+            !candidate.contains("moonshine")
+                && provider
+                    .model_options()
+                    .iter()
+                    .any(|option| option.id == candidate)
+        }
+        _ => provider
+            .model_options()
+            .iter()
+            .any(|option| option.id == candidate),
+    }
 }
 
 fn default_meeting_model_id(provider: asr::AsrProviderType) -> &'static str {
@@ -17606,7 +17795,7 @@ fn ensure_meeting_route_supported(
     }
 
     Err(format!(
-        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Distil Whisper, Parakeet, Voxtral, ElevenLabs, OpenAI, or Groq in Settings -> ASR / Providers.",
+        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose Distil Whisper, MLX Audio, Parakeet, Voxtral, ElevenLabs, OpenAI, or Groq in Settings -> ASR / Providers.",
         provider.display_name(),
         model_id
     ))
@@ -17626,6 +17815,7 @@ fn preferred_meeting_provider_candidates(
     ];
     let local_defaults = [
         Some(asr::AsrProviderType::DistilWhisper),
+        Some(asr::AsrProviderType::MlxAudio),
         Some(asr::AsrProviderType::Parakeet),
         Some(asr::AsrProviderType::Voxtral),
     ];
@@ -17689,6 +17879,7 @@ fn preferred_dictation_provider_candidates(
         asr::AsrProviderType::Whisper,
         asr::AsrProviderType::Moonshine,
         asr::AsrProviderType::Parakeet,
+        asr::AsrProviderType::MlxAudio,
         asr::AsrProviderType::WhisperCandle,
         asr::AsrProviderType::Voxtral,
     ];
@@ -17745,6 +17936,33 @@ fn select_ready_dictation_candidate(
     })
 }
 
+fn preferred_same_provider_dictation_fallback_model(
+    provider_type: asr::AsrProviderType,
+    requested_model_id: &str,
+    preference: DictationRoutePreference,
+    models_root: &Path,
+) -> Option<String> {
+    if !matches!(preference, DictationRoutePreference::Local) {
+        return None;
+    }
+
+    match provider_type {
+        asr::AsrProviderType::Moonshine if requested_model_id == "moonshine-tiny" => {
+            let base_model_dir = models_root.join("moonshine");
+            let base_ready = is_valid_onnx_artifact(&base_model_dir.join("encoder_model.onnx"))
+                && is_valid_onnx_artifact(&base_model_dir.join("decoder_model_merged.onnx"))
+                && is_valid_json_artifact(&base_model_dir.join("tokenizer.json"), 1024);
+
+            if base_ready {
+                Some("moonshine-base".to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 fn select_ready_meeting_candidate(
     provider_infos: &[asr::manager::ProviderInfo],
     preferred_candidates: &[asr::AsrProviderType],
@@ -17766,6 +17984,7 @@ fn select_ready_meeting_candidate(
 }
 
 fn normalize_contextual_asr_settings(transcription: &mut settings::TranscriptionSettings) {
+    migrate_legacy_mlx_route_selection(transcription);
     let meeting_policy = meeting_route_policy_from_settings(&transcription.meeting_route_policy);
     let default_provider = asr_provider_from_settings_value(&transcription.default_provider)
         .unwrap_or(asr::AsrProviderType::DistilWhisper);
@@ -17820,6 +18039,114 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
             &transcription.meeting_model_id
         },
     );
+    normalize_mlx_accelerated_providers(transcription);
+}
+
+fn migrate_legacy_mlx_route_selection(transcription: &mut settings::TranscriptionSettings) {
+    let mut ensure_acceleration_for =
+        |provider_value: &mut String, model_value: &mut String| {
+            if asr_provider_from_settings_value(provider_value)
+                == Some(asr::AsrProviderType::MlxAudio)
+            {
+                if let Some((visible_provider, visible_model_id)) =
+                    asr::mlx_audio::visible_route_for_model(model_value)
+                {
+                    *provider_value = asr_provider_to_settings_value(visible_provider).to_string();
+                    *model_value = visible_model_id.to_string();
+                    let provider_key =
+                        asr_provider_to_settings_value(visible_provider).to_string();
+                    if !transcription
+                        .mlx_accelerated_providers
+                        .iter()
+                        .any(|value| value == &provider_key)
+                    {
+                        transcription.mlx_accelerated_providers.push(provider_key);
+                    }
+                }
+            }
+        };
+
+    ensure_acceleration_for(
+        &mut transcription.default_provider,
+        &mut transcription.selected_model_id,
+    );
+    ensure_acceleration_for(
+        &mut transcription.dictation_provider,
+        &mut transcription.dictation_model_id,
+    );
+    ensure_acceleration_for(
+        &mut transcription.meeting_provider,
+        &mut transcription.meeting_model_id,
+    );
+
+    let legacy_pairs: Vec<(String, String)> = transcription.provider_model_ids.clone().into_iter().collect();
+    for (provider_key, model_id) in legacy_pairs {
+        if asr_provider_from_settings_value(&provider_key) == Some(asr::AsrProviderType::MlxAudio) {
+            if let Some((visible_provider, visible_model_id)) =
+                asr::mlx_audio::visible_route_for_model(&model_id)
+            {
+                let visible_key = asr_provider_to_settings_value(visible_provider).to_string();
+                transcription
+                    .provider_model_ids
+                    .insert(visible_key.clone(), visible_model_id.to_string());
+                if !transcription
+                    .mlx_accelerated_providers
+                    .iter()
+                    .any(|value| value == &visible_key)
+                {
+                    transcription.mlx_accelerated_providers.push(visible_key);
+                }
+            }
+        }
+    }
+}
+
+fn normalize_mlx_accelerated_providers(transcription: &mut settings::TranscriptionSettings) {
+    let selected_routes = [
+        (
+            asr_provider_from_settings_value(&transcription.default_provider),
+            transcription.selected_model_id.as_str(),
+        ),
+        (
+            asr_provider_from_settings_value(&transcription.dictation_provider),
+            transcription.dictation_model_id.as_str(),
+        ),
+        (
+            asr_provider_from_settings_value(&transcription.meeting_provider),
+            transcription.meeting_model_id.as_str(),
+        ),
+    ];
+
+    let mut normalized = Vec::new();
+    for provider_key in transcription.mlx_accelerated_providers.clone() {
+        let Some(provider_type) = asr_provider_from_settings_value(&provider_key) else {
+            continue;
+        };
+        if !asr::mlx_audio::supports_visible_provider(provider_type) {
+            continue;
+        }
+        let has_supported_selected_model = selected_routes.iter().any(|(candidate_provider, model_id)| {
+            *candidate_provider == Some(provider_type)
+                && asr::mlx_audio::mapped_model_for_visible_route(provider_type, model_id).is_some()
+        });
+        if has_supported_selected_model
+            && !normalized.iter().any(|value: &String| value == &provider_key)
+        {
+            normalized.push(provider_key);
+        }
+    }
+    transcription.mlx_accelerated_providers = normalized;
+}
+
+fn mlx_accelerated_provider_set_from_settings(
+    transcription: &settings::TranscriptionSettings,
+) -> std::collections::HashSet<asr::AsrProviderType> {
+    transcription
+        .mlx_accelerated_providers
+        .iter()
+        .filter_map(|provider_key| asr_provider_from_settings_value(provider_key))
+        .filter(|provider_type| asr::mlx_audio::supports_visible_provider(*provider_type))
+        .collect()
 }
 
 fn resolve_transcription_provider_and_model(
@@ -18294,6 +18621,7 @@ fn provider_model_map_to_settings(
     map: &HashMap<asr::AsrProviderType, String>,
 ) -> HashMap<String, String> {
     map.iter()
+        .filter(|(pt, _)| **pt != asr::AsrProviderType::MlxAudio)
         .map(|(pt, model_id)| {
             (
                 asr_provider_to_settings_value(*pt).to_string(),

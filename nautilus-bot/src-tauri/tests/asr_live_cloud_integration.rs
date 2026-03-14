@@ -73,7 +73,7 @@ async fn live_cloud_asr_providers_pass_and_meet_latency_gate() {
     let openai_ms = started_openai.elapsed().as_millis() as u64;
 
     let started_eleven = std::time::Instant::now();
-    let eleven = ElevenLabsScribeProvider::new(Some("scribe_v1"));
+    let eleven = ElevenLabsScribeProvider::new(Some("scribe_v2"));
     let eleven_result = eleven
         .transcribe_bytes(&wav)
         .await

@@ -31,6 +31,12 @@ async fn smoke_local_providers_print_outcomes() {
     manager
         .set_provider_model_id(AsrProviderType::Voxtral, "voxtral-local".to_string())
         .await;
+    manager
+        .set_provider_model_id(
+            AsrProviderType::MlxAudio,
+            "mlx-community/SenseVoiceSmall".to_string(),
+        )
+        .await;
 
     let providers = [
         AsrProviderType::Whisper,
@@ -39,6 +45,7 @@ async fn smoke_local_providers_print_outcomes() {
         AsrProviderType::WhisperCandle,
         AsrProviderType::DistilWhisper,
         AsrProviderType::Voxtral,
+        AsrProviderType::MlxAudio,
     ];
 
     let wav = fixture();

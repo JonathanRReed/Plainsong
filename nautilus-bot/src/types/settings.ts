@@ -62,6 +62,7 @@ export interface TranscriptionSettings {
   meetingModelId?: string;
   meetingRoutePolicy?: "prefer_local" | "best_available";
   providerModelIds?: Record<string, string>;
+  mlxAcceleratedProviders?: string[];
   autoTranscribe: boolean;
   enableDiarization: boolean;
   intelligentPunctuation: boolean;

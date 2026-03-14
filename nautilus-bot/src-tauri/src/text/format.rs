@@ -518,11 +518,7 @@ fn capitalize_after_bullet_markers(text: &str) -> String {
         return text.to_string();
     };
     re.replace_all(text, |captures: &regex::Captures<'_>| {
-        format!(
-            "{}- {}",
-            &captures[1],
-            captures[2].to_ascii_uppercase()
-        )
+        format!("{}- {}", &captures[1], captures[2].to_ascii_uppercase())
     })
     .to_string()
 }

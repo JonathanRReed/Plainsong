@@ -2,6 +2,9 @@ import type { AsrProviderInfo, AsrProviderType } from "@/types";
 
 export type DictationRoutePreference = "local" | "cloud";
 
+const HIDDEN_PROVIDER_SET = new Set<AsrProviderType>(["mlx_audio"]);
+const MLX_ACCELERATABLE_PROVIDER_SET = new Set<AsrProviderType>(["moonshine", "whisper"]);
+
 const DOWNLOADABLE_PROVIDER_SET = new Set<AsrProviderType>([
   "whisper",
   "parakeet",
@@ -36,6 +39,59 @@ const CLOUD_PROVIDER_SET = new Set<AsrProviderType>([
 
 export function isDownloadableProvider(providerType: AsrProviderType) {
   return DOWNLOADABLE_PROVIDER_SET.has(providerType);
+}
+
+export function isVisibleAsrProvider(providerType: AsrProviderType) {
+  return !HIDDEN_PROVIDER_SET.has(providerType);
+}
+
+export function providerCanUseMlxAcceleration(providerType: AsrProviderType) {
+  return MLX_ACCELERATABLE_PROVIDER_SET.has(providerType);
+}
+
+export function mlxMappedModelId(
+  providerType: AsrProviderType,
+  modelId: string | null | undefined
+) {
+  const normalized = (modelId ?? "").trim();
+  switch (providerType) {
+    case "moonshine":
+      if (normalized === "moonshine-tiny") return "UsefulSensors/moonshine-tiny";
+      if (normalized === "moonshine-base" || normalized === "moonshine") {
+        return "UsefulSensors/moonshine-base";
+      }
+      return null;
+    case "whisper":
+      return normalized === "large-v3-turbo"
+        ? "mlx-community/whisper-large-v3-turbo-asr-fp16"
+        : null;
+    default:
+      return null;
+  }
+}
+
+export function modelSupportsMlxAcceleration(
+  providerType: AsrProviderType,
+  modelId: string | null | undefined
+) {
+  return mlxMappedModelId(providerType, modelId) !== null;
+}
+
+export function visibleRouteForMlxModel(modelId: string | null | undefined): {
+  providerType: AsrProviderType;
+  modelId: string;
+} | null {
+  const normalized = (modelId ?? "").trim();
+  switch (normalized) {
+    case "UsefulSensors/moonshine-tiny":
+      return { providerType: "moonshine", modelId: "moonshine-tiny" };
+    case "UsefulSensors/moonshine-base":
+      return { providerType: "moonshine", modelId: "moonshine-base" };
+    case "mlx-community/whisper-large-v3-turbo-asr-fp16":
+      return { providerType: "whisper", modelId: "large-v3-turbo" };
+    default:
+      return null;
+  }
 }
 
 export function isMeetingGradeProvider(providerType: AsrProviderType) {

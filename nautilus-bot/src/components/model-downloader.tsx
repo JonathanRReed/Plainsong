@@ -81,8 +81,8 @@ const PROVIDER_BUNDLES: Array<{
   {
     id: "macos_mlx_sidecar",
     platformEngine: "macos_mlx_sidecar",
-    label: "macOS MLX sidecar assets",
-    description: "Bootstraps MLX runtime assets for platform optimization checks.",
+    label: "MLX acceleration runtime assets",
+    description: "Bootstraps shared MLX runtime assets used by Apple Silicon acceleration routes and advanced runtime checks.",
     indicator: "mlx/manifest.json",
   },
   {

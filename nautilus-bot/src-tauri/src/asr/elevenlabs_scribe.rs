@@ -21,9 +21,12 @@ struct ScribeResponse {
 
 fn sanitize_elevenlabs_asr_model_id(model_id: &str) -> &'static str {
     match model_id {
-        "scribe_v1" => "scribe_v1",
-        "scribe_v1_experimental" => "scribe_v1_experimental",
-        _ => "scribe_v1",
+        "scribe_v2" => "scribe_v2",
+        "scribe_v2_experimental" => "scribe_v2_experimental",
+        "scribe_v2_realtime" => "scribe_v2",
+        "scribe_v1" => "scribe_v2",
+        "scribe_v1_experimental" => "scribe_v2_experimental",
+        _ => "scribe_v2",
     }
 }
 
@@ -37,7 +40,7 @@ struct ScribeWord {
 impl Default for ElevenLabsScribeProvider {
     fn default() -> Self {
         Self {
-            model_id: "scribe_v1".to_string(),
+            model_id: "scribe_v2".to_string(),
         }
     }
 }
@@ -45,7 +48,7 @@ impl Default for ElevenLabsScribeProvider {
 impl ElevenLabsScribeProvider {
     pub fn new(selected_model_id: Option<&str>) -> Self {
         Self {
-            model_id: sanitize_elevenlabs_asr_model_id(selected_model_id.unwrap_or("scribe_v1"))
+            model_id: sanitize_elevenlabs_asr_model_id(selected_model_id.unwrap_or("scribe_v2"))
                 .to_string(),
         }
     }
@@ -125,6 +128,13 @@ impl ElevenLabsScribeProvider {
             fallback_reason: None,
         })
     }
+
+    fn selected_label(&self) -> &'static str {
+        match self.model_id.as_str() {
+            "scribe_v2_experimental" => "Scribe v2 Experimental",
+            _ => "Scribe v2",
+        }
+    }
 }
 
 #[async_trait]
@@ -143,8 +153,8 @@ impl AsrProvider for ElevenLabsScribeProvider {
 
     fn model_info(&self) -> ModelInfo {
         ModelInfo {
-            name: "Scribe v1".to_string(),
-            version: "1.0".to_string(),
+            name: self.selected_label().to_string(),
+            version: self.model_id.clone(),
             size_mb: 0.0,
             parameters: "cloud".to_string(),
             languages: vec!["en".to_string(), "multilingual".to_string()],

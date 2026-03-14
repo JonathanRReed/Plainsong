@@ -513,6 +513,58 @@ impl DownloadManager {
             }
         }
 
+        // Check MLX Audio model bundles
+        let mlx_audio_dir = self.models_dir.join("mlx_audio");
+        if mlx_audio_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&mlx_audio_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let metadata = entry.metadata().await?;
+                if !metadata.is_dir() {
+                    continue;
+                }
+
+                let manifest_path = entry.path().join("manifest.json");
+                let bundle_size = walkdir::WalkDir::new(entry.path())
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter_map(|item| item.metadata().ok())
+                    .filter(|metadata| metadata.is_file())
+                    .map(|metadata| metadata.len())
+                    .sum();
+                if bundle_size == 0 {
+                    continue;
+                }
+
+                let manifest = if manifest_path.exists() {
+                    tokio::fs::read_to_string(&manifest_path)
+                        .await
+                        .ok()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                } else {
+                    None
+                };
+                let fallback_name = entry.file_name().to_string_lossy().to_string();
+                let model_id = manifest
+                    .as_ref()
+                    .and_then(|payload| payload.get("model_id"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(fallback_name.as_str())
+                    .to_string();
+
+                models.push(DownloadedModel {
+                    name: format!("MLX Audio {}", model_id),
+                    provider: "mlx_audio".to_string(),
+                    path: if manifest_path.exists() {
+                        manifest_path
+                    } else {
+                        entry.path()
+                    },
+                    size_bytes: bundle_size,
+                    downloaded_at: metadata.modified()?,
+                });
+            }
+        }
+
         // Check platform MLX assets
         let mlx_dir = self.models_dir.join("mlx");
         if mlx_dir.exists() {

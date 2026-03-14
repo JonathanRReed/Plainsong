@@ -136,7 +136,10 @@ function getRecommendedMeetingRoute(providers: AsrProviderInfo[]) {
   }
 
   const provider = providers.find(
-    (item) => isMeetingEligibleProvider(item.providerType) && item.inferenceEnabled
+    (item) =>
+      item.providerType !== "mlx_audio" &&
+      isMeetingEligibleProvider(item.providerType) &&
+      item.inferenceEnabled
   );
   if (!provider) {
     return null;
@@ -297,7 +300,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       setMeetingRouteError(
         routeReady
           ? null
-          : "Meetings need a meeting-grade ASR route. Use Distil Whisper, Parakeet, Canary, Voxtral, Groq, OpenAI, or ElevenLabs."
+          : "Meetings need a meeting-grade ASR route. Use Distil Whisper, MLX Audio, Parakeet, Voxtral, Groq, OpenAI, or ElevenLabs."
       );
       setMeetingSystemAudioAvailable(systemAudioAvailable);
       setLoopbackDevice(detectedLoopbackDevice);

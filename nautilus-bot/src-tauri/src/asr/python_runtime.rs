@@ -186,7 +186,7 @@ impl PythonAsrWorker {
 }
 
 fn supports_persistent_worker(provider: &str) -> bool {
-    matches!(provider, "voxtral_local")
+    matches!(provider, "voxtral_local" | "mlx_audio_stt")
 }
 
 async fn get_or_spawn_worker(
@@ -242,6 +242,7 @@ fn provider_import_probe(provider: &str) -> &'static str {
         "parakeet_ctc" => {
             "import torch; from transformers import pipeline"
         }
+        "mlx_audio_stt" => "import mlx_audio.stt; import mlx.core",
         _ => "import json",
     }
 }
@@ -265,6 +266,7 @@ fn provider_requirements(provider: &str) -> &'static [&'static str] {
             "librosa>=0.10.2",
             "numpy>=1.26.0",
         ],
+        "mlx_audio_stt" => &["mlx-audio[stt]>=0.4.1"],
         _ => &["numpy>=1.26.0"],
     }
 }

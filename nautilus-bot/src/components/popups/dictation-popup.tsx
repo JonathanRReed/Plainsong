@@ -504,6 +504,7 @@ export function DictationPopup() {
 
   const hidePopup = async () => {
     try {
+      await invoke("dismiss_dictation_overlay");
       await window.hide();
     } catch (error) {
       console.error("Failed to hide dictation popup:", error);
@@ -527,7 +528,11 @@ export function DictationPopup() {
     return (
       <div
         className="h-screen w-screen bg-transparent flex items-center justify-center"
-        onMouseDown={() => void window.startDragging()}
+        onMouseDownCapture={(event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          void window.startDragging();
+        }}
         onDoubleClick={() => void cycleDisplayMode()}
         title="Double-click to expand"
       >
@@ -572,10 +577,15 @@ export function DictationPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="rounded-[24px] border border-cyan-400/35 bg-linear-to-br from-slate-950/95 via-slate-900/92 to-cyan-950/55 px-4 py-3 backdrop-blur-xl shadow-[0_18px_80px_rgba(8,15,28,0.55)] overflow-hidden">
+      <div className="max-h-[calc(100vh-24px)] overflow-y-auto rounded-[24px] border border-cyan-400/35 bg-linear-to-br from-slate-950/95 via-slate-900/92 to-cyan-950/55 px-4 py-3 backdrop-blur-xl shadow-[0_18px_80px_rgba(8,15,28,0.55)]">
         <div
-          className="mb-2 flex items-center justify-between text-slate-300"
-          onMouseDown={() => void window.startDragging()}
+          data-tauri-drag-region
+          className="mb-2 flex cursor-grab select-none items-center justify-between text-slate-300 active:cursor-grabbing"
+          onMouseDownCapture={(event) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            void window.startDragging();
+          }}
         >
           <div className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide">
             <GripHorizontal className="h-3 w-3" />

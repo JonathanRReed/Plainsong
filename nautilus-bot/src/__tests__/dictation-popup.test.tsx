@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DictationPopup } from "@/components/popups/dictation-popup";
 
@@ -359,5 +359,18 @@ describe("DictationPopup", () => {
 
     expect(await screen.findByText("Mic primed")).toBeInTheDocument();
     expect(screen.getByText("--:--")).toBeInTheDocument();
+  });
+
+  it("dismisses the overlay instead of only hiding the webview locally", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Hide popup" }));
+
+    await waitFor(() => {
+      expect(popupMocks.invoke).toHaveBeenCalledWith("dismiss_dictation_overlay");
+      expect(popupMocks.windowHandle.hide).toHaveBeenCalled();
+    });
   });
 });
