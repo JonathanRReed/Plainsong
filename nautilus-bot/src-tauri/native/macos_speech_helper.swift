@@ -16,9 +16,68 @@ struct LiveOutputPayload: Codable {
     let isFinal: Bool
 }
 
+struct AuthorizationPayload: Codable {
+    let status: String
+    let code: Int
+}
+
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
     exit(1)
+}
+
+func authorizationPayload(
+    from status: SFSpeechRecognizerAuthorizationStatus
+) -> AuthorizationPayload {
+    switch status {
+    case .authorized:
+        return AuthorizationPayload(status: "authorized", code: Int(status.rawValue))
+    case .notDetermined:
+        return AuthorizationPayload(status: "not_determined", code: Int(status.rawValue))
+    case .denied:
+        return AuthorizationPayload(status: "denied", code: Int(status.rawValue))
+    case .restricted:
+        return AuthorizationPayload(status: "restricted", code: Int(status.rawValue))
+    @unknown default:
+        return AuthorizationPayload(status: "unknown", code: Int(status.rawValue))
+    }
+}
+
+func emitAuthorizationPayload(_ payload: AuthorizationPayload) {
+    do {
+        let data = try JSONEncoder().encode(payload)
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data([0x0A]))
+    } catch {
+        fail("Failed to encode authorization payload: \(error.localizedDescription)")
+    }
+}
+
+func resolveAuthorizationPayload(promptIfNeeded: Bool) -> AuthorizationPayload {
+    let initialStatus = SFSpeechRecognizer.authorizationStatus()
+    if initialStatus != .notDetermined || !promptIfNeeded {
+        return authorizationPayload(from: initialStatus)
+    }
+
+    let semaphore = DispatchSemaphore(value: 0)
+    let stateLock = NSLock()
+    var resolvedStatus = initialStatus
+
+    SFSpeechRecognizer.requestAuthorization { status in
+        stateLock.lock()
+        resolvedStatus = status
+        stateLock.unlock()
+        semaphore.signal()
+    }
+
+    if semaphore.wait(timeout: .now() + .seconds(20)) == .timedOut {
+        fail("Timed out waiting for macOS Speech authorization response.")
+    }
+
+    stateLock.lock()
+    let finalStatus = resolvedStatus
+    stateLock.unlock()
+    return authorizationPayload(from: finalStatus)
 }
 
 func makeRecognizer() -> SFSpeechRecognizer {
@@ -335,10 +394,14 @@ func runLiveRecognition(sampleRate: Double) {
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 guard !arguments.isEmpty else {
-    fail("Usage: macos_speech_helper <audio_file_path> | --live --sample-rate <hz>")
+    fail("Usage: macos_speech_helper <audio_file_path> | --live --sample-rate <hz> | --authorization-status | --request-authorization")
 }
 
-if arguments.first == "--live" {
+if arguments.first == "--authorization-status" {
+    emitAuthorizationPayload(resolveAuthorizationPayload(promptIfNeeded: false))
+} else if arguments.first == "--request-authorization" {
+    emitAuthorizationPayload(resolveAuthorizationPayload(promptIfNeeded: true))
+} else if arguments.first == "--live" {
     guard let sampleRateIndex = arguments.firstIndex(of: "--sample-rate"),
           sampleRateIndex + 1 < arguments.count,
           let sampleRate = Double(arguments[sampleRateIndex + 1]),
