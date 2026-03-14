@@ -154,8 +154,22 @@ impl BackupManager {
         Ok(())
     }
 
-    /// Create a backup now
+    /// Create a full data backup now.
     pub async fn create_backup(&self, data_dir: &Path) -> Result<BackupInfo> {
+        self.create_backup_with_type(data_dir, BackupType::Full).await
+    }
+
+    /// Create a settings-only backup for profile sync and migration.
+    pub async fn create_settings_backup(&self, data_dir: &Path) -> Result<BackupInfo> {
+        self.create_backup_with_type(data_dir, BackupType::Settings)
+            .await
+    }
+
+    async fn create_backup_with_type(
+        &self,
+        data_dir: &Path,
+        backup_type: BackupType,
+    ) -> Result<BackupInfo> {
         let backup_dir = self
             .config
             .backup_dir
@@ -167,25 +181,29 @@ impl BackupManager {
 
         // Generate backup ID
         let timestamp = Utc::now();
-        let backup_id = format!("backup_{}", timestamp.format("%Y%m%d_%H%M%S"));
+        let backup_prefix = match backup_type {
+            BackupType::Full => "backup",
+            BackupType::Incremental => "incremental",
+            BackupType::Settings => "settings",
+        };
+        let backup_id = format!("{}_{}", backup_prefix, timestamp.format("%Y%m%d_%H%M%S"));
         let backup_path = backup_dir.join(&backup_id);
         tokio::fs::create_dir_all(&backup_path).await?;
 
-        // Copy database
-        let db_path = data_dir.join("nautilus.db");
-        if db_path.exists() {
-            let db_backup = backup_path.join("nautilus.db");
-            tokio::fs::copy(&db_path, db_backup).await?;
+        if matches!(backup_type, BackupType::Full | BackupType::Incremental) {
+            let db_path = data_dir.join("nautilus.db");
+            if db_path.exists() {
+                let db_backup = backup_path.join("nautilus.db");
+                tokio::fs::copy(&db_path, db_backup).await?;
+            }
+
+            let recordings_dir = data_dir.join("recordings");
+            if recordings_dir.exists() {
+                let recordings_backup = backup_path.join("recordings");
+                copy_dir_recursive(&recordings_dir, &recordings_backup).await?;
+            }
         }
 
-        // Copy recordings
-        let recordings_dir = data_dir.join("recordings");
-        if recordings_dir.exists() {
-            let recordings_backup = backup_path.join("recordings");
-            copy_dir_recursive(&recordings_dir, &recordings_backup).await?;
-        }
-
-        // Copy settings
         let settings_path = crate::settings::settings_file_path()?;
         if settings_path.exists() {
             let settings_backup = backup_path.join(SETTINGS_BACKUP_FILENAME);
@@ -206,7 +224,7 @@ impl BackupManager {
             timestamp,
             size_bytes,
             items_count,
-            backup_type: BackupType::Full,
+            backup_type,
         };
 
         tracing::info!("Backup created: {} ({} bytes)", info.id, info.size_bytes);
@@ -281,7 +299,7 @@ impl BackupManager {
                     timestamp,
                     size_bytes,
                     items_count,
-                    backup_type: BackupType::Full,
+                    backup_type: infer_backup_type(&path),
                 });
             }
         }
@@ -582,6 +600,18 @@ impl BackupManager {
         std::fs::write(config_path, json)?;
         Ok(())
     }
+}
+
+fn infer_backup_type(path: &Path) -> BackupType {
+    let has_database = path.join("nautilus.db").exists();
+    let has_recordings = path.join("recordings").exists();
+    let has_settings = path.join(SETTINGS_BACKUP_FILENAME).exists();
+
+    if has_settings && !has_database && !has_recordings {
+        return BackupType::Settings;
+    }
+
+    BackupType::Full
 }
 
 impl Default for BackupManager {
@@ -990,6 +1020,17 @@ async fn list_rclone_remotes() -> std::result::Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("nautilus-backup-test-{name}-{suffix}"))
+    }
 
     #[test]
     fn backup_id_rejects_traversal() {
@@ -1020,5 +1061,29 @@ mod tests {
     fn cloud_folder_accepts_nested_safe_paths() {
         let value = validate_cloud_folder("Nautilus/Backups/2026").expect("valid folder");
         assert_eq!(value, "Nautilus/Backups/2026");
+    }
+
+    #[test]
+    fn infer_backup_type_detects_settings_only_snapshots() {
+        let dir = unique_test_dir("settings");
+        fs::create_dir_all(&dir).expect("create test dir");
+        fs::write(dir.join(SETTINGS_BACKUP_FILENAME), "{}").expect("write settings backup");
+
+        let inferred = infer_backup_type(&dir);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(matches!(inferred, BackupType::Settings));
+    }
+
+    #[test]
+    fn infer_backup_type_prefers_full_when_data_files_exist() {
+        let dir = unique_test_dir("full");
+        fs::create_dir_all(dir.join("recordings")).expect("create recordings dir");
+        fs::write(dir.join(SETTINGS_BACKUP_FILENAME), "{}").expect("write settings backup");
+
+        let inferred = infer_backup_type(&dir);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(matches!(inferred, BackupType::Full));
     }
 }

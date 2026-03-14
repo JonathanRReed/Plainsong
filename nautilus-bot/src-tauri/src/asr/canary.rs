@@ -429,7 +429,11 @@ impl AsrProvider for CanaryProvider {
             manager
                 .download_file_unverified(&url, &destination, move |p| {
                     cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);
-                    tracing::info!("Whisper Candle {} download: {:.1}%", file_name, p.percentage);
+                    tracing::info!(
+                        "Whisper Candle {} download: {:.1}%",
+                        file_name,
+                        p.percentage
+                    );
                 })
                 .await?;
         }

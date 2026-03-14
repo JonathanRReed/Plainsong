@@ -1442,9 +1442,12 @@ mod tests {
 
     #[test]
     fn infer_learned_correction_extracts_single_word_fix() {
-        let candidate =
-            infer_learned_correction("please email jon tomorrow", "please email John tomorrow", false)
-                .expect("infers proper-name correction");
+        let candidate = infer_learned_correction(
+            "please email jon tomorrow",
+            "please email John tomorrow",
+            false,
+        )
+        .expect("infers proper-name correction");
         assert_eq!(candidate.spoken_form, "jon");
         assert_eq!(candidate.replacement, "John");
     }

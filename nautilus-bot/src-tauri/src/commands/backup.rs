@@ -49,6 +49,20 @@ pub async fn create_backup_default(
 }
 
 #[tauri::command]
+pub async fn create_settings_backup_default(
+    state: tauri::State<'_, AppState>,
+) -> Result<backup::BackupInfo, String> {
+    let data_dir = dirs::data_dir()
+        .ok_or("Could not find data directory")?
+        .join("Nautilus");
+    let backup_manager = state.backup_manager.lock().await;
+    backup_manager
+        .create_settings_backup(&data_dir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn restore_backup(
     state: tauri::State<'_, AppState>,
     backup_id: String,
@@ -66,6 +80,21 @@ pub async fn restore_backup(
     let backup_manager = state.backup_manager.lock().await;
     backup_manager
         .restore_backup(&backup_id, &path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn restore_backup_default(
+    state: tauri::State<'_, AppState>,
+    backup_id: String,
+) -> Result<(), String> {
+    let data_dir = dirs::data_dir()
+        .ok_or("Could not find data directory")?
+        .join("Nautilus");
+    let backup_manager = state.backup_manager.lock().await;
+    backup_manager
+        .restore_backup(&backup_id, &data_dir)
         .await
         .map_err(|e| e.to_string())
 }

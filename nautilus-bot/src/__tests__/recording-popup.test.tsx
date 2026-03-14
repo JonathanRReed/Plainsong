@@ -129,7 +129,7 @@ describe("RecordingPopup", () => {
     });
   });
 
-  it("keeps workspace access in minimal mode", async () => {
+  it("keeps meeting-view access in minimal mode", async () => {
     await act(async () => {
       render(<RecordingPopup />);
     });
@@ -138,7 +138,7 @@ describe("RecordingPopup", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Compact popup" }));
     fireEvent.click(screen.getByRole("button", { name: "Minimal popup" }));
-    fireEvent.click(screen.getByRole("button", { name: "Open workspace" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open meeting view" }));
 
     expect(popupMocks.invoke).toHaveBeenCalledWith("open_main_window_to", {
       view: "recordings",

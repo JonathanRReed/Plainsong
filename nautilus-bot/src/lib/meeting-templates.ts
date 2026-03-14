@@ -4,7 +4,12 @@ export type MeetingTemplateId =
   | "standup"
   | "sales"
   | "interview"
-  | "brainstorm";
+  | "brainstorm"
+  | "coaching"
+  | "doctor"
+  | "legal"
+  | "research"
+  | "personal_admin";
 
 export type MeetingTemplateOption = {
   value: MeetingTemplateId;
@@ -68,6 +73,46 @@ export const MEETING_TEMPLATES: MeetingTemplateOption[] = [
     summaryPrompt:
       "Summarize this brainstorm with ideas generated, strongest candidates, decisions made, and follow-up experiments or tasks.",
     notesOutline: ["Ideas", "Strong candidates", "Decisions", "Experiments", "Follow-ups"],
+  },
+  {
+    value: "coaching",
+    label: "Coaching",
+    description: "Challenges, reframes, commitments, and next experiments.",
+    summaryPrompt:
+      "Summarize this coaching conversation with the core challenge, reframes, commitments, follow-up experiments, and any open concerns.",
+    notesOutline: ["Current challenge", "Reframes", "Commitments", "Experiments", "Open questions"],
+  },
+  {
+    value: "doctor",
+    label: "Doctor Visit",
+    description: "Symptoms, findings, care plan, and next steps.",
+    summaryPrompt:
+      "Summarize this medical visit with symptoms discussed, findings, treatment guidance, medications or tests, and next steps.",
+    notesOutline: ["Symptoms", "Findings", "Guidance", "Tests or meds", "Next steps"],
+  },
+  {
+    value: "legal",
+    label: "Legal Call",
+    description: "Facts, advice, risks, deadlines, and follow-up.",
+    summaryPrompt:
+      "Summarize this legal discussion with relevant facts, advice given, risks, deadlines, and follow-up actions.",
+    notesOutline: ["Facts", "Advice", "Risks", "Deadlines", "Follow-up"],
+  },
+  {
+    value: "research",
+    label: "Research Call",
+    description: "Questions, insights, signals, and open threads.",
+    summaryPrompt:
+      "Summarize this research call with questions explored, key insights, strong signals, uncertainties, and recommended next steps.",
+    notesOutline: ["Questions", "Insights", "Signals", "Uncertainties", "Next steps"],
+  },
+  {
+    value: "personal_admin",
+    label: "Personal Admin",
+    description: "Decisions, paperwork, logistics, and reminders.",
+    summaryPrompt:
+      "Summarize this personal admin conversation with decisions, paperwork, logistics, reminders, and immediate next steps.",
+    notesOutline: ["Decisions", "Paperwork", "Logistics", "Reminders", "Next steps"],
   },
 ];
 

@@ -16,9 +16,40 @@ const mocks = vi.hoisted(() => ({
   getSpeakers: vi.fn(async () => []),
   getMeetingChatMessages: vi.fn(),
   updateMeetingChatMessages: vi.fn(),
+  askMemory: vi.fn(async () => ({
+    response: "Jon keeps pushing for a written launch plan and Friday owner confirmation.",
+    citations: [
+      {
+        text: "Jon asked for a written launch plan before Friday.",
+        startTime: 12,
+        endTime: 16,
+        recordingId: "r0",
+      },
+    ],
+  })),
   updateRecordingNotes: vi.fn(),
   updateRecordingAnalysis: vi.fn(),
   updateRecordingTemplate: vi.fn(),
+  getRelationshipMemory: vi.fn(async () => ({
+    people: [
+      {
+        id: "p1",
+        name: "Jon",
+        recordingCount: 2,
+        lastSeenAt: "2026-03-05T12:00:00Z",
+        relatedCompanies: ["Acme"],
+        recentMeetings: [
+          {
+            recordingId: "r0",
+            recordingTitle: "Weekly sync",
+            createdAt: "2026-03-05T12:00:00Z",
+            snippet: "Jon owns the launch checklist and follow-up.",
+          },
+        ],
+      },
+    ],
+    companies: [],
+  })),
   summarizeRecordingGrounded: vi.fn(),
   extractActionItemsGrounded: vi.fn(),
   exportRecordingV2: vi.fn(),
@@ -172,11 +203,13 @@ vi.mock("@/lib/tauri", () => ({
   isDiarizationModelAvailable: vi.fn(async () => false),
   getMeetingChatMessages: mocks.getMeetingChatMessages,
   updateMeetingChatMessages: mocks.updateMeetingChatMessages,
+  askMemory: mocks.askMemory,
   updateTranscriptSegment: vi.fn(),
   deleteTranscriptSegments: vi.fn(),
   updateRecordingNotes: mocks.updateRecordingNotes,
   updateRecordingAnalysis: mocks.updateRecordingAnalysis,
   updateRecordingTemplate: mocks.updateRecordingTemplate,
+  getRelationshipMemory: mocks.getRelationshipMemory,
   summarizeRecordingGrounded: mocks.summarizeRecordingGrounded,
   extractActionItemsGrounded: mocks.extractActionItemsGrounded,
   exportRecordingV2: mocks.exportRecordingV2,
@@ -401,7 +434,7 @@ describe("RecordingsView", () => {
     fireEvent.click(screen.getByText("Weekly sync"));
     await screen.findByRole("group", { name: "Meeting notes" });
 
-    fireEvent.change(screen.getByLabelText("Format"), {
+    fireEvent.change(screen.getByLabelText("Playbook"), {
       target: { value: "standup" },
     });
 
@@ -419,6 +452,39 @@ describe("RecordingsView", () => {
     });
     expect(screen.getByLabelText("Done notes")).toHaveValue("");
     expect(screen.getByLabelText("Blockers notes")).toHaveValue("");
+  });
+
+  it("shows prep briefing and follow-up center in meeting review", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+
+    expect(await screen.findByText("Prep Briefing")).toBeInTheDocument();
+    expect(screen.getByText("Cross-meeting Recall")).toBeInTheDocument();
+    expect(screen.getByText("Follow-up Center")).toBeInTheDocument();
+    expect(screen.getByText("Jon owns the launch checklist and follow-up.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy Follow-up Email" })).toBeInTheDocument();
+  });
+
+  it("runs cross-meeting recall from the meeting review sidebar", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+
+    expect(await screen.findByText("Cross-meeting Recall")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Jon cared about across recent meetings/i }));
+
+    await waitFor(() => {
+      expect(mocks.askMemory).toHaveBeenCalledWith(
+        expect.stringContaining("What has Jon cared about across recent meetings?")
+      );
+    });
+    expect(
+      await screen.findByText(
+        "Jon keeps pushing for a written launch plan and Friday owner confirmation."
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByText("Jon asked for a written launch plan before Friday.")).toBeInTheDocument();
   });
 
   it("persists meeting note section edits through the notes autosave flow", async () => {

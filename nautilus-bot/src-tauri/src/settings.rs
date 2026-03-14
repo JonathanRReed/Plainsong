@@ -178,6 +178,8 @@ pub struct TranscriptionSettings {
     pub dictation_command_prefix: String,
     /// Dictation insertion mode: auto, paste, clipboard_only
     pub dictation_insertion_mode: String,
+    /// Active language set used when session language remains on auto.
+    pub dictation_active_languages: Vec<String>,
     /// Dictation: snippet expansion toggle
     pub dictation_snippets_enabled: bool,
     /// Dictation: learn safe confirmed text corrections into the dictionary automatically.
@@ -286,6 +288,7 @@ impl Default for TranscriptionSettings {
             dictation_command_mode_enabled: true,
             dictation_command_prefix: "command".to_string(),
             dictation_insertion_mode: "paste".to_string(),
+            dictation_active_languages: Vec::new(),
             dictation_snippets_enabled: true,
             dictation_auto_learn_corrections: true,
             dictation_custom_prompt: None,
@@ -584,9 +587,7 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
                 "parakeet-ctc-0.6b".to_string()
             }
             "parakeet-ctc-1.1b" => "parakeet-ctc-1.1b".to_string(),
-            "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => {
-                "parakeet-tdt-ctc-110m".to_string()
-            }
+            "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => "parakeet-tdt-ctc-110m".to_string(),
             _ => "parakeet-ctc-0.6b".to_string(),
         },
         "whisper_candle" => "whisper-large-v3-turbo".to_string(),
@@ -626,6 +627,24 @@ fn normalize_dictation_keep_warm(value: &str) -> String {
     }
 }
 
+fn normalize_dictation_active_languages(languages: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for language in languages {
+        let trimmed = language.trim().to_ascii_lowercase();
+        let canonical = match trimmed.as_str() {
+            "en" | "es" | "fr" | "de" | "it" | "pt" | "ja" | "ko" | "zh" | "ru" | "ar"
+            | "hi" => Some(trimmed),
+            _ => None,
+        };
+        if let Some(language) = canonical {
+            if !normalized.contains(&language) {
+                normalized.push(language);
+            }
+        }
+    }
+    normalized
+}
+
 fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSettings) {
     transcription.default_provider =
         normalize_transcription_provider_value(&transcription.default_provider);
@@ -658,6 +677,8 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
 
     transcription.dictation_keep_warm =
         normalize_dictation_keep_warm(&transcription.dictation_keep_warm);
+    transcription.dictation_active_languages =
+        normalize_dictation_active_languages(&transcription.dictation_active_languages);
 
     for mode in &mut transcription.dictation_custom_modes {
         mode.base_mode_preset = mode.base_mode_preset.clone().and_then(|value| {
@@ -685,17 +706,14 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
             *model_id = normalize_transcription_model_id(normalized_provider.as_str(), model_id);
         }
 
-        mode.language_override = mode
-            .language_override
-            .clone()
-            .and_then(|value| {
-                let trimmed = value.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            });
+        mode.language_override = mode.language_override.clone().and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
         mode.custom_prompt = mode.custom_prompt.clone().and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {
@@ -860,7 +878,9 @@ impl Default for SettingsManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{PlatformOptimizationSettings, Settings};
+    use super::{
+        normalize_dictation_active_languages, PlatformOptimizationSettings, Settings,
+    };
 
     #[test]
     fn platform_optimization_defaults_are_stable() {
@@ -894,5 +914,16 @@ mod tests {
         assert_eq!(settings.transcription.dictation_insertion_mode, "paste");
         assert!(settings.transcription.dictation_snippets_enabled);
         assert!(settings.transcription.dictation_auto_learn_corrections);
+    }
+
+    #[test]
+    fn dictation_active_languages_are_normalized() {
+        let normalized = normalize_dictation_active_languages(&[
+            " EN ".to_string(),
+            "es".to_string(),
+            "ES".to_string(),
+            "bogus".to_string(),
+        ]);
+        assert_eq!(normalized, vec!["en".to_string(), "es".to_string()]);
     }
 }

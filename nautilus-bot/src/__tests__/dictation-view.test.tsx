@@ -6,6 +6,8 @@ const tauriMocks = vi.hoisted(() => ({
   eventListeners: new Map<string, (event: { payload: any }) => void>(),
   saveSettings: vi.fn(async () => {}),
   refetchDictationHistory: vi.fn(),
+  startDictation: vi.fn(async () => {}),
+  stopDictation: vi.fn(async () => ""),
   getSettings: vi.fn(async () => ({
   audio: {
     sampleRate: 16000,
@@ -38,6 +40,7 @@ const tauriMocks = vi.hoisted(() => ({
     dictationCommandModeEnabled: true,
     dictationCommandPrefix: "command",
     dictationInsertionMode: "auto" as const,
+    dictationActiveLanguages: [],
     dictationContextSource: "none" as const,
     dictationModePreset: "voice" as const,
     dictationSelectedCustomModeId: null,
@@ -114,8 +117,8 @@ vi.mock("@/hooks/use-recording", () => ({
   useRecording: () => ({
     isRecording: false,
     formattedDuration: "0:00",
-    startDictation: vi.fn(),
-    stopDictation: vi.fn(async () => ""),
+    startDictation: tauriMocks.startDictation,
+    stopDictation: tauriMocks.stopDictation,
   }),
 }));
 
@@ -137,11 +140,111 @@ vi.mock("@/lib/tauri", () => ({
   getSettings: tauriMocks.getSettings,
   saveSettings: tauriMocks.saveSettings,
   getTranscript: vi.fn(),
+  getDictationHistoryDetails: vi.fn(async () => null),
+  getDictationInsights: vi.fn(async () => ({
+    totalDictations: 3,
+    dictatedWords: 120,
+    averageWordsPerDictation: 40,
+    activeDays: 2,
+    lastSevenDaysDictations: 3,
+    commandsUsed: 1,
+    backtracksUsed: 1,
+    snippetsTriggered: 2,
+    topAppTarget: "Slack",
+    topAppTargetCount: 2,
+  })),
+  getAsrProviders: vi.fn(async () => [
+    {
+      providerType: "moonshine",
+      name: "UsefulSensors Moonshine",
+      description: "Fast local dictation",
+      isAvailable: true,
+      inferenceEnabled: true,
+      selectedModelId: "moonshine-base",
+      modelOptions: [{ id: "moonshine-base", label: "Moonshine Base" }],
+      downloadStatus: "Downloaded",
+      runtimeStatus: "ready",
+      runtimeMessage: null,
+      runtimeDetails: {},
+      modelInfo: {
+        name: "Moonshine Base",
+        version: "1",
+        sizeMb: 100,
+        parameters: "base",
+        languages: ["en"],
+        license: "Apache-2.0",
+        sourceUrl: "https://example.com/moonshine",
+      },
+    },
+    {
+      providerType: "openai_cloud",
+      name: "OpenAI Cloud",
+      description: "Cloud multilingual",
+      isAvailable: true,
+      inferenceEnabled: true,
+      selectedModelId: "gpt-4o-transcribe",
+      modelOptions: [{ id: "gpt-4o-transcribe", label: "GPT-4o Transcribe" }],
+      downloadStatus: "Downloaded",
+      runtimeStatus: "ready",
+      runtimeMessage: null,
+      runtimeDetails: {},
+      modelInfo: {
+        name: "GPT-4o Transcribe",
+        version: "1",
+        sizeMb: 0,
+        parameters: "cloud",
+        languages: ["multilingual"],
+        license: "Commercial",
+        sourceUrl: "https://example.com/openai",
+      },
+    },
+  ]),
   reprocessDictationText: vi.fn(),
   listDictationDictionaryEntries: vi.fn(async () => []),
   createDictationDictionaryEntry: vi.fn(),
   updateDictationDictionaryEntry: vi.fn(),
   deleteDictationDictionaryEntry: vi.fn(),
+  exportDictationDictionaryCsv: vi.fn(async () => "spoken_form,replacement\nopen ai,OpenAI"),
+  importDictationDictionaryCsv: vi.fn(async () => ({
+    createdCount: 1,
+    updatedCount: 0,
+    skippedCount: 0,
+    errors: [],
+  })),
+  listDictationCorrectionSuggestions: vi.fn(async () => []),
+  queueDictationCorrectionSuggestion: vi.fn(async () => ({
+    queued: true,
+    action: "created",
+    spokenForm: "jon",
+    replacement: "John",
+    suggestion: {
+      id: "suggestion-1",
+      originalText: "jon will join",
+      correctedText: "John will join",
+      spokenForm: "jon",
+      replacement: "John",
+      appTarget: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+  })),
+  approveDictationCorrectionSuggestion: vi.fn(async () => ({
+    learned: true,
+    action: "created",
+    spokenForm: "jon",
+    replacement: "John",
+    entry: {
+      id: "learned-1",
+      spokenForm: "jon",
+      replacement: "John",
+      appScope: null,
+      caseSensitive: false,
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+  })),
+  rejectDictationCorrectionSuggestion: vi.fn(async () => {}),
   learnDictationCorrection: vi.fn(async () => ({
     learned: true,
     action: "created",
@@ -176,7 +279,7 @@ describe("DictationView modes", () => {
   it("renders the new mode presets", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Modes");
+    await screen.findByText("Flow Profiles");
     expect(screen.getByRole("button", { name: /voice/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /messages/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /meeting follow-up/i })).toBeInTheDocument();
@@ -185,7 +288,7 @@ describe("DictationView modes", () => {
   it("applies Messages mode defaults and persists them", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Modes");
+    await screen.findByText("Flow Profiles");
     fireEvent.click(screen.getByRole("button", { name: /messages/i }));
 
     await waitFor(() => {
@@ -208,11 +311,11 @@ describe("DictationView modes", () => {
   it("saves the current setup as a reusable custom mode", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Modes");
+    await screen.findByText("Flow Profiles");
     fireEvent.click(screen.getByRole("button", { name: /messages/i }));
     fireEvent.click(screen.getByRole("button", { name: /custom/i }));
 
-    const nameInput = await screen.findByLabelText("Mode name");
+    const nameInput = await screen.findByLabelText("Profile name");
     fireEvent.change(nameInput, { target: { value: "Sales Follow-up" } });
     fireEvent.change(screen.getByLabelText("Auto-activate for domain"), {
       target: { value: "gmail.com" },
@@ -238,7 +341,7 @@ describe("DictationView modes", () => {
   it("installs a recommended app style as a custom mode", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Recommended app styles");
+    await screen.findByText("Recommended flow profiles");
     fireEvent.click(screen.getAllByRole("button", { name: /install and use/i })[0]);
 
     await waitFor(() => {
@@ -260,7 +363,7 @@ describe("DictationView modes", () => {
   it("refreshes dictation history when a dictation result event arrives", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Modes");
+    await screen.findByText("Flow Profiles");
     const handler = tauriMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
@@ -281,7 +384,7 @@ describe("DictationView modes", () => {
   it("surfaces auto-activated app matcher details in the latest result", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Modes");
+    await screen.findByText("Flow Profiles");
     const handler = tauriMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
@@ -304,7 +407,7 @@ describe("DictationView modes", () => {
     const tauri = await import("@/lib/tauri");
     render(<DictationView />);
 
-    await screen.findByText("Modes");
+    await screen.findByText("Flow Profiles");
     const handler = tauriMocks.eventListeners.get("dictation-text-ready");
 
     await act(async () => {
@@ -321,7 +424,7 @@ describe("DictationView modes", () => {
     fireEvent.blur(editor);
 
     await waitFor(() => {
-      expect(tauri.learnDictationCorrection).toHaveBeenCalledWith({
+      expect(tauri.queueDictationCorrectionSuggestion).toHaveBeenCalledWith({
         originalText: "please email jon tomorrow",
         correctedText: "please email John tomorrow",
         appTarget: null,
@@ -329,6 +432,76 @@ describe("DictationView modes", () => {
       });
     });
 
-    expect(await screen.findByText("Learned: jon -> John")).toBeInTheDocument();
+    expect(await screen.findByText("Queued for review: jon -> John")).toBeInTheDocument();
+  });
+
+  it("groups duplicate correction suggestions and clears the group together", async () => {
+    const tauri = await import("@/lib/tauri");
+    vi.mocked(tauri.listDictationCorrectionSuggestions).mockResolvedValueOnce([
+      {
+        id: "suggestion-1",
+        originalText: "jon will join",
+        correctedText: "John will join",
+        spokenForm: "jon",
+        replacement: "John",
+        appTarget: "Slack",
+        createdAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+        updatedAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+      },
+      {
+        id: "suggestion-2",
+        originalText: "jon can ship it",
+        correctedText: "John can ship it",
+        spokenForm: "jon",
+        replacement: "John",
+        appTarget: "Slack",
+        createdAt: new Date("2026-03-14T11:00:00Z").toISOString(),
+        updatedAt: new Date("2026-03-14T11:00:00Z").toISOString(),
+      },
+    ]);
+
+    render(<DictationView />);
+
+    expect(await screen.findByText(/2 similar edits/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve all" }));
+
+    await waitFor(() => {
+      expect(tauri.approveDictationCorrectionSuggestion).toHaveBeenCalledWith("suggestion-1");
+      expect(tauri.rejectDictationCorrectionSuggestion).toHaveBeenCalledWith("suggestion-2");
+    });
+  });
+
+  it("persists the session language separately from flow profiles", async () => {
+    render(<DictationView />);
+
+    await screen.findByLabelText("Session language");
+    fireEvent.change(screen.getByLabelText("Session language"), {
+      target: { value: "es" },
+    });
+
+    await waitFor(() => {
+      expect(tauriMocks.saveSettings).toHaveBeenCalled();
+    });
+
+    const saveCalls = tauriMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+    const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
+    expect(latestSettings.transcription.language).toBe("es");
+  });
+
+  it("locks auto dictation to a single active language when the set has one item", async () => {
+    render(<DictationView />);
+
+    await screen.findByLabelText("Session language");
+    fireEvent.click(screen.getByRole("button", { name: "Toggle French active language" }));
+    fireEvent.click(screen.getByRole("button", { name: /start dictation/i }));
+
+    await waitFor(() => {
+      expect(tauriMocks.startDictation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          languageOverride: "fr",
+        })
+      );
+    });
   });
 });

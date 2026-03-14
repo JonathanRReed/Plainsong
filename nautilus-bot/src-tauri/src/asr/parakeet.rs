@@ -157,9 +157,8 @@ pub struct ParakeetProvider {
 
 impl ParakeetProvider {
     pub fn new(selected_model_id: Option<&str>) -> Self {
-        let model_id = normalize_parakeet_model_id(
-            selected_model_id.unwrap_or(PARAKEET_CTC_06B_MODEL_ID),
-        );
+        let model_id =
+            normalize_parakeet_model_id(selected_model_id.unwrap_or(PARAKEET_CTC_06B_MODEL_ID));
         let models_root = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Nautilus")
@@ -170,7 +169,10 @@ impl ParakeetProvider {
             models_root.join(model_id.replace('-', "_"))
         };
 
-        Self { model_dir, model_id }
+        Self {
+            model_dir,
+            model_id,
+        }
     }
 
     fn onnx_path(&self) -> PathBuf {
@@ -266,9 +268,7 @@ impl Default for ParakeetProvider {
 
 fn normalize_parakeet_model_id(model_id: &str) -> String {
     match model_id.trim() {
-        "parakeet-tdt-0.6b-v3" | PARAKEET_CTC_06B_MODEL_ID => {
-            PARAKEET_CTC_06B_MODEL_ID.to_string()
-        }
+        "parakeet-tdt-0.6b-v3" | PARAKEET_CTC_06B_MODEL_ID => PARAKEET_CTC_06B_MODEL_ID.to_string(),
         PARAKEET_CTC_11B_MODEL_ID => PARAKEET_CTC_11B_MODEL_ID.to_string(),
         "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => PARAKEET_LEGACY_MODEL_ID.to_string(),
         _ => PARAKEET_CTC_06B_MODEL_ID.to_string(),

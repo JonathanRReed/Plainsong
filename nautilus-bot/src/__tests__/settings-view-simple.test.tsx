@@ -92,6 +92,7 @@ vi.mock("@/components/theme-provider", () => ({
 
 vi.mock("@/lib/tauri", () => ({
   createBackupDefault: vi.fn(),
+  createSettingsBackupDefault: vi.fn(),
   clearProviderSecret: vi.fn(),
   getBackupConfig: vi.fn(async () => ({
     enabled: true,
@@ -132,7 +133,22 @@ vi.mock("@/lib/tauri", () => ({
   getSettings: vi.fn(async () => ({ ...baseSettings })),
   hasProviderSecret: vi.fn(async () => false),
   lockVault: vi.fn(),
-  listBackups: vi.fn(async () => []),
+  listBackups: vi.fn(async () => [
+    {
+      id: "settings_20260314_120000",
+      timestamp: "2026-03-14T12:00:00.000Z",
+      sizeBytes: 1024,
+      itemsCount: 6,
+      backupType: "settings",
+    },
+    {
+      id: "backup_20260314_110000",
+      timestamp: "2026-03-14T11:00:00.000Z",
+      sizeBytes: 2048,
+      itemsCount: 20,
+      backupType: "full",
+    },
+  ]),
   listOllamaModels: vi.fn(async () => ["llama3.2"]),
   listOllamaCloudModels: vi.fn(async () => []),
   listOpenAiModels: vi.fn(async () => []),
@@ -158,6 +174,7 @@ vi.mock("@/lib/tauri", () => ({
   saveSettings: vi.fn(async () => { }),
   saveBackupConfig: vi.fn(),
   setProviderSecret: vi.fn(async () => { }),
+  restoreBackupDefault: vi.fn(async () => {}),
   syncBackupToCloud: vi.fn(),
   unlockVault: vi.fn(),
   verifyBackupCloudConnection: vi.fn(),
@@ -245,6 +262,25 @@ describe("SettingsView performance behavior", () => {
 
     await waitFor(() => {
       expect(tauri.saveSettings).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("shows personal profile sync actions and can restore the latest profile snapshot", async () => {
+    const tauri = await import("@/lib/tauri");
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Storage"));
+    await screen.findByText("Personal Profile Sync");
+
+    expect(screen.getByText("Latest profile snapshot")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create Profile Snapshot" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sync Latest Profile Snapshot" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore Latest Profile Snapshot" }));
+
+    await waitFor(() => {
+      expect(tauri.restoreBackupDefault).toHaveBeenCalledWith("settings_20260314_120000");
     });
   });
 
@@ -343,7 +379,7 @@ describe("SettingsView performance behavior", () => {
     window.removeEventListener(OPEN_ONBOARDING_EVENT, handler as EventListener);
   });
 
-  it("opens the memory workspace from AI settings", async () => {
+  it("opens memory and meetings views from AI settings", async () => {
     const events: Array<string | undefined> = [];
     const handler = (event: Event) => {
       events.push((event as CustomEvent<{ view?: string }>).detail?.view);
@@ -360,12 +396,40 @@ describe("SettingsView performance behavior", () => {
     fireEvent.click(screen.getByText("AI & Keys"));
     await screen.findByText("Cross-meeting memory chat");
 
-    fireEvent.click(screen.getByRole("button", { name: /open memory workspace/i }));
+    fireEvent.click(screen.getByRole("button", { name: /open memory/i }));
     fireEvent.click(screen.getByRole("button", { name: /open relationship memory/i }));
-    fireEvent.click(screen.getByRole("button", { name: /open meetings workspace/i }));
+    fireEvent.click(screen.getByRole("button", { name: /open meetings/i }));
 
     expect(events).toEqual(["dashboard", "dashboard", "recordings"]);
 
     window.removeEventListener(OPEN_MAIN_VIEW_EVENT, handler as EventListener);
+  });
+
+  it("persists the dictation active language set from transcription settings", async () => {
+    const tauri = await import("@/lib/tauri");
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findByText("Dictation active language set");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /toggle French in dictation active languages/i,
+      })
+    );
+
+    await waitFor(() => {
+      expect(tauri.saveSettings).toHaveBeenCalled();
+    });
+
+    const saveCalls = vi.mocked(tauri.saveSettings).mock.calls;
+    const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
+    expect(latestSettings?.transcription.dictationActiveLanguages).toEqual(["fr"]);
   });
 });

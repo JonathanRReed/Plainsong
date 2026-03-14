@@ -36,10 +36,17 @@ import {
   updateMeetingChatMessages,
   summarizeRecordingGrounded,
   extractActionItemsGrounded,
+  askMemory,
   exportRecordingV2,
   openExportPath,
+  getRelationshipMemory,
 } from "@/lib/tauri";
-import type { MeetingChatMessage } from "@/lib/tauri";
+import type {
+  CompanyMemoryProfile,
+  MeetingChatMessage,
+  PersonMemoryProfile,
+  RelationshipMemory,
+} from "@/lib/tauri";
 import type { MeetingTranscriptDetails, Recording } from "@/types";
 import {
   buildMeetingTemplateOutline,
@@ -468,6 +475,160 @@ function qualityToneClasses(tone: "good" | "warn" | "muted"): string {
   }
 }
 
+function normalizePrepSearchTokens(value: string): string[] {
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3);
+}
+
+function relationshipPrepScore(
+  profile: PersonMemoryProfile | CompanyMemoryProfile,
+  haystack: string,
+  tokens: string[]
+): number {
+  const name = profile.name.toLowerCase();
+  let score = haystack.includes(name) ? 5 : 0;
+  for (const token of tokens) {
+    if (name.includes(token)) {
+      score += 1;
+    }
+  }
+  score += Math.min(profile.recordingCount, 3);
+  return score;
+}
+
+function prepPromptsForTemplate(templateId: string): string[] {
+  switch (templateId) {
+    case "sales":
+      return [
+        "What changed since the last conversation?",
+        "Where are the buying signals and objections?",
+        "What next step do I want before the call ends?",
+      ];
+    case "1on1":
+      return [
+        "What feedback or support should I be ready to give?",
+        "What commitments do I need to follow up on?",
+        "What changed since the last 1:1?",
+      ];
+    case "interview":
+      return [
+        "Which signals am I trying to confirm?",
+        "What gaps or concerns need evidence?",
+        "What should I compare against the scorecard afterward?",
+      ];
+    case "brainstorm":
+      return [
+        "What decision should this session unlock?",
+        "Which ideas need evidence instead of more debate?",
+        "What experiments would make the best next step?",
+      ];
+    case "doctor":
+      return [
+        "What symptoms, dates, and changes do I need to mention clearly?",
+        "What decisions or prescriptions do I need written down?",
+        "What tests, referrals, or follow-up dates should I confirm?",
+      ];
+    case "legal":
+      return [
+        "What facts, dates, and documents matter most?",
+        "What deadlines or risk tradeoffs do I need clarified?",
+        "What follow-up tasks should I leave with?",
+      ];
+    case "research":
+      return [
+        "What hypotheses am I trying to validate?",
+        "What surprised users before, and what do I still not understand?",
+        "What should I synthesize immediately after the call?",
+      ];
+    case "personal_admin":
+      return [
+        "What decisions or paperwork need to be completed today?",
+        "What dates, references, or case numbers should I capture exactly?",
+        "What follow-up reminder should I set right after this?",
+      ];
+    default:
+      return [
+        "What outcome do I want from this meeting?",
+        "What commitments or blockers should I confirm live?",
+        "What follow-up should be ready as soon as the meeting ends?",
+      ];
+  }
+}
+
+function buildDeterministicFollowUpDraft(
+  title: string,
+  summary: string,
+  actionItems: string[]
+): string {
+  const trimmedSummary = summary.trim();
+  const normalizedItems = normalizeActionItems(actionItems);
+  return [
+    `Subject: Follow-up on ${title}`,
+    "",
+    "Thanks again for the conversation.",
+    "",
+    trimmedSummary || "Here is a quick recap of what we covered.",
+    "",
+    normalizedItems.length > 0
+      ? ["Next steps:", ...normalizedItems.map((item) => `- ${item}`)].join("\n")
+      : "Next steps:\n- Confirm owners and timing.",
+  ].join("\n");
+}
+
+function buildDeterministicAgenda(title: string, actionItems: string[]): string {
+  const normalizedItems = normalizeActionItems(actionItems);
+  return [
+    `Next agenda for ${title}`,
+    "",
+    ...(normalizedItems.length > 0
+      ? normalizedItems.map((item) => `- Review: ${item}`)
+      : ["- Review outstanding decisions", "- Confirm ownership and dates", "- Close open blockers"]),
+  ].join("\n");
+}
+
+function buildCrossMeetingRecallQuery(args: {
+  title: string;
+  summary: string;
+  actionItems: string[];
+  prompt: string;
+}): string {
+  const sections = [
+    "You are helping a solo user prepare for follow-through across prior meetings.",
+    `Current meeting: ${args.title}`,
+    args.summary.trim() ? `Current summary: ${args.summary.trim()}` : null,
+    args.actionItems.length > 0
+      ? `Current action items:\n${args.actionItems.map((item) => `- ${item}`).join("\n")}`
+      : null,
+    `Question: ${args.prompt.trim()}`,
+    "Answer using prior meetings as the source of truth. Focus on recurring priorities, commitments, blockers, and deadlines.",
+  ].filter(Boolean);
+
+  return sections.join("\n\n");
+}
+
+function buildRelationshipRecallPrompts(args: {
+  title: string;
+  people: PersonMemoryProfile[];
+  companies: CompanyMemoryProfile[];
+}): string[] {
+  const prompts = [
+    `What commitments and deadlines from prior meetings matter before the next ${args.title} follow-up?`,
+    ...args.people.slice(0, 2).map(
+      (person) =>
+        `What has ${person.name} cared about across recent meetings? Include priorities, open questions, and what I owe them.`
+    ),
+    ...args.companies.slice(0, 1).map(
+      (company) =>
+        `What has ${company.name} pushed on across recent meetings? Include risks, asks, and deadlines.`
+    ),
+  ];
+
+  return [...new Set(prompts)];
+}
+
 export function RecordingsView() {
   const { recordings, refetch } = useRecordings();
   const { startMeeting, stopMeeting, isRecording, recordingId, formattedDuration } = useRecording();
@@ -498,6 +659,12 @@ export function RecordingsView() {
     useState<EnhancedMeetingNotesDraft | null>(null);
   const [isEnhancingMeetingNotes, setIsEnhancingMeetingNotes] = useState(false);
   const [meetingChatMessages, setMeetingChatMessages] = useState<MeetingChatMessage[]>([]);
+  const [meetingRecallQuery, setMeetingRecallQuery] = useState("");
+  const [meetingRecallResponse, setMeetingRecallResponse] = useState<string | null>(null);
+  const [meetingRecallCitations, setMeetingRecallCitations] = useState<LlmCitation[]>([]);
+  const [meetingRecallPromptLabel, setMeetingRecallPromptLabel] = useState<string | null>(null);
+  const [meetingRecallLoading, setMeetingRecallLoading] = useState(false);
+  const [meetingRecallError, setMeetingRecallError] = useState<string | null>(null);
   const [isRefreshingSummary, setIsRefreshingSummary] = useState(false);
   const [isRefreshingActionItems, setIsRefreshingActionItems] = useState(false);
   const recordingRequestGuard = useScopedRequestGuard<string | null>();
@@ -528,6 +695,7 @@ export function RecordingsView() {
   const [isBulkReclassifying, setIsBulkReclassifying] = useState(false);
   const [isExportingMeeting, setIsExportingMeeting] = useState(false);
   const [lastMeetingExportPath, setLastMeetingExportPath] = useState<string | null>(null);
+  const [relationshipMemory, setRelationshipMemory] = useState<RelationshipMemory | null>(null);
 
   const {
     selectedRecording,
@@ -556,6 +724,27 @@ export function RecordingsView() {
       }
     },
   });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void getRelationshipMemory()
+      .then((result) => {
+        if (!cancelled) {
+          setRelationshipMemory(result);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.warn("Failed to load relationship memory for meetings:", error);
+          setRelationshipMemory(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   type RecordingStatusChangedEvent = {
     recordingId: string;
@@ -1284,20 +1473,81 @@ export function RecordingsView() {
     }
   };
 
-  const handleCopyMeetingFollowUp = async (text: string) => {
-    const trimmed = text.trim();
+  const handleCopyMeetingText = async (args: {
+    text: string;
+    emptyMessage: string;
+    successMessage: string;
+    failureMessage: string;
+  }) => {
+    const trimmed = args.text.trim();
     if (!trimmed) {
-      toast("Nothing to copy for the follow-up draft.", "error");
+      toast(args.emptyMessage, "error");
       return;
     }
 
     try {
       await navigator.clipboard.writeText(trimmed);
-      toast("Follow-up draft copied.", "success");
+      toast(args.successMessage, "success");
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Failed to copy the follow-up draft.";
+      const message = error instanceof Error ? error.message : args.failureMessage;
       toast(message, "error");
+    }
+  };
+
+  const handleCopyMeetingFollowUp = async (text: string) => {
+    await handleCopyMeetingText({
+      text,
+      emptyMessage: "Nothing to copy for the follow-up draft.",
+      successMessage: "Follow-up draft copied.",
+      failureMessage: "Failed to copy the follow-up draft.",
+    });
+  };
+
+  const handleCopyMeetingRecall = async (text: string) => {
+    await handleCopyMeetingText({
+      text,
+      emptyMessage: "Nothing to copy from cross-meeting recall.",
+      successMessage: "Cross-meeting recall copied.",
+      failureMessage: "Failed to copy cross-meeting recall.",
+    });
+  };
+
+  const runMeetingRecall = async (promptOverride?: string) => {
+    if (!selectedRecording) {
+      return;
+    }
+
+    const prompt = (promptOverride ?? meetingRecallQuery).trim();
+    if (!prompt) {
+      return;
+    }
+
+    setMeetingRecallLoading(true);
+    setMeetingRecallError(null);
+
+    try {
+      const result = await askMemory(
+        buildCrossMeetingRecallQuery({
+          title: selectedRecording.title,
+          summary: meetingSummary,
+          actionItems: selectedMeetingActionItems,
+          prompt,
+        })
+      );
+      setMeetingRecallPromptLabel(prompt);
+      setMeetingRecallResponse(result.response);
+      setMeetingRecallCitations(result.citations);
+      if (!promptOverride) {
+        setMeetingRecallQuery("");
+      }
+    } catch (error) {
+      setMeetingRecallError(
+        error instanceof Error ? error.message : "Cross-meeting recall could not be generated."
+      );
+      setMeetingRecallResponse(null);
+      setMeetingRecallCitations([]);
+    } finally {
+      setMeetingRecallLoading(false);
     }
   };
 
@@ -1521,6 +1771,72 @@ export function RecordingsView() {
     () => actionItemsFromText(meetingActionItemsText),
     [meetingActionItemsText]
   );
+  const selectedMeetingPrepPrompts = useMemo(
+    () => prepPromptsForTemplate(meetingTemplateId),
+    [meetingTemplateId]
+  );
+  const selectedMeetingRelationshipMatches = useMemo(() => {
+    if (!selectedRecording || !relationshipMemory) {
+      return { people: [] as PersonMemoryProfile[], companies: [] as CompanyMemoryProfile[] };
+    }
+
+    const haystack = [
+      selectedRecording.title,
+      meetingNotes,
+      meetingSummary,
+      meetingActionItemsText,
+    ]
+      .join(" ")
+      .toLowerCase();
+    const tokens = normalizePrepSearchTokens(haystack);
+    const sortProfiles = <T extends PersonMemoryProfile | CompanyMemoryProfile>(profiles: T[]) =>
+      profiles
+        .map((profile) => ({
+          profile,
+          score: relationshipPrepScore(profile, haystack, tokens),
+        }))
+        .filter((entry) => entry.score > 0)
+        .sort((left, right) => right.score - left.score)
+        .slice(0, 3)
+        .map((entry) => entry.profile);
+
+    return {
+      people: sortProfiles(relationshipMemory.people),
+      companies: sortProfiles(relationshipMemory.companies),
+    };
+  }, [
+    meetingActionItemsText,
+    meetingNotes,
+    meetingSummary,
+    relationshipMemory,
+    selectedRecording,
+  ]);
+  const deterministicMeetingFollowUp = useMemo(
+    () =>
+      buildDeterministicFollowUpDraft(
+        selectedRecording?.title ?? "this meeting",
+        meetingSummary,
+        selectedMeetingActionItems
+      ),
+    [meetingSummary, selectedMeetingActionItems, selectedRecording]
+  );
+  const deterministicNextAgenda = useMemo(
+    () => buildDeterministicAgenda(selectedRecording?.title ?? "this meeting", selectedMeetingActionItems),
+    [selectedMeetingActionItems, selectedRecording]
+  );
+  const selectedMeetingRecallPrompts = useMemo(
+    () =>
+      buildRelationshipRecallPrompts({
+        title: selectedRecording?.title ?? "this meeting",
+        people: selectedMeetingRelationshipMatches.people,
+        companies: selectedMeetingRelationshipMatches.companies,
+      }),
+    [
+      selectedMeetingRelationshipMatches.companies,
+      selectedMeetingRelationshipMatches.people,
+      selectedRecording?.title,
+    ]
+  );
   const selectedMeetingConsent = useMemo(
     () =>
       describeMeetingConsent(
@@ -1580,6 +1896,15 @@ export function RecordingsView() {
       ),
     [enhancedMeetingNotesDraft, meetingNotes]
   );
+
+  useEffect(() => {
+    setMeetingRecallQuery("");
+    setMeetingRecallResponse(null);
+    setMeetingRecallCitations([]);
+    setMeetingRecallPromptLabel(null);
+    setMeetingRecallError(null);
+    setMeetingRecallLoading(false);
+  }, [selectedRecording?.id]);
 
   const updateMeetingSections = (
     updater: (sections: MeetingNoteSection[]) => MeetingNoteSection[]
@@ -1710,7 +2035,7 @@ export function RecordingsView() {
           }
         })
         .catch((error) => {
-          console.error("Failed to open requested recording workspace:", error);
+          console.error("Failed to open requested meeting view:", error);
         });
     };
 
@@ -1910,7 +2235,7 @@ export function RecordingsView() {
                         {activeMeetingCaptureMode}
                       </Badge>
                       <Badge variant="outline" className="bg-background/70">
-                        Template: {liveMeetingTemplateOption.label}
+                        Playbook: {liveMeetingTemplateOption.label}
                       </Badge>
                       {liveMeetingConsentShown ? (
                         <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
@@ -2211,7 +2536,7 @@ export function RecordingsView() {
                         </p>
                       </div>
                       <div className="text-xs text-muted-foreground text-right">
-                        <div>Template: {selectedTemplateOption.label}</div>
+                        <div>Playbook: {selectedTemplateOption.label}</div>
                         <div>{selectedTemplateOption.description}</div>
                         {selectedRecording?.notesUpdatedAt ? (
                           <div>
@@ -2264,7 +2589,7 @@ export function RecordingsView() {
                     </div>
                     <div className="mt-4 flex flex-wrap items-center gap-2">
                       <label className="text-xs font-medium text-muted-foreground" htmlFor="meeting-template">
-                        Format
+                        Playbook
                       </label>
                       <select
                         id="meeting-template"
@@ -2554,6 +2879,245 @@ export function RecordingsView() {
                   </div>
 
                   <div className="space-y-4">
+                    <div className="rounded-lg border bg-muted/20 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                            Prep Briefing
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Solo prep before or after the call: playbook, relationship memory, and the questions worth answering live.
+                          </p>
+                        </div>
+                        <Badge variant="outline" className="bg-background/80">
+                          {selectedTemplateOption.label}
+                        </Badge>
+                      </div>
+                      <div className="mt-3 space-y-3">
+                        <div className="rounded-md border bg-background/80 px-3 py-3">
+                          <p className="text-xs font-medium text-muted-foreground">Prep prompts</p>
+                          <ul className="mt-2 space-y-1 text-sm">
+                            {selectedMeetingPrepPrompts.map((prompt) => (
+                              <li key={prompt}>- {prompt}</li>
+                            ))}
+                          </ul>
+                        </div>
+                        <div className="rounded-md border bg-background/80 px-3 py-3">
+                          <p className="text-xs font-medium text-muted-foreground">Relationship memory</p>
+                          {selectedMeetingRelationshipMatches.people.length === 0 &&
+                          selectedMeetingRelationshipMatches.companies.length === 0 ? (
+                            <p className="mt-2 text-sm text-muted-foreground">
+                              No strong matches yet. Nautilus will start surfacing people and companies as meetings accumulate.
+                            </p>
+                          ) : (
+                            <div className="mt-2 space-y-2">
+                              {selectedMeetingRelationshipMatches.people.map((person) => (
+                                <div key={`person-${person.id}`} className="rounded-md border bg-muted/20 px-3 py-2">
+                                  <p className="text-sm font-medium">{person.name}</p>
+                                  <p className="mt-1 text-xs text-muted-foreground">
+                                    {person.recordingCount} meetings · last seen {new Date(person.lastSeenAt).toLocaleDateString()}
+                                  </p>
+                                  {person.recentMeetings[0] ? (
+                                    <p className="mt-2 text-sm text-muted-foreground">
+                                      {person.recentMeetings[0].snippet}
+                                    </p>
+                                  ) : null}
+                                </div>
+                              ))}
+                              {selectedMeetingRelationshipMatches.companies.map((company) => (
+                                <div key={`company-${company.id}`} className="rounded-md border bg-muted/20 px-3 py-2">
+                                  <p className="text-sm font-medium">{company.name}</p>
+                                  <p className="mt-1 text-xs text-muted-foreground">
+                                    {company.recordingCount} meetings · last seen {new Date(company.lastSeenAt).toLocaleDateString()}
+                                  </p>
+                                  {company.recentMeetings[0] ? (
+                                    <p className="mt-2 text-sm text-muted-foreground">
+                                      {company.recentMeetings[0].snippet}
+                                    </p>
+                                  ) : null}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border bg-muted/20 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                            Follow-up Center
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Deterministic solo outputs you can copy immediately, even before generating an AI draft.
+                          </p>
+                        </div>
+                        <Badge variant="outline" className="bg-background/80">
+                          Solo
+                        </Badge>
+                      </div>
+                      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleCopyMeetingFollowUp(deterministicMeetingFollowUp)}
+                        >
+                          <Copy className="mr-2 h-4 w-4" />
+                          Copy Follow-up Email
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            void handleCopyMeetingFollowUp(
+                              `${meetingSummary.trim() || "Quick recap"}\n\n${selectedMeetingActionItems
+                                .map((item) => `- ${item}`)
+                                .join("\n")}`.trim()
+                            )
+                          }
+                        >
+                          <Copy className="mr-2 h-4 w-4" />
+                          Copy DM Recap
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleCopyMeetingFollowUp(deterministicNextAgenda)}
+                        >
+                          <Copy className="mr-2 h-4 w-4" />
+                          Copy Next Agenda
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            void handleCopyMeetingFollowUp(
+                              selectedMeetingActionItems.length > 0
+                                ? selectedMeetingActionItems.map((item) => `- ${item}`).join("\n")
+                                : "- Review this meeting summary\n- Confirm owners and dates"
+                            )
+                          }
+                        >
+                          <Copy className="mr-2 h-4 w-4" />
+                          Copy Task List
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border bg-muted/20 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                            Cross-meeting Recall
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Ask across prior meetings before you draft the next note, reply, or agenda.
+                          </p>
+                        </div>
+                        <Badge variant="outline" className="bg-background/80">
+                          Memory
+                        </Badge>
+                      </div>
+                      <div className="mt-3 space-y-3">
+                        <div className="flex flex-wrap gap-2">
+                          {selectedMeetingRecallPrompts.map((prompt) => (
+                            <Button
+                              key={prompt}
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void runMeetingRecall(prompt)}
+                              disabled={meetingRecallLoading}
+                            >
+                              {prompt.includes("What has")
+                                ? prompt.replace(/^What has /, "").split("?")[0]
+                                : "Recall next follow-up"}
+                            </Button>
+                          ))}
+                        </div>
+                        <div className="flex gap-2">
+                          <Input
+                            value={meetingRecallQuery}
+                            onChange={(event) => setMeetingRecallQuery(event.target.value)}
+                            placeholder="Ask across prior meetings"
+                            aria-label="Ask across meetings"
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            onClick={() => void runMeetingRecall()}
+                            disabled={meetingRecallLoading || !meetingRecallQuery.trim()}
+                          >
+                            {meetingRecallLoading ? (
+                              <>
+                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                Asking
+                              </>
+                            ) : (
+                              "Ask across meetings"
+                            )}
+                          </Button>
+                        </div>
+                        {meetingRecallError ? (
+                          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                            {meetingRecallError}
+                          </div>
+                        ) : null}
+                        {meetingRecallResponse ? (
+                          <div className="space-y-3 rounded-md border bg-background/80 px-3 py-3">
+                            <div className="flex items-start justify-between gap-3">
+                              <div>
+                                <p className="text-xs font-medium text-muted-foreground">
+                                  {meetingRecallPromptLabel ?? "Cross-meeting answer"}
+                                </p>
+                                <p className="mt-2 text-sm whitespace-pre-wrap">
+                                  {meetingRecallResponse}
+                                </p>
+                              </div>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => void handleCopyMeetingRecall(meetingRecallResponse)}
+                              >
+                                <Copy className="mr-2 h-4 w-4" />
+                                Copy
+                              </Button>
+                            </div>
+                            {meetingRecallCitations.length > 0 ? (
+                              <div className="space-y-2">
+                                <p className="text-xs font-medium text-muted-foreground">
+                                  Supporting meetings
+                                </p>
+                                {meetingRecallCitations.slice(0, 3).map((citation, index) => (
+                                  <div
+                                    key={`meeting-recall-citation-${index}`}
+                                    className="rounded-md border bg-muted/20 px-3 py-2 text-sm"
+                                  >
+                                    <p>{citation.text}</p>
+                                    <p className="mt-1 text-[11px] text-muted-foreground">
+                                      {formatCitationTimeRange(citation) ?? "No timestamp"}
+                                      {citation.recordingId ? ` · ${citation.recordingId}` : ""}
+                                    </p>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            Start with a suggested prompt or ask your own question to pull forward
+                            context from prior meetings.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
                     <div className="rounded-lg border bg-muted/20 p-4">
                       <div className="flex items-start justify-between gap-3">
                         <div>

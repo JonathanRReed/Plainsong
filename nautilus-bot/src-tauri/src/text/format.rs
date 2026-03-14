@@ -355,17 +355,10 @@ impl Default for IntelligentPunctuator {
     }
 }
 
-fn replace_spoken_token(
-    input: &str,
-    phrase: &str,
-    replacement: &str,
-) -> String {
+fn replace_spoken_token(input: &str, phrase: &str, replacement: &str) -> String {
     let escaped = regex::escape(phrase);
     let pattern = format!(r"(^|[\s])({})([\s]|$)", escaped);
-    let Ok(re) = RegexBuilder::new(&pattern)
-        .case_insensitive(true)
-        .build()
-    else {
+    let Ok(re) = RegexBuilder::new(&pattern).case_insensitive(true).build() else {
         return input.to_string();
     };
 
@@ -380,6 +373,19 @@ fn normalize_spoken_punctuation(text: &str) -> String {
         ("new paragraph", "\n\n"),
         ("new line", "\n"),
         ("newline", "\n"),
+        ("bullet point", "\n- "),
+        ("bullet", "\n- "),
+        ("dash", " - "),
+        ("open parenthesis", "("),
+        ("close parenthesis", ")"),
+        ("open paren", "("),
+        ("close paren", ")"),
+        ("open quote", "\""),
+        ("close quote", "\""),
+        ("quote", "\""),
+        ("at sign", "@"),
+        ("forward slash", "/"),
+        ("slash", "/"),
         ("question mark", "?"),
         ("exclamation point", "!"),
         ("exclamation mark", "!"),
@@ -390,9 +396,11 @@ fn normalize_spoken_punctuation(text: &str) -> String {
         ("semicolon", ";"),
     ];
 
-    replacements.iter().fold(text.to_string(), |current, (phrase, replacement)| {
-        replace_spoken_token(&current, phrase, replacement)
-    })
+    replacements
+        .iter()
+        .fold(text.to_string(), |current, (phrase, replacement)| {
+            replace_spoken_token(&current, phrase, replacement)
+        })
 }
 
 fn normalize_spacing_around_punctuation(text: &str) -> String {
@@ -421,6 +429,40 @@ fn normalize_spacing_around_punctuation(text: &str) -> String {
         .replace("\n\n\n", "\n\n")
         .replace(" \n", "\n")
         .replace("\n ", "\n")
+}
+
+fn compact_structural_symbol_spacing(text: &str) -> String {
+    let mut output = text.to_string();
+
+    let replacements = [
+        ("( ", "("),
+        (" )", ")"),
+        ("[ ", "["),
+        (" ]", "]"),
+        ("{ ", "{"),
+        (" }", "}"),
+    ];
+    for (needle, replacement) in replacements {
+        output = output.replace(needle, replacement);
+    }
+
+    let regex_replacements = [
+        (r#""\s+([A-Za-z0-9])"#, r#""$1"#),
+        (r#"([A-Za-z0-9.,!?])\s+""#, r#"$1""#),
+        (r"([A-Za-z0-9])\(", r"$1 ("),
+        (r"([A-Za-z0-9])\s*/\s*([A-Za-z0-9])", r"$1/$2"),
+        (r"(?m)^-\s*([A-Za-z0-9])", r"- $1"),
+        (r"(?m)\n-\s*([A-Za-z0-9])", "\n- $1"),
+    ];
+
+    for (pattern, replacement) in regex_replacements {
+        let Ok(re) = RegexBuilder::new(pattern).build() else {
+            continue;
+        };
+        output = re.replace_all(&output, replacement).to_string();
+    }
+
+    output
 }
 
 fn restore_structural_breaks(text: &str) -> String {
@@ -469,6 +511,20 @@ fn capitalize_after_line_breaks(text: &str) -> String {
     }
 
     output
+}
+
+fn capitalize_after_bullet_markers(text: &str) -> String {
+    let Ok(re) = RegexBuilder::new(r"(?m)(^|\n)-\s+([a-z])").build() else {
+        return text.to_string();
+    };
+    re.replace_all(text, |captures: &regex::Captures<'_>| {
+        format!(
+            "{}- {}",
+            &captures[1],
+            captures[2].to_ascii_uppercase()
+        )
+    })
+    .to_string()
 }
 
 fn resolve_dictation_app_style(app_target: Option<&str>) -> DictationAppStyle {
@@ -569,10 +625,7 @@ fn normalize_for_app_style(
                 ensure_terminal_punctuation(trimmed, '.')
             }
         }
-        DictationAppStyle::Document => trimmed
-            .replace("\n\n\n", "\n\n")
-            .trim()
-            .to_string(),
+        DictationAppStyle::Document => trimmed.replace("\n\n\n", "\n\n").trim().to_string(),
         DictationAppStyle::Worklog => {
             let merged = merge_inline_conjunction_sentences(trimmed);
             if mode_preset == "messages" {
@@ -597,9 +650,22 @@ pub fn smart_format_dictation_text_for_app(
 
     let normalized = normalize_spoken_punctuation(trimmed);
     let normalized = capitalize_standalone_i(&normalized);
-    let normalized = restore_structural_breaks(&normalize_spacing_around_punctuation(&normalized));
+    let normalized = restore_structural_breaks(&compact_structural_symbol_spacing(
+        &normalize_spacing_around_punctuation(&normalized),
+    ));
     let normalized = preserve_structural_break_tokens(&normalized);
     let app_style = resolve_dictation_app_style(app_target);
+
+    if normalized.contains("__NAUTILUS_LINE_BREAK__")
+        || normalized.contains("__NAUTILUS_PARAGRAPH_BREAK__")
+    {
+        let structured = compact_structural_symbol_spacing(&capitalize_after_bullet_markers(
+            &capitalize_after_line_breaks(&restore_structural_breaks(
+                &restore_structural_break_tokens(&normalized),
+            )),
+        ));
+        return normalize_for_app_style(structured, mode_preset, app_style);
+    }
 
     let config = match (mode_preset, app_style) {
         ("messages", _) => PunctuationConfig {
@@ -677,13 +743,15 @@ pub fn smart_format_dictation_text_for_app(
     };
 
     normalize_for_app_style(
-        capitalize_after_line_breaks(&restore_structural_breaks(
-            &restore_structural_break_tokens(&capitalize_after_line_breaks(
-                &restore_structural_breaks(
-                    IntelligentPunctuator::new(config)
-                        .punctuate(&normalized)
-                        .trim(),
-                ),
+        compact_structural_symbol_spacing(&capitalize_after_bullet_markers(
+            &capitalize_after_line_breaks(&restore_structural_breaks(
+                &restore_structural_break_tokens(&capitalize_after_line_breaks(
+                    &restore_structural_breaks(
+                        IntelligentPunctuator::new(config)
+                            .punctuate(&normalized)
+                            .trim(),
+                    ),
+                )),
             )),
         )),
         mode_preset,
@@ -816,8 +884,7 @@ mod tests {
     #[test]
     fn smart_format_dictation_uses_document_style_for_browser_domain_hints() {
         let input = "first section period new paragraph second section period";
-        let result =
-            smart_format_dictation_text_for_app(input, "voice", Some("docs.google.com"));
+        let result = smart_format_dictation_text_for_app(input, "voice", Some("docs.google.com"));
         assert!(result.contains("\n\n"));
         assert!(result.ends_with('.'));
     }
@@ -826,6 +893,24 @@ mod tests {
     fn smart_format_dictation_uses_worklog_style_for_browser_domain_hints() {
         let input = "followed up with procurement and sent revised timeline";
         let result = smart_format_dictation_text_for_app(input, "voice", Some("linear.app"));
-        assert_eq!(result, "Followed up with procurement and sent revised timeline.");
+        assert_eq!(
+            result,
+            "Followed up with procurement and sent revised timeline."
+        );
+    }
+
+    #[test]
+    fn smart_format_dictation_supports_bullets_and_parentheses() {
+        let input = "bullet review pricing open paren with finance close paren new line bullet send follow up";
+        let result = smart_format_dictation_text_for_app(input, "notes", Some("Notion"));
+        assert!(result.contains("- Review pricing (with finance)"));
+        assert!(result.contains("\n- Send follow up"));
+    }
+
+    #[test]
+    fn smart_format_dictation_supports_quotes_and_symbols() {
+        let input = "open quote launch ready close quote at sign team slash ops";
+        let result = smart_format_dictation_text_for_app(input, "messages", Some("Slack"));
+        assert_eq!(result, "\"Launch ready\" @ team/ops");
     }
 }

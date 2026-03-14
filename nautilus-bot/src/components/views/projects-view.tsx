@@ -44,7 +44,7 @@ export function ProjectsView() {
       <div className="p-6 border-b flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Projects</h1>
-          <p className="text-muted-foreground">Organize recordings and workspaces</p>
+          <p className="text-muted-foreground">Organize recordings and personal libraries</p>
         </div>
         <Button onClick={() => setShowNewProject(true)}>
           <Plus className="h-4 w-4 mr-2" />

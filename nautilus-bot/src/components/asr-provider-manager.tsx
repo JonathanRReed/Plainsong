@@ -509,6 +509,34 @@ export function AsrProviderManager({
   const modelOptionsForProvider = (providerType: AsrProviderType) =>
     providerByType(providerType)?.modelOptions ?? [];
 
+  const readyLocalProvider = (...providerTypes: AsrProviderType[]) =>
+    providerTypes
+      .map((providerType) => providerByType(providerType))
+      .find((provider) => provider?.runtimeStatus === "ready" && provider.inferenceEnabled) ?? null;
+
+  const fastLocalDictationProvider =
+    readyLocalProvider("moonshine", "macos_apple_speech", "distil_whisper", "whisper") ??
+    providerByType(dictationProvider) ??
+    null;
+  const higherAccuracyLocalProvider =
+    readyLocalProvider("distil_whisper", "whisper", "parakeet") ??
+    providerByType(defaultProvider) ??
+    null;
+  const meetingGradeLocalProvider =
+    readyLocalProvider("distil_whisper", "parakeet", "voxtral") ??
+    providerByType(meetingProvider) ??
+    null;
+  const currentDictationRouteProvider =
+    providerByType(useSharedAsrSelection ? defaultProvider : dictationProvider) ?? null;
+  const currentMeetingRouteProvider =
+    providerByType(useSharedAsrSelection ? defaultProvider : meetingProvider) ?? null;
+  const mlxAccelerationLabel = platformSettings?.macos.mlxEnabled
+    ? "Enabled"
+    : "Disabled";
+  const mlxAccelerationDetail = platformSettings?.macos.mlxEnabled
+    ? "Apple Silicon acceleration is available for local experiments when the MLX sidecar assets are installed."
+    : "MLX acceleration is off, so Nautilus will stay on the standard local runtime lane.";
+
   const meetingProviders = providers.filter((provider) =>
     isMeetingEligibleProvider(provider.providerType)
   );
@@ -1385,6 +1413,98 @@ export function AsrProviderManager({
                       });
                     }, meetingModelOptionsForProvider(meetingProvider))
                   : null}
+              </div>
+
+              <div className="rounded-lg border border-border bg-muted/10 p-4 space-y-3">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline">Solo local lanes</Badge>
+                    <span className="text-sm font-medium">Recommended local model lanes</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    A simpler view of the local stack for fast dictation, higher-quality local transcription, and Apple Silicon acceleration.
+                  </p>
+                </div>
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="rounded-md border bg-background/60 p-3 space-y-1">
+                    <p className="text-xs font-medium text-muted-foreground">Fast local dictation</p>
+                    <p className="text-sm font-medium">
+                      {fastLocalDictationProvider?.name ?? "No ready local dictation provider"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {fastLocalDictationProvider?.runtimeStatus === "ready"
+                        ? "Best lane for low-friction solo dictation."
+                        : "Download or enable a local dictation model to unlock the fast lane."}
+                    </p>
+                  </div>
+                  <div className="rounded-md border bg-background/60 p-3 space-y-1">
+                    <p className="text-xs font-medium text-muted-foreground">Higher-quality local</p>
+                    <p className="text-sm font-medium">
+                      {higherAccuracyLocalProvider?.name ?? "No ready high-accuracy local provider"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {higherAccuracyLocalProvider?.runtimeStatus === "ready"
+                        ? "Use this when you want cleaner local transcription at the cost of some speed."
+                        : "Keep a stronger local model ready for longer dictations and rewrites."}
+                    </p>
+                  </div>
+                  <div className="rounded-md border bg-background/60 p-3 space-y-1">
+                    <p className="text-xs font-medium text-muted-foreground">Meeting-grade local</p>
+                    <p className="text-sm font-medium">
+                      {meetingGradeLocalProvider?.name ?? "No ready local meeting model"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {meetingGradeLocalProvider?.runtimeStatus === "ready"
+                        ? "Stronger local route for recordings, summaries, and follow-up grounded in meetings."
+                        : "Meetings may fall back to another route until a meeting-grade local model is ready."}
+                    </p>
+                  </div>
+                </div>
+                <div className="rounded-md border bg-background/60 p-3 space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-medium text-muted-foreground">Apple Silicon acceleration</p>
+                    <Badge variant={platformSettings?.macos.mlxEnabled ? "default" : "secondary"} className={platformSettings?.macos.mlxEnabled ? "bg-green-600" : ""}>
+                      {mlxAccelerationLabel}
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{mlxAccelerationDetail}</p>
+                </div>
+                <div className="rounded-md border bg-background/60 p-3 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-medium text-muted-foreground">Current solo routes</p>
+                    <Badge variant="outline">{useSharedAsrSelection ? "Shared route" : "Split routes"}</Badge>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="rounded-md border bg-muted/20 p-3 space-y-1">
+                      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Dictation
+                      </p>
+                      <p className="text-sm font-medium">
+                        {currentDictationRouteProvider?.name ?? "No dictation route selected"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {currentDictationRouteProvider?.providerType ===
+                        fastLocalDictationProvider?.providerType
+                          ? "Aligned with the fast solo dictation lane."
+                          : "Keep the fast lane ready if you want lower-friction everyday dictation."}
+                      </p>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 p-3 space-y-1">
+                      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Meetings
+                      </p>
+                      <p className="text-sm font-medium">
+                        {currentMeetingRouteProvider?.name ?? "No meeting route selected"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {currentMeetingRouteProvider?.providerType ===
+                        meetingGradeLocalProvider?.providerType
+                          ? "Aligned with the stronger meeting lane."
+                          : "Use a stronger route here when summaries and follow-up quality matter more than speed."}
+                      </p>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               {renderAppleNativeSetupCard()}

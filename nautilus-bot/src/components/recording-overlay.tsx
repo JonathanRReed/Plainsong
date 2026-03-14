@@ -62,7 +62,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
         <DialogHeader>
           <DialogTitle>Start Meeting</DialogTitle>
           <DialogDescription>
-            Choose the capture mode and note format. Nautilus will carry these choices into the live recorder and review workspace.
+            Choose the capture mode and note format. Nautilus will carry these choices into the live recorder and review view.
           </DialogDescription>
         </DialogHeader>
 
