@@ -107,6 +107,26 @@ struct BacktrackResolution {
     used_recent_insert: bool,
 }
 
+fn normalize_backtrack_replacement_phrase(value: &str) -> String {
+    let mut replacement = value.trim();
+    for prefix in [
+        "actually ",
+        "actually, ",
+        "no, actually ",
+        "no actually ",
+        "no comma actually ",
+        "no, say ",
+        "no say ",
+        "no comma say ",
+    ] {
+        if let Some(stripped) = strip_prefix_ignore_case(replacement, prefix) {
+            replacement = stripped.trim();
+            break;
+        }
+    }
+    replacement.to_string()
+}
+
 fn resolve_backtrack_command(
     text: &str,
     recent_inserted_text: Option<&str>,
@@ -137,6 +157,29 @@ fn resolve_backtrack_command(
     else {
         return None;
     };
+
+    for prefix in [
+        "scratch that ",
+        "scratch that, ",
+        "undo that ",
+        "undo that, ",
+        "undo it ",
+        "undo it, ",
+        "never mind ",
+        "never mind, ",
+    ] {
+        if let Some(replacement) = strip_prefix_ignore_case(trimmed, prefix) {
+            let replacement = normalize_backtrack_replacement_phrase(replacement);
+            if !replacement.is_empty() {
+                return Some(BacktrackResolution {
+                    command_key: "backtrack_replace_last_insert",
+                    text: replacement,
+                    undo_previous_insert: true,
+                    used_recent_insert: true,
+                });
+            }
+        }
+    }
 
     for prefix in [
         "actually ",
@@ -392,6 +435,49 @@ mod tests {
         assert!(!result.recent_insert_reused);
         assert_eq!(result.pipeline_stage_keys, vec!["backtrack"]);
         assert!(!result.undo_previous_insert);
+    }
+
+    #[test]
+    fn pipeline_replaces_last_insert_for_scratch_that_with_replacement() {
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "scratch that actually ship it tomorrow",
+            dictionary_entries: &[],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            formatting_hint: None,
+            smart_formatting_enabled: false,
+            recent_inserted_text: Some("ship it today"),
+        });
+
+        assert_eq!(result.text, "ship it tomorrow");
+        assert_eq!(
+            result.command_applied.as_deref(),
+            Some("backtrack_replace_last_insert")
+        );
+        assert!(result.recent_insert_reused);
+        assert!(result.undo_previous_insert);
+    }
+
+    #[test]
+    fn pipeline_applies_dictionary_before_scratch_that_replacement() {
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "scratch that jon is ready",
+            dictionary_entries: &[dictionary_entry("jon", "John")],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            formatting_hint: None,
+            smart_formatting_enabled: false,
+            recent_inserted_text: Some("sam is ready"),
+        });
+
+        assert_eq!(result.text, "John is ready");
+        assert_eq!(result.dictionary_applied_count, 1);
+        assert_eq!(
+            result.command_applied.as_deref(),
+            Some("backtrack_replace_last_insert")
+        );
     }
 
     #[test]

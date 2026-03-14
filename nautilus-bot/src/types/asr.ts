@@ -79,6 +79,7 @@ export type AsrProviderType =
   | "parakeet"
   | "whisper_candle"
   | "distil_whisper"
+  | "mlx_audio"
   | "macos_apple_speech"
   | "moonshine"
   | "voxtral"

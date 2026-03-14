@@ -43,10 +43,10 @@ impl PlatformEngine {
         match self {
             PlatformEngine::ProviderDefault => true,
             PlatformEngine::MacosAppleSpeech | PlatformEngine::WindowsSdkDictation => {
-                !provider.is_remote()
+                !provider.is_remote() && provider != AsrProviderType::MlxAudio
             }
             PlatformEngine::MacosMlxSidecar | PlatformEngine::WindowsFoundryLocal => {
-                provider.is_local()
+                provider.is_local() && provider != AsrProviderType::MlxAudio
             }
         }
     }

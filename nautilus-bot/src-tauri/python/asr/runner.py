@@ -21,6 +21,10 @@ _PARAKEET_RUNTIME = {
     "model_spec": None,
     "pipe": None,
 }
+_MLX_AUDIO_RUNTIME = {
+    "model_spec": None,
+    "model": None,
+}
 
 
 def emit(payload):
@@ -46,6 +50,23 @@ def model_spec_for(provider: str, model_dir: Path) -> str:
             if model_id:
                 return model_id
         return "nvidia/parakeet-ctc-0.6b"
+    if provider == "mlx_audio_stt":
+        manifest = model_dir / "manifest.json"
+        if not model_dir.exists():
+            raise ValueError(f"MLX Audio model directory missing: {model_dir}")
+        if manifest.exists():
+            payload = json.loads(manifest.read_text())
+            model_id = str(payload.get("model_id", "")).strip()
+            has_artifacts = any(
+                child.name != "manifest.json" for child in model_dir.iterdir()
+            )
+            if model_id and has_artifacts:
+                return str(model_dir)
+            if model_id:
+                return model_id
+        if any(child.name != "manifest.json" for child in model_dir.iterdir()):
+            return str(model_dir)
+        raise ValueError(f"MLX Audio model manifest missing in {model_dir}")
     raise ValueError(f"Unsupported provider: {provider}")
 
 
@@ -193,6 +214,9 @@ def run_probe(provider: str):
         import transformers  # noqa: F401
         import soundfile  # noqa: F401
         import librosa  # noqa: F401
+    if provider == "mlx_audio_stt":
+        import mlx_audio.stt  # noqa: F401
+        import mlx.core  # noqa: F401
     if provider == "voxtral_local":
         from transformers import AutoProcessor, VoxtralRealtimeForConditionalGeneration  # noqa: F401
         from mistral_common.tokens.tokenizers.audio import Audio  # noqa: F401
@@ -235,32 +259,62 @@ def run_download(provider: str, model_dir: Path, model_id: Optional[str] = None)
             "preprocessor_config.json",
             "config.json",
         ]
+    elif provider == "mlx_audio_stt":
+        if not model_id:
+            raise ValueError("model_id is required for MLX Audio downloads")
+        repo_id = str(model_id).strip()
+        if repo_id == "canary-1b-v2-mlx":
+            raise ValueError(
+                "Canary does not have an official downloadable MLX repo yet. Convert or place a local canary-1b-v2-mlx bundle into the selected model directory."
+            )
+        allow_patterns = None
     else:
         raise ValueError(f"Unsupported provider for download: {provider}")
 
-    snapshot_download(
-        repo_id=repo_id,
-        local_dir=str(model_dir),
-        local_dir_use_symlinks=False,
-        allow_patterns=allow_patterns,
-    )
+    download_kwargs = {
+        "repo_id": repo_id,
+        "local_dir": str(model_dir),
+        "local_dir_use_symlinks": False,
+    }
+    if allow_patterns is not None:
+        download_kwargs["allow_patterns"] = allow_patterns
 
-    if provider == "parakeet_ctc":
+    snapshot_download(**download_kwargs)
+
+    if provider in {"parakeet_ctc", "mlx_audio_stt"}:
         manifest = model_dir / "manifest.json"
-        if not manifest.exists():
-            manifest.write_text(
-                json.dumps(
-                    {
-                        "provider": provider,
-                        "repo_id": repo_id,
-                        "model_id": repo_id,
-                    },
-                    ensure_ascii=True,
-                    indent=2,
-                )
+        manifest.write_text(
+            json.dumps(
+                {
+                    "provider": provider,
+                    "repo_id": repo_id,
+                    "model_id": repo_id,
+                },
+                ensure_ascii=True,
+                indent=2,
             )
+        )
 
     return {"ok": True}
+
+
+def _reset_mlx_audio_runtime():
+    _MLX_AUDIO_RUNTIME["model_spec"] = None
+    _MLX_AUDIO_RUNTIME["model"] = None
+
+
+def _load_mlx_audio_model(model_spec: str):
+    from mlx_audio.stt import load
+
+    cached_spec = _MLX_AUDIO_RUNTIME["model_spec"]
+    cached_model = _MLX_AUDIO_RUNTIME["model"]
+    if cached_spec == model_spec and cached_model is not None:
+        return cached_model
+
+    model = load(model_spec)
+    _MLX_AUDIO_RUNTIME["model_spec"] = model_spec
+    _MLX_AUDIO_RUNTIME["model"] = model
+    return model
 
 
 def _load_parakeet_pipeline(model_spec: str):
@@ -398,6 +452,62 @@ def run_transcribe_voxtral(model_spec: str, audio_path: Path):
     }
 
 
+def _result_text(payload) -> str:
+    if payload is None:
+        return ""
+    text = getattr(payload, "text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    if isinstance(payload, str):
+        return payload.strip()
+    if isinstance(payload, dict):
+        candidate = payload.get("text")
+        if isinstance(candidate, str):
+            return candidate.strip()
+    return str(payload).strip()
+
+
+def _result_language(payload) -> str:
+    language = getattr(payload, "language", None)
+    if isinstance(language, str) and language.strip():
+        return language.strip()
+    if isinstance(payload, dict):
+        candidate = payload.get("language")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return "auto"
+
+
+def _result_confidence(payload) -> float:
+    confidence = getattr(payload, "confidence", None)
+    if isinstance(confidence, (int, float)):
+        return float(confidence)
+    if isinstance(payload, dict):
+        candidate = payload.get("confidence")
+        if isinstance(candidate, (int, float)):
+            return float(candidate)
+    return 0.9
+
+
+def run_transcribe_mlx_audio(model_spec: str, audio_path: Path):
+    model = _load_mlx_audio_model(model_spec)
+    try:
+        result = model.generate(str(audio_path), verbose=False, generation_stream=False)
+    except Exception:
+        _reset_mlx_audio_runtime()
+        raise
+
+    text = _result_text(result)
+    if not text:
+        raise RuntimeError("MLX Audio returned an empty transcription")
+
+    return {
+        "text": text,
+        "language": _result_language(result),
+        "confidence": _result_confidence(result),
+    }
+
+
 def run_transcribe(provider: str, model_dir: Path, audio_path: Path):
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -407,6 +517,8 @@ def run_transcribe(provider: str, model_dir: Path, audio_path: Path):
         result = run_transcribe_voxtral(model_spec, audio_path)
     elif provider == "parakeet_ctc":
         result = run_transcribe_parakeet(model_spec, audio_path)
+    elif provider == "mlx_audio_stt":
+        result = run_transcribe_mlx_audio(model_spec, audio_path)
     else:
         raise ValueError(f"Unsupported provider for transcription: {provider}")
 

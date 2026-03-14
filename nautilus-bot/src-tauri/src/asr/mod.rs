@@ -4,6 +4,7 @@ pub mod elevenlabs_scribe;
 pub mod groq;
 pub mod macos_apple_speech_provider;
 pub mod manager;
+pub mod mlx_audio;
 pub mod moonshine;
 pub mod openai_cloud;
 pub mod parakeet;
@@ -101,6 +102,7 @@ pub enum AsrProviderType {
     Parakeet,
     WhisperCandle,
     DistilWhisper,
+    MlxAudio,
     MacosAppleSpeech,
     Moonshine,
     Voxtral,
@@ -117,6 +119,7 @@ impl AsrProviderType {
             AsrProviderType::Parakeet,
             AsrProviderType::WhisperCandle,
             AsrProviderType::DistilWhisper,
+            AsrProviderType::MlxAudio,
             AsrProviderType::MacosAppleSpeech,
             AsrProviderType::Moonshine,
             AsrProviderType::Voxtral,
@@ -134,6 +137,7 @@ impl AsrProviderType {
             AsrProviderType::Parakeet => "NVIDIA Parakeet",
             AsrProviderType::WhisperCandle => "Whisper Candle",
             AsrProviderType::DistilWhisper => "Distil Whisper",
+            AsrProviderType::MlxAudio => "MLX Audio",
             AsrProviderType::MacosAppleSpeech => "Apple Native Speech",
             AsrProviderType::Moonshine => "UsefulSensors Moonshine",
             AsrProviderType::Voxtral => "Mistral Voxtral Mini",
@@ -150,11 +154,12 @@ impl AsrProviderType {
             AsrProviderType::Parakeet => "parakeet-ctc-0.6b",
             AsrProviderType::WhisperCandle => "whisper-large-v3-turbo",
             AsrProviderType::DistilWhisper => "distil-large-v3.5",
+            AsrProviderType::MlxAudio => mlx_audio::default_model_id(),
             AsrProviderType::MacosAppleSpeech => "macos_apple_speech",
             AsrProviderType::Moonshine => "moonshine-base",
             AsrProviderType::Voxtral => "voxtral-local",
             AsrProviderType::WindowsSdkDictation => "windows_sdk_dictation",
-            AsrProviderType::ElevenLabsScribe => "scribe_v1",
+            AsrProviderType::ElevenLabsScribe => "scribe_v2",
             AsrProviderType::OpenAiCloud => "whisper-1",
             AsrProviderType::Groq => "whisper-large-v3-turbo",
         }
@@ -226,6 +231,7 @@ impl AsrProviderType {
                 id: "distil-large-v3.5".to_string(),
                 label: "Distil Whisper Large v3.5".to_string(),
             }],
+            AsrProviderType::MlxAudio => mlx_audio::model_options(),
             AsrProviderType::MacosAppleSpeech => vec![ModelOption {
                 id: "macos_apple_speech".to_string(),
                 label: "Managed by macOS".to_string(),
@@ -254,10 +260,16 @@ impl AsrProviderType {
                 id: "windows_sdk_dictation".to_string(),
                 label: "Managed by Windows".to_string(),
             }],
-            AsrProviderType::ElevenLabsScribe => vec![ModelOption {
-                id: "scribe_v1".to_string(),
-                label: "Scribe v1".to_string(),
-            }],
+            AsrProviderType::ElevenLabsScribe => vec![
+                ModelOption {
+                    id: "scribe_v2".to_string(),
+                    label: "Scribe v2".to_string(),
+                },
+                ModelOption {
+                    id: "scribe_v2_experimental".to_string(),
+                    label: "Scribe v2 Experimental".to_string(),
+                },
+            ],
             AsrProviderType::OpenAiCloud => vec![
                 ModelOption {
                     id: "whisper-1".to_string(),
@@ -306,6 +318,9 @@ impl AsrProviderFactory {
             AsrProviderType::DistilWhisper => Box::new(distil_whisper::DistilWhisperProvider::new(
                 selected_model_id,
             )),
+            AsrProviderType::MlxAudio => {
+                Box::new(mlx_audio::MlxAudioProvider::new(selected_model_id))
+            }
             AsrProviderType::MacosAppleSpeech => {
                 Box::new(macos_apple_speech_provider::MacosAppleSpeechProvider::new())
             }

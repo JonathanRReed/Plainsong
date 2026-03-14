@@ -16,7 +16,9 @@ use std::{cell::RefCell, thread_local};
 // ---------------------------------------------------------------------------
 const MOONSHINE_BASE_MODEL_ID: &str = "moonshine-base";
 const MOONSHINE_TINY_MODEL_ID: &str = "moonshine-tiny";
-const MOONSHINE_HF_REPO: &str = "UsefulSensors/moonshine";
+const MOONSHINE_ONNX_HF_REPO: &str = "UsefulSensors/moonshine";
+const MOONSHINE_TINY_HF_REPO: &str = "UsefulSensors/moonshine-tiny";
+const MOONSHINE_BASE_HF_REPO: &str = "UsefulSensors/moonshine-base";
 
 /// ONNX files and tokenizer shipped in the UsefulSensors/moonshine HF repo.
 const MOONSHINE_LOCAL_ENCODER: &str = "encoder_model.onnx";
@@ -188,18 +190,42 @@ fn normalize_moonshine_model_id(model_id: &str) -> String {
     }
 }
 
-fn moonshine_repo_paths(model_id: &str) -> (&'static str, &'static str, &'static str) {
+fn moonshine_repo_files(model_id: &str) -> [(&'static str, &'static str, &'static str); 3] {
     match model_id {
-        MOONSHINE_TINY_MODEL_ID => (
-            "onnx/merged/tiny/float/encoder_model.onnx",
-            "onnx/merged/tiny/float/decoder_model_merged.onnx",
-            "onnx/merged/tiny/float/tokenizer.json",
-        ),
-        _ => (
-            "onnx/merged/base/float/encoder_model.onnx",
-            "onnx/merged/base/float/decoder_model_merged.onnx",
-            "onnx/merged/base/float/tokenizer.json",
-        ),
+        MOONSHINE_TINY_MODEL_ID => [
+            (
+                MOONSHINE_ONNX_HF_REPO,
+                "onnx/merged/tiny/float/encoder_model.onnx",
+                MOONSHINE_LOCAL_ENCODER,
+            ),
+            (
+                MOONSHINE_ONNX_HF_REPO,
+                "onnx/merged/tiny/float/decoder_model_merged.onnx",
+                MOONSHINE_LOCAL_DECODER,
+            ),
+            (
+                MOONSHINE_TINY_HF_REPO,
+                "tokenizer.json",
+                MOONSHINE_LOCAL_TOKENIZER,
+            ),
+        ],
+        _ => [
+            (
+                MOONSHINE_ONNX_HF_REPO,
+                "onnx/merged/base/float/encoder_model.onnx",
+                MOONSHINE_LOCAL_ENCODER,
+            ),
+            (
+                MOONSHINE_ONNX_HF_REPO,
+                "onnx/merged/base/float/decoder_model_merged.onnx",
+                MOONSHINE_LOCAL_DECODER,
+            ),
+            (
+                MOONSHINE_BASE_HF_REPO,
+                "tokenizer.json",
+                MOONSHINE_LOCAL_TOKENIZER,
+            ),
+        ],
     }
 }
 
@@ -499,7 +525,7 @@ impl AsrProvider for MoonshineProvider {
                 word_error_rate: Some(5.4),
                 real_time_factor: Some(0.18),
                 license: "MIT".to_string(),
-                source_url: format!("https://huggingface.co/{}", MOONSHINE_HF_REPO),
+                source_url: format!("https://huggingface.co/{}", MOONSHINE_BASE_HF_REPO),
             }
         } else {
             ModelInfo {
@@ -511,7 +537,7 @@ impl AsrProvider for MoonshineProvider {
                 word_error_rate: Some(4.0),
                 real_time_factor: Some(0.3),
                 license: "MIT".to_string(),
-                source_url: format!("https://huggingface.co/{}", MOONSHINE_HF_REPO),
+                source_url: format!("https://huggingface.co/{}", MOONSHINE_TINY_HF_REPO),
             }
         }
     }
@@ -635,17 +661,10 @@ impl AsrProvider for MoonshineProvider {
 
         let manager = DownloadManager::new()?;
         let progress_cb = std::sync::Arc::new(progress_cb);
-        let (encoder_path, decoder_path, tokenizer_path) =
-            moonshine_repo_paths(self.model_id.as_str());
-
-        let files = [
-            (encoder_path, MOONSHINE_LOCAL_ENCODER),
-            (decoder_path, MOONSHINE_LOCAL_DECODER),
-            (tokenizer_path, MOONSHINE_LOCAL_TOKENIZER),
-        ];
+        let files = moonshine_repo_files(self.model_id.as_str());
         let n_files = files.len() as f32;
 
-        for (i, (hf_path, local_name)) in files.into_iter().enumerate() {
+        for (i, (repo_id, hf_path, local_name)) in files.into_iter().enumerate() {
             let destination = self.model_dir.join(local_name);
             let is_valid = if local_name.ends_with(".onnx") {
                 is_valid_onnx_file(&destination)
@@ -660,7 +679,7 @@ impl AsrProvider for MoonshineProvider {
             }
             let url = format!(
                 "https://huggingface.co/{}/resolve/main/{}",
-                MOONSHINE_HF_REPO, hf_path
+                repo_id, hf_path
             );
             let cb = progress_cb.clone();
             manager
@@ -676,5 +695,33 @@ impl AsrProvider for MoonshineProvider {
             self.model_id
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        moonshine_repo_files, MOONSHINE_BASE_HF_REPO, MOONSHINE_LOCAL_TOKENIZER,
+        MOONSHINE_ONNX_HF_REPO, MOONSHINE_TINY_HF_REPO,
+    };
+
+    #[test]
+    fn tiny_tokenizer_uses_model_specific_repo() {
+        let files = moonshine_repo_files("moonshine-tiny");
+        assert_eq!(files[0].0, MOONSHINE_ONNX_HF_REPO);
+        assert_eq!(files[1].0, MOONSHINE_ONNX_HF_REPO);
+        assert_eq!(files[2].0, MOONSHINE_TINY_HF_REPO);
+        assert_eq!(files[2].1, "tokenizer.json");
+        assert_eq!(files[2].2, MOONSHINE_LOCAL_TOKENIZER);
+    }
+
+    #[test]
+    fn base_tokenizer_uses_model_specific_repo() {
+        let files = moonshine_repo_files("moonshine-base");
+        assert_eq!(files[0].0, MOONSHINE_ONNX_HF_REPO);
+        assert_eq!(files[1].0, MOONSHINE_ONNX_HF_REPO);
+        assert_eq!(files[2].0, MOONSHINE_BASE_HF_REPO);
+        assert_eq!(files[2].1, "tokenizer.json");
+        assert_eq!(files[2].2, MOONSHINE_LOCAL_TOKENIZER);
     }
 }

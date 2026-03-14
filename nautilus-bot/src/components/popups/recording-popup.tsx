@@ -313,6 +313,7 @@ export function RecordingPopup() {
 
   const hidePopup = async () => {
     try {
+      await invoke("dismiss_recording_overlay");
       await window.hide();
     } catch (error) {
       console.error("Failed to hide recording popup:", error);
@@ -365,7 +366,11 @@ export function RecordingPopup() {
     return (
       <div
         className="flex h-screen w-screen items-center justify-center bg-transparent"
-        onMouseDown={() => void window.startDragging()}
+        onMouseDownCapture={(event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          void window.startDragging();
+        }}
       >
         <div className="flex items-center gap-2 rounded-full border border-cyan-400/25 bg-slate-950/92 px-3 py-2 text-white shadow-[0_20px_60px_rgba(2,6,23,0.45)] backdrop-blur-md">
           <span className={`h-2.5 w-2.5 rounded-full ${isTranscribing ? "bg-cyan-400" : "bg-rose-400"}`} />
@@ -409,10 +414,15 @@ export function RecordingPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="rounded-[28px] border border-cyan-400/20 bg-[linear-gradient(180deg,rgba(2,6,23,0.96),rgba(15,23,42,0.92))] px-4 py-3 text-white shadow-[0_24px_80px_rgba(2,6,23,0.5)] backdrop-blur-xl">
+      <div className="max-h-[calc(100vh-24px)] overflow-y-auto rounded-[28px] border border-cyan-400/20 bg-[linear-gradient(180deg,rgba(2,6,23,0.96),rgba(15,23,42,0.92))] px-4 py-3 text-white shadow-[0_24px_80px_rgba(2,6,23,0.5)] backdrop-blur-xl">
         <div
-          className="mb-3 flex items-center justify-between text-slate-300"
-          onMouseDown={() => void window.startDragging()}
+          data-tauri-drag-region
+          className="mb-3 flex cursor-grab select-none items-center justify-between text-slate-300 active:cursor-grabbing"
+          onMouseDownCapture={(event) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            void window.startDragging();
+          }}
         >
           <div className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.2em]">
             <GripHorizontal className="h-3 w-3" />

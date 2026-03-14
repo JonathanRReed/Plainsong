@@ -156,7 +156,8 @@ impl BackupManager {
 
     /// Create a full data backup now.
     pub async fn create_backup(&self, data_dir: &Path) -> Result<BackupInfo> {
-        self.create_backup_with_type(data_dir, BackupType::Full).await
+        self.create_backup_with_type(data_dir, BackupType::Full)
+            .await
     }
 
     /// Create a settings-only backup for profile sync and migration.

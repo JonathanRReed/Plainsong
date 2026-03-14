@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 const VOXTRAL_LOCAL_MODEL_ID: &str = "voxtral-local";
 const VOXTRAL_CLOUD_MODEL_ID: &str = "voxtral-cloud";
-const VOXTRAL_API_MODEL: &str = "voxtral-mini-4b-2602";
+const VOXTRAL_API_MODEL: &str = "voxtral-mini-latest";
 const MISTRAL_ASR_URL: &str = "https://api.mistral.ai/v1/audio/transcriptions";
 const VOXTRAL_HF_REPO: &str = "mistralai/Voxtral-Mini-4B-Realtime-2602";
 

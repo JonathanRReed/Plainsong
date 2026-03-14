@@ -128,6 +128,8 @@ pub struct TranscriptionSettings {
     pub meeting_route_policy: String,
     /// Provider-specific model identifiers (keyed by provider value, e.g. "whisper")
     pub provider_model_ids: HashMap<String, String>,
+    /// Visible providers that should run through MLX Audio when a compatible model is selected.
+    pub mlx_accelerated_providers: Vec<String>,
     /// Auto-transcribe after recording
     pub auto_transcribe: bool,
     /// Enable speaker diarization
@@ -262,6 +264,7 @@ impl Default for TranscriptionSettings {
             meeting_model_id: "distil-large-v3.5".to_string(),
             meeting_route_policy: "prefer_local".to_string(),
             provider_model_ids: HashMap::new(),
+            mlx_accelerated_providers: Vec::new(),
             auto_transcribe: true,
             enable_diarization: true,
             intelligent_punctuation: true,
@@ -604,7 +607,10 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
         },
         "windows_sdk_dictation" => "windows_sdk_dictation".to_string(),
         "elevenlabs_scribe" => match model_id.trim() {
-            "" => "scribe_v1".to_string(),
+            "" => "scribe_v2".to_string(),
+            "scribe_v1" => "scribe_v2".to_string(),
+            "scribe_v1_experimental" => "scribe_v2_experimental".to_string(),
+            "scribe_v2_realtime" => "scribe_v2".to_string(),
             value => value.to_string(),
         },
         "openai_cloud" => match model_id.trim() {
@@ -632,8 +638,9 @@ fn normalize_dictation_active_languages(languages: &[String]) -> Vec<String> {
     for language in languages {
         let trimmed = language.trim().to_ascii_lowercase();
         let canonical = match trimmed.as_str() {
-            "en" | "es" | "fr" | "de" | "it" | "pt" | "ja" | "ko" | "zh" | "ru" | "ar"
-            | "hi" => Some(trimmed),
+            "en" | "es" | "fr" | "de" | "it" | "pt" | "ja" | "ko" | "zh" | "ru" | "ar" | "hi" => {
+                Some(trimmed)
+            }
             _ => None,
         };
         if let Some(language) = canonical {
@@ -878,9 +885,7 @@ impl Default for SettingsManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        normalize_dictation_active_languages, PlatformOptimizationSettings, Settings,
-    };
+    use super::{normalize_dictation_active_languages, PlatformOptimizationSettings, Settings};
 
     #[test]
     fn platform_optimization_defaults_are_stable() {
