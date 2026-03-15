@@ -22,6 +22,105 @@ struct MlxAudioModelSpec {
 
 const MLX_AUDIO_MODEL_SPECS: &[MlxAudioModelSpec] = &[
     MlxAudioModelSpec {
+        id: "mlx-community/whisper-tiny-asr-fp16",
+        label: "Whisper Tiny (MLX)",
+        name: "Whisper Tiny",
+        version: "mlx-community/whisper-tiny-asr-fp16",
+        parameters: "tiny",
+        languages: &["99+ languages"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/whisper-tiny-asr-fp16",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/whisper-tiny.en-asr-fp16",
+        label: "Whisper Tiny English (MLX)",
+        name: "Whisper Tiny English",
+        version: "mlx-community/whisper-tiny.en-asr-fp16",
+        parameters: "tiny",
+        languages: &["en"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/whisper-tiny.en-asr-fp16",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/whisper-base-asr-fp16",
+        label: "Whisper Base (MLX)",
+        name: "Whisper Base",
+        version: "mlx-community/whisper-base-asr-fp16",
+        parameters: "base",
+        languages: &["99+ languages"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/whisper-base-asr-fp16",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/whisper-base.en-asr-fp16",
+        label: "Whisper Base English (MLX)",
+        name: "Whisper Base English",
+        version: "mlx-community/whisper-base.en-asr-fp16",
+        parameters: "base",
+        languages: &["en"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/whisper-base.en-asr-fp16",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/whisper-small-asr-fp16",
+        label: "Whisper Small (MLX)",
+        name: "Whisper Small",
+        version: "mlx-community/whisper-small-asr-fp16",
+        parameters: "small",
+        languages: &["99+ languages"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/whisper-small-asr-fp16",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/whisper-small.en-asr-fp16",
+        label: "Whisper Small English (MLX)",
+        name: "Whisper Small English",
+        version: "mlx-community/whisper-small.en-asr-fp16",
+        parameters: "small",
+        languages: &["en"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/whisper-small.en-asr-fp16",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/whisper-medium-asr-fp16",
+        label: "Whisper Medium (MLX)",
+        name: "Whisper Medium",
+        version: "mlx-community/whisper-medium-asr-fp16",
+        parameters: "medium",
+        languages: &["99+ languages"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/whisper-medium-asr-fp16",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/whisper-medium.en-asr-fp16",
+        label: "Whisper Medium English (MLX)",
+        name: "Whisper Medium English",
+        version: "mlx-community/whisper-medium.en-asr-fp16",
+        parameters: "medium",
+        languages: &["en"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/whisper-medium.en-asr-fp16",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/whisper-large-v3-asr-fp16",
+        label: "Whisper Large V3 (MLX)",
+        name: "Whisper Large V3",
+        version: "mlx-community/whisper-large-v3-asr-fp16",
+        parameters: "large-v3",
+        languages: &["99+ languages"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/whisper-large-v3-asr-fp16",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
         id: "mlx-community/whisper-large-v3-turbo-asr-fp16",
         label: "Whisper Large V3 Turbo (MLX)",
         name: "Whisper Large V3 Turbo",
@@ -30,6 +129,50 @@ const MLX_AUDIO_MODEL_SPECS: &[MlxAudioModelSpec] = &[
         languages: &["99+ languages"],
         size_mb: 0.0,
         source_url: "https://huggingface.co/mlx-community/whisper-large-v3-turbo-asr-fp16",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/Qwen3-ASR-0.6B-bf16",
+        label: "Qwen3-ASR 0.6B (bf16)",
+        name: "Qwen3-ASR 0.6B",
+        version: "mlx-community/Qwen3-ASR-0.6B-bf16",
+        parameters: "0.6B",
+        languages: &["multilingual"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/Qwen3-ASR-0.6B-bf16",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/Qwen3-ASR-0.6B-4bit",
+        label: "Qwen3-ASR 0.6B (4-bit)",
+        name: "Qwen3-ASR 0.6B",
+        version: "mlx-community/Qwen3-ASR-0.6B-4bit",
+        parameters: "0.6B",
+        languages: &["multilingual"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/Qwen3-ASR-0.6B-4bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/Qwen3-ASR-0.6B-5bit",
+        label: "Qwen3-ASR 0.6B (5-bit)",
+        name: "Qwen3-ASR 0.6B",
+        version: "mlx-community/Qwen3-ASR-0.6B-5bit",
+        parameters: "0.6B",
+        languages: &["multilingual"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/Qwen3-ASR-0.6B-5bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/Qwen3-ASR-0.6B-6bit",
+        label: "Qwen3-ASR 0.6B (6-bit)",
+        name: "Qwen3-ASR 0.6B",
+        version: "mlx-community/Qwen3-ASR-0.6B-6bit",
+        parameters: "0.6B",
+        languages: &["multilingual"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/Qwen3-ASR-0.6B-6bit",
         downloadable: true,
     },
     MlxAudioModelSpec {
@@ -44,6 +187,39 @@ const MLX_AUDIO_MODEL_SPECS: &[MlxAudioModelSpec] = &[
         downloadable: true,
     },
     MlxAudioModelSpec {
+        id: "mlx-community/Qwen3-ASR-1.7B-4bit",
+        label: "Qwen3-ASR 1.7B (4-bit)",
+        name: "Qwen3-ASR 1.7B",
+        version: "mlx-community/Qwen3-ASR-1.7B-4bit",
+        parameters: "1.7B",
+        languages: &["multilingual"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-4bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/Qwen3-ASR-1.7B-5bit",
+        label: "Qwen3-ASR 1.7B (5-bit)",
+        name: "Qwen3-ASR 1.7B",
+        version: "mlx-community/Qwen3-ASR-1.7B-5bit",
+        parameters: "1.7B",
+        languages: &["multilingual"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-5bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/Qwen3-ASR-1.7B-6bit",
+        label: "Qwen3-ASR 1.7B (6-bit)",
+        name: "Qwen3-ASR 1.7B",
+        version: "mlx-community/Qwen3-ASR-1.7B-6bit",
+        parameters: "1.7B",
+        languages: &["multilingual"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-6bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
         id: "mlx-community/Qwen3-ASR-1.7B-8bit",
         label: "Qwen3-ASR 1.7B (8-bit)",
         name: "Qwen3-ASR 1.7B",
@@ -52,6 +228,28 @@ const MLX_AUDIO_MODEL_SPECS: &[MlxAudioModelSpec] = &[
         languages: &["multilingual"],
         size_mb: 0.0,
         source_url: "https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-8bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/Qwen3-ASR-1.7B-bf16",
+        label: "Qwen3-ASR 1.7B (bf16)",
+        name: "Qwen3-ASR 1.7B",
+        version: "mlx-community/Qwen3-ASR-1.7B-bf16",
+        parameters: "1.7B",
+        languages: &["multilingual"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/Qwen3-ASR-1.7B-bf16",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/parakeet-tdt-0.6b-v2",
+        label: "Parakeet TDT 0.6B v2 (MLX)",
+        name: "Parakeet TDT 0.6B v2",
+        version: "mlx-community/parakeet-tdt-0.6b-v2",
+        parameters: "0.6B",
+        languages: &["en"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2",
         downloadable: true,
     },
     MlxAudioModelSpec {
@@ -132,6 +330,28 @@ const MLX_AUDIO_MODEL_SPECS: &[MlxAudioModelSpec] = &[
         downloadable: true,
     },
     MlxAudioModelSpec {
+        id: "mlx-community/VibeVoice-ASR-5bit",
+        label: "VibeVoice-ASR (5-bit)",
+        name: "VibeVoice-ASR",
+        version: "mlx-community/VibeVoice-ASR-5bit",
+        parameters: "9B",
+        languages: &["multilingual"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/VibeVoice-ASR-5bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/VibeVoice-ASR-6bit",
+        label: "VibeVoice-ASR (6-bit)",
+        name: "VibeVoice-ASR",
+        version: "mlx-community/VibeVoice-ASR-6bit",
+        parameters: "9B",
+        languages: &["multilingual"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/VibeVoice-ASR-6bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
         id: "mlx-community/VibeVoice-ASR-8bit",
         label: "VibeVoice-ASR (8-bit)",
         name: "VibeVoice-ASR",
@@ -188,6 +408,39 @@ const MLX_AUDIO_MODEL_SPECS: &[MlxAudioModelSpec] = &[
         downloadable: true,
     },
     MlxAudioModelSpec {
+        id: "mlx-community/granite-4.0-1b-speech-mxfp4",
+        label: "Granite Speech 4.0 1B (mxfp4)",
+        name: "Granite Speech 4.0",
+        version: "mlx-community/granite-4.0-1b-speech-mxfp4",
+        parameters: "1B",
+        languages: &["en", "fr", "de", "es", "pt", "ja"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/granite-4.0-1b-speech-mxfp4",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/granite-4.0-1b-speech-5bit",
+        label: "Granite Speech 4.0 1B (5-bit)",
+        name: "Granite Speech 4.0",
+        version: "mlx-community/granite-4.0-1b-speech-5bit",
+        parameters: "1B",
+        languages: &["en", "fr", "de", "es", "pt", "ja"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/granite-4.0-1b-speech-5bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/granite-4.0-1b-speech-6bit",
+        label: "Granite Speech 4.0 1B (6-bit)",
+        name: "Granite Speech 4.0",
+        version: "mlx-community/granite-4.0-1b-speech-6bit",
+        parameters: "1B",
+        languages: &["en", "fr", "de", "es", "pt", "ja"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/granite-4.0-1b-speech-6bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
         id: "mlx-community/granite-4.0-1b-speech-8bit",
         label: "Granite Speech 4.0 1B (8-bit)",
         name: "Granite Speech 4.0",
@@ -196,6 +449,17 @@ const MLX_AUDIO_MODEL_SPECS: &[MlxAudioModelSpec] = &[
         languages: &["en", "fr", "de", "es", "pt", "ja"],
         size_mb: 0.0,
         source_url: "https://huggingface.co/mlx-community/granite-4.0-1b-speech-8bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "facebook/mms-1b",
+        label: "MMS 1B",
+        name: "MMS 1B",
+        version: "facebook/mms-1b",
+        parameters: "1B",
+        languages: &["many languages"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/facebook/mms-1b",
         downloadable: true,
     },
     MlxAudioModelSpec {
@@ -218,6 +482,17 @@ const MLX_AUDIO_MODEL_SPECS: &[MlxAudioModelSpec] = &[
         languages: &["1000+ languages"],
         size_mb: 0.0,
         source_url: "https://huggingface.co/facebook/mms-1b-all",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "facebook/mms-1b-l1107",
+        label: "MMS 1B L1107",
+        name: "MMS 1B L1107",
+        version: "facebook/mms-1b-l1107",
+        parameters: "1B",
+        languages: &["1,107 languages"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/facebook/mms-1b-l1107",
         downloadable: true,
     },
     MlxAudioModelSpec {
@@ -254,6 +529,28 @@ const MLX_AUDIO_MODEL_SPECS: &[MlxAudioModelSpec] = &[
         downloadable: true,
     },
     MlxAudioModelSpec {
+        id: "mlx-community/GLM-ASR-Nano-2512-5bit",
+        label: "GLM-ASR Nano 2512 (5-bit)",
+        name: "GLM-ASR Nano 2512",
+        version: "mlx-community/GLM-ASR-Nano-2512-5bit",
+        parameters: "nano",
+        languages: &["multilingual"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/GLM-ASR-Nano-2512-5bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
+        id: "mlx-community/GLM-ASR-Nano-2512-6bit",
+        label: "GLM-ASR Nano 2512 (6-bit)",
+        name: "GLM-ASR Nano 2512",
+        version: "mlx-community/GLM-ASR-Nano-2512-6bit",
+        parameters: "nano",
+        languages: &["multilingual"],
+        size_mb: 0.0,
+        source_url: "https://huggingface.co/mlx-community/GLM-ASR-Nano-2512-6bit",
+        downloadable: true,
+    },
+    MlxAudioModelSpec {
         id: "mlx-community/GLM-ASR-Nano-2512-8bit",
         label: "GLM-ASR Nano 2512 (8-bit)",
         name: "GLM-ASR Nano 2512",
@@ -267,7 +564,7 @@ const MLX_AUDIO_MODEL_SPECS: &[MlxAudioModelSpec] = &[
 ];
 
 pub fn default_model_id() -> &'static str {
-    MLX_AUDIO_MODEL_SPECS[0].id
+    "mlx-community/whisper-large-v3-turbo-asr-fp16"
 }
 
 pub fn model_options() -> Vec<super::ModelOption> {
@@ -298,6 +595,15 @@ pub fn mapped_model_for_visible_route(
             _ => None,
         },
         AsrProviderType::Whisper => match model_id.trim() {
+            "tiny" => Some("mlx-community/whisper-tiny-asr-fp16"),
+            "tiny.en" => Some("mlx-community/whisper-tiny.en-asr-fp16"),
+            "base" => Some("mlx-community/whisper-base-asr-fp16"),
+            "base.en" => Some("mlx-community/whisper-base.en-asr-fp16"),
+            "small" => Some("mlx-community/whisper-small-asr-fp16"),
+            "small.en" => Some("mlx-community/whisper-small.en-asr-fp16"),
+            "medium" => Some("mlx-community/whisper-medium-asr-fp16"),
+            "medium.en" => Some("mlx-community/whisper-medium.en-asr-fp16"),
+            "large-v3" => Some("mlx-community/whisper-large-v3-asr-fp16"),
             "large-v3-turbo" => Some("mlx-community/whisper-large-v3-turbo-asr-fp16"),
             _ => None,
         },
@@ -309,6 +615,15 @@ pub fn visible_route_for_model(model_id: &str) -> Option<(AsrProviderType, &'sta
     match normalize_model_id(model_id).as_str() {
         "UsefulSensors/moonshine-tiny" => Some((AsrProviderType::Moonshine, "moonshine-tiny")),
         "UsefulSensors/moonshine-base" => Some((AsrProviderType::Moonshine, "moonshine-base")),
+        "mlx-community/whisper-tiny-asr-fp16" => Some((AsrProviderType::Whisper, "tiny")),
+        "mlx-community/whisper-tiny.en-asr-fp16" => Some((AsrProviderType::Whisper, "tiny.en")),
+        "mlx-community/whisper-base-asr-fp16" => Some((AsrProviderType::Whisper, "base")),
+        "mlx-community/whisper-base.en-asr-fp16" => Some((AsrProviderType::Whisper, "base.en")),
+        "mlx-community/whisper-small-asr-fp16" => Some((AsrProviderType::Whisper, "small")),
+        "mlx-community/whisper-small.en-asr-fp16" => Some((AsrProviderType::Whisper, "small.en")),
+        "mlx-community/whisper-medium-asr-fp16" => Some((AsrProviderType::Whisper, "medium")),
+        "mlx-community/whisper-medium.en-asr-fp16" => Some((AsrProviderType::Whisper, "medium.en")),
+        "mlx-community/whisper-large-v3-asr-fp16" => Some((AsrProviderType::Whisper, "large-v3")),
         "mlx-community/whisper-large-v3-turbo-asr-fp16" => {
             Some((AsrProviderType::Whisper, "large-v3-turbo"))
         }
@@ -566,7 +881,11 @@ impl AsrProvider for MlxAudioProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{model_dir_for, model_is_ready};
+    use super::{
+        default_model_id, mapped_model_for_visible_route, model_dir_for, model_is_ready,
+        model_options, visible_route_for_model, MLX_AUDIO_MODEL_SPECS,
+    };
+    use crate::asr::AsrProviderType;
 
     #[test]
     fn downloadable_model_is_ready_without_manifest_when_artifacts_exist() {
@@ -574,13 +893,72 @@ mod tests {
         let model_dir = model_dir_for(model_id);
         let _ = std::fs::remove_dir_all(&model_dir);
         std::fs::create_dir_all(&model_dir).expect("create MLX model dir");
-        std::fs::write(model_dir.join("config.json"), br#"{"ok":true}"#)
-            .expect("write config");
+        std::fs::write(model_dir.join("config.json"), br#"{"ok":true}"#).expect("write config");
         std::fs::write(model_dir.join("weights.safetensors"), vec![1u8; 256])
             .expect("write weights");
 
         assert!(model_is_ready(model_id));
 
         let _ = std::fs::remove_dir_all(&model_dir);
+    }
+
+    #[test]
+    fn whisper_visible_routes_map_to_exact_mlx_routes() {
+        let cases = [
+            ("tiny", "mlx-community/whisper-tiny-asr-fp16"),
+            ("tiny.en", "mlx-community/whisper-tiny.en-asr-fp16"),
+            ("base", "mlx-community/whisper-base-asr-fp16"),
+            ("base.en", "mlx-community/whisper-base.en-asr-fp16"),
+            ("small", "mlx-community/whisper-small-asr-fp16"),
+            ("small.en", "mlx-community/whisper-small.en-asr-fp16"),
+            ("medium", "mlx-community/whisper-medium-asr-fp16"),
+            ("medium.en", "mlx-community/whisper-medium.en-asr-fp16"),
+            ("large-v3", "mlx-community/whisper-large-v3-asr-fp16"),
+            (
+                "large-v3-turbo",
+                "mlx-community/whisper-large-v3-turbo-asr-fp16",
+            ),
+        ];
+
+        for (visible_model_id, mlx_model_id) in cases {
+            assert_eq!(
+                mapped_model_for_visible_route(AsrProviderType::Whisper, visible_model_id),
+                Some(mlx_model_id)
+            );
+        }
+    }
+
+    #[test]
+    fn whisper_mlx_routes_map_back_to_visible_routes() {
+        let cases = [
+            ("mlx-community/whisper-tiny-asr-fp16", "tiny"),
+            ("mlx-community/whisper-tiny.en-asr-fp16", "tiny.en"),
+            ("mlx-community/whisper-base-asr-fp16", "base"),
+            ("mlx-community/whisper-base.en-asr-fp16", "base.en"),
+            ("mlx-community/whisper-small-asr-fp16", "small"),
+            ("mlx-community/whisper-small.en-asr-fp16", "small.en"),
+            ("mlx-community/whisper-medium-asr-fp16", "medium"),
+            ("mlx-community/whisper-medium.en-asr-fp16", "medium.en"),
+            ("mlx-community/whisper-large-v3-asr-fp16", "large-v3"),
+            (
+                "mlx-community/whisper-large-v3-turbo-asr-fp16",
+                "large-v3-turbo",
+            ),
+        ];
+
+        for (mlx_model_id, visible_model_id) in cases {
+            assert_eq!(
+                visible_route_for_model(mlx_model_id),
+                Some((AsrProviderType::Whisper, visible_model_id))
+            );
+        }
+    }
+
+    #[test]
+    fn model_options_expose_every_known_model_spec() {
+        let options = model_options();
+
+        assert_eq!(options.len(), MLX_AUDIO_MODEL_SPECS.len());
+        assert!(options.iter().any(|option| option.id == default_model_id()));
     }
 }

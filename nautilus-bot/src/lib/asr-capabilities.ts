@@ -62,9 +62,30 @@ export function mlxMappedModelId(
       }
       return null;
     case "whisper":
-      return normalized === "large-v3-turbo"
-        ? "mlx-community/whisper-large-v3-turbo-asr-fp16"
-        : null;
+      switch (normalized) {
+        case "tiny":
+          return "mlx-community/whisper-tiny-asr-fp16";
+        case "tiny.en":
+          return "mlx-community/whisper-tiny.en-asr-fp16";
+        case "base":
+          return "mlx-community/whisper-base-asr-fp16";
+        case "base.en":
+          return "mlx-community/whisper-base.en-asr-fp16";
+        case "small":
+          return "mlx-community/whisper-small-asr-fp16";
+        case "small.en":
+          return "mlx-community/whisper-small.en-asr-fp16";
+        case "medium":
+          return "mlx-community/whisper-medium-asr-fp16";
+        case "medium.en":
+          return "mlx-community/whisper-medium.en-asr-fp16";
+        case "large-v3":
+          return "mlx-community/whisper-large-v3-asr-fp16";
+        case "large-v3-turbo":
+          return "mlx-community/whisper-large-v3-turbo-asr-fp16";
+        default:
+          return null;
+      }
     default:
       return null;
   }
@@ -87,6 +108,24 @@ export function visibleRouteForMlxModel(modelId: string | null | undefined): {
       return { providerType: "moonshine", modelId: "moonshine-tiny" };
     case "UsefulSensors/moonshine-base":
       return { providerType: "moonshine", modelId: "moonshine-base" };
+    case "mlx-community/whisper-tiny-asr-fp16":
+      return { providerType: "whisper", modelId: "tiny" };
+    case "mlx-community/whisper-tiny.en-asr-fp16":
+      return { providerType: "whisper", modelId: "tiny.en" };
+    case "mlx-community/whisper-base-asr-fp16":
+      return { providerType: "whisper", modelId: "base" };
+    case "mlx-community/whisper-base.en-asr-fp16":
+      return { providerType: "whisper", modelId: "base.en" };
+    case "mlx-community/whisper-small-asr-fp16":
+      return { providerType: "whisper", modelId: "small" };
+    case "mlx-community/whisper-small.en-asr-fp16":
+      return { providerType: "whisper", modelId: "small.en" };
+    case "mlx-community/whisper-medium-asr-fp16":
+      return { providerType: "whisper", modelId: "medium" };
+    case "mlx-community/whisper-medium.en-asr-fp16":
+      return { providerType: "whisper", modelId: "medium.en" };
+    case "mlx-community/whisper-large-v3-asr-fp16":
+      return { providerType: "whisper", modelId: "large-v3" };
     case "mlx-community/whisper-large-v3-turbo-asr-fp16":
       return { providerType: "whisper", modelId: "large-v3-turbo" };
     default:
@@ -136,6 +175,8 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
       return normalizedModelId.startsWith("distil");
     case "parakeet":
       return normalizedModelId.startsWith("parakeet-ctc");
+    case "mlx_audio":
+      return !normalizedModelId.includes("moonshine");
     case "voxtral":
       return normalizedModelId.startsWith("voxtral");
     case "groq":

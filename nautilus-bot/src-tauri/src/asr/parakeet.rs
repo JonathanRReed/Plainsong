@@ -73,9 +73,8 @@ const PARAKEET_LEGACY_MODEL_ID: &str = "parakeet-tdt-ctc-110m";
 
 // CTC ONNX export hosted on HuggingFace (public, no auth required).
 const PARAKEET_HF_REPO: &str = "csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000";
-const PARAKEET_ONNX_SOURCES: [&str; 2] = [
+const PARAKEET_ONNX_SOURCES: [&str; 1] = [
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000/resolve/main/model.onnx",
-    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000/resolve/main/model.int8.onnx",
 ];
 const PARAKEET_TOKENS_SOURCES: [&str; 1] = [
     "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000/resolve/main/tokens.txt",

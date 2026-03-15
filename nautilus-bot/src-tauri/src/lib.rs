@@ -5742,9 +5742,7 @@ async fn set_asr_provider_model(
     settings_manager.save().map_err(|e| e.to_string())?;
     state
         .asr_manager
-        .set_mlx_accelerated_providers(mlx_accelerated_provider_set_from_settings(
-            &transcription,
-        ))
+        .set_mlx_accelerated_providers(mlx_accelerated_provider_set_from_settings(&transcription))
         .await;
     Ok(())
 }
@@ -18043,28 +18041,25 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
 }
 
 fn migrate_legacy_mlx_route_selection(transcription: &mut settings::TranscriptionSettings) {
-    let mut ensure_acceleration_for =
-        |provider_value: &mut String, model_value: &mut String| {
-            if asr_provider_from_settings_value(provider_value)
-                == Some(asr::AsrProviderType::MlxAudio)
+    let mut ensure_acceleration_for = |provider_value: &mut String, model_value: &mut String| {
+        if asr_provider_from_settings_value(provider_value) == Some(asr::AsrProviderType::MlxAudio)
+        {
+            if let Some((visible_provider, visible_model_id)) =
+                asr::mlx_audio::visible_route_for_model(model_value)
             {
-                if let Some((visible_provider, visible_model_id)) =
-                    asr::mlx_audio::visible_route_for_model(model_value)
+                *provider_value = asr_provider_to_settings_value(visible_provider).to_string();
+                *model_value = visible_model_id.to_string();
+                let provider_key = asr_provider_to_settings_value(visible_provider).to_string();
+                if !transcription
+                    .mlx_accelerated_providers
+                    .iter()
+                    .any(|value| value == &provider_key)
                 {
-                    *provider_value = asr_provider_to_settings_value(visible_provider).to_string();
-                    *model_value = visible_model_id.to_string();
-                    let provider_key =
-                        asr_provider_to_settings_value(visible_provider).to_string();
-                    if !transcription
-                        .mlx_accelerated_providers
-                        .iter()
-                        .any(|value| value == &provider_key)
-                    {
-                        transcription.mlx_accelerated_providers.push(provider_key);
-                    }
+                    transcription.mlx_accelerated_providers.push(provider_key);
                 }
             }
-        };
+        }
+    };
 
     ensure_acceleration_for(
         &mut transcription.default_provider,
@@ -18079,7 +18074,11 @@ fn migrate_legacy_mlx_route_selection(transcription: &mut settings::Transcriptio
         &mut transcription.meeting_model_id,
     );
 
-    let legacy_pairs: Vec<(String, String)> = transcription.provider_model_ids.clone().into_iter().collect();
+    let legacy_pairs: Vec<(String, String)> = transcription
+        .provider_model_ids
+        .clone()
+        .into_iter()
+        .collect();
     for (provider_key, model_id) in legacy_pairs {
         if asr_provider_from_settings_value(&provider_key) == Some(asr::AsrProviderType::MlxAudio) {
             if let Some((visible_provider, visible_model_id)) =
@@ -18125,12 +18124,18 @@ fn normalize_mlx_accelerated_providers(transcription: &mut settings::Transcripti
         if !asr::mlx_audio::supports_visible_provider(provider_type) {
             continue;
         }
-        let has_supported_selected_model = selected_routes.iter().any(|(candidate_provider, model_id)| {
-            *candidate_provider == Some(provider_type)
-                && asr::mlx_audio::mapped_model_for_visible_route(provider_type, model_id).is_some()
-        });
+        let has_supported_selected_model =
+            selected_routes
+                .iter()
+                .any(|(candidate_provider, model_id)| {
+                    *candidate_provider == Some(provider_type)
+                        && asr::mlx_audio::mapped_model_for_visible_route(provider_type, model_id)
+                            .is_some()
+                });
         if has_supported_selected_model
-            && !normalized.iter().any(|value: &String| value == &provider_key)
+            && !normalized
+                .iter()
+                .any(|value: &String| value == &provider_key)
         {
             normalized.push(provider_key);
         }

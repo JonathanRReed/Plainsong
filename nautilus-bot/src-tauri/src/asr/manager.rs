@@ -164,10 +164,7 @@ impl AsrManager {
         self.provider_model_ids.read().await.clone()
     }
 
-    pub async fn set_mlx_accelerated_providers(
-        &self,
-        providers: HashSet<AsrProviderType>,
-    ) {
+    pub async fn set_mlx_accelerated_providers(&self, providers: HashSet<AsrProviderType>) {
         *self.mlx_accelerated_providers.write().await = providers;
         self.invalidate_provider_info_cache().await;
     }
@@ -919,9 +916,8 @@ impl AsrManager {
             })
             .map(|engine| engine.id().to_string());
 
-        diagnostics.active_engine = active.or_else(|| {
-            Some(PlatformEngine::ProviderDefault.id().to_string())
-        });
+        diagnostics.active_engine =
+            active.or_else(|| Some(PlatformEngine::ProviderDefault.id().to_string()));
 
         diagnostics
     }
@@ -2086,12 +2082,10 @@ mod tests {
             diagnostics.active_engine.as_deref(),
             Some("provider_default")
         );
-        assert!(
-            !diagnostics
-                .available_engines
-                .iter()
-                .any(|engine| engine == "macos_mlx_sidecar")
-        );
+        assert!(!diagnostics
+            .available_engines
+            .iter()
+            .any(|engine| engine == "macos_mlx_sidecar"));
     }
 
     #[tokio::test]

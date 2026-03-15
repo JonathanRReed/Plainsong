@@ -66,6 +66,14 @@ impl OpenAiCloudWhisperProvider {
         self.model_id == "whisper-1"
     }
 
+    fn selected_label(&self) -> &'static str {
+        match self.model_id.as_str() {
+            "gpt-4o-mini-transcribe" => "GPT-4o Mini Transcribe",
+            "gpt-4o-transcribe" => "GPT-4o Transcribe",
+            _ => "Whisper-1",
+        }
+    }
+
     async fn transcribe_impl(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let api_key = Self::api_key().context("OPENAI_API_KEY environment variable not set")?;
 
@@ -168,15 +176,15 @@ impl AsrProvider for OpenAiCloudWhisperProvider {
 
     fn model_info(&self) -> ModelInfo {
         ModelInfo {
-            name: "Whisper (Cloud)".to_string(),
-            version: "1.0".to_string(),
+            name: format!("OpenAI {}", self.selected_label()),
+            version: self.model_id.clone(),
             size_mb: 0.0,
             parameters: "cloud".to_string(),
             languages: vec!["en".to_string(), "multilingual".to_string()],
             word_error_rate: None,
             real_time_factor: None,
             license: "Commercial API".to_string(),
-            source_url: "https://platform.openai.com/docs/guides/speech-to-text".to_string(),
+            source_url: "https://developers.openai.com/api/docs/guides/speech-to-text".to_string(),
         }
     }
 
@@ -203,6 +211,7 @@ impl AsrProvider for OpenAiCloudWhisperProvider {
 #[cfg(test)]
 mod tests {
     use super::OpenAiCloudWhisperProvider;
+    use crate::asr::AsrProvider;
 
     #[test]
     fn openai_asr_response_format_matches_selected_model() {
@@ -211,5 +220,13 @@ mod tests {
         assert!(
             !OpenAiCloudWhisperProvider::new(Some("gpt-4o-mini-transcribe")).uses_verbose_json()
         );
+    }
+
+    #[test]
+    fn openai_model_info_tracks_selected_model() {
+        let info = OpenAiCloudWhisperProvider::new(Some("gpt-4o-mini-transcribe")).model_info();
+
+        assert_eq!(info.name, "OpenAI GPT-4o Mini Transcribe");
+        assert_eq!(info.version, "gpt-4o-mini-transcribe");
     }
 }
