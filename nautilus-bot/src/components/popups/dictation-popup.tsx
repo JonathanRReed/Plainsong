@@ -229,6 +229,9 @@ export function DictationPopup() {
     useState<DictationRoutePreference | null>(null);
   const [dictationInsertionMode, setDictationInsertionMode] =
     useState<DictationInsertionMode>("paste");
+  const [useSharedAsrSelection, setUseSharedAsrSelection] = useState(true);
+  const [meetingProvider, setMeetingProvider] = useState<string | null>(null);
+  const [meetingModelId, setMeetingModelId] = useState<string | null>(null);
   const [resolvedModeLabel, setResolvedModeLabel] = useState<string | null>(null);
   const [runtimeAppTarget, setRuntimeAppTarget] = useState<string | null>(null);
   const [activationMatcher, setActivationMatcher] = useState<string | null>(null);
@@ -253,6 +256,18 @@ export function DictationPopup() {
     );
     setDictationInsertionMode(
       (settings.transcription.dictationInsertionMode ?? "paste") as DictationInsertionMode
+    );
+    const shared = settings.transcription.useSharedAsrSelection ?? true;
+    setUseSharedAsrSelection(shared);
+    setMeetingProvider(
+      shared
+        ? (settings.transcription.defaultProvider ?? null)
+        : (settings.transcription.meetingProvider ?? null)
+    );
+    setMeetingModelId(
+      shared
+        ? (settings.transcription.selectedModelId ?? null)
+        : (settings.transcription.meetingModelId ?? null)
     );
   };
 
@@ -452,6 +467,9 @@ export function DictationPopup() {
           dictationModelId
         )
       : dictationRoutePreference);
+  const meetingHostingLabel = meetingProvider
+    ? providerHostingPreference(meetingProvider as AsrProviderType, meetingModelId)
+    : "local";
   const targetDetail = runtimeAppTarget ? ` for ${runtimeAppTarget}` : "";
   const autoActivationDetail =
     activationMatcher && runtimeAppTarget
@@ -628,9 +646,20 @@ export function DictationPopup() {
               <modeMeta.icon className="h-3.5 w-3.5" />
               {modeMeta.label}
             </div>
-            <div className="inline-flex items-center gap-1.5 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-100">
-              {hostingLabel === "cloud" ? "Cloud route" : "Local route"}
-            </div>
+            {useSharedAsrSelection ? (
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-100">
+                {hostingLabel === "cloud" ? "Cloud route" : "Local route"}
+              </div>
+            ) : (
+              <>
+                <div className="inline-flex items-center gap-1.5 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-100">
+                  Dictation: {hostingLabel === "cloud" ? "Cloud" : "Local"}
+                </div>
+                <div className="inline-flex items-center gap-1.5 rounded-full border border-violet-400/20 bg-violet-400/10 px-2.5 py-1 text-[11px] font-medium text-violet-100">
+                  Meeting: {meetingHostingLabel === "cloud" ? "Cloud" : "Local"}
+                </div>
+              </>
+            )}
             {requestedRoute && (
               <div className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300">
                 Requested {requestedRoute === "cloud" ? "cloud" : "local"}

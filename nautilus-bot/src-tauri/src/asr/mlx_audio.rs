@@ -580,7 +580,10 @@ pub fn model_options() -> Vec<super::ModelOption> {
 pub fn supports_visible_provider(provider_type: AsrProviderType) -> bool {
     matches!(
         provider_type,
-        AsrProviderType::Moonshine | AsrProviderType::Whisper
+        AsrProviderType::Moonshine
+            | AsrProviderType::Whisper
+            | AsrProviderType::Parakeet
+            | AsrProviderType::Voxtral
     )
 }
 
@@ -607,6 +610,18 @@ pub fn mapped_model_for_visible_route(
             "large-v3-turbo" => Some("mlx-community/whisper-large-v3-turbo-asr-fp16"),
             _ => None,
         },
+        // parakeet-ctc-0.6b is the v3 multilingual model; legacy 110m has no MLX equivalent
+        AsrProviderType::Parakeet => match model_id.trim() {
+            "parakeet-ctc-0.6b" | "parakeet-tdt-0.6b-v3" => {
+                Some("mlx-community/parakeet-tdt-0.6b-v3")
+            }
+            _ => None,
+        },
+        // voxtral-local maps to the smallest downloadable MLX Voxtral model
+        AsrProviderType::Voxtral => match model_id.trim() {
+            "voxtral-local" => Some("mlx-community/Voxtral-Mini-3B-2507-bf16"),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -626,6 +641,12 @@ pub fn visible_route_for_model(model_id: &str) -> Option<(AsrProviderType, &'sta
         "mlx-community/whisper-large-v3-asr-fp16" => Some((AsrProviderType::Whisper, "large-v3")),
         "mlx-community/whisper-large-v3-turbo-asr-fp16" => {
             Some((AsrProviderType::Whisper, "large-v3-turbo"))
+        }
+        "mlx-community/parakeet-tdt-0.6b-v3" => {
+            Some((AsrProviderType::Parakeet, "parakeet-ctc-0.6b"))
+        }
+        "mlx-community/Voxtral-Mini-3B-2507-bf16" => {
+            Some((AsrProviderType::Voxtral, "voxtral-local"))
         }
         _ => None,
     }
