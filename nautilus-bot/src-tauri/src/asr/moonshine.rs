@@ -525,7 +525,7 @@ impl AsrProvider for MoonshineProvider {
                 word_error_rate: Some(5.4),
                 real_time_factor: Some(0.18),
                 license: "MIT".to_string(),
-                source_url: format!("https://huggingface.co/{}", MOONSHINE_BASE_HF_REPO),
+                source_url: format!("https://huggingface.co/{}", MOONSHINE_TINY_HF_REPO),
             }
         } else {
             ModelInfo {
@@ -537,7 +537,7 @@ impl AsrProvider for MoonshineProvider {
                 word_error_rate: Some(4.0),
                 real_time_factor: Some(0.3),
                 license: "MIT".to_string(),
-                source_url: format!("https://huggingface.co/{}", MOONSHINE_TINY_HF_REPO),
+                source_url: format!("https://huggingface.co/{}", MOONSHINE_BASE_HF_REPO),
             }
         }
     }
@@ -701,9 +701,10 @@ impl AsrProvider for MoonshineProvider {
 #[cfg(test)]
 mod tests {
     use super::{
-        moonshine_repo_files, MOONSHINE_BASE_HF_REPO, MOONSHINE_LOCAL_TOKENIZER,
+        moonshine_repo_files, MoonshineProvider, MOONSHINE_BASE_HF_REPO, MOONSHINE_LOCAL_TOKENIZER,
         MOONSHINE_ONNX_HF_REPO, MOONSHINE_TINY_HF_REPO,
     };
+    use crate::asr::AsrProvider;
 
     #[test]
     fn tiny_tokenizer_uses_model_specific_repo() {
@@ -723,5 +724,20 @@ mod tests {
         assert_eq!(files[2].0, MOONSHINE_BASE_HF_REPO);
         assert_eq!(files[2].1, "tokenizer.json");
         assert_eq!(files[2].2, MOONSHINE_LOCAL_TOKENIZER);
+    }
+
+    #[test]
+    fn model_info_source_url_matches_selected_variant() {
+        let tiny = MoonshineProvider::new(Some("moonshine-tiny")).model_info();
+        let base = MoonshineProvider::new(Some("moonshine-base")).model_info();
+
+        assert_eq!(
+            tiny.source_url,
+            format!("https://huggingface.co/{}", MOONSHINE_TINY_HF_REPO)
+        );
+        assert_eq!(
+            base.source_url,
+            format!("https://huggingface.co/{}", MOONSHINE_BASE_HF_REPO)
+        );
     }
 }

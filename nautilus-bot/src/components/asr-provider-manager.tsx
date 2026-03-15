@@ -610,7 +610,7 @@ export function AsrProviderManager({
 
   const providerDisplayName = (providerType: AsrProviderType, modelId: string) => {
     const provider = providerByType(providerType);
-    const baseLabel = provider?.name ?? providerType;
+    const baseLabel = provider ? providerUiName(provider) : providerType;
     return providerUsesMlxAcceleration(providerType, modelId)
       ? `${baseLabel} via MLX`
       : baseLabel;
@@ -640,12 +640,26 @@ export function AsrProviderManager({
     : "MLX acceleration is off, so Nautilus will stay on the standard local runtime lane.";
 
   const meetingProviders = providers.filter((provider) =>
-    isVisibleAsrProvider(provider.providerType) &&
+    (isVisibleAsrProvider(provider.providerType) || provider.providerType === "mlx_audio") &&
     isMeetingEligibleProvider(provider.providerType)
   );
   const visibleProviders = providers.filter((provider) =>
     isVisibleAsrProvider(provider.providerType)
   );
+  const routeSelectableProviders = providers.filter(
+    (provider) =>
+      isVisibleAsrProvider(provider.providerType) || provider.providerType === "mlx_audio"
+  );
+  const advancedMlxProvider =
+    providers.find((provider) => provider.providerType === "mlx_audio") ?? null;
+
+  const providerUiName = (provider: AsrProviderInfo) =>
+    provider.providerType === "mlx_audio" ? "Additional MLX models" : provider.name;
+
+  const providerUiDescription = (provider: AsrProviderInfo) =>
+    provider.providerType === "mlx_audio"
+      ? "Extra Apple Silicon MLX routes that do not map cleanly to another Nautilus provider family. Use the MLX toggle on Whisper and Moonshine when you want the same family through mlx-audio."
+      : provider.description;
 
   const providerUsesManagedModel = (providerType: AsrProviderType) =>
     providerType === "macos_apple_speech" || providerType === "windows_sdk_dictation";
@@ -871,7 +885,7 @@ export function AsrProviderManager({
       case "distil_whisper":
         return "Use the Download button to fetch the Distil-Whisper Large v3.5 model (no Python needed)";
       case "mlx_audio":
-        return "Use Download to fetch the selected MLX Audio route model. This Apple Silicon path bootstraps mlx-audio 0.4.1+ into Nautilus's managed runtime and then runs the selected model locally.";
+        return "Use Download to fetch the selected advanced MLX Audio model. This Apple Silicon path bootstraps mlx-audio 0.4.1+ into Nautilus's managed runtime and exposes MLX-only families like Granite Speech, Qwen3-ASR, SenseVoice, FireRedASR2, MMS, GLM-ASR, Canary conversion, and additional Voxtral variants.";
       case "macos_apple_speech":
         return "Grant Nautilus Speech Recognition access in macOS System Settings > Privacy & Security > Speech Recognition";
       case "moonshine":
@@ -1404,6 +1418,285 @@ export function AsrProviderManager({
     );
   };
 
+  const renderProviderCard = (provider: AsrProviderInfo, advanced = false) => {
+    const selection = getProviderSelectionStatus(provider);
+    const runtimeIssue =
+      selection.reason === "runtime_unavailable"
+        ? provider.runtimeMessage ?? "Runtime setup required."
+        : null;
+    const providerError = providerErrors[provider.providerType];
+    const modelOptions = provider.modelOptions ?? [];
+    const selectedModelId = provider.selectedModelId || modelOptions[0]?.id || "";
+
+    return (
+      <Card
+        key={provider.providerType}
+        className={cn(
+          "transition-all",
+          defaultProvider === provider.providerType && "border-trusted ring-1 ring-trusted"
+        )}
+      >
+        <CardHeader className="pb-3">
+          <div className="flex items-start justify-between">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-lg bg-trusted/10 flex items-center justify-center text-trusted">
+                {getProviderIcon(provider.providerType)}
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <CardTitle className="text-lg">{providerUiName(provider)}</CardTitle>
+                  {defaultProvider === provider.providerType ? (
+                    <Badge variant="outline" className="text-xs">
+                      Default
+                    </Badge>
+                  ) : null}
+                  {advanced ? (
+                    <Badge variant="secondary" className="text-xs">
+                      Advanced
+                    </Badge>
+                  ) : null}
+                </div>
+                <CardDescription className="line-clamp-2 mt-1">
+                  {providerUiDescription(provider)}
+                </CardDescription>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">{getDownloadStatusBadge(provider)}</div>
+          </div>
+        </CardHeader>
+
+        <CardContent className="space-y-4">
+          {provider.modelInfo && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <div className="p-2 bg-muted rounded-lg">
+                <div className="text-muted-foreground text-xs">Size</div>
+                <div className="font-medium">{provider.modelInfo.sizeMb} MB</div>
+              </div>
+              <div className="p-2 bg-muted rounded-lg">
+                <div className="text-muted-foreground text-xs">Model / Parameters</div>
+                <div className="font-medium">
+                  {provider.modelInfo.name || provider.modelInfo.parameters}
+                </div>
+              </div>
+              <div className="p-2 bg-muted rounded-lg">
+                <div className="text-muted-foreground text-xs">WER</div>
+                <div className="font-medium">
+                  {provider.modelInfo.wordErrorRate?.toFixed(2) || "N/A"}%
+                </div>
+              </div>
+              <div className="p-2 bg-muted rounded-lg">
+                <div className="text-muted-foreground text-xs">Speed</div>
+                <div className="font-medium">
+                  {provider.modelInfo.realTimeFactor?.toFixed(0) || "N/A"}x RTF
+                </div>
+              </div>
+            </div>
+          )}
+
+          {provider.modelInfo?.languages && provider.modelInfo.languages.length > 0 && (
+            <div>
+              <div className="text-sm text-muted-foreground mb-2">
+                Supported Languages ({provider.modelInfo.languages.length})
+              </div>
+              <ScrollArea className="h-16">
+                <div className="flex flex-wrap gap-1">
+                  {provider.modelInfo.languages.slice(0, 10).map((lang) => (
+                    <Badge key={lang} variant="secondary" className="text-xs">
+                      {lang.toUpperCase()}
+                    </Badge>
+                  ))}
+                  {provider.modelInfo.languages.length > 10 && (
+                    <Badge variant="secondary" className="text-xs">
+                      +{provider.modelInfo.languages.length - 10} more
+                    </Badge>
+                  )}
+                </div>
+              </ScrollArea>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">Model</p>
+            {modelOptions.length > 1 ? (
+              <select
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                value={selectedModelId}
+                onChange={(event) => {
+                  void handleModelChange(provider.providerType, event.target.value);
+                }}
+              >
+                {modelOptions.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
+                {(modelOptions[0]?.label ?? selectedModelId) || "Default model"}
+              </div>
+            )}
+          </div>
+
+          {renderMlxAccelerationToggle(provider.providerType, selectedModelId)}
+
+          {provider.engineDiagnostics ? (
+            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs space-y-1">
+              <p className="text-muted-foreground">
+                Active engine:{" "}
+                <span className="font-mono">
+                  {provider.engineDiagnostics.activeEngine ?? "provider_default"}
+                </span>
+              </p>
+              <p className="text-muted-foreground">
+                Ready engines:{" "}
+                <span className="font-mono">
+                  {provider.engineDiagnostics.availableEngines.length > 0
+                    ? provider.engineDiagnostics.availableEngines.join(", ")
+                    : "none"}
+                </span>
+              </p>
+              {provider.engineDiagnostics.notes.slice(0, 2).map((note, index) => (
+                <p key={`${provider.providerType}-engine-note-${index}`} className="text-muted-foreground">
+                  {note}
+                </p>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="flex items-center justify-between pt-2">
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className="text-xs">
+                {provider.modelInfo?.license || "Unknown"}
+              </Badge>
+              {selection.reason === "runtime_unavailable" && (
+                <Badge variant="secondary" className="text-xs">
+                  {provider.runtimeStatus === "missing_runtime"
+                    ? "Runtime setup required"
+                    : provider.runtimeStatus === "missing_model"
+                      ? "Model files missing"
+                      : "Runtime error"}
+                </Badge>
+              )}
+              {!provider.inferenceEnabled && (
+                <Badge variant="secondary" className="text-xs">
+                  Not enabled
+                </Badge>
+              )}
+              {provider.modelInfo?.sourceUrl && (
+                <a
+                  href={provider.modelInfo.sourceUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-trusted hover:underline"
+                >
+                  Learn more
+                </a>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {selection.selectable ? (
+                <>
+                  <Button
+                    variant={defaultProvider === provider.providerType ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => handleSetDefault(provider.providerType)}
+                  >
+                    {defaultProvider === provider.providerType ? "Default" : "Set Default"}
+                  </Button>
+                  {selection.reason === "download_required" &&
+                  isNotDownloaded(provider.downloadStatus) ? (
+                    <Button
+                      size="sm"
+                      onClick={() => handleDownload(provider.providerType)}
+                      disabled={isLoading}
+                    >
+                      <Download className="h-4 w-4 mr-2" />
+                      Download
+                    </Button>
+                  ) : null}
+                  {selection.reason === "runtime_unavailable" ? (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void copySetupCommand(provider.providerType)}
+                      >
+                        Copy setup info
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={async () => {
+                          try {
+                            await refreshAsrRuntimeProbes();
+                          } catch (error) {
+                            console.warn("Failed to refresh runtime probes:", error);
+                          }
+                          await loadProviders();
+                        }}
+                      >
+                        Re-check runtime
+                      </Button>
+                      {defaultProvider === provider.providerType &&
+                      provider.providerType !== "whisper" ? (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => handleSetDefault("whisper")}
+                        >
+                          Switch to Whisper
+                        </Button>
+                      ) : null}
+                    </>
+                  ) : null}
+                </>
+              ) : selection.reason === "runtime_unavailable" ? (
+                <Button size="sm" variant="outline" disabled>
+                  Runtime setup required
+                </Button>
+              ) : selection.reason === "not_enabled" ? (
+                <Button size="sm" variant="outline" disabled>
+                  Not enabled
+                </Button>
+              ) : null}
+            </div>
+          </div>
+          {(runtimeIssue || providerError) && (
+            <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+              <p>{providerError ?? runtimeIssue}</p>
+              {selection.reason === "runtime_unavailable" && (
+                <>
+                  {provider.runtimeDetails?.missingFiles?.length ? (
+                    <p className="text-amber-100">
+                      Missing:{" "}
+                      <span className="font-mono">
+                        {provider.runtimeDetails.missingFiles.join(", ")}
+                      </span>
+                    </p>
+                  ) : null}
+                  <p className="text-amber-100">
+                    How to enable:{" "}
+                    <span className="font-mono">
+                      {provider.runtimeDetails?.setupAction ??
+                        providerSetupCommand(provider.providerType)}
+                    </span>
+                  </p>
+                  {provider.runtimeDetails?.pythonPath ? (
+                    <p className="text-amber-100">
+                      Detected Python:{" "}
+                      <span className="font-mono">{provider.runtimeDetails.pythonPath}</span>
+                    </p>
+                  ) : null}
+                </>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    );
+  };
+
   return (
     <div className={cn("space-y-6", className)}>
       <Tabs defaultValue="providers" className="space-y-4">
@@ -1499,9 +1792,9 @@ export function AsrProviderManager({
                       })();
                     }}
                   >
-                    {visibleProviders.map((provider) => (
+                    {routeSelectableProviders.map((provider) => (
                       <option key={`shared-${provider.providerType}`} value={provider.providerType}>
-                        {provider.name}
+                        {providerUiName(provider)}
                       </option>
                     ))}
                   </select>
@@ -1551,7 +1844,7 @@ export function AsrProviderManager({
                     >
                       {meetingProviders.map((provider) => (
                         <option key={`meeting-${provider.providerType}`} value={provider.providerType}>
-                          {provider.name}
+                          {providerUiName(provider)}
                         </option>
                       ))}
                     </select>
@@ -1960,281 +2253,10 @@ export function AsrProviderManager({
                 </CardContent>
               </Card>
             ) : (
-              visibleProviders.map((provider) => {
-                const selection = getProviderSelectionStatus(provider);
-                const runtimeIssue =
-                  selection.reason === "runtime_unavailable"
-                    ? provider.runtimeMessage ?? "Runtime setup required."
-                    : null;
-                const providerError = providerErrors[provider.providerType];
-                const modelOptions = provider.modelOptions ?? [];
-                const selectedModelId = provider.selectedModelId || modelOptions[0]?.id || "";
-                return (
-                  <Card
-                    key={provider.providerType}
-                    className={cn(
-                      "transition-all",
-                      defaultProvider === provider.providerType && "border-trusted ring-1 ring-trusted"
-                    )}
-                  >
-                    <CardHeader className="pb-3">
-                      <div className="flex items-start justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className="h-10 w-10 rounded-lg bg-trusted/10 flex items-center justify-center text-trusted">
-                            {getProviderIcon(provider.providerType)}
-                          </div>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <CardTitle className="text-lg">{provider.name}</CardTitle>
-                              {defaultProvider === provider.providerType ? (
-                                <Badge variant="outline" className="text-xs">
-                                  Default
-                                </Badge>
-                              ) : null}
-                            </div>
-                            <CardDescription className="line-clamp-2 mt-1">
-                              {provider.description}
-                            </CardDescription>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {getDownloadStatusBadge(provider)}
-                        </div>
-                      </div>
-                    </CardHeader>
-
-                    <CardContent className="space-y-4">
-                      {provider.modelInfo && (
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-                          <div className="p-2 bg-muted rounded-lg">
-                            <div className="text-muted-foreground text-xs">Size</div>
-                            <div className="font-medium">{provider.modelInfo.sizeMb} MB</div>
-                          </div>
-                          <div className="p-2 bg-muted rounded-lg">
-                            <div className="text-muted-foreground text-xs">Model / Parameters</div>
-                            <div className="font-medium">
-                              {provider.modelInfo.name || provider.modelInfo.parameters}
-                            </div>
-                          </div>
-                          <div className="p-2 bg-muted rounded-lg">
-                            <div className="text-muted-foreground text-xs">WER</div>
-                            <div className="font-medium">
-                              {provider.modelInfo.wordErrorRate?.toFixed(2) || "N/A"}%
-                            </div>
-                          </div>
-                          <div className="p-2 bg-muted rounded-lg">
-                            <div className="text-muted-foreground text-xs">Speed</div>
-                            <div className="font-medium">
-                              {provider.modelInfo.realTimeFactor?.toFixed(0) || "N/A"}x RTF
-                            </div>
-                          </div>
-                        </div>
-                      )}
-
-                      {provider.modelInfo?.languages && provider.modelInfo.languages.length > 0 && (
-                        <div>
-                          <div className="text-sm text-muted-foreground mb-2">
-                            Supported Languages ({provider.modelInfo.languages.length})
-                          </div>
-                          <ScrollArea className="h-16">
-                            <div className="flex flex-wrap gap-1">
-                              {provider.modelInfo.languages.slice(0, 10).map((lang) => (
-                                <Badge key={lang} variant="secondary" className="text-xs">
-                                  {lang.toUpperCase()}
-                                </Badge>
-                              ))}
-                              {provider.modelInfo.languages.length > 10 && (
-                                <Badge variant="secondary" className="text-xs">
-                                  +{provider.modelInfo.languages.length - 10} more
-                                </Badge>
-                              )}
-                            </div>
-                          </ScrollArea>
-                        </div>
-                      )}
-
-                      <div className="space-y-2">
-                        <p className="text-xs text-muted-foreground">Model</p>
-                        {modelOptions.length > 1 ? (
-                          <select
-                            className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                            value={selectedModelId}
-                            onChange={(event) => {
-                              void handleModelChange(provider.providerType, event.target.value);
-                            }}
-                          >
-                            {modelOptions.map((option) => (
-                              <option key={option.id} value={option.id}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
-                        ) : (
-                          <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
-                            {(modelOptions[0]?.label ?? selectedModelId) || "Default model"}
-                          </div>
-                        )}
-                      </div>
-
-                      {renderMlxAccelerationToggle(provider.providerType, selectedModelId)}
-
-                      {provider.engineDiagnostics ? (
-                        <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs space-y-1">
-                          <p className="text-muted-foreground">
-                            Active engine:{" "}
-                            <span className="font-mono">
-                              {provider.engineDiagnostics.activeEngine ?? "provider_default"}
-                            </span>
-                          </p>
-                          <p className="text-muted-foreground">
-                            Ready engines:{" "}
-                            <span className="font-mono">
-                              {provider.engineDiagnostics.availableEngines.length > 0
-                                ? provider.engineDiagnostics.availableEngines.join(", ")
-                                : "none"}
-                            </span>
-                          </p>
-                          {provider.engineDiagnostics.notes.slice(0, 2).map((note, index) => (
-                            <p key={`${provider.providerType}-engine-note-${index}`} className="text-muted-foreground">
-                              {note}
-                            </p>
-                          ))}
-                        </div>
-                      ) : null}
-
-                      <div className="flex items-center justify-between pt-2">
-                        <div className="flex items-center gap-2">
-                          <Badge variant="outline" className="text-xs">
-                            {provider.modelInfo?.license || "Unknown"}
-                          </Badge>
-                          {selection.reason === "runtime_unavailable" && (
-                            <Badge variant="secondary" className="text-xs">
-                              {provider.runtimeStatus === "missing_runtime"
-                                ? "Runtime setup required"
-                                : provider.runtimeStatus === "missing_model"
-                                  ? "Model files missing"
-                                  : "Runtime error"}
-                            </Badge>
-                          )}
-                          {!provider.inferenceEnabled && (
-                            <Badge variant="secondary" className="text-xs">
-                              Not enabled
-                            </Badge>
-                          )}
-                          {provider.modelInfo?.sourceUrl && (
-                            <a
-                              href={provider.modelInfo.sourceUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-xs text-trusted hover:underline"
-                            >
-                              Learn more
-                            </a>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {selection.selectable ? (
-                            <>
-                              <Button
-                                variant={defaultProvider === provider.providerType ? "default" : "outline"}
-                                size="sm"
-                                onClick={() => handleSetDefault(provider.providerType)}
-                              >
-                                {defaultProvider === provider.providerType ? "Default" : "Set Default"}
-                              </Button>
-                              {selection.reason === "download_required" &&
-                              isNotDownloaded(provider.downloadStatus) ? (
-                                <Button
-                                  size="sm"
-                                  onClick={() => handleDownload(provider.providerType)}
-                                  disabled={isLoading}
-                                >
-                                  <Download className="h-4 w-4 mr-2" />
-                                  Download
-                                </Button>
-                              ) : null}
-                              {selection.reason === "runtime_unavailable" ? (
-                                <>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={() => void copySetupCommand(provider.providerType)}
-                                  >
-                                    Copy setup info
-                                  </Button>
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={async () => {
-                                      try {
-                                        await refreshAsrRuntimeProbes();
-                                      } catch (error) {
-                                        console.warn("Failed to refresh runtime probes:", error);
-                                      }
-                                      await loadProviders();
-                                    }}
-                                  >
-                                    Re-check runtime
-                                  </Button>
-                                  {defaultProvider === provider.providerType &&
-                                  provider.providerType !== "whisper" ? (
-                                    <Button
-                                      size="sm"
-                                      variant="secondary"
-                                      onClick={() => handleSetDefault("whisper")}
-                                    >
-                                      Switch to Whisper
-                                    </Button>
-                                  ) : null}
-                                </>
-                              ) : null}
-                            </>
-                          ) : selection.reason === "runtime_unavailable" ? (
-                            <>
-                              <Button size="sm" variant="outline" disabled>
-                                Runtime setup required
-                              </Button>
-                            </>
-                          ) : selection.reason === "not_enabled" ? (
-                            <Button size="sm" variant="outline" disabled>
-                              Not enabled
-                            </Button>
-                          ) : null}
-                        </div>
-                      </div>
-                      {(runtimeIssue || providerError) && (
-                        <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-                          <p>{providerError ?? runtimeIssue}</p>
-                          {selection.reason === "runtime_unavailable" && (
-                            <>
-                              {provider.runtimeDetails?.missingFiles?.length ? (
-                                <p className="text-amber-100">
-                                  Missing:{" "}
-                                  <span className="font-mono">
-                                    {provider.runtimeDetails.missingFiles.join(", ")}
-                                  </span>
-                                </p>
-                              ) : null}
-                              <p className="text-amber-100">
-                                How to enable:{" "}
-                                <span className="font-mono">
-                                  {provider.runtimeDetails?.setupAction ??
-                                    providerSetupCommand(provider.providerType)}
-                                </span>
-                              </p>
-                              {provider.runtimeDetails?.pythonPath ? (
-                                <p className="text-amber-100">
-                                  Detected Python: <span className="font-mono">{provider.runtimeDetails.pythonPath}</span>
-                                </p>
-                              ) : null}
-                            </>
-                          )}
-                        </div>
-                      )}
-                    </CardContent>
-                  </Card>
-                );
-              })
+              <>
+                {visibleProviders.map((provider) => renderProviderCard(provider))}
+                {advancedMlxProvider ? renderProviderCard(advancedMlxProvider, true) : null}
+              </>
             )}
           </div>
           ) : null}

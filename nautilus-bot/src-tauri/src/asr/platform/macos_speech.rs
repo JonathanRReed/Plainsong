@@ -565,8 +565,8 @@ fn helper_authorization_status(prompt_if_needed: bool) -> Result<SpeechAuthoriza
         ));
     }
 
-    let payload: MacosSpeechAuthorizationPayload =
-        serde_json::from_slice(&output.stdout).with_context(|| {
+    let payload: MacosSpeechAuthorizationPayload = serde_json::from_slice(&output.stdout)
+        .with_context(|| {
             format!(
                 "Failed to parse macOS Speech authorization helper output as JSON: {}",
                 String::from_utf8_lossy(&output.stdout)
@@ -689,7 +689,10 @@ fn is_executable_file(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_authorization_status_payload, MacosSpeechAuthorizationPayload, SpeechAuthorizationStatus};
+    use super::{
+        map_authorization_status_payload, MacosSpeechAuthorizationPayload,
+        SpeechAuthorizationStatus,
+    };
 
     #[test]
     fn helper_authorization_payload_maps_known_statuses() {
