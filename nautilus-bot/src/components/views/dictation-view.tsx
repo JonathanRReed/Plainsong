@@ -72,6 +72,7 @@ interface DictationTextReadyEvent {
   requestedProvider?: string;
   actualProvider?: string;
   isFallback?: boolean;
+  optimizationApplied?: boolean | null;
   fallbackReason?: string | null;
   fallbackMessage?: string | null;
   modelId?: string;
@@ -751,6 +752,8 @@ export function DictationView() {
   const [reprocessError, setReprocessError] = useState<string | null>(null);
   const [currentDictationProvider, setCurrentDictationProvider] = useState<string | null>(null);
   const [currentDictationModelId, setCurrentDictationModelId] = useState<string | null>(null);
+  const [defaultAsrProvider, setDefaultAsrProvider] = useState<string | null>(null);
+  const [useSharedAsrSelection, setUseSharedAsrSelection] = useState(true);
   const [currentAiProvider, setCurrentAiProvider] = useState<string | null>(null);
   const [currentAiModelId, setCurrentAiModelId] = useState<string | null>(null);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -1020,6 +1023,8 @@ export function DictationView() {
         setSelectedCustomModeId(settings.transcription.dictationSelectedCustomModeId ?? null);
         setCurrentDictationProvider(settings.transcription.dictationProvider ?? null);
         setCurrentDictationModelId(settings.transcription.dictationModelId ?? null);
+        setDefaultAsrProvider(settings.transcription.defaultProvider ?? null);
+        setUseSharedAsrSelection(settings.transcription.useSharedAsrSelection ?? true);
         setCurrentAiProvider(settings.privacy.llmProvider ?? null);
         setCurrentAiModelId(settings.privacy.llmModelId ?? null);
         setDefaultProjectId(settings.transcription.dictationProjectId || "inbox");
@@ -1604,14 +1609,9 @@ export function DictationView() {
         if (payload?.actualProvider) {
           setLastProvider(payload.actualProvider);
         }
-        const hasProviderFallback =
-          payload?.isFallback === true ||
-          (!!payload?.requestedProvider &&
-            !!payload?.actualProvider &&
-            payload.requestedProvider !== payload.actualProvider);
         if (payload?.fallbackMessage) {
           setFallbackStatus(payload.fallbackMessage);
-        } else if (hasProviderFallback) {
+        } else if (payload?.isFallback === true) {
           const reason =
             payload?.fallbackReason?.trim() ||
             "Requested provider could not complete transcription.";
@@ -2503,6 +2503,14 @@ export function DictationView() {
                           : "Local"
                         : "Unknown"}
                     </p>
+                    {!useSharedAsrSelection &&
+                    defaultAsrProvider &&
+                    currentDictationProvider &&
+                    currentDictationProvider !== defaultAsrProvider ? (
+                      <p className="text-xs text-amber-500">
+                        ⚠ Dictation is using {currentDictationProvider}, not {defaultAsrProvider}.
+                      </p>
+                    ) : null}
                   </div>
                   <div className="space-y-2">
                     <p className="text-sm font-medium">Next button capture override</p>

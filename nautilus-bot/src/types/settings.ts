@@ -62,7 +62,12 @@ export interface TranscriptionSettings {
   meetingModelId?: string;
   meetingRoutePolicy?: "prefer_local" | "best_available";
   providerModelIds?: Record<string, string>;
+  /** @deprecated – kept for migration; use dictationMlxEnabled / meetingMlxEnabled instead */
   mlxAcceleratedProviders?: string[];
+  /** MLX acceleration for the dictation route slot only */
+  dictationMlxEnabled?: boolean;
+  /** MLX acceleration for the meeting route slot only */
+  meetingMlxEnabled?: boolean;
   autoTranscribe: boolean;
   enableDiarization: boolean;
   intelligentPunctuation: boolean;

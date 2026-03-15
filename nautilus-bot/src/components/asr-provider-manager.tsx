@@ -69,7 +69,8 @@ export function AsrProviderManager({
   const [dictationModelId, setDictationModelId] = useState("distil-large-v3.5");
   const [meetingProvider, setMeetingProvider] = useState<AsrProviderType>("distil_whisper");
   const [meetingModelId, setMeetingModelId] = useState("distil-large-v3.5");
-  const [mlxAcceleratedProviders, setMlxAcceleratedProviders] = useState<AsrProviderType[]>([]);
+  const [dictationMlxEnabled, setDictationMlxEnabled] = useState(false);
+  const [meetingMlxEnabled, setMeetingMlxEnabled] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResult[]>([]);
   const [benchmarkHistory, setBenchmarkHistory] = useState<AsrBenchmarkEntry[]>([]);
@@ -448,23 +449,18 @@ export function AsrProviderManager({
             sanitizedMeetingProvider,
             loadedMeetingProvider === sanitizedMeetingProvider ? loadedMeetingModelId : undefined
           );
-      const loadedMlxAcceleratedProviders = (
-        [
-          ...(settings.transcription.mlxAcceleratedProviders ?? []),
-          ...migratedMlxProviders,
-        ] as AsrProviderType[]
-      ).filter((providerType): providerType is AsrProviderType =>
-        providerList.some((provider) => provider.providerType === providerType)
-      );
-      const sanitizedMlxAcceleratedProviders = normalizeMlxAcceleratedProviders(
-        loadedMlxAcceleratedProviders,
-        loadedDefaultProvider,
-        loadedDefaultModelId,
-        sanitizedDictationProvider,
-        sanitizedDictationModelId,
-        sanitizedMeetingProvider,
-        sanitizedMeetingModelId
-      );
+      // Migrate legacy mlxAcceleratedProviders list → per-slot booleans when new flags absent.
+      let loadedDictationMlxEnabled = settings.transcription.dictationMlxEnabled ?? false;
+      let loadedMeetingMlxEnabled = settings.transcription.meetingMlxEnabled ?? false;
+      if (!loadedDictationMlxEnabled && !loadedMeetingMlxEnabled) {
+        const legacy = (settings.transcription.mlxAcceleratedProviders ?? []) as AsrProviderType[];
+        if (legacy.includes(sanitizedDictationProvider) || migratedMlxProviders.includes(sanitizedDictationProvider)) {
+          loadedDictationMlxEnabled = true;
+        }
+        if (legacy.includes(sanitizedMeetingProvider) || migratedMlxProviders.includes(sanitizedMeetingProvider)) {
+          loadedMeetingMlxEnabled = true;
+        }
+      }
 
       setDefaultProvider(loadedDefaultProvider);
       setDefaultModelId(loadedDefaultModelId);
@@ -473,7 +469,8 @@ export function AsrProviderManager({
       setDictationModelId(sanitizedDictationModelId);
       setMeetingProvider(sanitizedMeetingProvider);
       setMeetingModelId(sanitizedMeetingModelId);
-      setMlxAcceleratedProviders(sanitizedMlxAcceleratedProviders);
+      setDictationMlxEnabled(loadedDictationMlxEnabled);
+      setMeetingMlxEnabled(loadedMeetingMlxEnabled);
       setMeetingRoutePolicy(loadedMeetingRoutePolicy);
     } catch (error) {
       console.error("Failed to load ASR selection settings:", error);
@@ -488,7 +485,8 @@ export function AsrProviderManager({
     dictationModelId?: string;
     meetingProvider?: AsrProviderType;
     meetingModelId?: string;
-    mlxAcceleratedProviders?: AsrProviderType[];
+    dictationMlxEnabled?: boolean;
+    meetingMlxEnabled?: boolean;
     meetingRoutePolicy?: "prefer_local" | "best_available";
   }) => {
     const settings = await getSettings();
@@ -499,8 +497,8 @@ export function AsrProviderManager({
     const nextDictationModelId = updates.dictationModelId ?? dictationModelId;
     const nextMeetingProvider = updates.meetingProvider ?? meetingProvider;
     const nextMeetingModelId = updates.meetingModelId ?? meetingModelId;
-    const nextMlxAcceleratedProviders =
-      updates.mlxAcceleratedProviders ?? mlxAcceleratedProviders;
+    const nextDictationMlxEnabled = updates.dictationMlxEnabled ?? dictationMlxEnabled;
+    const nextMeetingMlxEnabled = updates.meetingMlxEnabled ?? meetingMlxEnabled;
     const nextMeetingRoutePolicy = updates.meetingRoutePolicy ?? meetingRoutePolicy;
     const sanitizedShared =
       nextUseShared && isSharedMeetingCompatible(nextDefaultProvider, nextSelectedModelId);
@@ -526,15 +524,13 @@ export function AsrProviderManager({
         : sanitizedShared
           ? nextSelectedModelId
           : nextDictationModelId;
-    const sanitizedMlxAcceleratedProviders = normalizeMlxAcceleratedProviders(
-      nextMlxAcceleratedProviders,
-      nextDefaultProvider,
-      nextSelectedModelId,
-      sanitizedDictationProvider,
-      sanitizedDictationModelId,
-      sanitizedMeetingProvider,
-      sanitizedMeetingModelId
-    );
+    // Guard: MLX flag only applies when the provider supports it for the chosen model.
+    const sanitizedDictationMlx =
+      nextDictationMlxEnabled &&
+      providerHasMlxAcceleration(sanitizedDictationProvider, sanitizedDictationModelId);
+    const sanitizedMeetingMlx =
+      nextMeetingMlxEnabled &&
+      providerHasMlxAcceleration(sanitizedMeetingProvider, sanitizedMeetingModelId);
 
     await saveSettings({
       ...settings,
@@ -547,7 +543,8 @@ export function AsrProviderManager({
         dictationModelId: sanitizedDictationModelId,
         meetingProvider: sanitizedMeetingProvider,
         meetingModelId: sanitizedMeetingModelId,
-        mlxAcceleratedProviders: sanitizedMlxAcceleratedProviders,
+        dictationMlxEnabled: sanitizedDictationMlx,
+        meetingMlxEnabled: sanitizedMeetingMlx,
         meetingRoutePolicy: nextMeetingRoutePolicy,
       },
     });
@@ -559,7 +556,8 @@ export function AsrProviderManager({
     setDictationModelId(sanitizedDictationModelId);
     setMeetingProvider(sanitizedMeetingProvider);
     setMeetingModelId(sanitizedMeetingModelId);
-    setMlxAcceleratedProviders(sanitizedMlxAcceleratedProviders);
+    setDictationMlxEnabled(sanitizedDictationMlx);
+    setMeetingMlxEnabled(sanitizedMeetingMlx);
     setMeetingRoutePolicy(nextMeetingRoutePolicy);
     await loadProviders();
   };
@@ -573,34 +571,13 @@ export function AsrProviderManager({
   const providerHasMlxAcceleration = (providerType: AsrProviderType, modelId: string) =>
     modelSupportsMlxAcceleration(providerType, modelId);
 
-  const providerUsesMlxAcceleration = (providerType: AsrProviderType, modelId: string) =>
-    mlxAcceleratedProviders.includes(providerType) &&
-    providerHasMlxAcceleration(providerType, modelId);
-
-  const normalizeMlxAcceleratedProviders = (
-    candidateProviders: AsrProviderType[],
-    nextDefaultProvider: AsrProviderType,
-    nextDefaultModelId: string,
-    nextDictationProvider: AsrProviderType,
-    nextDictationModelId: string,
-    nextMeetingProvider: AsrProviderType,
-    nextMeetingModelId: string
+  const providerUsesMlxAcceleration = (
+    providerType: AsrProviderType,
+    modelId: string,
+    slot: "dictation" | "meeting"
   ) => {
-    const selectedRoutes: Array<[AsrProviderType, string]> = [
-      [nextDefaultProvider, nextDefaultModelId],
-      [nextDictationProvider, nextDictationModelId],
-      [nextMeetingProvider, nextMeetingModelId],
-    ];
-    const seen = new Set<AsrProviderType>();
-    return candidateProviders.filter((providerType) => {
-      if (seen.has(providerType)) return false;
-      seen.add(providerType);
-      return selectedRoutes.some(
-        ([candidateProvider, candidateModelId]) =>
-          candidateProvider === providerType &&
-          providerHasMlxAcceleration(candidateProvider, candidateModelId)
-      );
-    });
+    const mlxEnabled = slot === "dictation" ? dictationMlxEnabled : meetingMlxEnabled;
+    return mlxEnabled && providerHasMlxAcceleration(providerType, modelId);
   };
 
   const readyLocalProvider = (...providerTypes: AsrProviderType[]) =>
@@ -608,10 +585,14 @@ export function AsrProviderManager({
       .map((providerType) => providerByType(providerType))
       .find((provider) => provider?.runtimeStatus === "ready" && provider.inferenceEnabled) ?? null;
 
-  const providerDisplayName = (providerType: AsrProviderType, modelId: string) => {
+  const providerDisplayName = (
+    providerType: AsrProviderType,
+    modelId: string,
+    slot: "dictation" | "meeting" = "dictation"
+  ) => {
     const provider = providerByType(providerType);
     const baseLabel = provider ? providerUiName(provider) : providerType;
-    return providerUsesMlxAcceleration(providerType, modelId)
+    return providerUsesMlxAcceleration(providerType, modelId, slot)
       ? `${baseLabel} via MLX`
       : baseLabel;
   };
@@ -932,10 +913,15 @@ export function AsrProviderManager({
     }
   };
 
-  const renderRouteStatus = (label: string, providerType: AsrProviderType, modelId: string) => {
+  const renderRouteStatus = (
+    label: string,
+    providerType: AsrProviderType,
+    modelId: string,
+    slot: "dictation" | "meeting" = "dictation"
+  ) => {
     const provider = providerByType(providerType);
     if (!provider) return null;
-    const routeLabel = providerDisplayName(providerType, modelId);
+    const routeLabel = providerDisplayName(providerType, modelId, slot);
     if (providerType === "macos_apple_speech" && permissionDiagnostics?.speechRecognitionReady) {
       return (
         <p className="text-xs text-muted-foreground">
@@ -1081,12 +1067,17 @@ export function AsrProviderManager({
     );
   };
 
-  const renderMlxAccelerationToggle = (providerType: AsrProviderType, modelId: string) => {
+  const renderMlxAccelerationToggle = (
+    providerType: AsrProviderType,
+    modelId: string,
+    slot: "dictation" | "meeting" | "shared"
+  ) => {
     if (!providerHasMlxAcceleration(providerType, modelId)) {
       return null;
     }
 
-    const checked = providerUsesMlxAcceleration(providerType, modelId);
+    const effectiveSlot = slot === "shared" ? "dictation" : slot;
+    const checked = providerUsesMlxAcceleration(providerType, modelId, effectiveSlot);
     const globalMlxEnabled = platformSettings?.macos.mlxEnabled ?? true;
 
     return (
@@ -1104,12 +1095,14 @@ export function AsrProviderManager({
           type="checkbox"
           checked={checked}
           onChange={(event) => {
-            const nextProviders = event.target.checked
-              ? [...mlxAcceleratedProviders, providerType]
-              : mlxAcceleratedProviders.filter((value) => value !== providerType);
-            void persistSelectionSettings({
-              mlxAcceleratedProviders: nextProviders,
-            }).catch((error) => {
+            const enabled = event.target.checked;
+            const update =
+              slot === "shared"
+                ? { dictationMlxEnabled: enabled, meetingMlxEnabled: enabled }
+                : slot === "dictation"
+                  ? { dictationMlxEnabled: enabled }
+                  : { meetingMlxEnabled: enabled };
+            void persistSelectionSettings(update).catch((error) => {
               console.error("Failed to update MLX acceleration setting:", error);
             });
           }}
@@ -1538,7 +1531,7 @@ export function AsrProviderManager({
             )}
           </div>
 
-          {renderMlxAccelerationToggle(provider.providerType, selectedModelId)}
+          {null /* MLX toggle is per-slot (dictation / meeting) in the route selector below */}
 
           {provider.engineDiagnostics ? (
             <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs space-y-1">
@@ -1818,8 +1811,16 @@ export function AsrProviderManager({
                 )}
                 {renderMlxAccelerationToggle(
                   useSharedAsrSelection ? defaultProvider : dictationProvider,
-                  useSharedAsrSelection ? defaultModelId : dictationModelId
+                  useSharedAsrSelection ? defaultModelId : dictationModelId,
+                  useSharedAsrSelection ? "shared" : "dictation"
                 )}
+                {!useSharedAsrSelection && dictationProvider !== defaultProvider ? (
+                  <p className="text-xs text-amber-500">
+                    ⚠ Dictation is using{" "}
+                    {providerByType(dictationProvider)?.name ?? dictationProvider}, not{" "}
+                    {providerByType(defaultProvider)?.name ?? defaultProvider}.
+                  </p>
+                ) : null}
                 {!useSharedAsrSelection ? (
                   <label className="space-y-1 text-sm">
                     <span className="text-muted-foreground">Meeting provider</span>
@@ -1860,8 +1861,15 @@ export function AsrProviderManager({
                     }, meetingModelOptionsForProvider(meetingProvider))
                   : null}
                 {!useSharedAsrSelection
-                  ? renderMlxAccelerationToggle(meetingProvider, meetingModelId)
+                  ? renderMlxAccelerationToggle(meetingProvider, meetingModelId, "meeting")
                   : null}
+                {!useSharedAsrSelection && meetingProvider !== defaultProvider ? (
+                  <p className="text-xs text-amber-500">
+                    ⚠ Meeting is using{" "}
+                    {providerByType(meetingProvider)?.name ?? meetingProvider}, not{" "}
+                    {providerByType(defaultProvider)?.name ?? defaultProvider}.
+                  </p>
+                ) : null}
               </div>
 
               <div className="rounded-lg border border-border bg-muted/10 p-4 space-y-3">
@@ -1932,7 +1940,8 @@ export function AsrProviderManager({
                         {currentDictationRouteProvider
                           ? providerDisplayName(
                               currentDictationRouteProvider.providerType,
-                              useSharedAsrSelection ? defaultModelId : dictationModelId
+                              useSharedAsrSelection ? defaultModelId : dictationModelId,
+                              "dictation"
                             )
                           : "No dictation route selected"}
                       </p>
@@ -1951,7 +1960,8 @@ export function AsrProviderManager({
                         {currentMeetingRouteProvider
                           ? providerDisplayName(
                               currentMeetingRouteProvider.providerType,
-                              useSharedAsrSelection ? defaultModelId : meetingModelId
+                              useSharedAsrSelection ? defaultModelId : meetingModelId,
+                              "meeting"
                             )
                           : "No meeting route selected"}
                       </p>
@@ -1971,10 +1981,10 @@ export function AsrProviderManager({
 
               <div className="space-y-1">
                 {useSharedAsrSelection
-                  ? renderRouteStatus("Shared route", defaultProvider, defaultModelId)
-                  : renderRouteStatus("Dictation route", dictationProvider, dictationModelId)}
+                  ? renderRouteStatus("Shared route", defaultProvider, defaultModelId, "dictation")
+                  : renderRouteStatus("Dictation route", dictationProvider, dictationModelId, "dictation")}
                 {!useSharedAsrSelection
-                  ? renderRouteStatus("Meeting route", meetingProvider, meetingModelId)
+                  ? renderRouteStatus("Meeting route", meetingProvider, meetingModelId, "meeting")
                   : null}
               </div>
             </CardContent>

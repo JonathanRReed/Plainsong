@@ -32,7 +32,11 @@ pub struct AsrManager {
     default_provider: RwLock<AsrProviderType>,
     selected_model_id: RwLock<String>,
     provider_model_ids: RwLock<HashMap<AsrProviderType, String>>,
+    /// Legacy global set — kept for provider-info display and backward-compat callers.
     mlx_accelerated_providers: RwLock<HashSet<AsrProviderType>>,
+    /// Per-slot MLX flags — these are the authoritative source for routing.
+    dictation_mlx_enabled: RwLock<bool>,
+    meeting_mlx_enabled: RwLock<bool>,
     silence_skip_enabled: RwLock<bool>,
     platform_optimization: RwLock<crate::settings::PlatformOptimizationSettings>,
     last_runtime_errors: RwLock<HashMap<AsrProviderType, String>>,
@@ -79,6 +83,8 @@ impl AsrManager {
             ),
             provider_model_ids: RwLock::new(provider_model_ids),
             mlx_accelerated_providers: RwLock::new(HashSet::new()),
+            dictation_mlx_enabled: RwLock::new(false),
+            meeting_mlx_enabled: RwLock::new(false),
             last_runtime_errors: RwLock::new(HashMap::new()),
             provider_info_cache: RwLock::new(None),
             models_dir,
@@ -173,6 +179,24 @@ impl AsrManager {
         self.mlx_accelerated_providers.read().await.clone()
     }
 
+    pub async fn set_dictation_mlx_enabled(&self, enabled: bool) {
+        *self.dictation_mlx_enabled.write().await = enabled;
+        self.invalidate_provider_info_cache().await;
+    }
+
+    pub async fn set_meeting_mlx_enabled(&self, enabled: bool) {
+        *self.meeting_mlx_enabled.write().await = enabled;
+        self.invalidate_provider_info_cache().await;
+    }
+
+    pub async fn dictation_mlx_enabled(&self) -> bool {
+        *self.dictation_mlx_enabled.read().await
+    }
+
+    pub async fn meeting_mlx_enabled(&self) -> bool {
+        *self.meeting_mlx_enabled.read().await
+    }
+
     pub async fn resolve_effective_provider_and_model(
         &self,
         provider_type: AsrProviderType,
@@ -184,7 +208,7 @@ impl AsrManager {
             provider_type,
             model_id,
             &optimization,
-            &mlx_accelerated_providers,
+            mlx_accelerated_providers.contains(&provider_type),
         );
         (
             effective.provider_type,
@@ -245,13 +269,13 @@ impl AsrManager {
         requested_provider: AsrProviderType,
         requested_model_id: &str,
         optimization: &crate::settings::PlatformOptimizationSettings,
-        mlx_accelerated_providers: &HashSet<AsrProviderType>,
+        mlx_enabled: bool,
     ) -> EffectiveProviderSelection {
         let normalized_model_id = Self::normalize_model_id(requested_provider, requested_model_id);
         if requested_provider != AsrProviderType::MlxAudio
             && cfg!(all(target_os = "macos", target_arch = "aarch64"))
             && optimization.macos.mlx_enabled
-            && mlx_accelerated_providers.contains(&requested_provider)
+            && mlx_enabled
         {
             if let Some(mlx_model_id) = crate::asr::mlx_audio::mapped_model_for_visible_route(
                 requested_provider,
@@ -272,15 +296,19 @@ impl AsrManager {
         }
     }
 
-    pub fn supports_short_keep_warm(&self, provider_type: AsrProviderType, model_id: &str) -> bool {
+    pub async fn supports_short_keep_warm(
+        &self,
+        provider_type: AsrProviderType,
+        model_id: &str,
+    ) -> bool {
         let normalized = Self::normalize_model_id(provider_type, model_id);
-        let optimization = self.platform_optimization.blocking_read().clone();
-        let mlx_accelerated_providers = self.mlx_accelerated_providers.blocking_read().clone();
+        let optimization = self.platform_optimization().await;
+        let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
         let effective = Self::effective_provider_selection(
             provider_type,
             normalized.as_str(),
             &optimization,
-            &mlx_accelerated_providers,
+            mlx_accelerated_providers.contains(&provider_type),
         );
         match effective.provider_type {
             AsrProviderType::Whisper
@@ -293,15 +321,15 @@ impl AsrManager {
         }
     }
 
-    pub fn cool_down_local_route(&self, provider_type: AsrProviderType, model_id: &str) {
+    pub async fn cool_down_local_route(&self, provider_type: AsrProviderType, model_id: &str) {
         let normalized = Self::normalize_model_id(provider_type, model_id);
-        let optimization = self.platform_optimization.blocking_read().clone();
-        let mlx_accelerated_providers = self.mlx_accelerated_providers.blocking_read().clone();
+        let optimization = self.platform_optimization().await;
+        let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
         let effective = Self::effective_provider_selection(
             provider_type,
             normalized.as_str(),
             &optimization,
-            &mlx_accelerated_providers,
+            mlx_accelerated_providers.contains(&provider_type),
         );
         match effective.provider_type {
             AsrProviderType::Whisper => super::whisper::clear_cached_model(&normalized),
@@ -370,7 +398,7 @@ impl AsrManager {
             provider_type,
             selected_model.as_str(),
             &optimization,
-            &mlx_accelerated_providers,
+            mlx_accelerated_providers.contains(&provider_type),
         );
         let provider =
             Self::provider_with_model(effective.provider_type, Some(effective.model_id.as_str()));
@@ -402,6 +430,9 @@ impl AsrManager {
         file_path: Option<&Path>,
         audio_data: Option<&[u8]>,
         selected_model: Option<&str>,
+        /// When `Some`, bypasses the global mlx_accelerated_providers set with an explicit flag.
+        /// Use this for slot-aware routing (dictation vs meeting).
+        mlx_override: Option<bool>,
     ) -> Result<TranscriptionResult> {
         let requested_provider = provider_type;
         let resolved_model = match selected_model {
@@ -410,12 +441,18 @@ impl AsrManager {
         };
         let skip_silence = self.silence_skip_enabled().await;
         let optimization = self.platform_optimization().await;
-        let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
+        let mlx_enabled = match mlx_override {
+            Some(b) => b,
+            None => self
+                .mlx_accelerated_providers()
+                .await
+                .contains(&requested_provider),
+        };
         let effective_selection = Self::effective_provider_selection(
             requested_provider,
             resolved_model.as_str(),
             &optimization,
-            &mlx_accelerated_providers,
+            mlx_enabled,
         );
 
         // Pre-process: remove silence from audio bytes if enabled
@@ -740,26 +777,62 @@ impl AsrManager {
     /// Transcribe using the default provider
     pub async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
         let provider_type = self.get_default_provider().await;
-        self.transcribe_inner(provider_type, Some(audio_path), None, None)
+        self.transcribe_inner(provider_type, Some(audio_path), None, None, None)
             .await
     }
 
     /// Transcribe bytes using the default provider
     pub async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let provider_type = self.get_default_provider().await;
-        self.transcribe_inner(provider_type, None, Some(audio_data), None)
+        self.transcribe_inner(provider_type, None, Some(audio_data), None, None)
             .await
     }
 
-    /// Transcribe bytes with a specific provider.
+    /// Transcribe bytes with a specific provider (uses the global MLX accelerated set).
     pub async fn transcribe_bytes_with_provider(
         &self,
         provider_type: AsrProviderType,
         audio_data: &[u8],
         selected_model: Option<&str>,
     ) -> Result<TranscriptionResult> {
-        self.transcribe_inner(provider_type, None, Some(audio_data), selected_model)
+        self.transcribe_inner(provider_type, None, Some(audio_data), selected_model, None)
             .await
+    }
+
+    /// Transcribe bytes for the dictation route slot (uses per-slot dictation MLX flag).
+    pub async fn transcribe_bytes_for_dictation(
+        &self,
+        provider_type: AsrProviderType,
+        audio_data: &[u8],
+        selected_model: Option<&str>,
+    ) -> Result<TranscriptionResult> {
+        let mlx_enabled = *self.dictation_mlx_enabled.read().await;
+        self.transcribe_inner(
+            provider_type,
+            None,
+            Some(audio_data),
+            selected_model,
+            Some(mlx_enabled),
+        )
+        .await
+    }
+
+    /// Transcribe bytes for the meeting route slot (uses per-slot meeting MLX flag).
+    pub async fn transcribe_bytes_for_meeting(
+        &self,
+        provider_type: AsrProviderType,
+        audio_data: &[u8],
+        selected_model: Option<&str>,
+    ) -> Result<TranscriptionResult> {
+        let mlx_enabled = *self.meeting_mlx_enabled.read().await;
+        self.transcribe_inner(
+            provider_type,
+            None,
+            Some(audio_data),
+            selected_model,
+            Some(mlx_enabled),
+        )
+        .await
     }
 
     /// Transcribe with a specific provider
@@ -769,7 +842,7 @@ impl AsrManager {
         provider_type: AsrProviderType,
         audio_path: &Path,
     ) -> Result<TranscriptionResult> {
-        self.transcribe_inner(provider_type, Some(audio_path), None, None)
+        self.transcribe_inner(provider_type, Some(audio_path), None, None, None)
             .await
     }
 
@@ -791,11 +864,12 @@ impl AsrManager {
                 .unwrap_or_else(|| provider_type.default_model_id().to_string());
             let optimization = optimization.clone();
             let mlx_accelerated_providers = mlx_accelerated_providers.clone();
+            let mlx_enabled = mlx_accelerated_providers.contains(&provider_type);
             let effective = Self::effective_provider_selection(
                 provider_type,
                 selected_model.as_str(),
                 &optimization,
-                &mlx_accelerated_providers,
+                mlx_enabled,
             );
             let last_error = last_errors.get(&effective.provider_type).cloned();
 
@@ -838,7 +912,7 @@ impl AsrManager {
                             effective.provider_type,
                             effective.model_id.as_str(),
                             &optimization,
-                            &mlx_accelerated_providers,
+                            mlx_enabled,
                         ),
                     }
                 })
@@ -866,14 +940,14 @@ impl AsrManager {
         provider_type: AsrProviderType,
         selected_model_id: &str,
         optimization: &crate::settings::PlatformOptimizationSettings,
-        mlx_accelerated_providers: &HashSet<AsrProviderType>,
+        mlx_enabled: bool,
     ) -> EngineDiagnostics {
         let mut diagnostics = EngineDiagnostics::default();
         let effective = Self::effective_provider_selection(
             provider_type,
             selected_model_id,
             optimization,
-            mlx_accelerated_providers,
+            mlx_enabled,
         );
         let all_engines = [
             PlatformEngine::ProviderDefault,
@@ -935,7 +1009,7 @@ impl AsrManager {
             provider_type,
             selected_model.as_str(),
             &optimization,
-            &mlx_accelerated_providers,
+            mlx_accelerated_providers.contains(&provider_type),
         );
         let provider =
             Self::provider_with_model(effective.provider_type, Some(effective.model_id.as_str()));
@@ -2161,6 +2235,22 @@ mod tests {
         let model = provider.model_info();
 
         assert_eq!(model.version, "mlx-community/SenseVoiceSmall");
+    }
+
+    #[tokio::test]
+    async fn mlx_keep_warm_helpers_are_runtime_safe() {
+        let manager = AsrManager::new();
+        manager
+            .set_mlx_accelerated_providers(std::iter::once(AsrProviderType::Whisper).collect())
+            .await;
+
+        assert!(manager
+            .supports_short_keep_warm(AsrProviderType::Whisper, "base.en")
+            .await);
+
+        manager
+            .cool_down_local_route(AsrProviderType::Whisper, "base.en")
+            .await;
     }
 
     #[tokio::test]

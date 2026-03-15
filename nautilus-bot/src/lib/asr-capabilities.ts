@@ -3,7 +3,12 @@ import type { AsrProviderInfo, AsrProviderType } from "@/types";
 export type DictationRoutePreference = "local" | "cloud";
 
 const HIDDEN_PROVIDER_SET = new Set<AsrProviderType>(["mlx_audio"]);
-const MLX_ACCELERATABLE_PROVIDER_SET = new Set<AsrProviderType>(["moonshine", "whisper"]);
+const MLX_ACCELERATABLE_PROVIDER_SET = new Set<AsrProviderType>([
+  "moonshine",
+  "whisper",
+  "parakeet",
+  "voxtral",
+]);
 
 const DOWNLOADABLE_PROVIDER_SET = new Set<AsrProviderType>([
   "whisper",
@@ -86,6 +91,14 @@ export function mlxMappedModelId(
         default:
           return null;
       }
+    case "parakeet":
+      if (normalized === "parakeet-ctc-0.6b" || normalized === "parakeet-tdt-0.6b-v3") {
+        return "mlx-community/parakeet-tdt-0.6b-v3";
+      }
+      return null;
+    case "voxtral":
+      if (normalized === "voxtral-local") return "mlx-community/Voxtral-Mini-3B-2507-bf16";
+      return null;
     default:
       return null;
   }
@@ -128,6 +141,10 @@ export function visibleRouteForMlxModel(modelId: string | null | undefined): {
       return { providerType: "whisper", modelId: "large-v3" };
     case "mlx-community/whisper-large-v3-turbo-asr-fp16":
       return { providerType: "whisper", modelId: "large-v3-turbo" };
+    case "mlx-community/parakeet-tdt-0.6b-v3":
+      return { providerType: "parakeet", modelId: "parakeet-ctc-0.6b" };
+    case "mlx-community/Voxtral-Mini-3B-2507-bf16":
+      return { providerType: "voxtral", modelId: "voxtral-local" };
     default:
       return null;
   }

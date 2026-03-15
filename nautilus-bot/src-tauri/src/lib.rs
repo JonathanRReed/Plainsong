@@ -2496,6 +2496,7 @@ async fn stop_recording(
                     requested_provider_clone,
                     actual_provider_clone,
                     fallback_reason_clone.as_deref(),
+                    optimization_applied_clone,
                 ) {
                     tracing::warn!("{}", fallback_warning);
                     let _ = app_handle.emit("asr-provider-warning", fallback_warning);
@@ -5744,6 +5745,14 @@ async fn set_asr_provider_model(
         .asr_manager
         .set_mlx_accelerated_providers(mlx_accelerated_provider_set_from_settings(&transcription))
         .await;
+    state
+        .asr_manager
+        .set_dictation_mlx_enabled(transcription.dictation_mlx_enabled)
+        .await;
+    state
+        .asr_manager
+        .set_meeting_mlx_enabled(transcription.meeting_mlx_enabled)
+        .await;
     Ok(())
 }
 
@@ -6320,6 +6329,14 @@ async fn reset_app_state(
         .await;
     state
         .asr_manager
+        .set_dictation_mlx_enabled(defaults.transcription.dictation_mlx_enabled)
+        .await;
+    state
+        .asr_manager
+        .set_meeting_mlx_enabled(defaults.transcription.meeting_mlx_enabled)
+        .await;
+    state
+        .asr_manager
         .set_default_provider(default_provider)
         .await;
     state
@@ -6447,6 +6464,14 @@ async fn save_settings(
             .set_mlx_accelerated_providers(mlx_accelerated_provider_set_from_settings(
                 &settings.transcription,
             ))
+            .await;
+        state
+            .asr_manager
+            .set_dictation_mlx_enabled(settings.transcription.dictation_mlx_enabled)
+            .await;
+        state
+            .asr_manager
+            .set_meeting_mlx_enabled(settings.transcription.meeting_mlx_enabled)
             .await;
         state
             .asr_manager
@@ -8613,7 +8638,7 @@ async fn stop_dictation_session_for_session(
         } else {
             state
                 .asr_manager
-                .transcribe_bytes_with_provider(
+                .transcribe_bytes_for_dictation(
                     dictation_provider,
                     &audio_data,
                     Some(dictation_model_id.as_str()),
@@ -8624,7 +8649,7 @@ async fn stop_dictation_session_for_session(
         {
             state
                 .asr_manager
-                .transcribe_bytes_with_provider(
+                .transcribe_bytes_for_dictation(
                     dictation_provider,
                     &audio_data,
                     Some(dictation_model_id.as_str()),
@@ -8704,7 +8729,7 @@ async fn stop_dictation_session_for_session(
                 );
                 match state
                     .asr_manager
-                    .transcribe_bytes_with_provider(
+                    .transcribe_bytes_for_dictation(
                         dictation_provider,
                         &trimmed_audio,
                         Some(dictation_model_id.as_str()),
@@ -9183,6 +9208,7 @@ async fn stop_dictation_session_for_session(
         result.requested_provider,
         result.actual_provider,
         result.fallback_reason.as_deref(),
+        result.optimization_applied,
     );
     if let Some(message) = fallback_message.as_deref() {
         tracing::warn!("{}", message);
@@ -10138,6 +10164,7 @@ async fn suspend_matching_dictation_keep_warm_route(
         || !state
             .asr_manager
             .supports_short_keep_warm(provider, model_id)
+            .await
     {
         return;
     }
@@ -10197,7 +10224,8 @@ async fn apply_dictation_keep_warm_policy(
         && resolved_hosting == Some("local")
         && state
             .asr_manager
-            .supports_short_keep_warm(provider, model_id);
+            .supports_short_keep_warm(provider, model_id)
+            .await;
 
     let current_route = DictationKeepWarmRoute {
         provider,
@@ -10210,10 +10238,11 @@ async fn apply_dictation_keep_warm_policy(
             if let Some(previous_route) = previous_route {
                 state
                     .asr_manager
-                    .cool_down_local_route(previous_route.provider, &previous_route.model_id);
+                    .cool_down_local_route(previous_route.provider, &previous_route.model_id)
+                    .await;
             }
         }
-        state.asr_manager.cool_down_local_route(provider, model_id);
+        state.asr_manager.cool_down_local_route(provider, model_id).await;
         return;
     }
 
@@ -10223,7 +10252,8 @@ async fn apply_dictation_keep_warm_policy(
         if let Some(previous_route) = previous_route {
             state
                 .asr_manager
-                .cool_down_local_route(previous_route.provider, &previous_route.model_id);
+                .cool_down_local_route(previous_route.provider, &previous_route.model_id)
+                .await;
         }
     }
 
@@ -10245,7 +10275,9 @@ async fn apply_dictation_keep_warm_policy(
         };
 
         if should_cool {
-            asr_manager.cool_down_local_route(current_route.provider, &current_route.model_id);
+            asr_manager
+                .cool_down_local_route(current_route.provider, &current_route.model_id)
+                .await;
         }
     });
 }
@@ -12422,12 +12454,14 @@ fn build_dictation_text_ready_payload(
     resolved_hosting: Option<&str>,
     provider_model_label: Option<&str>,
 ) -> DictationTextReadyEvent {
-    let is_fallback = result.requested_provider != result.actual_provider
-        || result
-            .fallback_reason
-            .as_deref()
-            .map(|reason| !reason.trim().is_empty())
-            .unwrap_or(false);
+    let has_fallback_reason = result
+        .fallback_reason
+        .as_deref()
+        .map(|reason| !reason.trim().is_empty())
+        .unwrap_or(false);
+    let provider_changed = result.requested_provider != result.actual_provider;
+    let is_fallback =
+        has_fallback_reason || (provider_changed && !result.optimization_applied);
 
     DictationTextReadyEvent {
         session_id,
@@ -13718,6 +13752,8 @@ pub fn run() {
                     silence_skip,
                     platform_optimization,
                     mlx_accelerated_providers,
+                    dictation_mlx_enabled,
+                    meeting_mlx_enabled,
                     mut provider_model_map,
                 ) = {
                     let settings_manager = state.settings_manager.lock().await;
@@ -13727,6 +13763,8 @@ pub fn run() {
                         transcription.silence_skip_enabled,
                         transcription.platform_optimization.clone(),
                         mlx_accelerated_provider_set_from_settings(transcription),
+                        transcription.dictation_mlx_enabled,
+                        transcription.meeting_mlx_enabled,
                         provider_model_map_from_settings(transcription),
                     )
                 };
@@ -13738,6 +13776,14 @@ pub fn run() {
                 state
                     .asr_manager
                     .set_mlx_accelerated_providers(mlx_accelerated_providers.clone())
+                    .await;
+                state
+                    .asr_manager
+                    .set_dictation_mlx_enabled(dictation_mlx_enabled)
+                    .await;
+                state
+                    .asr_manager
+                    .set_meeting_mlx_enabled(meeting_mlx_enabled)
                     .await;
                 state
                     .asr_manager
@@ -13779,6 +13825,14 @@ pub fn run() {
                 state
                     .asr_manager
                     .set_mlx_accelerated_providers(mlx_accelerated_providers)
+                    .await;
+                state
+                    .asr_manager
+                    .set_dictation_mlx_enabled(dictation_mlx_enabled)
+                    .await;
+                state
+                    .asr_manager
+                    .set_meeting_mlx_enabled(meeting_mlx_enabled)
                     .await;
                 state.asr_manager.set_default_provider(resolved_provider).await;
 
@@ -14778,13 +14832,24 @@ mod tests {
             asr::AsrProviderType::Whisper,
             asr::AsrProviderType::Whisper,
             None,
+            false,
         );
         assert!(none.is_none());
+
+        // An MLX optimization remap should not produce a fallback message.
+        let mlx_opt = build_provider_fallback_message(
+            asr::AsrProviderType::Whisper,
+            asr::AsrProviderType::MlxAudio,
+            None,
+            true,
+        );
+        assert!(mlx_opt.is_none());
 
         let fallback = build_provider_fallback_message(
             asr::AsrProviderType::Voxtral,
             asr::AsrProviderType::Whisper,
             Some("Voxtral runtime returned an empty transcript."),
+            false,
         );
         assert!(fallback
             .as_deref()
@@ -15327,6 +15392,69 @@ mod tests {
         assert_eq!(
             payload.get("isFallback").and_then(|value| value.as_bool()),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn dictation_text_ready_payload_does_not_flag_mlx_optimization_as_fallback() {
+        let result = asr::TranscriptionResult {
+            text: "hello world".to_string(),
+            segments: Vec::new(),
+            language: "en".to_string(),
+            confidence: 0.95,
+            processing_time_ms: 180,
+            model_name: "mlx-audio".to_string(),
+            model_id: "openai/whisper-base.en-mlx".to_string(),
+            requested_provider: asr::AsrProviderType::Whisper,
+            actual_provider: asr::AsrProviderType::MlxAudio,
+            requested_engine: Some("whisper.cpp".to_string()),
+            actual_engine: Some("mlx".to_string()),
+            optimization_applied: true,
+            fallback_reason: None,
+        };
+
+        let payload = build_dictation_text_ready_payload(
+            7,
+            "manual",
+            "pasted",
+            &result,
+            true,
+            false,
+            None,
+            None,
+            Some(95),
+            180,
+            Some(24),
+            320,
+            "paste",
+            Some("newline"),
+            1,
+            2,
+            true,
+            false,
+            &["backtrack".to_string(), "smart_formatting".to_string()],
+            Some("Notes"),
+            Some("slack"),
+            Some("clipboard"),
+            Some(42),
+            Some("local"),
+            Some("best_available"),
+            Some("local"),
+            Some("Whisper base.en (MLX)"),
+        );
+        let payload = serde_json::to_value(payload).expect("payload should serialize");
+
+        assert_eq!(
+            payload.get("requestedProvider").and_then(|value| value.as_str()),
+            Some("whisper")
+        );
+        assert_eq!(
+            payload.get("actualProvider").and_then(|value| value.as_str()),
+            Some("mlx_audio")
+        );
+        assert_eq!(
+            payload.get("isFallback").and_then(|value| value.as_bool()),
+            Some(false)
         );
     }
 
@@ -16955,7 +17083,7 @@ async fn transcribe_recording_in_chunks(
         Box::pin(async move {
             let wav_chunk = mono_samples_to_wav_bytes(&chunk, spec.sample_rate)?;
             let result = asr_manager
-                .transcribe_bytes_with_provider(provider, &wav_chunk, Some(model_id.as_str()))
+                .transcribe_bytes_for_meeting(provider, &wav_chunk, Some(model_id.as_str()))
                 .await
                 .map_err(|error| {
                     format!(
@@ -18038,6 +18166,32 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
         },
     );
     normalize_mlx_accelerated_providers(transcription);
+    migrate_mlx_providers_to_slot_flags(transcription);
+}
+
+/// One-time migration: if `mlx_accelerated_providers` contains the dictation or meeting provider
+/// and the slot-specific flag has never been set (still false), enable it automatically.
+fn migrate_mlx_providers_to_slot_flags(transcription: &mut settings::TranscriptionSettings) {
+    if transcription.dictation_mlx_enabled || transcription.meeting_mlx_enabled {
+        // Already migrated or explicitly set; leave untouched.
+        return;
+    }
+    let dictation_key = transcription.dictation_provider.as_str();
+    if transcription
+        .mlx_accelerated_providers
+        .iter()
+        .any(|p| p == dictation_key)
+    {
+        transcription.dictation_mlx_enabled = true;
+    }
+    let meeting_key = transcription.meeting_provider.as_str();
+    if transcription
+        .mlx_accelerated_providers
+        .iter()
+        .any(|p| p == meeting_key)
+    {
+        transcription.meeting_mlx_enabled = true;
+    }
 }
 
 fn migrate_legacy_mlx_route_selection(transcription: &mut settings::TranscriptionSettings) {
@@ -18204,8 +18358,10 @@ fn build_provider_fallback_message(
     requested_provider: asr::AsrProviderType,
     actual_provider: asr::AsrProviderType,
     fallback_reason: Option<&str>,
+    optimization_applied: bool,
 ) -> Option<String> {
-    if requested_provider == actual_provider {
+    // An intentional MLX remap is an optimization, not a fallback — suppress the warning.
+    if requested_provider == actual_provider || optimization_applied {
         return None;
     }
 

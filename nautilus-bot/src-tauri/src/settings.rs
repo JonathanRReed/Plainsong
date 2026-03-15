@@ -129,7 +129,12 @@ pub struct TranscriptionSettings {
     /// Provider-specific model identifiers (keyed by provider value, e.g. "whisper")
     pub provider_model_ids: HashMap<String, String>,
     /// Visible providers that should run through MLX Audio when a compatible model is selected.
+    /// Kept for migration/display; per-slot flags below are the authoritative routing source.
     pub mlx_accelerated_providers: Vec<String>,
+    /// Whether the dictation route slot should use MLX acceleration when available.
+    pub dictation_mlx_enabled: bool,
+    /// Whether the meeting route slot should use MLX acceleration when available.
+    pub meeting_mlx_enabled: bool,
     /// Auto-transcribe after recording
     pub auto_transcribe: bool,
     /// Enable speaker diarization
@@ -265,6 +270,8 @@ impl Default for TranscriptionSettings {
             meeting_route_policy: "prefer_local".to_string(),
             provider_model_ids: HashMap::new(),
             mlx_accelerated_providers: Vec::new(),
+            dictation_mlx_enabled: false,
+            meeting_mlx_enabled: false,
             auto_transcribe: true,
             enable_diarization: true,
             intelligent_punctuation: true,
