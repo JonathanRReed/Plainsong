@@ -430,8 +430,8 @@ impl AsrManager {
         file_path: Option<&Path>,
         audio_data: Option<&[u8]>,
         selected_model: Option<&str>,
-        /// When `Some`, bypasses the global mlx_accelerated_providers set with an explicit flag.
-        /// Use this for slot-aware routing (dictation vs meeting).
+        // When `Some`, bypasses the global mlx_accelerated_providers set.
+        // Use this for slot-aware routing (dictation vs meeting).
         mlx_override: Option<bool>,
     ) -> Result<TranscriptionResult> {
         let requested_provider = provider_type;
