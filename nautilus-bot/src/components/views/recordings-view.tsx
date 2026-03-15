@@ -82,6 +82,9 @@ import {
   Square,
   Trash2,
   Users,
+  Rocket,
+  ClipboardList,
+  CalendarClock,
 } from "lucide-react";
 import type { AnalysisTemplate } from "@/types";
 import type { LlmCitation } from "@/types";
@@ -607,6 +610,40 @@ function buildCrossMeetingRecallQuery(args: {
   ].filter(Boolean);
 
   return sections.join("\n\n");
+}
+
+function buildMeetingReadyState(args: {
+  summary: string;
+  actionItems: string[];
+  notes: string;
+  transcriptSegments: number;
+}): { label: string; tone: "good" | "warn" | "muted"; detail: string } {
+  if (args.summary.trim() && args.actionItems.length > 0) {
+    return {
+      label: "Ready to send follow-up",
+      tone: "good",
+      detail: "Summary and next steps are already in place.",
+    };
+  }
+  if (args.notes.trim() && args.transcriptSegments > 0) {
+    return {
+      label: "Ready for AI cleanup",
+      tone: "warn",
+      detail: "You have enough notes and transcript context to generate a solid recap.",
+    };
+  }
+  if (args.transcriptSegments > 0) {
+    return {
+      label: "Transcript captured",
+      tone: "muted",
+      detail: "Start filling notes or run summary/action item refresh next.",
+    };
+  }
+  return {
+    label: "Capture in progress",
+    tone: "muted",
+    detail: "Keep notes current while the meeting is still live.",
+  };
 }
 
 function buildRelationshipRecallPrompts(args: {
@@ -1871,6 +1908,16 @@ export function RecordingsView() {
       selectedTranscript?.fullText,
     ]
   );
+  const selectedMeetingReadyState = useMemo(
+    () =>
+      buildMeetingReadyState({
+        summary: meetingSummary,
+        actionItems: selectedMeetingActionItems,
+        notes: meetingNotes,
+        transcriptSegments: selectedTranscript?.segments?.length ?? 0,
+      }),
+    [meetingNotes, meetingSummary, selectedMeetingActionItems, selectedTranscript?.segments?.length]
+  );
   const transcriptPreviewItems = useMemo(() => {
     if (selectedRecording?.id === recordingId && streamChunks.length > 0) {
       return streamChunks.slice(-5).map((chunk, index) => ({
@@ -2337,6 +2384,32 @@ export function RecordingsView() {
                     )}
                   </div>
                 </div>
+                <div className="mt-4 grid gap-3 md:grid-cols-3">
+                  <div className="rounded-lg border bg-background/70 p-3">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Solo operator tip
+                    </p>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      Capture decisions and owners in notes now. Nautilus can clean them up after the call, but only if the raw facts are here.
+                    </p>
+                  </div>
+                  <div className="rounded-lg border bg-background/70 p-3">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Best note pattern
+                    </p>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      Decision, owner, deadline, blocker. That four-part rhythm makes summaries and follow-ups much stronger.
+                    </p>
+                  </div>
+                  <div className="rounded-lg border bg-background/70 p-3">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      End-of-call move
+                    </p>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      Stop capture, open workspace, refresh summary and action items, then copy a follow-up draft before context cools off.
+                    </p>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           )}
@@ -2585,6 +2658,55 @@ export function RecordingsView() {
                             {selectedMeetingConsent.message}
                           </p>
                         ) : null}
+                      </div>
+                    </div>
+                    <div className="mt-4 rounded-lg border border-active/20 bg-active/5 p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-active">
+                            Solo Meeting Cockpit
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            One-glance status for what to do next before you leave this workspace.
+                          </p>
+                        </div>
+                        <Badge variant="outline" className={qualityToneClasses(selectedMeetingReadyState.tone)}>
+                          {selectedMeetingReadyState.label}
+                        </Badge>
+                      </div>
+                      <p className="mt-3 text-sm text-muted-foreground">{selectedMeetingReadyState.detail}</p>
+                      <div className="mt-4 grid gap-3 md:grid-cols-3">
+                        <div className="rounded-md border bg-background/80 p-3">
+                          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                            <FileText className="h-3.5 w-3.5" />
+                            Summary
+                          </div>
+                          <p className="mt-2 text-sm font-medium">
+                            {meetingSummary.trim() ? "Ready" : "Needs refresh"}
+                          </p>
+                        </div>
+                        <div className="rounded-md border bg-background/80 p-3">
+                          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                            <ClipboardList className="h-3.5 w-3.5" />
+                            Action items
+                          </div>
+                          <p className="mt-2 text-sm font-medium">
+                            {selectedMeetingActionItems.length > 0
+                              ? `${selectedMeetingActionItems.length} captured`
+                              : "Need follow-ups"}
+                          </p>
+                        </div>
+                        <div className="rounded-md border bg-background/80 p-3">
+                          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                            <Rocket className="h-3.5 w-3.5" />
+                            Send-off
+                          </div>
+                          <p className="mt-2 text-sm font-medium">
+                            {meetingSummary.trim() && selectedMeetingActionItems.length > 0
+                              ? "Follow-up ready"
+                              : "Build recap first"}
+                          </p>
+                        </div>
                       </div>
                     </div>
                     <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -2957,6 +3079,26 @@ export function RecordingsView() {
                           Solo
                         </Badge>
                       </div>
+                      <div className="mt-3 grid gap-3 md:grid-cols-3">
+                        <div className="rounded-md border bg-background/80 px-3 py-3">
+                          <p className="text-xs font-medium text-muted-foreground">Fastest next step</p>
+                          <p className="mt-2 text-sm text-muted-foreground">
+                            Copy a DM recap when you need speed, then send the longer follow-up after a quick edit.
+                          </p>
+                        </div>
+                        <div className="rounded-md border bg-background/80 px-3 py-3">
+                          <p className="text-xs font-medium text-muted-foreground">Best planning move</p>
+                          <p className="mt-2 text-sm text-muted-foreground">
+                            Use Next Agenda after every important call so the next conversation starts with memory already loaded.
+                          </p>
+                        </div>
+                        <div className="rounded-md border bg-background/80 px-3 py-3">
+                          <p className="text-xs font-medium text-muted-foreground">Solo default</p>
+                          <p className="mt-2 text-sm text-muted-foreground">
+                            Summary + action items + one copied artifact is the minimum winning loop.
+                          </p>
+                        </div>
+                      </div>
                       <div className="mt-3 grid gap-2 sm:grid-cols-2">
                         <Button
                           type="button"
@@ -3022,6 +3164,15 @@ export function RecordingsView() {
                         <Badge variant="outline" className="bg-background/80">
                           Memory
                         </Badge>
+                      </div>
+                      <div className="mt-3 rounded-md border bg-background/80 px-3 py-3">
+                        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                          <CalendarClock className="h-3.5 w-3.5" />
+                          Best use
+                        </div>
+                        <p className="mt-2 text-sm text-muted-foreground">
+                          Run this before sending the follow-up when prior promises, deadlines, or repeated asks may change what you say next.
+                        </p>
                       </div>
                       <div className="mt-3 space-y-3">
                         <div className="flex flex-wrap gap-2">

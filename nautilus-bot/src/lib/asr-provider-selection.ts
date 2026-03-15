@@ -17,16 +17,16 @@ export function getProviderSelectionStatus(
     return { selectable: false, reason: "not_enabled" };
   }
   if (normalized.kind !== "downloaded") {
-    return { selectable: true, reason: "download_required" };
+    return { selectable: false, reason: "download_required" };
   }
   if (provider.runtimeStatus !== "ready" || !provider.isAvailable) {
-    return { selectable: true, reason: "runtime_unavailable" };
+    return { selectable: false, reason: "runtime_unavailable" };
   }
   if (
     provider.engineDiagnostics &&
     provider.engineDiagnostics.availableEngines.length === 0
   ) {
-    return { selectable: true, reason: "runtime_unavailable" };
+    return { selectable: false, reason: "runtime_unavailable" };
   }
   return { selectable: true, reason: null };
 }

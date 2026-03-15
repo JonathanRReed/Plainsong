@@ -34,7 +34,7 @@ interface SidebarProps {
 }
 
 const primaryNavItems = [
-  { id: "dashboard", label: "Dashboard", icon: FileText },
+  { id: "dashboard", label: "Home", icon: FileText },
   { id: "dictation", label: "Dictation", icon: Mic },
   { id: "recordings", label: "Meetings", icon: AudioWaveform },
   { id: "projects", label: "Projects", icon: Folder },
@@ -228,7 +228,7 @@ export function Sidebar({
         <div className="p-4 flex items-center justify-between">
           <div className={cn(isCollapsed && "hidden")}>
             <h1 className="font-semibold text-lg">Nautilus</h1>
-            <p className="text-xs text-muted-foreground mt-1">Local-first meeting notes and dictation</p>
+            <p className="text-xs text-muted-foreground mt-1">Solo voice workspace for dictation and meetings</p>
           </div>
           {onToggleCollapse && (
             <Button

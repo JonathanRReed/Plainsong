@@ -12,7 +12,7 @@ import { deriveEntitlement } from "@/hooks/use-license-features";
 import { useSetupStatus } from "@/hooks/use-setup-status";
 import { requestMainView } from "@/lib/navigation";
 import { requestOnboarding } from "@/lib/onboarding";
-import { Folder, FileAudio, Clock, Activity, Brain, Loader2 } from "lucide-react";
+import { Folder, FileAudio, Clock, Activity, Brain, Loader2, Mic, Rocket, Sparkles } from "lucide-react";
 import { TierBadge } from "@/components/tier-badge";
 
 export function DashboardView() {
@@ -90,6 +90,15 @@ export function DashboardView() {
 
   const recentRecordings = useMemo(() => recordings.slice(0, 10), [recordings]);
   const totalDuration = useMemo(() => recordings.reduce((acc, r) => acc + r.duration, 0), [recordings]);
+  const setupHeadline = setupLoading
+    ? "Checking your voice workspace"
+    : dictationReady && meetingReady
+      ? "Everything is ready"
+      : dictationReady
+        ? "Dictation is ready. Meetings need one more pass"
+        : meetingReady
+          ? "Meetings are ready. Dictation needs one more pass"
+          : "Finish setup to unlock the full solo workflow";
   const timelineGroups = useMemo(() => recordings.reduce<Record<string, typeof recordings>>((acc, recording) => {
     const key = new Date(recording.createdAt).toLocaleDateString();
     if (!acc[key]) {
@@ -195,15 +204,69 @@ export function DashboardView() {
   return (
     <div className="h-full flex flex-col">
       <div className="p-6 border-b">
-        <h1 className="text-2xl font-semibold">Dashboard</h1>
-        <p className="text-muted-foreground">Recent activity, readiness, and quick actions</p>
+        <h1 className="text-2xl font-semibold">Home</h1>
+        <p className="text-muted-foreground">Your solo voice workspace for dictation, meetings, and follow-through</p>
       </div>
       
       <ScrollArea className="flex-1">
         <div className="p-6 space-y-6">
+          <Card className="border-cyan-500/20 bg-cyan-500/5">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-cyan-300" />
+                Daily cockpit
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)]">
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-lg font-semibold">{setupHeadline}</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      Launch the fastest lane for what you need right now, then keep the follow-up loop moving without leaving Nautilus.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button onClick={() => requestMainView("dictation")}>
+                      <Mic className="mr-2 h-4 w-4" />
+                      Open dictation
+                    </Button>
+                    <Button variant="outline" onClick={() => requestMainView("recordings")}>
+                      <FileAudio className="mr-2 h-4 w-4" />
+                      Open meetings
+                    </Button>
+                    <Button variant="outline" onClick={() => requestMainView("setup")}>
+                      <Rocket className="mr-2 h-4 w-4" />
+                      Open setup
+                    </Button>
+                  </div>
+                </div>
+                <div className="rounded-xl border bg-background/70 p-4 space-y-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Winning loop
+                  </p>
+                  <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <p className="text-sm font-medium">1. Capture</p>
+                      <p className="mt-1 text-xs text-muted-foreground">Dictate anywhere or run a meeting with notes live.</p>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <p className="text-sm font-medium">2. Clarify</p>
+                      <p className="mt-1 text-xs text-muted-foreground">Use summaries, action items, memory, and edits to sharpen the result.</p>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <p className="text-sm font-medium">3. Follow through</p>
+                      <p className="mt-1 text-xs text-muted-foreground">Send the follow-up, task list, or next agenda before context fades.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle>Setup status</CardTitle>
+              <CardTitle>Readiness</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid gap-3 md:grid-cols-2">
@@ -222,7 +285,7 @@ export function DashboardView() {
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button variant="outline" onClick={() => requestMainView("setup")}>
-                  Open setup
+                  Launch checklist
                 </Button>
                 {!dictationReady ? (
                   <Button variant="outline" onClick={() => requestOnboarding("dictation")}>
@@ -286,13 +349,13 @@ export function DashboardView() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Brain className="h-5 w-5 text-violet-500" />
-                Memory
+                Second Brain
                 <TierBadge required="pro" unlocked={entitlement.proEnabled} />
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <p className="text-sm text-muted-foreground">
-                Ask anything about your meetings. Nautilus searches all transcripts, keeps the thread locally in the app, and answers with citations.
+                Ask anything across your meetings. Nautilus searches transcripts, keeps the thread locally in the app, and answers with citations.
               </p>
               <div className="flex gap-2">
                 <Input
@@ -359,11 +422,11 @@ export function DashboardView() {
 
           <Card>
             <CardHeader>
-              <CardTitle>People & Companies</CardTitle>
+              <CardTitle>Relationship Memory</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <p className="text-sm text-muted-foreground">
-                Local relationship memory built from speaker names, meeting notes, summaries, and transcripts.
+                Local memory built from speaker names, notes, summaries, and transcripts so solo follow-up gets easier over time.
               </p>
               {relationshipMemoryError ? (
                 <p className="text-sm text-destructive">{relationshipMemoryError}</p>
@@ -467,7 +530,7 @@ export function DashboardView() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Search Across Meetings</CardTitle>
+              <CardTitle>Ask Across Meetings</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex gap-2">
@@ -515,7 +578,7 @@ export function DashboardView() {
                 <Input
                   value={analysisQuery}
                   onChange={(event: ChangeEvent<HTMLInputElement>) => setAnalysisQuery(event.target.value)}
-                  placeholder="Ask across selected meetings..."
+                  placeholder="What changed across these meetings?"
                 />
                 <Button
                   onClick={runMultiRecordingAnalysis}
@@ -548,7 +611,7 @@ export function DashboardView() {
 
           <Tabs defaultValue="recent" className="space-y-4">
             <TabsList>
-              <TabsTrigger value="recent">Recent Meetings</TabsTrigger>
+               <TabsTrigger value="recent">Recent Sessions</TabsTrigger>
               <TabsTrigger value="projects">Projects</TabsTrigger>
               <TabsTrigger value="timeline">Timeline</TabsTrigger>
             </TabsList>
