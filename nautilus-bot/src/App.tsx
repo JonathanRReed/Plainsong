@@ -403,7 +403,7 @@ function App() {
                     <Suspense
                       fallback={
                         <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
-                          Loading view...
+                          Loading workspace...
                         </div>
                       }
                     >

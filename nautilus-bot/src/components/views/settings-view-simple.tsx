@@ -4247,30 +4247,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                       <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 p-3">
                         <div className="space-y-0.5">
-                          <p className="text-sm font-medium">Cross-meeting memory chat</p>
-                          <p className="text-xs text-muted-foreground">
-                            Open the Memory view to ask follow-up questions across all meetings.
-                          </p>
-                        </div>
-                        <Button variant="secondary" size="sm" onClick={() => requestMainView("dashboard")}>
-                          Open Memory
-                        </Button>
-                      </div>
-
-                      <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 p-3">
-                        <div className="space-y-0.5">
-                          <p className="text-sm font-medium">People and company memory</p>
-                          <p className="text-xs text-muted-foreground">
-                            Review local relationship memory cards built from speaker names, notes, summaries, and transcripts.
-                          </p>
-                        </div>
-                        <Button variant="secondary" size="sm" onClick={() => requestMainView("dashboard")}>
-                          Open Relationship Memory
-                        </Button>
-                      </div>
-
-                      <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 p-3">
-                        <div className="space-y-0.5">
                           <p className="text-sm font-medium">Grounded meeting follow-up drafts</p>
                           <p className="text-xs text-muted-foreground">
                             Open Meetings to draft transcript-backed follow-up emails and notes.

@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import {
   checkSystemAudioAvailability,
-  downloadWhisperModel,
+  downloadAsrModels,
   getAsrProviders,
   getLoopbackDeviceName,
   getPermissionDiagnostics,
@@ -28,7 +28,9 @@ import {
   openPermissionSettings,
   requestDictationPermissions,
   saveSettings,
+  verifyMeetingSetup,
   type PermissionDiagnostics,
+  type SetupVerificationResult,
 } from "@/lib/tauri";
 import {
   defaultDictationShortcut,
@@ -67,9 +69,24 @@ const MEETING_PROVIDER_PRIORITY: AsrProviderType[] = [
 ];
 
 const POWER_MODEL_OPTIONS = [
-  { id: "base.en", label: "Base English", size: "~148 MB", desc: "Fastest local fallback for dictation" },
-  { id: "small.en", label: "Small English", size: "~488 MB", desc: "Balanced speed and accuracy" },
-  { id: "medium.en", label: "Medium English", size: "~1.5 GB", desc: "Best accuracy, slower" },
+  {
+    id: "distil-large-v3.5",
+    label: "Distil Whisper",
+    size: "Managed",
+    desc: "Best default solo route for fast local dictation",
+  },
+  {
+    id: "moonshine-base",
+    label: "Moonshine Base",
+    size: "Managed",
+    desc: "Lightweight local fallback for lower-end machines",
+  },
+  {
+    id: "parakeet-ctc-0.6b",
+    label: "Parakeet 0.6B",
+    size: "Managed",
+    desc: "Higher-quality local route when accuracy matters more",
+  },
 ];
 
 const STEP_LABELS: Record<Step, string> = {
@@ -184,6 +201,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [meetingRouteError, setMeetingRouteError] = useState<string | null>(null);
   const [meetingSystemAudioAvailable, setMeetingSystemAudioAvailable] = useState<boolean | null>(null);
   const [loopbackDevice, setLoopbackDevice] = useState<string | null>(null);
+  const [meetingVerificationDetails, setMeetingVerificationDetails] = useState<string[]>([]);
   const [meetingRecommendedRoute, setMeetingRecommendedRoute] = useState<{
     providerType: AsrProviderType;
     modelId: string;
@@ -242,6 +260,13 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             ? "audio_and_transcript"
             : "audio_only"
         );
+        if (settings.transcription.dictationProvider === "moonshine") {
+          setSelectedModelId("moonshine-base");
+        } else if (settings.transcription.dictationProvider === "parakeet") {
+          setSelectedModelId("parakeet-ctc-0.6b");
+        } else {
+          setSelectedModelId("distil-large-v3.5");
+        }
       })
       .catch(() => {
         // Keep defaults if onboarding loads before settings are ready.
@@ -274,33 +299,26 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const refreshMeetingSetup = useCallback(async () => {
     setMeetingSetupLoading(true);
     try {
-      const [settings, providers, systemAudioAvailable, detectedLoopbackDevice] = await Promise.all([
+      const [settings, providers, systemAudioAvailable, detectedLoopbackDevice, verification] = await Promise.all([
         getSettings(),
         getAsrProviders(),
         checkSystemAudioAvailability().catch(() => false),
         getLoopbackDeviceName().catch(() => null),
+        verifyMeetingSetup().catch(() => null as SetupVerificationResult | null),
       ]);
 
       const currentProvider = (settings.transcription.meetingProvider as AsrProviderType | undefined) ?? null;
       const currentModelId = settings.transcription.meetingModelId ?? null;
-      const providerInfo = providers.find((item) => item.providerType === currentProvider);
-      const modelReady =
-        !currentModelId ||
-        providerInfo?.modelOptions.some((option) => option.id === currentModelId) ||
-        false;
-      const routeReady = Boolean(
-        currentProvider &&
-          isMeetingEligibleProvider(currentProvider) &&
-          providerInfo?.inferenceEnabled &&
-          modelReady
-      );
+      const routeReady = verification?.ok ?? false;
 
       setMeetingRouteSummary(summarizeMeetingRoute(currentProvider, currentModelId, providers));
       setMeetingRouteReady(routeReady);
+      setMeetingVerificationDetails(verification?.details ?? []);
       setMeetingRouteError(
         routeReady
           ? null
-          : "Meetings need a meeting-grade ASR route. Use Distil Whisper, MLX Audio, Parakeet, Voxtral, Groq, OpenAI, or ElevenLabs."
+          : verification?.summary ??
+              "Meetings need a meeting-grade ASR route with microphone and system-audio setup ready."
       );
       setMeetingSystemAudioAvailable(systemAudioAvailable);
       setLoopbackDevice(detectedLoopbackDevice);
@@ -334,7 +352,21 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     setModelState("downloading");
     setModelError(null);
     try {
-      await downloadWhisperModel(modelId ?? "base.en");
+      const selected = modelId ?? "distil-large-v3.5";
+      const settings = await getSettings();
+      const providerType: AsrProviderType =
+        selected === "moonshine-base"
+          ? "moonshine"
+          : selected === "parakeet-ctc-0.6b"
+            ? "parakeet"
+            : "distil_whisper";
+      await downloadAsrModels(providerType);
+      settings.transcription.useSharedAsrSelection = false;
+      settings.transcription.defaultProvider = providerType;
+      settings.transcription.selectedModelId = selected;
+      settings.transcription.dictationProvider = providerType;
+      settings.transcription.dictationModelId = selected;
+      await saveSettings(settings);
       setModelState("done");
     } catch (error) {
       setModelState("error");
@@ -557,6 +589,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             routeSummary={meetingRouteSummary}
             routeReady={meetingRouteReady}
             routeError={meetingRouteError}
+            verificationDetails={meetingVerificationDetails}
             systemAudioAvailable={meetingSystemAudioAvailable}
             loopbackDevice={loopbackDevice}
             meetingAudioStorageMode={meetingAudioStorageMode}
@@ -842,7 +875,7 @@ function DictationModelStep({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Download a local Whisper model so you always have a reliable offline dictation route, even if you later switch between Apple Native and other engines.
+        Set up the actual local dictation route Nautilus will use for solo work. Distil Whisper is the recommended default.
       </p>
 
       <div className="space-y-2">
@@ -887,7 +920,7 @@ function DictationModelStep({
       {state === "done" ? (
         <div className="flex items-center gap-2 text-sm text-emerald-600">
           <CheckCircle2 className="h-4 w-4" />
-          Local model downloaded and ready.
+          Local dictation route downloaded and selected.
         </div>
       ) : null}
 
@@ -1033,6 +1066,7 @@ function MeetingSetupStep({
   routeSummary,
   routeReady,
   routeError,
+  verificationDetails,
   systemAudioAvailable,
   loopbackDevice,
   meetingAudioStorageMode,
@@ -1051,6 +1085,7 @@ function MeetingSetupStep({
   routeSummary: string;
   routeReady: boolean | null;
   routeError: string | null;
+  verificationDetails: string[];
   systemAudioAvailable: boolean | null;
   loopbackDevice: string | null;
   meetingAudioStorageMode: "always" | "transcript_only";
@@ -1087,6 +1122,15 @@ function MeetingSetupStep({
             )}
           </div>
           {routeError ? <p className="mt-2 text-xs text-amber-600">{routeError}</p> : null}
+          {verificationDetails.length > 0 ? (
+            <div className="mt-2 space-y-1">
+              {verificationDetails.map((detail) => (
+                <p key={detail} className="text-xs text-muted-foreground">
+                  {detail}
+                </p>
+              ))}
+            </div>
+          ) : null}
           {recommendedRouteSummary && !routeReady ? (
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button size="sm" variant="outline" onClick={onApplyRecommendedRoute}>

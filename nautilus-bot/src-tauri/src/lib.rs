@@ -11254,9 +11254,24 @@ fn provider_secret_for(provider: AnalysisProvider) -> Result<String, String> {
         ));
     };
 
-    match secrets::get_provider_secret(secret_name).map_err(|e| e.to_string())? {
-        Some(value) if !value.trim().is_empty() => Ok(value),
-        _ => Err(missing_provider_secret_error(provider)),
+    let env_name = match provider {
+        AnalysisProvider::OpenAi => "OPENAI_API_KEY",
+        AnalysisProvider::Anthropic => "ANTHROPIC_API_KEY",
+        AnalysisProvider::Gemini => "GEMINI_API_KEY",
+        AnalysisProvider::DeepSeek => "DEEPSEEK_API_KEY",
+        AnalysisProvider::OllamaCloud => "OLLAMA_CLOUD_API_KEY",
+        AnalysisProvider::Ollama => return Err("Provider 'ollama' does not use API keys".to_string()),
+    };
+
+    let secret = secrets::get_provider_secret(secret_name)
+        .map_err(|e| e.to_string())?
+        .or_else(|| std::env::var(env_name).ok())
+        .unwrap_or_default();
+
+    if secret.trim().is_empty() {
+        Err(missing_provider_secret_error(provider))
+    } else {
+        Ok(secret)
     }
 }
 
@@ -18172,23 +18187,21 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
 /// One-time migration: if `mlx_accelerated_providers` contains the dictation or meeting provider
 /// and the slot-specific flag has never been set (still false), enable it automatically.
 fn migrate_mlx_providers_to_slot_flags(transcription: &mut settings::TranscriptionSettings) {
-    if transcription.dictation_mlx_enabled || transcription.meeting_mlx_enabled {
-        // Already migrated or explicitly set; leave untouched.
-        return;
-    }
     let dictation_key = transcription.dictation_provider.as_str();
-    if transcription
-        .mlx_accelerated_providers
-        .iter()
-        .any(|p| p == dictation_key)
+    if !transcription.dictation_mlx_enabled
+        && transcription
+            .mlx_accelerated_providers
+            .iter()
+            .any(|p| p == dictation_key)
     {
         transcription.dictation_mlx_enabled = true;
     }
     let meeting_key = transcription.meeting_provider.as_str();
-    if transcription
-        .mlx_accelerated_providers
-        .iter()
-        .any(|p| p == meeting_key)
+    if !transcription.meeting_mlx_enabled
+        && transcription
+            .mlx_accelerated_providers
+            .iter()
+            .any(|p| p == meeting_key)
     {
         transcription.meeting_mlx_enabled = true;
     }

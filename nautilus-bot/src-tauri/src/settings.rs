@@ -574,6 +574,7 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "whisper" => "whisper".to_string(),
         "parakeet" => "parakeet".to_string(),
         "distil_whisper" => "distil_whisper".to_string(),
+        "mlx_audio" => "mlx_audio".to_string(),
         "macos_apple_speech" => "macos_apple_speech".to_string(),
         "moonshine" => "moonshine".to_string(),
         "voxtral" => "voxtral".to_string(),
@@ -602,6 +603,7 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
         },
         "whisper_candle" => "whisper-large-v3-turbo".to_string(),
         "distil_whisper" => "distil-large-v3.5".to_string(),
+        "mlx_audio" => model_id.trim().to_string(),
         "macos_apple_speech" => "macos_apple_speech".to_string(),
         "moonshine" => match model_id.trim() {
             "moonshine" | "moonshine-base" => "moonshine-base".to_string(),

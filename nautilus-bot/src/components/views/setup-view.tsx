@@ -175,7 +175,7 @@ export function SetupView() {
             <div>
               <h1 className="text-2xl font-semibold">Setup</h1>
               <p className="text-sm text-muted-foreground">
-                Keep dictation and meetings healthy, rerun guided setup, and verify every ASR route from one place.
+                Keep dictation and meetings launch-ready, rerun guided setup, and verify every route from one place.
               </p>
             </div>
           </div>
@@ -214,7 +214,7 @@ export function SetupView() {
                   Dictation readiness
                 </CardTitle>
                 <CardDescription className="text-current opacity-80">
-                  Permissions, popup behavior, and the active dictation route.
+                  Permissions, insert behavior, and the active dictation lane.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
@@ -375,7 +375,7 @@ export function SetupView() {
                   Meeting readiness
                 </CardTitle>
                 <CardDescription className="text-current opacity-80">
-                  Meeting-capable ASR, system audio, and loopback visibility.
+                  Meeting-grade transcription, system audio, and loopback visibility.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
@@ -507,7 +507,7 @@ export function SetupView() {
                   Providers and models
                 </CardTitle>
                 <CardDescription>
-                  Every route’s runtime state, missing files, and recovery action in one place.
+                  Every route's runtime state, missing files, and recovery action in one place.
                 </CardDescription>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -674,9 +674,9 @@ export function SetupView() {
                 <ShieldCheck className="h-4 w-4" />
                 Quick recovery
               </CardTitle>
-              <CardDescription>
-                Fast paths for the most common “why is this not working” situations.
-              </CardDescription>
+                <CardDescription>
+                  Fast paths for the most common launch blockers.
+                </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3 md:grid-cols-3">
               <div className="rounded-xl border border-border/70 p-4">

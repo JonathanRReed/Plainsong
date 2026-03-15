@@ -58,7 +58,24 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Keyboard, Mic, Square, Zap, Save, RefreshCw, Download, Upload, Copy } from "lucide-react";
+import {
+  Keyboard,
+  Mic,
+  Square,
+  Zap,
+  Save,
+  RefreshCw,
+  Download,
+  Upload,
+  Copy,
+  Brain,
+  Sparkles,
+  Languages,
+  Terminal,
+  Volume2,
+  BookOpen,
+  Replace,
+} from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 import type { AsrProviderInfo, AsrProviderType, Recording, Transcript } from "@/types";
@@ -160,6 +177,25 @@ type RecommendedAppStyle = {
   activationAppMatcher?: string;
   activationDomainMatcher?: string;
   livePreviewEnabled?: boolean;
+};
+
+type SoloLane = {
+  id: string;
+  title: string;
+  description: string;
+  icon: typeof Mic;
+  modeId?: DictationModePreset;
+  styleId?: string;
+  emphasis: string;
+};
+
+type DictationCoachStep = "backtrack" | "dictionary" | "command_mode" | "profiles";
+
+type DictationCoachCard = {
+  id: DictationCoachStep;
+  title: string;
+  body: string;
+  actionLabel: string;
 };
 
 const ACTIVATION_APP_SUGGESTIONS = ["Slack", "Cursor", "Messages"];
@@ -264,6 +300,109 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     commandModeEnabled: true,
     activationDomainMatcher: "linear.app",
     livePreviewEnabled: true,
+  },
+  {
+    id: "builtin-coding-copilot",
+    name: "Coding Copilot",
+    description: "Code-aware dictation for prompts, commits, terminal commands, and editor rewrites.",
+    baseModePreset: "messages",
+    customPrompt:
+      "Rewrite the user's dictation for a software development workflow. Preserve code terms, filenames, CLI commands, markdown, and developer jargon exactly when possible. Prefer concise technical phrasing and keep variable names, casing, and product names intact.",
+    profile: "normal_speed",
+    routePreference: "local",
+    insertionMode: "paste",
+    contextSource: "selected_text",
+    saveToInbox: true,
+    copyToClipboard: true,
+    commandModeEnabled: true,
+    activationAppMatcher: "Cursor",
+    livePreviewEnabled: true,
+  },
+  {
+    id: "builtin-quiet-focus",
+    name: "Quiet Focus",
+    description: "Low-friction dictation for whispering, private work, and fewer interruptions.",
+    baseModePreset: "voice",
+    customPrompt:
+      "Rewrite the user's dictation with minimal cleanup. Preserve quiet speech intent, keep corrections natural, and avoid over-formatting. Return only the final text.",
+    profile: "normal_speed",
+    routePreference: "local",
+    insertionMode: "paste",
+    contextSource: "none",
+    saveToInbox: true,
+    copyToClipboard: true,
+    commandModeEnabled: true,
+    livePreviewEnabled: true,
+  },
+];
+
+const SOLO_LANES: SoloLane[] = [
+  {
+    id: "everywhere",
+    title: "Everywhere",
+    description: "Fast default dictation for any app with clean inserts and light cleanup.",
+    icon: Sparkles,
+    modeId: "voice",
+    emphasis: "Best all-around starting point",
+  },
+  {
+    id: "messages",
+    title: "Messages",
+    description: "Short replies for Slack, chat, and quick-response work.",
+    icon: Zap,
+    modeId: "messages",
+    emphasis: "Keeps replies compact",
+  },
+  {
+    id: "writing",
+    title: "Writing",
+    description: "Long-form drafting for docs, email, and polished prose.",
+    icon: BookOpen,
+    modeId: "email",
+    emphasis: "Best for polished language",
+  },
+  {
+    id: "coding",
+    title: "Coding",
+    description: "Developer-first dictation for prompts, issue updates, markdown, and commands.",
+    icon: Terminal,
+    styleId: "builtin-coding-copilot",
+    emphasis: "Optimized for software work",
+  },
+  {
+    id: "quiet",
+    title: "Quiet",
+    description: "Low-noise dictation when you want whisper-friendly capture and fewer distractions.",
+    icon: Volume2,
+    styleId: "builtin-quiet-focus",
+    emphasis: "Best for low-volume speaking",
+  },
+];
+
+const DICTATION_COACH_CARDS: DictationCoachCard[] = [
+  {
+    id: "backtrack",
+    title: "Fix the last insert with your voice",
+    body: "Say 'scratch that', 'actually ...', or 'replace X with Y' right after an insert. Nautilus already supports it, and this is one of the fastest ways to beat the keyboard.",
+    actionLabel: "Got it",
+  },
+  {
+    id: "dictionary",
+    title: "Teach Nautilus names and jargon",
+    body: "Edit the latest result, then choose Learn correction. Use the dictionary for words that need to stick across apps.",
+    actionLabel: "Show me later",
+  },
+  {
+    id: "command_mode",
+    title: "Use voice editing, not just voice typing",
+    body: "Command mode is best for rewrite, bulletize, summarize, and coding cleanup on selected text. Keep it on when you want the app to act like a writing copilot.",
+    actionLabel: "Keep enabled",
+  },
+  {
+    id: "profiles",
+    title: "Let app-aware flows switch for you",
+    body: "Install a lane or flow profile for the apps you use most so Nautilus automatically matches style, context, and insertion behavior.",
+    actionLabel: "I’ll use this",
   },
 ];
 
@@ -420,6 +559,26 @@ function describeActivationRules(
   }
 
   return "Manual only. This mode stays available, but Nautilus will not switch into it automatically.";
+}
+
+function describeSmartContextState(
+  activationMatcher: string | null,
+  appTarget: string | null,
+  contextChars: number | null
+): string {
+  if (activationMatcher && appTarget) {
+    return `${activationMatcher} matched, and Nautilus captured context from ${appTarget}.`;
+  }
+  if (activationMatcher) {
+    return `${activationMatcher} matched before capture, so Nautilus used an app-aware flow.`;
+  }
+  if (appTarget && contextChars && contextChars > 0) {
+    return `Nautilus captured ${contextChars} chars of context from ${appTarget}.`;
+  }
+  if (appTarget) {
+    return `Nautilus targeted ${appTarget} for insertion.`;
+  }
+  return "Nautilus is ready to work in any app and will use the active flow settings.";
 }
 
 function createCustomModeDraft(
@@ -743,6 +902,7 @@ export function DictationView() {
   const [historyCorrectionText, setHistoryCorrectionText] = useState("");
   const [historyCorrectionBaseline, setHistoryCorrectionBaseline] = useState("");
   const [historyLearnStatus, setHistoryLearnStatus] = useState<string | null>(null);
+  const [dismissedCoachSteps, setDismissedCoachSteps] = useState<DictationCoachStep[]>([]);
   const [isLoadingTranscript, setIsLoadingTranscript] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [reprocessModePreset, setReprocessModePreset] =
@@ -777,6 +937,71 @@ export function DictationView() {
         : null,
     [dictationCustomModes, selectedCustomModeId]
   );
+
+  const activeLaneId = useMemo(() => {
+    if (dictationModePreset === "custom" && selectedCustomModeId === "builtin-coding-copilot") {
+      return "coding";
+    }
+    if (dictationModePreset === "custom" && selectedCustomModeId === "builtin-quiet-focus") {
+      return "quiet";
+    }
+    switch (dictationModePreset) {
+      case "messages":
+        return "messages";
+      case "email":
+      case "notes":
+      case "meeting_follow_up":
+        return "writing";
+      default:
+        return "everywhere";
+    }
+  }, [dictationModePreset, selectedCustomModeId]);
+
+  const activeLane = useMemo(
+    () => SOLO_LANES.find((lane) => lane.id === activeLaneId) ?? SOLO_LANES[0],
+    [activeLaneId]
+  );
+
+  const smartContextSummary = useMemo(
+    () => describeSmartContextState(activationMatcher, appTarget, contextChars),
+    [activationMatcher, appTarget, contextChars]
+  );
+
+  const dictionaryCoverageSummary = useMemo(() => {
+    const enabledEntries = dictationDictionaryEntries.filter((entry) => entry.enabled).length;
+    const scopedEntries = dictationDictionaryEntries.filter(
+      (entry) => entry.enabled && entry.appScope?.trim()
+    ).length;
+    if (enabledEntries === 0) {
+      return "No custom words yet. Add names, brands, and recurring terms Nautilus should always get right.";
+    }
+    return `${enabledEntries} active dictionary entr${enabledEntries === 1 ? "y" : "ies"}${
+      scopedEntries > 0 ? ` · ${scopedEntries} app-specific` : ""
+    }.`;
+  }, [dictationDictionaryEntries]);
+
+  const activeCoachCards = useMemo(() => {
+    return DICTATION_COACH_CARDS.filter((card) => {
+      if (dismissedCoachSteps.includes(card.id)) {
+        return false;
+      }
+      if (card.id === "dictionary") {
+        return dictationDictionaryEntries.length < 3;
+      }
+      if (card.id === "command_mode") {
+        return !dictationCommandModeEnabled;
+      }
+      if (card.id === "profiles") {
+        return dictationCustomModes.length < 2;
+      }
+      return true;
+    }).slice(0, 2);
+  }, [
+    dictationCommandModeEnabled,
+    dictationCustomModes.length,
+    dictationDictionaryEntries.length,
+    dismissedCoachSteps,
+  ]);
 
   const activeModeSummary = useMemo(
     () =>
@@ -910,6 +1135,36 @@ export function DictationView() {
 
     return matched?.id ?? "custom";
   };
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem("nautilus-dictation-coach-dismissed");
+      if (!raw) {
+        return;
+      }
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        setDismissedCoachSteps(
+          parsed.filter((value): value is DictationCoachStep =>
+            ["backtrack", "dictionary", "command_mode", "profiles"].includes(String(value))
+          )
+        );
+      }
+    } catch (error) {
+      console.warn("Failed to restore dictation coach state:", error);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        "nautilus-dictation-coach-dismissed",
+        JSON.stringify(dismissedCoachSteps)
+      );
+    } catch (error) {
+      console.warn("Failed to persist dictation coach state:", error);
+    }
+  }, [dismissedCoachSteps]);
 
   useEffect(() => {
     if (!isDialogOpen || !selectedRecording) {
@@ -1675,6 +1930,10 @@ export function DictationView() {
     }
   };
 
+  const dismissCoachCard = (step: DictationCoachStep) => {
+    setDismissedCoachSteps((current) => (current.includes(step) ? current : [...current, step]));
+  };
+
   const formatRecordingDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
@@ -2294,6 +2553,57 @@ export function DictationView() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Brain className="h-4 w-4 text-primary" />
+                  <p className="text-sm font-medium">Solo lanes</p>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Pick the lane that matches what you are doing right now. Nautilus keeps the deep controls below, but these presets are the fastest way to feel dialed in.
+                </p>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+                  {SOLO_LANES.map((lane) => {
+                    const Icon = lane.icon;
+                    const isActive = activeLane.id === lane.id;
+                    return (
+                      <button
+                        key={lane.id}
+                        type="button"
+                        onClick={() => {
+                          if (lane.styleId) {
+                            const style = RECOMMENDED_APP_STYLES.find((candidate) => candidate.id === lane.styleId);
+                            if (style) {
+                              void handleInstallRecommendedStyle(style);
+                            }
+                            return;
+                          }
+                          if (lane.modeId) {
+                            applyDictationMode(lane.modeId);
+                          }
+                        }}
+                        className={cn(
+                          "rounded-xl border p-4 text-left transition-colors",
+                          isActive
+                            ? "border-active bg-active/10 shadow-sm"
+                            : "border-border bg-background hover:border-active/40 hover:bg-muted/40"
+                        )}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <Icon className="h-4 w-4 text-primary" />
+                          {isActive ? (
+                            <span className="rounded-full bg-active px-2 py-0.5 text-[11px] font-semibold text-active-foreground">
+                              Active
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="mt-3 font-medium">{lane.title}</p>
+                        <p className="mt-2 text-sm text-muted-foreground">{lane.description}</p>
+                        <p className="mt-3 text-[11px] font-medium text-primary">{lane.emphasis}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                 {DICTATION_MODE_DEFINITIONS.map((mode) => {
                   const isActive = dictationModePreset === mode.id;
@@ -2835,6 +3145,44 @@ export function DictationView() {
               </CardDescription>
             </CardHeader>
             <CardContent>
+              <div className="space-y-4">
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="rounded-xl border bg-background/70 p-3">
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                      Active lane
+                    </p>
+                    <p className="mt-1 text-sm font-semibold">{activeLane.title}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{activeLane.description}</p>
+                  </div>
+                  <div className="rounded-xl border bg-background/70 p-3">
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                      Smart context
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">{smartContextSummary}</p>
+                  </div>
+                  <div className="rounded-xl border bg-background/70 p-3">
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                      Teaching Nautilus
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">{dictionaryCoverageSummary}</p>
+                  </div>
+                </div>
+                <div className="rounded-xl border border-border bg-muted/20 p-3">
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
+                      Backtrack: <span className="font-medium text-foreground">scratch that</span>
+                    </span>
+                    <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
+                      Replace: <span className="font-medium text-foreground">replace X with Y</span>
+                    </span>
+                    <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
+                      Quick fix: <span className="font-medium text-foreground">actually ...</span>
+                    </span>
+                    <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
+                      Teach words: <span className="font-medium text-foreground">edit result to Learn correction</span>
+                    </span>
+                  </div>
+                </div>
               <div className="flex flex-col items-center gap-6 py-8">
                 {isRecording ? (
                   <div className="flex flex-col items-center gap-4">
@@ -2904,6 +3252,7 @@ export function DictationView() {
                   </div>
                 )}
               </div>
+              </div>
             </CardContent>
           </Card>
           
@@ -2932,7 +3281,7 @@ export function DictationView() {
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground">
-                    Your final text is inserted after capture finishes.
+                    Your final text is inserted after capture finishes, and live preview can stay visible while you speak.
                 </p>
               </CardContent>
             </Card>
@@ -2948,6 +3297,280 @@ export function DictationView() {
                   <p className="text-sm text-muted-foreground">
                     Keep dictations in Inbox so they are searchable later.
                   </p>
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Replace className="h-4 w-4" />
+                  Backtrack
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  Say <code>scratch that</code>, <code>actually ...</code>, or <code>replace X with Y</code> right after an insert.
+                </p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <BookOpen className="h-4 w-4" />
+                  Personal dictionary
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  Teach names, brands, and recurring terms once so Nautilus remembers them everywhere.
+                </p>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Languages className="h-4 w-4" />
+                  Context aware
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  App/domain-aware profiles, selected text, and clipboard context help match how you actually write.
+                </p>
+              </CardContent>
+            </Card>
+          </div>
+
+          {activeCoachCards.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Sparkles className="h-4 w-4" />
+                  Dictation Coach
+                </CardTitle>
+                <CardDescription>
+                  Learn the highest-leverage moves that make Nautilus feel faster than typing.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid gap-3 xl:grid-cols-2">
+                  {activeCoachCards.map((card) => (
+                    <div key={card.id} className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                      <div>
+                        <p className="text-sm font-medium">{card.title}</p>
+                        <p className="mt-2 text-xs text-muted-foreground">{card.body}</p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {card.id === "command_mode" ? (
+                          <Button
+                            size="sm"
+                            onClick={() => {
+                              setDictationCommandModeEnabled(true);
+                              const nextModePreset = syncModePreset({ commandModeEnabled: true });
+                              void persistDictationPreferences({
+                                commandModeEnabled: true,
+                                modePreset: nextModePreset,
+                              });
+                              dismissCoachCard(card.id);
+                            }}
+                          >
+                            {card.actionLabel}
+                          </Button>
+                        ) : card.id === "profiles" ? (
+                          <Button
+                            size="sm"
+                            onClick={() => {
+                              const style = RECOMMENDED_APP_STYLES.find((candidate) => candidate.id === "builtin-coding-copilot");
+                              if (style) {
+                                void handleInstallRecommendedStyle(style);
+                              }
+                              dismissCoachCard(card.id);
+                            }}
+                          >
+                            Install a flow
+                          </Button>
+                        ) : (
+                          <Button size="sm" onClick={() => dismissCoachCard(card.id)}>
+                            {card.actionLabel}
+                          </Button>
+                        )}
+                        <Button size="sm" variant="outline" onClick={() => dismissCoachCard(card.id)}>
+                          Dismiss
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Terminal className="h-4 w-4" />
+                  Developer Dictation
+                </CardTitle>
+                <CardDescription>
+                  A tighter lane for Cursor, terminals, commit messages, markdown, and prompt-heavy work.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="rounded-md border bg-muted/20 p-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Best current setup
+                  </p>
+                  <p className="mt-1 text-sm font-medium">
+                    {currentDictationProvider && currentDictationModelId
+                      ? `${currentDictationProvider} · ${currentDictationModelId}`
+                      : "Use a fast local provider with live preview"}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Coding benefits from low-latency local capture, selected-text context, and command mode staying on.
+                  </p>
+                </div>
+                <div className="grid gap-2 md:grid-cols-2">
+                  <div className="rounded-md border bg-background px-3 py-3">
+                    <p className="text-xs font-medium text-muted-foreground">Good spoken patterns</p>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      “open paren”, “close brace”, “snake case”, “camel case”, file names, CLI commands, and bulletized status updates.
+                    </p>
+                  </div>
+                  <div className="rounded-md border bg-background px-3 py-3">
+                    <p className="text-xs font-medium text-muted-foreground">Best commands</p>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Keep <code>{dictationCommandPrefix}</code> mode ready for rewrite, bulletize, and professional cleanup on selected text.
+                    </p>
+                  </div>
+                </div>
+                <div className="rounded-md border bg-background px-3 py-3">
+                  <p className="text-xs font-medium text-muted-foreground">Developer quick starts</p>
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+                    <span className="rounded-full border px-2 py-1">commit messages</span>
+                    <span className="rounded-full border px-2 py-1">PR summaries</span>
+                    <span className="rounded-full border px-2 py-1">terminal commands</span>
+                    <span className="rounded-full border px-2 py-1">issue updates</span>
+                    <span className="rounded-full border px-2 py-1">Cursor prompts</span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      const style = RECOMMENDED_APP_STYLES.find((candidate) => candidate.id === "builtin-coding-copilot");
+                      if (style) {
+                        void handleInstallRecommendedStyle(style);
+                      }
+                    }}
+                  >
+                    Use Coding lane
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setDictationContextSource("selected_text");
+                      setDictationCommandModeEnabled(true);
+                      setDictationLivePreviewEnabled(true);
+                      const nextModePreset = syncModePreset({
+                        contextSource: "selected_text",
+                        commandModeEnabled: true,
+                      });
+                      void persistDictationPreferences({
+                        contextSource: "selected_text",
+                        commandModeEnabled: true,
+                        livePreviewEnabled: true,
+                        modePreset: nextModePreset,
+                      });
+                    }}
+                  >
+                    Turn on coding helpers
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Volume2 className="h-4 w-4" />
+                  Quiet Dictation
+                </CardTitle>
+                <CardDescription>
+                  Better defaults for low-volume speaking, focus sessions, and fewer distracting UI changes.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="rounded-md border bg-muted/20 p-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    Quiet-friendly defaults
+                  </p>
+                  <p className="mt-1 text-sm font-medium">
+                    Silence auto-stop {dictationSilenceTimeoutSeconds > 0 ? `${dictationSilenceTimeoutSeconds}s` : "off"} · Keep warm {dictationKeepWarm}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    For whispering, a warmed local model and a slightly longer stop window reduce awkward cutoffs.
+                  </p>
+                </div>
+                <div className="grid gap-2 md:grid-cols-2">
+                  <div className="rounded-md border bg-background px-3 py-3">
+                    <p className="text-xs font-medium text-muted-foreground">Recommended route</p>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Prefer local capture so quiet speech does not depend on network latency or upload timing.
+                    </p>
+                  </div>
+                  <div className="rounded-md border bg-background px-3 py-3">
+                    <p className="text-xs font-medium text-muted-foreground">Preview behavior</p>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Leave live preview on when you want reassurance, or turn it off for less visual churn during deep work.
+                    </p>
+                  </div>
+                </div>
+                <div className="rounded-md border bg-background px-3 py-3">
+                  <p className="text-xs font-medium text-muted-foreground">Quiet quick starts</p>
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+                    <span className="rounded-full border px-2 py-1">late-night writing</span>
+                    <span className="rounded-full border px-2 py-1">shared spaces</span>
+                    <span className="rounded-full border px-2 py-1">focus sessions</span>
+                    <span className="rounded-full border px-2 py-1">private drafting</span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      const style = RECOMMENDED_APP_STYLES.find((candidate) => candidate.id === "builtin-quiet-focus");
+                      if (style) {
+                        void handleInstallRecommendedStyle(style);
+                      }
+                    }}
+                  >
+                    Use Quiet lane
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      setDictationRoutePreference("local");
+                      setDictationKeepWarm("long");
+                      setDictationSilenceTimeoutSeconds(1.8);
+                      const nextModePreset = syncModePreset({});
+                      void persistDictationPreferences({
+                        routePreference: "local",
+                        keepWarm: "long",
+                        silenceTimeoutSeconds: 1.8,
+                        modePreset: nextModePreset,
+                      });
+                    }}
+                  >
+                    Apply whisper-friendly defaults
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           </div>
@@ -2973,6 +3596,33 @@ export function DictationView() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-3">
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                        Backtrack ready
+                      </p>
+                      <p className="mt-1 text-sm font-medium">Say “scratch that” after the next insert</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Nautilus can undo the last insert or replace it with a corrected phrase.
+                      </p>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                        Personal dictionary
+                      </p>
+                      <p className="mt-1 text-sm font-medium">Fix a word once, then teach it</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Edit the result here and use Learn correction so your names and jargon stick.
+                      </p>
+                    </div>
+                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                        Smart context
+                      </p>
+                      <p className="mt-1 text-sm font-medium">{activationMatcher ?? appTarget ?? "General dictation"}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">{smartContextSummary}</p>
+                    </div>
+                  </div>
                   <div className="rounded-lg bg-muted p-4">
                     <textarea
                       className="min-h-[120px] w-full resize-y bg-transparent text-sm outline-none"
@@ -2998,6 +3648,21 @@ export function DictationView() {
                       }
                     >
                       Learn correction
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        const trimmed = transcribedText.trim();
+                        if (!trimmed) {
+                          return;
+                        }
+                        setNewDictionarySpokenForm(trimmed);
+                        setNewDictionaryReplacement(trimmed);
+                        setDictionaryCsvStatus("Loaded current result into the dictionary editor below.");
+                      }}
+                    >
+                      Quick add to dictionary
                     </Button>
                     <p className="text-xs text-muted-foreground">
                       Edit a mistaken word here and Nautilus can remember it for next time.
@@ -3430,6 +4095,16 @@ export function DictationView() {
                 </div>
 
                 <div className="space-y-2">
+                  <label className="text-sm font-medium">Command mode prefix</label>
+                  <div className="rounded-md border bg-muted/20 px-3 py-3 space-y-2">
+                    <p className="text-sm font-medium">{dictationCommandPrefix}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Use this before voice editing commands when command mode is enabled. Great for rewrite, bulletize, summarize, and coding cleanup flows.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
                   <label className="text-sm font-medium">Silence auto-stop</label>
                   <div className="flex items-center gap-2">
                     <input
@@ -3458,6 +4133,31 @@ export function DictationView() {
                   <p className="text-xs text-muted-foreground">
                     `0` disables silence auto-stop. Hands-free falls back to 1.8 seconds if this is off.
                   </p>
+                </div>
+
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-sm font-medium">Provider fit for this session</label>
+                  <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                    {activeLanguageProviders.length > 0 ? (
+                      activeLanguageProviders.map((provider) => (
+                        <div key={provider.providerType} className="rounded-md border bg-muted/20 px-3 py-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-sm font-medium">{provider.name}</p>
+                            <span className="text-[11px] text-muted-foreground">
+                              {provider.runtimeStatus === "ready" ? "Ready" : provider.runtimeStatus}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {providerCapabilityLabel(provider.providerType)} · {providerRecommendation(provider)}
+                          </p>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="rounded-md border bg-muted/20 px-3 py-3 text-xs text-muted-foreground md:col-span-2 xl:col-span-4">
+                        No ready providers matched the current language/session filters yet.
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 <div className="space-y-2">
@@ -3915,6 +4615,16 @@ export function DictationView() {
                 {dictionaryCsvStatus && (
                   <p className="text-xs text-muted-foreground">{dictionaryCsvStatus}</p>
                 )}
+                <div className="rounded-md border bg-background/60 p-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <BookOpen className="h-4 w-4 text-primary" />
+                    <p className="text-sm font-medium">Teach Nautilus your words</p>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{dictionaryCoverageSummary}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Use global entries for names and jargon you want everywhere. Use app scope when a replacement should only happen in a specific app.
+                  </p>
+                </div>
                 <div className="rounded-md border bg-muted/20 p-3 space-y-3">
                   <div className="flex items-center justify-between gap-3">
                     <div>
@@ -4036,6 +4746,11 @@ export function DictationView() {
                     <code>actually ...</code>, <code>no, say ...</code>, <code>replace X with Y</code>, or{" "}
                     <code>change X to Y</code>.
                   </p>
+                  <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+                    <span className="rounded-full border bg-background px-2 py-1">Undo last insert</span>
+                    <span className="rounded-full border bg-background px-2 py-1">Replace most recent phrase</span>
+                    <span className="rounded-full border bg-background px-2 py-1">Keep flow without touching the keyboard</span>
+                  </div>
                 </div>
               </div>
 
