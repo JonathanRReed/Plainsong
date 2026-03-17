@@ -456,6 +456,17 @@ struct PermissionDiagnostics {
     notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioInputDeviceInventory {
+    devices: Vec<audio::AudioInputDeviceInfo>,
+    app_wide_selected_device_id: Option<String>,
+    dictation_override_enabled: bool,
+    dictation_selected_device_id: Option<String>,
+    meeting_override_enabled: bool,
+    meeting_selected_device_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum CursorInsertFailureKind {
@@ -1951,7 +1962,7 @@ async fn get_meeting_consent_automation_status(
 async fn start_recording(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-    options: models::RecordingOptions,
+    mut options: models::RecordingOptions,
 ) -> Result<String, String> {
     {
         let dictation_state = state.dictation_runtime_state.lock().await;
@@ -1993,6 +2004,17 @@ async fn start_recording(
                     .to_string(),
             );
         }
+    }
+
+    if options.mic && options.preferred_input_device_id.is_none() {
+        let settings = state.settings_manager.lock().await.settings().clone();
+        options.preferred_input_device_id = settings
+            .audio
+            .meeting_input_device
+            .as_ref()
+            .filter(|_| settings.audio.meeting_input_override_enabled)
+            .or(settings.audio.preferred_input_device.as_ref())
+            .map(|device| device.device_id.clone());
     }
 
     let mut audio = state.audio_capture.lock().await;
@@ -6249,6 +6271,40 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<settings::Set
 }
 
 #[tauri::command]
+async fn list_audio_input_devices(
+    state: tauri::State<'_, AppState>,
+) -> Result<AudioInputDeviceInventory, String> {
+    let settings = {
+        let settings_manager = state.settings_manager.lock().await;
+        settings_manager.settings().clone()
+    };
+    let inventory = {
+        let audio = state.audio_capture.lock().await;
+        audio.list_input_devices().map_err(|error| error.to_string())?
+    };
+    Ok(AudioInputDeviceInventory {
+        devices: inventory,
+        app_wide_selected_device_id: settings
+            .audio
+            .preferred_input_device
+            .as_ref()
+            .map(|device| device.device_id.clone()),
+        dictation_override_enabled: settings.audio.dictation_input_override_enabled,
+        dictation_selected_device_id: settings
+            .audio
+            .dictation_input_device
+            .as_ref()
+            .map(|device| device.device_id.clone()),
+        meeting_override_enabled: settings.audio.meeting_input_override_enabled,
+        meeting_selected_device_id: settings
+            .audio
+            .meeting_input_device
+            .as_ref()
+            .map(|device| device.device_id.clone()),
+    })
+}
+
+#[tauri::command]
 async fn reset_app_state(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -6430,6 +6486,7 @@ async fn save_settings(
     let previous_shortcuts = previous_settings.shortcuts.clone();
 
     let result: Result<(), String> = async {
+        settings::normalize_loaded_audio_settings(&mut settings.audio);
         settings.audio.silence_timeout_seconds =
             normalize_silence_timeout_seconds(settings.audio.silence_timeout_seconds);
         settings.ui.color_scheme = normalize_color_scheme_value(&settings.ui.color_scheme);
@@ -7582,7 +7639,20 @@ async fn start_dictation_session(
 
     {
         let mut audio = state.audio_capture.lock().await;
-        if let Err(error) = audio.start_dictation() {
+        let preferred_input_device = settings_snapshot
+            .audio
+            .dictation_input_device
+            .as_ref()
+            .filter(|_| settings_snapshot.audio.dictation_input_override_enabled)
+            .or(settings_snapshot.audio.preferred_input_device.as_ref());
+        match audio.start_dictation(preferred_input_device) {
+            Ok(resolved_input) => {
+                if let Some(advisory) = resolved_input.advisory.as_deref() {
+                    let _ = app.emit("audio-input-advisory", advisory.to_string());
+                }
+                options.preferred_input_device_id = Some(resolved_input.device_id);
+            }
+            Err(error) => {
             {
                 let mut runtime_state = state.dictation_runtime_state.lock().await;
                 *runtime_state = DictationSessionState::Idle;
@@ -7615,6 +7685,7 @@ async fn start_dictation_session(
                 Some("startup_error".to_string()),
             );
             return Err(error.to_string());
+            }
         }
     }
 
@@ -10863,6 +10934,7 @@ async fn handle_primary_tray_action(app: AppHandle, action: String) {
                 mic: true,
                 system_audio,
                 project_id: "default".to_string(),
+                preferred_input_device_id: None,
                 template: None,
                 meeting_notes: None,
                 consent_prompt_shown: true,
@@ -14123,6 +14195,7 @@ pub fn run() {
             is_diarization_model_available,
             download_diarization_model,
             get_settings,
+            list_audio_input_devices,
             reset_app_state,
             save_settings,
             apply_global_shortcuts_now,
@@ -15893,6 +15966,63 @@ mod tests {
     }
 
     #[test]
+    fn meeting_route_support_matrix_matches_expected_provider_families() {
+        assert!(!meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Whisper,
+            "base.en"
+        ));
+        assert!(!meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Moonshine,
+            "moonshine-base"
+        ));
+        assert!(!meeting_route_is_shared_compatible(
+            asr::AsrProviderType::WhisperCandle,
+            "whisper-large-v3-turbo"
+        ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::DistilWhisper,
+            "distil-large-v3.5"
+        ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Parakeet,
+            "parakeet-ctc-0.6b"
+        ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Voxtral,
+            "voxtral-local"
+        ));
+        assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::OpenAiCloud,
+            "whisper-1"
+        ));
+    }
+
+    #[test]
+    fn whisper_candle_is_dictation_only_for_meetings() {
+        let mut transcription = settings::TranscriptionSettings::default();
+        transcription.use_shared_asr_selection = true;
+        transcription.default_provider = "whisper_candle".to_string();
+        transcription.selected_model_id = "whisper-large-v3-turbo".to_string();
+        transcription.dictation_provider = "whisper_candle".to_string();
+        transcription.dictation_model_id = "whisper-large-v3-turbo".to_string();
+        transcription.meeting_provider = "whisper_candle".to_string();
+        transcription.meeting_model_id = "whisper-large-v3-turbo".to_string();
+
+        normalize_contextual_asr_settings(&mut transcription);
+
+        assert!(!transcription.use_shared_asr_selection);
+        assert_eq!(transcription.dictation_provider, "whisper_candle");
+        assert_eq!(transcription.dictation_model_id, "whisper-large-v3-turbo");
+        assert_eq!(transcription.meeting_provider, "distil_whisper");
+        assert_eq!(transcription.meeting_model_id, "distil-large-v3.5");
+
+        let (meeting_provider, meeting_model_id) =
+            resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting);
+        assert_eq!(meeting_provider, asr::AsrProviderType::DistilWhisper);
+        assert_eq!(meeting_model_id, "distil-large-v3.5");
+    }
+
+    #[test]
     fn legacy_mlx_audio_selection_migrates_to_visible_provider_toggle() {
         let mut transcription = settings::TranscriptionSettings::default();
         transcription.default_provider = "mlx_audio".to_string();
@@ -16132,6 +16262,38 @@ mod tests {
     }
 
     #[test]
+    fn ready_dictation_candidate_respects_cloud_preference_ordering() {
+        let providers = vec![
+            provider_info_for_test(
+                asr::AsrProviderType::DistilWhisper,
+                "distil-large-v3.5",
+                asr::manager::RuntimeStatus::Ready,
+                true,
+            ),
+            provider_info_for_test(
+                asr::AsrProviderType::OpenAiCloud,
+                "whisper-1",
+                asr::manager::RuntimeStatus::Ready,
+                true,
+            ),
+        ];
+
+        let selection = select_ready_dictation_candidate(
+            &providers,
+            &preferred_dictation_provider_candidates(
+                DictationRoutePreference::Cloud,
+                asr::AsrProviderType::Moonshine,
+                asr::AsrProviderType::Moonshine,
+            ),
+            DictationRoutePreference::Cloud,
+        )
+        .expect("cloud dictation candidate should be selected");
+
+        assert_eq!(selection.0, asr::AsrProviderType::OpenAiCloud);
+        assert_eq!(selection.1, "whisper-1");
+    }
+
+    #[test]
     fn repair_local_model_cache_removes_invalid_artifacts_only() {
         let root = temp_models_root();
         let parakeet_dir = root.join("parakeet");
@@ -16246,6 +16408,13 @@ fn dictation_options_from_settings(settings: &settings::Settings) -> models::Dic
         captured_context_text: None,
         context_app_name: None,
         context_app_bundle_id: None,
+        preferred_input_device_id: settings
+            .audio
+            .dictation_input_device
+            .as_ref()
+            .filter(|_| settings.audio.dictation_input_override_enabled)
+            .or(settings.audio.preferred_input_device.as_ref())
+            .map(|device| device.device_id.clone()),
     }
 }
 

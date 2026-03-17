@@ -117,6 +117,37 @@ const providerFixture = [
     },
   },
   {
+    providerType: "whisper_candle",
+    name: "Whisper Candle",
+    description: "Native Candle Whisper runtime",
+    isAvailable: true,
+    inferenceEnabled: true,
+    modelInfo: {
+      name: "Whisper Large V3 Turbo",
+      version: "whisper-large-v3-turbo",
+      sizeMb: 3100,
+      parameters: "809M",
+      languages: ["en"],
+      license: "MIT",
+      sourceUrl: "https://example.com/whisper-candle",
+    },
+    selectedModelId: "whisper-large-v3-turbo",
+    modelOptions: [
+      {
+        id: "whisper-large-v3-turbo",
+        label: "Whisper Large V3 Turbo via Candle (experimental)",
+      },
+    ],
+    downloadStatus: "Downloaded",
+    runtimeStatus: "ready",
+    runtimeDetails: {},
+    engineDiagnostics: {
+      activeEngine: "provider_default",
+      availableEngines: ["provider_default"],
+      notes: [],
+    },
+  },
+  {
     providerType: "macos_apple_speech",
     name: "Apple Native Speech",
     description: "Use macOS native speech recognition.",
@@ -416,7 +447,7 @@ describe("Platform optimization settings", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.getByText(
-        "Meetings use meeting-grade ASR only. Apple Native Speech, Windows Native Speech, Moonshine, and standard Whisper are dictation-only, so meetings will use a separate stronger model instead."
+        "Meetings use meeting-grade ASR only. Apple Native Speech, Windows Native Speech, Moonshine, Whisper Candle, and standard Whisper are dictation-only, so meetings will use a separate stronger model instead."
       )
     ).toBeInTheDocument();
   });
@@ -453,6 +484,53 @@ describe("Platform optimization settings", () => {
       (meetingProviderSelect as HTMLSelectElement).querySelectorAll("option")
     ).map((option) => option.getAttribute("value") ?? "");
     expect(optionValues).not.toContain("whisper");
+    expect(optionValues).toContain("distil_whisper");
+  });
+
+  it("keeps Whisper Candle out of shared meeting-compatible routes", async () => {
+    getSettingsMock.mockResolvedValue({
+      transcription: {
+        defaultProvider: "whisper_candle",
+        selectedModelId: "whisper-large-v3-turbo",
+        useSharedAsrSelection: true,
+        dictationProvider: "whisper_candle",
+        dictationModelId: "whisper-large-v3-turbo",
+        meetingProvider: "whisper_candle",
+        meetingModelId: "whisper-large-v3-turbo",
+        meetingRoutePolicy: "prefer_local",
+        platformOptimization: {
+          mode: "auto",
+          fallbackPolicy: "local_only",
+          macos: { appleNativeEnabled: false, mlxEnabled: true },
+          windows: { foundryEnabled: false, windowsSdkDictationEnabled: false },
+          manualEnginePriority: [],
+        },
+      },
+    });
+
+    render(<AsrProviderManager />);
+
+    expect(await screen.findByText("Meeting provider")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Meetings use meeting-grade ASR only. Apple Native Speech, Windows Native Speech, Moonshine, Whisper Candle, and standard Whisper are dictation-only, so meetings will use a separate stronger model instead."
+      )
+    ).toBeInTheDocument();
+
+    const sharedProviderSelect = screen
+      .getByText("Dictation provider")
+      .parentElement?.querySelector("select");
+    expect(sharedProviderSelect).toBeTruthy();
+    expect((sharedProviderSelect as HTMLSelectElement).value).toBe("whisper_candle");
+
+    const meetingProviderSelect = screen
+      .getByText("Meeting provider")
+      .parentElement?.querySelector("select");
+    expect(meetingProviderSelect).toBeTruthy();
+    const optionValues = Array.from(
+      (meetingProviderSelect as HTMLSelectElement).querySelectorAll("option")
+    ).map((option) => option.getAttribute("value") ?? "");
+    expect(optionValues).not.toContain("whisper_candle");
     expect(optionValues).toContain("distil_whisper");
   });
 

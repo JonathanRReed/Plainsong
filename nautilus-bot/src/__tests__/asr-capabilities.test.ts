@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  isDictationOnlyProvider,
+  isMeetingEligibleProvider,
+  isSharedMeetingCompatible,
   mlxMappedModelId,
   modelSupportsMlxAcceleration,
   visibleRouteForMlxModel,
@@ -15,9 +18,9 @@ describe("ASR capability mappings", () => {
     );
   });
 
-  it("does not claim MLX acceleration for unsupported provider/model pairs", () => {
-    expect(modelSupportsMlxAcceleration("parakeet", "parakeet-ctc-0.6b")).toBe(false);
-    expect(modelSupportsMlxAcceleration("voxtral", "voxtral-local")).toBe(false);
+  it("claims MLX acceleration only for model/provider pairs that have direct mapped routes", () => {
+    expect(modelSupportsMlxAcceleration("parakeet", "parakeet-ctc-0.6b")).toBe(true);
+    expect(modelSupportsMlxAcceleration("voxtral", "voxtral-local")).toBe(true);
     expect(modelSupportsMlxAcceleration("whisper", "not-a-real-model")).toBe(false);
   });
 
@@ -32,5 +35,21 @@ describe("ASR capability mappings", () => {
       providerType: "whisper",
       modelId: "large-v3-turbo",
     });
+  });
+
+  it("keeps frontend provider eligibility aligned with backend meeting rules", () => {
+    expect(isDictationOnlyProvider("whisper")).toBe(true);
+    expect(isDictationOnlyProvider("moonshine")).toBe(true);
+    expect(isDictationOnlyProvider("whisper_candle")).toBe(true);
+    expect(isMeetingEligibleProvider("distil_whisper")).toBe(true);
+    expect(isMeetingEligibleProvider("parakeet")).toBe(true);
+    expect(isMeetingEligibleProvider("voxtral")).toBe(true);
+    expect(isMeetingEligibleProvider("openai_cloud")).toBe(true);
+    expect(isMeetingEligibleProvider("whisper_candle")).toBe(false);
+    expect(isSharedMeetingCompatible("distil_whisper", "distil-large-v3.5")).toBe(true);
+    expect(isSharedMeetingCompatible("parakeet", "parakeet-ctc-0.6b")).toBe(true);
+    expect(isSharedMeetingCompatible("voxtral", "voxtral-local")).toBe(true);
+    expect(isSharedMeetingCompatible("whisper", "base.en")).toBe(false);
+    expect(isSharedMeetingCompatible("whisper_candle", "whisper-large-v3-turbo")).toBe(false);
   });
 });

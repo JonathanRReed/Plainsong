@@ -96,6 +96,8 @@ pub struct RecordingOptions {
     pub system_audio: bool,
     pub project_id: String,
     #[serde(default)]
+    pub preferred_input_device_id: Option<String>,
+    #[serde(default)]
     pub template: Option<String>,
     #[serde(default)]
     pub meeting_notes: Option<String>,
@@ -145,6 +147,8 @@ pub struct DictationStartOptions {
     pub context_app_name: Option<String>,
     #[serde(default)]
     pub context_app_bundle_id: Option<String>,
+    #[serde(default)]
+    pub preferred_input_device_id: Option<String>,
 }
 
 impl Default for DictationStartOptions {
@@ -165,6 +169,7 @@ impl Default for DictationStartOptions {
             captured_context_text: None,
             context_app_name: None,
             context_app_bundle_id: None,
+            preferred_input_device_id: None,
         }
     }
 }

@@ -78,6 +78,16 @@ pub struct AudioSettings {
     pub capture_system_audio: bool,
     /// Enable microphone capture
     pub capture_microphone: bool,
+    /// Preferred app-wide input device selection.
+    pub preferred_input_device: Option<AudioInputDevicePreference>,
+    /// Whether dictation should override the app-wide microphone selection.
+    pub dictation_input_override_enabled: bool,
+    /// Preferred microphone for dictation when override is enabled.
+    pub dictation_input_device: Option<AudioInputDevicePreference>,
+    /// Whether meetings should override the app-wide microphone selection.
+    pub meeting_input_override_enabled: bool,
+    /// Preferred microphone for meetings when override is enabled.
+    pub meeting_input_device: Option<AudioInputDevicePreference>,
     /// Enable noise suppression
     pub noise_suppression: bool,
     /// Enable VAD (auto-stop on silence)
@@ -97,11 +107,34 @@ impl Default for AudioSettings {
             channels: 1,
             capture_system_audio: true,
             capture_microphone: true,
+            preferred_input_device: None,
+            dictation_input_override_enabled: false,
+            dictation_input_device: None,
+            meeting_input_override_enabled: false,
+            meeting_input_device: None,
             noise_suppression: true,
             voice_activity_detection: true,
             silence_timeout_seconds: 300.0,
             auto_gain_control: true,
             manual_gain_db: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AudioInputDevicePreference {
+    pub device_id: String,
+    pub device_name: String,
+    pub transport_type: Option<String>,
+}
+
+impl Default for AudioInputDevicePreference {
+    fn default() -> Self {
+        Self {
+            device_id: String::new(),
+            device_name: String::new(),
+            transport_type: None,
         }
     }
 }
@@ -661,6 +694,43 @@ fn normalize_dictation_active_languages(languages: &[String]) -> Vec<String> {
     normalized
 }
 
+fn normalize_audio_input_device_preference(
+    preference: Option<AudioInputDevicePreference>,
+) -> Option<AudioInputDevicePreference> {
+    preference.and_then(|mut value| {
+        value.device_id = value.device_id.trim().to_string();
+        value.device_name = value.device_name.trim().to_string();
+        value.transport_type = value.transport_type.and_then(|transport| {
+            let trimmed = transport.trim().to_ascii_lowercase();
+            match trimmed.as_str() {
+                "builtin" | "bluetooth" | "usb" | "virtual" | "unknown" => Some(trimmed),
+                _ => None,
+            }
+        });
+        if value.device_id.is_empty() || value.device_name.is_empty() {
+            None
+        } else {
+            Some(value)
+        }
+    })
+}
+
+pub(crate) fn normalize_loaded_audio_settings(audio: &mut AudioSettings) {
+    audio.preferred_input_device =
+        normalize_audio_input_device_preference(audio.preferred_input_device.clone());
+    audio.dictation_input_device =
+        normalize_audio_input_device_preference(audio.dictation_input_device.clone());
+    audio.meeting_input_device =
+        normalize_audio_input_device_preference(audio.meeting_input_device.clone());
+
+    if !audio.dictation_input_override_enabled {
+        audio.dictation_input_device = None;
+    }
+    if !audio.meeting_input_override_enabled {
+        audio.meeting_input_device = None;
+    }
+}
+
 fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSettings) {
     transcription.default_provider =
         normalize_transcription_provider_value(&transcription.default_provider);
@@ -832,6 +902,7 @@ impl SettingsManager {
         } else {
             Settings::default()
         };
+        normalize_loaded_audio_settings(&mut settings.audio);
         normalize_keyboard_shortcuts(&mut settings.shortcuts);
         normalize_loaded_transcription_settings(&mut settings.transcription);
 
@@ -894,7 +965,10 @@ impl Default for SettingsManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_dictation_active_languages, PlatformOptimizationSettings, Settings};
+    use super::{
+        normalize_audio_input_device_preference, normalize_dictation_active_languages,
+        AudioInputDevicePreference, PlatformOptimizationSettings, Settings,
+    };
 
     #[test]
     fn platform_optimization_defaults_are_stable() {
@@ -939,5 +1013,29 @@ mod tests {
             "bogus".to_string(),
         ]);
         assert_eq!(normalized, vec!["en".to_string(), "es".to_string()]);
+    }
+
+    #[test]
+    fn audio_input_preference_drops_invalid_values() {
+        assert!(
+            normalize_audio_input_device_preference(Some(AudioInputDevicePreference {
+                device_id: " ".to_string(),
+                device_name: "Built-in Microphone".to_string(),
+                transport_type: Some("builtin".to_string()),
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn audio_input_preference_normalizes_transport_type() {
+        let normalized =
+            normalize_audio_input_device_preference(Some(AudioInputDevicePreference {
+                device_id: "device-1".to_string(),
+                device_name: "Built-in Microphone".to_string(),
+                transport_type: Some(" BUILTIN ".to_string()),
+            }))
+            .expect("valid device preference");
+        assert_eq!(normalized.transport_type.as_deref(), Some("builtin"));
     }
 }

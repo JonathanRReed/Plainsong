@@ -11,6 +11,11 @@ const baseSettings = {
     channels: 1,
     captureSystemAudio: true,
     captureMicrophone: true,
+    preferredInputDevice: null,
+    dictationInputOverrideEnabled: false,
+    dictationInputDevice: null,
+    meetingInputOverrideEnabled: false,
+    meetingInputDevice: null,
     noiseSuppression: true,
     voiceActivityDetection: true,
     silenceTimeoutSeconds: 3,
@@ -94,6 +99,25 @@ vi.mock("@/lib/tauri", () => ({
   createBackupDefault: vi.fn(),
   createSettingsBackupDefault: vi.fn(),
   clearProviderSecret: vi.fn(),
+  listAudioInputDevices: vi.fn(async () => ({
+    devices: [
+      {
+        deviceId: "input-0-built-in microphone",
+        deviceName: "Built-in Microphone",
+        transportType: "builtin",
+        isDefault: true,
+        isAvailable: true,
+        isBluetoothLike: false,
+        channelCount: 1,
+        sampleRate: 16000,
+      },
+    ],
+    appWideSelectedDeviceId: null,
+    dictationOverrideEnabled: false,
+    dictationSelectedDeviceId: null,
+    meetingOverrideEnabled: false,
+    meetingSelectedDeviceId: null,
+  })),
   getBackupConfig: vi.fn(async () => ({
     enabled: true,
     intervalHours: 24,
@@ -394,7 +418,7 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     fireEvent.click(screen.getByText("AI & Keys"));
-    await screen.findByText("Cross-meeting memory chat");
+    await screen.findByText("Memory Search");
 
     fireEvent.click(screen.getByRole("button", { name: /open memory/i }));
     fireEvent.click(screen.getByRole("button", { name: /open relationship memory/i }));

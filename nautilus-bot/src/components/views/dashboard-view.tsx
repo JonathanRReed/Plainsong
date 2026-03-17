@@ -423,6 +423,7 @@ export function DashboardView() {
           <Card>
             <CardHeader>
               <CardTitle>Relationship Memory</CardTitle>
+              <p className="text-sm text-muted-foreground">People &amp; Companies</p>
             </CardHeader>
             <CardContent className="space-y-4">
               <p className="text-sm text-muted-foreground">

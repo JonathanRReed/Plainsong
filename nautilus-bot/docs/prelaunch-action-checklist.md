@@ -6,7 +6,7 @@ Current blocker register: `docs/strict-release-blocker-register.md`.
 
 ## A) Required Secrets
 
-- [ ] Confirm updater/signing secrets are set: `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PUBLIC_KEY`.
+- [ ] Confirm updater/signing secrets are set: `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (if used), `TAURI_SIGNING_PUBLIC_KEY`.
 - [ ] Confirm macOS signing/notarization secrets are set (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`, `KEYCHAIN_PASSWORD`) — BLOCKED (Apple setup unavailable in this cycle).
 - [ ] Confirm Windows signing secrets are set (`WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`) — BLOCKED (Windows cert unavailable in this cycle).
 - [ ] Confirm cloud ASR live-test secrets are set (`OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `MISTRAL_API_KEY`) — BLOCKED (`scripts/live-cloud-asr-smoke.mjs` fails without these).

@@ -192,11 +192,36 @@ export async function startRecording(options: {
   mic: boolean;
   systemAudio: boolean;
   projectId: string;
+  preferredInputDeviceId?: string;
   template?: string;
   meetingNotes?: string;
   consentPromptShown?: boolean;
 }): Promise<string> {
   return await invoke("start_recording", { options });
+}
+
+export interface AudioInputDeviceInfo {
+  deviceId: string;
+  deviceName: string;
+  transportType?: "builtin" | "bluetooth" | "usb" | "virtual" | "unknown" | null;
+  isDefault: boolean;
+  isAvailable: boolean;
+  isBluetoothLike: boolean;
+  channelCount?: number | null;
+  sampleRate?: number | null;
+}
+
+export interface AudioInputDeviceInventory {
+  devices: AudioInputDeviceInfo[];
+  appWideSelectedDeviceId?: string | null;
+  dictationOverrideEnabled: boolean;
+  dictationSelectedDeviceId?: string | null;
+  meetingOverrideEnabled: boolean;
+  meetingSelectedDeviceId?: string | null;
+}
+
+export async function listAudioInputDevices(): Promise<AudioInputDeviceInventory> {
+  return await invoke("list_audio_input_devices");
 }
 
 export async function getMeetingConsentAutomationStatus(): Promise<MeetingConsentAutomationStatus> {

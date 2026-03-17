@@ -81,6 +81,23 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import type { AsrProviderInfo, AsrProviderType, Recording, Transcript } from "@/types";
 import type { DictationCustomMode } from "@/types/settings";
 
+function getSafeLocalStorage(): Pick<Storage, "getItem" | "setItem"> | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const storage = window.localStorage;
+  if (
+    !storage ||
+    typeof storage.getItem !== "function" ||
+    typeof storage.setItem !== "function"
+  ) {
+    return null;
+  }
+
+  return storage;
+}
+
 interface DictationTextReadyEvent {
   text: string;
   pasted?: boolean;
@@ -912,7 +929,7 @@ export function DictationView() {
   const [reprocessError, setReprocessError] = useState<string | null>(null);
   const [currentDictationProvider, setCurrentDictationProvider] = useState<string | null>(null);
   const [currentDictationModelId, setCurrentDictationModelId] = useState<string | null>(null);
-  const [defaultAsrProvider, setDefaultAsrProvider] = useState<string | null>(null);
+  const [currentMeetingProvider, setCurrentMeetingProvider] = useState<string | null>(null);
   const [useSharedAsrSelection, setUseSharedAsrSelection] = useState(true);
   const [currentAiProvider, setCurrentAiProvider] = useState<string | null>(null);
   const [currentAiModelId, setCurrentAiModelId] = useState<string | null>(null);
@@ -1138,7 +1155,11 @@ export function DictationView() {
 
   useEffect(() => {
     try {
-      const raw = window.localStorage.getItem("nautilus-dictation-coach-dismissed");
+      const storage = getSafeLocalStorage();
+      if (!storage) {
+        return;
+      }
+      const raw = storage.getItem("nautilus-dictation-coach-dismissed");
       if (!raw) {
         return;
       }
@@ -1157,7 +1178,11 @@ export function DictationView() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(
+      const storage = getSafeLocalStorage();
+      if (!storage) {
+        return;
+      }
+      storage.setItem(
         "nautilus-dictation-coach-dismissed",
         JSON.stringify(dismissedCoachSteps)
       );
@@ -1278,7 +1303,7 @@ export function DictationView() {
         setSelectedCustomModeId(settings.transcription.dictationSelectedCustomModeId ?? null);
         setCurrentDictationProvider(settings.transcription.dictationProvider ?? null);
         setCurrentDictationModelId(settings.transcription.dictationModelId ?? null);
-        setDefaultAsrProvider(settings.transcription.defaultProvider ?? null);
+        setCurrentMeetingProvider(settings.transcription.meetingProvider ?? null);
         setUseSharedAsrSelection(settings.transcription.useSharedAsrSelection ?? true);
         setCurrentAiProvider(settings.privacy.llmProvider ?? null);
         setCurrentAiModelId(settings.privacy.llmModelId ?? null);
@@ -2569,6 +2594,7 @@ export function DictationView() {
                       <button
                         key={lane.id}
                         type="button"
+                        aria-label={`Solo lane: ${lane.title}`}
                         onClick={() => {
                           if (lane.styleId) {
                             const style = RECOMMENDED_APP_STYLES.find((candidate) => candidate.id === lane.styleId);
@@ -2611,6 +2637,7 @@ export function DictationView() {
                     <button
                       key={mode.id}
                       type="button"
+                      aria-label={`Flow profile: ${mode.label}`}
                       onClick={() => applyDictationMode(mode.id)}
                       className={cn(
                         "rounded-xl border p-4 text-left transition-colors",
@@ -2814,11 +2841,11 @@ export function DictationView() {
                         : "Unknown"}
                     </p>
                     {!useSharedAsrSelection &&
-                    defaultAsrProvider &&
                     currentDictationProvider &&
-                    currentDictationProvider !== defaultAsrProvider ? (
+                    currentMeetingProvider &&
+                    currentDictationProvider !== currentMeetingProvider ? (
                       <p className="text-xs text-amber-500">
-                        ⚠ Dictation is using {currentDictationProvider}, not {defaultAsrProvider}.
+                        Dictation uses {currentDictationProvider} while meetings use {currentMeetingProvider}.
                       </p>
                     ) : null}
                   </div>

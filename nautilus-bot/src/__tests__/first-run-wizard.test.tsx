@@ -157,6 +157,27 @@ const createSettings = () => ({
 let currentSettings = createSettings();
 const storage = new Map<string, string>();
 
+function getMeetingVerificationResult() {
+  const provider = currentSettings.transcription.meetingProvider;
+  const ready = provider === "distil_whisper" || provider === "parakeet" || provider === "voxtral";
+
+  if (ready) {
+    return {
+      ok: true,
+      title: "Meeting verification",
+      summary: "Meeting route is ready.",
+      details: [],
+    };
+  }
+
+  return {
+    ok: false,
+    title: "Meeting verification",
+    summary: "Meetings need a meeting-grade ASR route.",
+    details: ["Apple Native is dictation-only for meetings."],
+  };
+}
+
 vi.mock("@/lib/tauri", () => ({
   checkSystemAudioAvailability: vi.fn(async () => true),
   downloadWhisperModel: vi.fn(async () => {}),
@@ -186,6 +207,7 @@ vi.mock("@/lib/tauri", () => ({
   saveSettings: vi.fn(async (nextSettings) => {
     currentSettings = structuredClone(nextSettings);
   }),
+  verifyMeetingSetup: vi.fn(async () => getMeetingVerificationResult()),
 }));
 
 async function clickPrimary(label: RegExp) {

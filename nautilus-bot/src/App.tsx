@@ -175,6 +175,21 @@ function AppRuntimeListeners() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    void listen<string>("audio-input-advisory", (event) => {
+      const message = typeof event.payload === "string" ? event.payload.trim() : "";
+      if (message) {
+        toast(message, "info");
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [toast]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
     void listen<void>("accessibility-permission-warning", () => {
       toast(
         "Accessibility permission required for dictation. Enable it in System Settings > Privacy & Security > Accessibility.",

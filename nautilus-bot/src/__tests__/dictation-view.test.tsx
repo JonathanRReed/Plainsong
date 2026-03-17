@@ -280,16 +280,18 @@ describe("DictationView modes", () => {
     render(<DictationView />);
 
     await screen.findByText("Flow Profiles");
-    expect(screen.getByRole("button", { name: /voice/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /messages/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /meeting follow-up/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /flow profile: voice/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /flow profile: messages/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /flow profile: meeting follow-up/i })
+    ).toBeInTheDocument();
   });
 
   it("applies Messages mode defaults and persists them", async () => {
     render(<DictationView />);
 
     await screen.findByText("Flow Profiles");
-    fireEvent.click(screen.getByRole("button", { name: /messages/i }));
+    fireEvent.click(screen.getByRole("button", { name: /flow profile: messages/i }));
 
     await waitFor(() => {
       expect(tauriMocks.saveSettings).toHaveBeenCalled();
@@ -312,8 +314,8 @@ describe("DictationView modes", () => {
     render(<DictationView />);
 
     await screen.findByText("Flow Profiles");
-    fireEvent.click(screen.getByRole("button", { name: /messages/i }));
-    fireEvent.click(screen.getByRole("button", { name: /custom/i }));
+    fireEvent.click(screen.getByRole("button", { name: /flow profile: messages/i }));
+    fireEvent.click(screen.getByRole("button", { name: /flow profile: custom/i }));
 
     const nameInput = await screen.findByLabelText("Profile name");
     fireEvent.change(nameInput, { target: { value: "Sales Follow-up" } });

@@ -584,14 +584,12 @@ fn parse_python_asr_stdout(stdout: &str) -> Result<PythonAsrActionOutput> {
         }
     }
 
-    let compact = if trimmed.chars().count() > 800 {
-        let mut snippet = trimmed.chars().take(800).collect::<String>();
-        snippet.push_str("...");
-        snippet
-    } else {
-        trimmed.to_string()
-    };
-    Err(anyhow!("Failed to parse Python ASR output: {}", compact))
+    tracing::warn!(
+        "Python ASR output was not parseable as JSON; suppressing raw runner output from UI"
+    );
+    Err(anyhow!(
+        "The speech runtime returned an unexpected response. Try the route again or switch models."
+    ))
 }
 
 pub async fn run_python_asr_action(
@@ -702,18 +700,16 @@ pub async fn run_python_asr_action(
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let detail = if !stderr.is_empty() {
-                stderr
-            } else if !stdout.is_empty() {
-                stdout
-            } else {
-                "no error output".to_string()
-            };
-            return Err(anyhow!(
-                "Python {} action for '{}' failed: {}",
+            let detail = if !stderr.is_empty() { stderr } else { stdout };
+            tracing::warn!(
+                "Python {} action for '{}' failed with suppressed detail: {}",
                 action,
                 provider,
-                detail
+                if detail.is_empty() { "<empty>" } else { "<suppressed>" }
+            );
+            return Err(anyhow!(
+                "The {} speech runtime failed to complete transcription. Try the route again or switch models.",
+                action,
             ));
         }
 

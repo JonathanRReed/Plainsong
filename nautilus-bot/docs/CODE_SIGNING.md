@@ -1,6 +1,6 @@
 # Code Signing & Distribution Certification — Nautilus
 
-App bundle identifier: **`com.nautilus.app`**  
+App bundle identifier: **`com.nautilus.bot`**  
 Tauri config: `src-tauri/tauri.conf.json`
 
 This doc covers everything needed to produce signed, verified distributable builds for macOS, Windows, and Linux.
@@ -28,6 +28,7 @@ This doc covers everything needed to produce signed, verified distributable buil
 | `APPLE_PASSWORD` | App-specific password (not your Apple ID password) |
 | `APPLE_TEAM_ID` | 10-character team ID, e.g. `ABCD123456` |
 | `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater private key used to sign update artifacts |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the updater private key, if you protected it |
 | `TAURI_SIGNING_PUBLIC_KEY` | Tauri updater public key injected into `tauri.conf.json` at release build time |
 
 ### tauri.conf.json — macOS signing fields
@@ -42,7 +43,7 @@ This doc covers everything needed to produce signed, verified distributable buil
 
 `signingIdentity` stays `null` — Tauri picks it up automatically from the `APPLE_SIGNING_IDENTITY` environment variable during CI.
 
-Updater note: keep the updater `pubkey` placeholder in source control and inject the real value in CI (`scripts/inject-updater-pubkey.js`) using `TAURI_SIGNING_PUBLIC_KEY`.
+Updater note: keep the updater `pubkey` placeholder in source control and inject the real value in CI (`scripts/inject-updater-pubkey.js`) using `TAURI_SIGNING_PUBLIC_KEY`. If the private key is password-protected, also set `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` in CI.
 
 ### Entitlements.plist — capabilities needed
 
