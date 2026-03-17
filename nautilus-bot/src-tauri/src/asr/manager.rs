@@ -1973,7 +1973,6 @@ mod tests {
     };
     use crate::asr::AsrProviderFactory;
     use crate::settings::PlatformOptimizationSettings;
-    use std::collections::HashSet;
     use std::path::PathBuf;
 
     fn temp_models_root() -> PathBuf {
@@ -2150,7 +2149,7 @@ mod tests {
             AsrProviderType::MlxAudio,
             crate::asr::mlx_audio::default_model_id(),
             &PlatformOptimizationSettings::default(),
-            &HashSet::new(),
+            false,
         );
         assert_eq!(
             diagnostics.active_engine.as_deref(),

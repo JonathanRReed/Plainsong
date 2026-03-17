@@ -9,9 +9,11 @@ use crate::audio::enhance::AudioPreprocessor;
 use crate::audio::system_capture::MixedAudioCapture;
 use crate::audio::vad::{VadConfig, VoiceActivityDetector};
 use crate::models::RecordingOptions;
+use crate::settings;
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam::channel::{bounded, Receiver, Sender, TrySendError};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,6 +25,31 @@ const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
 const DICTATION_MIN_CAPTURE_SECONDS: f32 = 0.35;
 const DICTATION_SHORT_CAPTURE_PEAK_THRESHOLD: f32 = 0.008;
 const DICTATION_SHORT_CAPTURE_RMS_THRESHOLD: f32 = 0.002;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioInputDeviceInfo {
+    pub device_id: String,
+    pub device_name: String,
+    pub transport_type: Option<String>,
+    pub is_default: bool,
+    pub is_available: bool,
+    pub is_bluetooth_like: bool,
+    pub channel_count: Option<u16>,
+    pub sample_rate: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedAudioInputDevice {
+    pub device_id: String,
+    pub device_name: String,
+    pub transport_type: Option<String>,
+    pub is_default: bool,
+    pub is_bluetooth_like: bool,
+    pub used_fallback: bool,
+    pub advisory: Option<String>,
+}
 
 pub struct AudioCapture {
     is_dictating: Arc<AtomicBool>,
@@ -96,6 +123,88 @@ pub struct RecordingStopResult {
     pub dropped_mixed_chunks: u64,
 }
 
+fn infer_transport_type(device_name: &str) -> String {
+    let normalized = device_name.trim().to_ascii_lowercase();
+    if normalized.contains("airpods")
+        || normalized.contains("bluetooth")
+        || normalized.contains("headset")
+        || normalized.contains("hands-free")
+    {
+        "bluetooth".to_string()
+    } else if normalized.contains("built-in") || normalized.contains("macbook") {
+        "builtin".to_string()
+    } else if normalized.contains("usb") {
+        "usb".to_string()
+    } else if normalized.contains("blackhole")
+        || normalized.contains("loopback")
+        || normalized.contains("soundflower")
+        || normalized.contains("virtual")
+    {
+        "virtual".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn bluetooth_advisory_for_device(
+    device_name: &str,
+    transport_type: Option<&str>,
+) -> Option<String> {
+    let normalized = device_name.trim().to_ascii_lowercase();
+    let bluetooth_like = transport_type == Some("bluetooth")
+        || normalized.contains("airpods")
+        || normalized.contains("bluetooth")
+        || normalized.contains("headset")
+        || normalized.contains("hands-free");
+    if bluetooth_like {
+        Some(
+            "Bluetooth headset microphones can reduce playback quality during capture. Switch to your built-in or USB mic if audio sounds degraded."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+fn build_audio_input_device_info(
+    device: &cpal::Device,
+    is_default: bool,
+    index: usize,
+) -> Option<AudioInputDeviceInfo> {
+    let device_name = device.name().ok()?.trim().to_string();
+    if device_name.is_empty() {
+        return None;
+    }
+    let config = device.default_input_config().ok();
+    let transport_type = infer_transport_type(&device_name);
+    Some(AudioInputDeviceInfo {
+        device_id: format!("input-{}-{}", index, device_name.to_ascii_lowercase()),
+        device_name: device_name.clone(),
+        transport_type: Some(transport_type.clone()),
+        is_default,
+        is_available: true,
+        is_bluetooth_like: transport_type == "bluetooth",
+        channel_count: config.as_ref().map(|value| value.channels()),
+        sample_rate: config.as_ref().map(|value| value.sample_rate().0),
+    })
+}
+
+fn resolve_device_preference<'a>(
+    devices: &'a [(cpal::Device, AudioInputDeviceInfo)],
+    preference: Option<&settings::AudioInputDevicePreference>,
+) -> Option<(&'a cpal::Device, &'a AudioInputDeviceInfo)> {
+    let preference = preference?;
+    devices
+        .iter()
+        .find(|(_, info)| info.device_id == preference.device_id)
+        .or_else(|| {
+            devices
+                .iter()
+                .find(|(_, info)| info.device_name == preference.device_name)
+        })
+        .map(|(device, info)| (device, info))
+}
+
 #[allow(dead_code)]
 pub struct WaveformData {
     pub samples: Vec<f32>,
@@ -150,7 +259,140 @@ impl AudioCapture {
         sys_capture.get_loopback_device_name().ok().flatten()
     }
 
-    pub fn start_dictation(&mut self) -> Result<()> {
+    pub fn list_input_devices(&self) -> Result<Vec<AudioInputDeviceInfo>> {
+        let default_name = self
+            .host
+            .default_input_device()
+            .and_then(|device| device.name().ok());
+        let devices = self
+            .host
+            .input_devices()
+            .context("Failed to enumerate input devices")?;
+        let mut inventory = Vec::new();
+        for (index, device) in devices.enumerate() {
+            let is_default = default_name
+                .as_deref()
+                .map(|name| device.name().ok().as_deref() == Some(name))
+                .unwrap_or(false);
+            if let Some(info) = build_audio_input_device_info(&device, is_default, index) {
+                inventory.push(info);
+            }
+        }
+        Ok(inventory)
+    }
+
+    pub fn resolve_input_device(
+        &self,
+        preference: Option<&settings::AudioInputDevicePreference>,
+    ) -> Result<(cpal::Device, ResolvedAudioInputDevice)> {
+        let default_name = self
+            .host
+            .default_input_device()
+            .and_then(|device| device.name().ok());
+        let default_device_info = self.host.default_input_device().and_then(|device| {
+            let name = device.name().ok()?;
+            let transport_type = infer_transport_type(&name);
+            Some(ResolvedAudioInputDevice {
+                device_id: format!("default-{}", name.to_ascii_lowercase()),
+                device_name: name.clone(),
+                transport_type: Some(transport_type.clone()),
+                is_default: true,
+                is_bluetooth_like: transport_type == "bluetooth",
+                used_fallback: false,
+                advisory: bluetooth_advisory_for_device(&name, Some(&transport_type)),
+            })
+        });
+
+        let devices = self
+            .host
+            .input_devices()
+            .context("Failed to enumerate input devices")?;
+        let mut candidates = Vec::new();
+        for (index, device) in devices.enumerate() {
+            let is_default = default_name
+                .as_deref()
+                .map(|name| device.name().ok().as_deref() == Some(name))
+                .unwrap_or(false);
+            if let Some(info) = build_audio_input_device_info(&device, is_default, index) {
+                candidates.push((device, info));
+            }
+        }
+
+        if let Some((device, info)) = resolve_device_preference(&candidates, preference) {
+            return Ok((
+                device.clone(),
+                ResolvedAudioInputDevice {
+                    device_id: info.device_id.clone(),
+                    device_name: info.device_name.clone(),
+                    transport_type: info.transport_type.clone(),
+                    is_default: info.is_default,
+                    is_bluetooth_like: info.is_bluetooth_like,
+                    used_fallback: false,
+                    advisory: bluetooth_advisory_for_device(
+                        &info.device_name,
+                        info.transport_type.as_deref(),
+                    ),
+                },
+            ));
+        }
+
+        if let Some(default_device) = self.host.default_input_device() {
+            let name = default_device
+                .name()
+                .unwrap_or_else(|_| "Default microphone".to_string());
+            let transport_type = infer_transport_type(&name);
+            let advisory = match preference {
+                Some(saved) => Some(format!(
+                    "{} is unavailable, so Nautilus fell back to {}.",
+                    saved.device_name, name
+                )),
+                None => bluetooth_advisory_for_device(&name, Some(&transport_type)),
+            };
+            return Ok((
+                default_device,
+                ResolvedAudioInputDevice {
+                    device_id: default_device_info
+                        .as_ref()
+                        .map(|value| value.device_id.clone())
+                        .unwrap_or_else(|| format!("default-{}", name.to_ascii_lowercase())),
+                    device_name: name.clone(),
+                    transport_type: Some(transport_type.clone()),
+                    is_default: true,
+                    is_bluetooth_like: transport_type == "bluetooth",
+                    used_fallback: preference.is_some(),
+                    advisory,
+                },
+            ));
+        }
+
+        Err(anyhow::anyhow!("No input device available"))
+    }
+
+    pub fn resolve_input_device_by_id(
+        &self,
+        device_id: Option<&str>,
+    ) -> Result<(cpal::Device, ResolvedAudioInputDevice)> {
+        if let Some(device_id) = device_id {
+            let devices = self.list_input_devices()?;
+            if let Some(info) = devices
+                .iter()
+                .find(|candidate| candidate.device_id == device_id)
+            {
+                let preference = settings::AudioInputDevicePreference {
+                    device_id: info.device_id.clone(),
+                    device_name: info.device_name.clone(),
+                    transport_type: info.transport_type.clone(),
+                };
+                return self.resolve_input_device(Some(&preference));
+            }
+        }
+        self.resolve_input_device(None)
+    }
+
+    pub fn start_dictation(
+        &mut self,
+        preference: Option<&settings::AudioInputDevicePreference>,
+    ) -> Result<ResolvedAudioInputDevice> {
         if self.is_dictating.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("Dictation already in progress"));
         }
@@ -158,10 +400,7 @@ impl AudioCapture {
         while self.dictation_buffer.pop().is_some() {}
         while self.dictation_stream_queue.pop().is_some() {}
 
-        let device = self
-            .host
-            .default_input_device()
-            .context("No input device available")?;
+        let (device, resolved_device) = self.resolve_input_device(preference)?;
 
         let config = device.default_input_config()?;
         let sample_rate = config.sample_rate().0;
@@ -170,7 +409,8 @@ impl AudioCapture {
         self.dictation_channels = channels;
 
         tracing::info!(
-            "Starting dictation capture: {} channels, {} Hz, format: {:?}",
+            "Starting dictation capture on '{}' : {} channels, {} Hz, format: {:?}",
+            resolved_device.device_name,
             channels,
             sample_rate,
             config.sample_format()
@@ -194,17 +434,7 @@ impl AudioCapture {
 
         let capture_handle = std::thread::spawn(move || {
             let capture_flag = Arc::clone(&is_dictating);
-            let host = cpal::default_host();
-            let device = match host.default_input_device() {
-                Some(device) => device,
-                None => {
-                    let _ = startup_tx.send(Err(
-                        "No input device available for dictation capture".to_string()
-                    ));
-                    tracing::error!("No input device available for dictation capture thread");
-                    return;
-                }
-            };
+            let device = device;
             let config = match device.default_input_config() {
                 Ok(config) => config,
                 Err(e) => {
@@ -426,7 +656,7 @@ impl AudioCapture {
             }
         }
 
-        Ok(())
+        Ok(resolved_device)
     }
 
     pub fn stop_dictation(&mut self) -> Result<Vec<u8>> {
@@ -607,6 +837,14 @@ impl AudioCapture {
 
         let streaming_queue: Arc<crossbeam::queue::ArrayQueue<Vec<f32>>> =
             Arc::new(crossbeam::queue::ArrayQueue::new(256));
+        let preferred_mic_device = if options.mic {
+            Some(
+                self.resolve_input_device_by_id(options.preferred_input_device_id.as_deref())?
+                    .0,
+            )
+        } else {
+            None
+        };
 
         // Use MixedAudioCapture if system audio is requested
         if options.system_audio {
@@ -615,6 +853,7 @@ impl AudioCapture {
                 .start(
                     options.mic,
                     options.system_audio,
+                    preferred_mic_device,
                     Arc::clone(&waveform_buffer),
                     Some(Arc::clone(&streaming_queue)),
                 )
@@ -693,12 +932,16 @@ impl AudioCapture {
 
             let stream_queue_clone = Arc::clone(&streaming_queue);
             let capture_handle = std::thread::spawn(move || {
-                let host = cpal::default_host();
-                let Some(device) = host.default_input_device() else {
-                    let _ =
-                        startup_tx.send(Err("No microphone input device available".to_string()));
-                    tracing::error!("No input device available");
-                    return;
+                let device = match preferred_mic_device
+                    .or_else(|| cpal::default_host().default_input_device())
+                {
+                    Some(device) => device,
+                    None => {
+                        let _ = startup_tx
+                            .send(Err("No microphone input device available".to_string()));
+                        tracing::error!("No input device available");
+                        return;
+                    }
                 };
                 let Ok(config) = device.default_input_config() else {
                     let _ = startup_tx.send(Err(
@@ -833,9 +1076,8 @@ impl AudioCapture {
             }
 
             let sample_rate = self
-                .host
-                .default_input_device()
-                .context("No input device available")?
+                .resolve_input_device_by_id(options.preferred_input_device_id.as_deref())?
+                .0
                 .default_input_config()?
                 .sample_rate()
                 .0;

@@ -45,11 +45,22 @@ export interface AudioSettings {
   channels: number;
   captureSystemAudio: boolean;
   captureMicrophone: boolean;
+  preferredInputDevice?: AudioInputDevicePreference | null;
+  dictationInputOverrideEnabled?: boolean;
+  dictationInputDevice?: AudioInputDevicePreference | null;
+  meetingInputOverrideEnabled?: boolean;
+  meetingInputDevice?: AudioInputDevicePreference | null;
   noiseSuppression: boolean;
   voiceActivityDetection: boolean;
   silenceTimeoutSeconds: number;
   autoGainControl: boolean;
   manualGainDb: number;
+}
+
+export interface AudioInputDevicePreference {
+  deviceId: string;
+  deviceName: string;
+  transportType?: "builtin" | "bluetooth" | "usb" | "virtual" | "unknown" | null;
 }
 
 export interface TranscriptionSettings {

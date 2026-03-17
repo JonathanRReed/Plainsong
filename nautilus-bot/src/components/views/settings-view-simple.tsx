@@ -20,6 +20,7 @@ import {
   createBackupDefault,
   createSettingsBackupDefault,
   clearProviderSecret,
+  listAudioInputDevices,
   getBackupConfig,
   getPermissionDiagnostics,
   getBackupSetupReport,
@@ -53,6 +54,7 @@ import type { BackupConfig, BackupInfo, CloudSetupReport, SecurityStatus, Licens
 import type { PermissionDiagnostics } from "@/lib/tauri";
 import { validateLicense, activateLicense, deactivateLicense, isDiarizationModelAvailable, downloadDiarizationModel, listDiarizationModels } from "@/lib/tauri";
 import type { DiarizationModelOption } from "@/lib/tauri";
+import type { AudioInputDeviceInfo, AudioInputDeviceInventory } from "@/lib/tauri";
 import { isFeatureAllowed, canUseFormattingAssistant, getThemeAccessLevel } from "@/hooks/use-license-features";
 import type { Settings } from "@/types/settings";
 import { normalizeThemeSchemeForAccess, themeSchemesForAccess } from "@/lib/theme-schemes";
@@ -126,6 +128,79 @@ const DICTATION_ACTIVE_LANGUAGE_OPTIONS = [
   { value: "hi", label: "Hindi" },
 ] as const;
 
+const SETTINGS_TABS = [
+  {
+    id: "asr" as TabId,
+    label: "Transcription",
+    title: "Capture and transcription",
+    eyebrow: "Voice Stack",
+    summary:
+      "Choose microphones, tune dictation and meeting routes, and make capture behavior feel deterministic before you start speaking.",
+    railSummary: "Microphones, ASR routes, and dictation behavior",
+    icon: Mic,
+  },
+  {
+    id: "general" as TabId,
+    label: "General",
+    title: "Workspace",
+    eyebrow: "Desktop",
+    summary:
+      "Shape the Nautilus shell, keyboard shortcuts, overlays, and launch behavior without hunting through unrelated controls.",
+    railSummary: "Appearance, shortcuts, and window behavior",
+    icon: Monitor,
+  },
+  {
+    id: "security" as TabId,
+    label: "Privacy & Security",
+    title: "Privacy and security",
+    eyebrow: "Trust",
+    summary:
+      "Keep Nautilus local-first, verify permissions, and manage vault access with clear status instead of warning-heavy clutter.",
+    railSummary: "Permissions, vault access, and remote policy",
+    icon: Shield,
+  },
+  {
+    id: "storage" as TabId,
+    label: "Storage",
+    title: "Retention and recovery",
+    eyebrow: "Archive",
+    summary:
+      "Control export paths, retention, profile snapshots, and recovery workflows from one calmer storage workspace.",
+    railSummary: "Exports, retention, backups, and reset tools",
+    icon: Database,
+  },
+  {
+    id: "ai" as TabId,
+    label: "AI & Keys",
+    title: "AI and memory",
+    eyebrow: "Intelligence",
+    summary:
+      "Set the analysis provider, model, credentials, and transcript-backed memory tools without mixing them into system settings.",
+    railSummary: "Providers, credentials, and memory search",
+    icon: Key,
+  },
+  {
+    id: "updates" as TabId,
+    label: "Updates",
+    title: "Release management",
+    eyebrow: "Lifecycle",
+    summary:
+      "Check install status, choose update channels, and keep this machine current with minimal ceremony.",
+    railSummary: "Version status and update channels",
+    icon: RefreshCw,
+  },
+  {
+    id: "license" as TabId,
+    label: "License",
+    title: "Plan and activation",
+    eyebrow: "Entitlement",
+    summary:
+      "See trial state, activate a key, and manage this device without leaving Nautilus.",
+    railSummary: "Trial status, license key, and device activation",
+    icon: Shield,
+  },
+] as const;
+
 function normalizeActiveLanguageSet(languages: string[] | undefined): string[] {
   const allowed = new Set<string>(DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => option.value));
   const normalized: string[] = [];
@@ -161,6 +236,29 @@ function AdvancedToggle({
       <Switch checked={checked} onCheckedChange={onCheckedChange} className="scale-75 data-[state=checked]:bg-amber-600" />
     </div>
   );
+}
+
+function deviceTransportLabel(device: AudioInputDeviceInfo) {
+  switch (device.transportType) {
+    case "builtin":
+      return "Built-in";
+    case "bluetooth":
+      return "Bluetooth";
+    case "usb":
+      return "USB";
+    case "virtual":
+      return "Virtual";
+    default:
+      return "Audio input";
+  }
+}
+
+function renderDeviceOptionLabel(device: AudioInputDeviceInfo) {
+  const details = [deviceTransportLabel(device)];
+  if (device.isDefault) {
+    details.push("system default");
+  }
+  return `${device.deviceName} - ${details.join(" - ")}`;
 }
 
 type SettingsViewProps = {
@@ -207,6 +305,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const [micTestLevel, setMicTestLevel] = useState(0);
   const [micTestRecording, setMicTestRecording] = useState(false);
   const [micTestPlaybackUrl, setMicTestPlaybackUrl] = useState<string | null>(null);
+  const [audioDeviceInventory, setAudioDeviceInventory] = useState<AudioInputDeviceInventory | null>(null);
   const micTestContextRef = useRef<AudioContext | null>(null);
   const micTestAnimFrameRef = useRef<number | null>(null);
   const micTestStreamRef = useRef<MediaStream | null>(null);
@@ -782,12 +881,51 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     setHasLoadedStorageTab(true);
   }, []);
 
+  const refreshAudioDevices = useCallback(async () => {
+    try {
+      const inventory = await listAudioInputDevices();
+      setAudioDeviceInventory(inventory);
+    } catch (audioError) {
+      console.warn("Failed to load audio input devices:", audioError);
+      setAudioDeviceInventory(null);
+    }
+  }, []);
+
+  const resolveAudioDevicePreference = useCallback(
+    (deviceId: string | null): Settings["audio"]["preferredInputDevice"] => {
+      if (!deviceId || !audioDeviceInventory) {
+        return null;
+      }
+      const device = audioDeviceInventory.devices.find((candidate) => candidate.deviceId === deviceId);
+      if (!device) {
+        return null;
+      }
+      return {
+        deviceId: device.deviceId,
+        deviceName: device.deviceName,
+        transportType: device.transportType ?? null,
+      };
+    },
+    [audioDeviceInventory]
+  );
+
   const hasUnsavedChanges = useMemo(() => {
     if (!draftSettings || !persistedSettings) {
       return false;
     }
     return JSON.stringify(draftSettings) !== JSON.stringify(persistedSettings);
   }, [draftSettings, persistedSettings]);
+
+  const currentAudioDevices = audioDeviceInventory?.devices ?? [];
+  const appWideDeviceId = settings?.audio.preferredInputDevice?.deviceId ?? "";
+  const dictationDeviceId = settings?.audio.dictationInputDevice?.deviceId ?? "";
+  const meetingDeviceId = settings?.audio.meetingInputDevice?.deviceId ?? "";
+  const saveStateLabel = isSaving ? "Saving" : hasUnsavedChanges ? "Pending" : "Synced";
+  const activeTabConfig = SETTINGS_TABS.find((tab) => tab.id === activeTab) ?? SETTINGS_TABS[0];
+  const readyChipTone = (ready: boolean) =>
+    ready
+      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+      : "border-amber-400/30 bg-amber-400/10 text-amber-100";
 
   const handleSettingsTextBlur = useCallback(() => {
     void flushPendingSettingsSave();
@@ -814,6 +952,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    void refreshAudioDevices();
+  }, [refreshAudioDevices]);
+
   const stopMicTest = useCallback(() => {
     if (micTestAnimFrameRef.current !== null) {
       cancelAnimationFrame(micTestAnimFrameRef.current);
@@ -834,7 +976,13 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
   const startMicTest = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const preferredDeviceId = settings?.audio.dictationInputOverrideEnabled
+        ? settings.audio.dictationInputDevice?.deviceId
+        : settings?.audio.preferredInputDevice?.deviceId;
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: preferredDeviceId ? { deviceId: { ideal: preferredDeviceId } } : true,
+        video: false,
+      });
       micTestStreamRef.current = stream;
       const ctx = new AudioContext();
       micTestContextRef.current = ctx;
@@ -856,7 +1004,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     } catch (err) {
       console.error("Mic test failed:", err);
     }
-  }, []);
+  }, [settings?.audio.dictationInputDevice?.deviceId, settings?.audio.dictationInputOverrideEnabled, settings?.audio.preferredInputDevice?.deviceId]);
 
   const recordMicTest = useCallback(async () => {
     if (!micTestStreamRef.current) return;
@@ -882,19 +1030,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     }, 3000);
   }, [micTestPlaybackUrl]);
 
-  const tabList = useMemo(
-    () => [
-      { id: "asr" as TabId, label: "Transcription", icon: Mic },
-      { id: "general" as TabId, label: "General", icon: Monitor },
-      { id: "security" as TabId, label: "Privacy & Security", icon: Shield },
-      { id: "storage" as TabId, label: "Storage", icon: Database },
-      { id: "ai" as TabId, label: "AI & Keys", icon: Key },
-      { id: "updates" as TabId, label: "Updates", icon: RefreshCw },
-      { id: "license" as TabId, label: "License", icon: Shield },
-    ],
-    []
-  );
-
   if (!settings) {
     return (
       <div className="h-full flex items-center justify-center text-muted-foreground">
@@ -904,38 +1039,1195 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     );
   }
 
+  const renderShortcutsSection = () => (
+    <div className="rounded-[24px] border border-border/70 bg-background/75 p-5 shadow-sm">
+      <div className="space-y-1">
+        <Label>Global keyboard shortcuts</Label>
+        <p className="text-sm text-muted-foreground">
+          Click a field and press your desired shortcut combination.
+        </p>
+      </div>
+      <div className="mt-4 grid gap-3">
+        {SHORTCUT_FIELD_CONFIG.map(({ key, label }) => {
+          const currentVal = settings.shortcuts[key]
+            ? formatShortcutForDisplay(settings.shortcuts[key])
+            : "None";
+          const isCapturing = capturingShortcut === key;
+          return (
+            <div
+              key={key}
+              className="flex flex-col gap-2 rounded-2xl border border-border/60 bg-muted/20 px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+            >
+              <span className="text-sm text-muted-foreground">{label}</span>
+              <div className="flex items-center gap-2">
+                <Input
+                  value={isCapturing ? "Listening..." : currentVal}
+                  readOnly
+                  className={`h-9 w-36 text-center font-mono text-xs ${isCapturing ? "border-primary ring-1 ring-primary" : ""}`}
+                  onFocus={() => {
+                    setCapturingShortcut(key);
+                  }}
+                  onBlur={() => {
+                    if (capturingShortcut === key) {
+                      setCapturingShortcut(null);
+                    }
+                  }}
+                  onKeyDown={handleShortcutKeyDown(key)}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-9 px-3"
+                  onClick={() => {
+                    const next: Settings = {
+                      ...settings,
+                      shortcuts: { ...settings.shortcuts, [key]: "" },
+                    };
+                    setDraftSettings(next);
+                    queueSettingsSave(next, 0);
+                  }}
+                >
+                  Clear
+                </Button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <p className="mt-3 text-xs text-muted-foreground">
+        Changes save immediately, duplicate conflicts are blocked, and new bindings apply instantly.
+      </p>
+    </div>
+  );
+
+  const renderSharedDictationControls = (options?: {
+    includeCoreControls?: boolean;
+    includeHotkeyBehavior?: boolean;
+    includeMeetingAutoName?: boolean;
+    includeAudioTuning?: boolean;
+    includePermissions?: boolean;
+    includeCloudSync?: boolean;
+    includeKeyManager?: boolean;
+    includeMemory?: boolean;
+  }) => {
+    const {
+      includeCoreControls = true,
+      includeHotkeyBehavior = true,
+      includeMeetingAutoName = false,
+      includeAudioTuning = false,
+      includePermissions = false,
+      includeCloudSync = false,
+      includeKeyManager = false,
+      includeMemory = false,
+    } = options ?? {};
+
+    return (
+      <div className="space-y-5">
+        {includeHotkeyBehavior && (
+          <div className="space-y-2">
+            <Label>Hotkey behavior</Label>
+            <p className="text-sm text-muted-foreground">{dictationShortcutBehaviorHint}</p>
+            <select
+              aria-label="Hotkey behavior"
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              value={dictationShortcutBehavior}
+              onChange={(event) =>
+                updateDictationShortcutBehavior(event.target.value as DictationHotkeyBehavior)
+              }
+            >
+              <option value="hold_to_talk">Hold-to-talk</option>
+              <option value="toggle">Toggle press</option>
+              <option value="hands_free">Hands-free</option>
+            </select>
+          </div>
+        )}
+
+        {includeCoreControls && (
+          <>
+
+        <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+          <div className="space-y-0.5">
+            <Label className="flex items-center gap-1.5">
+              Smart Format
+              {!canUseFormattingAssistant(licenseInfo) && (
+                <span className="text-xs text-amber-600">Pro</span>
+              )}
+            </Label>
+            <p className="text-sm text-muted-foreground">
+              Use the default LLM to format and correct dictation before pasting.
+            </p>
+          </div>
+          <Switch
+            checked={settings.transcription.dictationAiFormatting}
+            disabled={!canUseFormattingAssistant(licenseInfo)}
+            onCheckedChange={(checked) =>
+              void updateSettings({
+                ...settings,
+                transcription: {
+                  ...settings.transcription,
+                  dictationAiFormatting: checked,
+                },
+              })
+            }
+          />
+        </div>
+
+        <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+          <div className="space-y-0.5">
+            <Label>Command mode</Label>
+            <p className="text-sm text-muted-foreground">
+              Enable corrections like &quot;command undo that&quot; and spoken transforms like
+              &quot;command uppercase selection&quot;.
+            </p>
+          </div>
+          <Switch
+            checked={settings.transcription.dictationCommandModeEnabled ?? true}
+            onCheckedChange={(checked) =>
+              void updateSettings({
+                ...settings,
+                transcription: {
+                  ...settings.transcription,
+                  dictationCommandModeEnabled: checked,
+                },
+              })
+            }
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label>Command prefix</Label>
+          <Input
+            value={settings.transcription.dictationCommandPrefix ?? "command"}
+            onChange={(e: any) =>
+              void updateSettings({
+                ...settings,
+                transcription: {
+                  ...settings.transcription,
+                  dictationCommandPrefix: e.target.value,
+                },
+              })
+            }
+          />
+          <p className="text-xs text-muted-foreground">
+            Use the wake word that starts correction and transform commands.
+          </p>
+        </div>
+
+        <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+          <div className="space-y-0.5">
+            <Label>Snippets</Label>
+            <p className="text-sm text-muted-foreground">
+              Expand saved text shortcuts after dictionary normalization.
+            </p>
+          </div>
+          <Switch
+            checked={settings.transcription.dictationSnippetsEnabled ?? true}
+            onCheckedChange={(checked) =>
+              void updateSettings({
+                ...settings,
+                transcription: {
+                  ...settings.transcription,
+                  dictationSnippetsEnabled: checked,
+                },
+              })
+            }
+          />
+        </div>
+
+        <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+          <div className="space-y-0.5">
+            <Label>Auto-learn corrections</Label>
+            <p className="text-sm text-muted-foreground">
+              Learn safe word and short-phrase fixes from confirmed dictation edits.
+            </p>
+          </div>
+          <Switch
+            checked={settings.transcription.dictationAutoLearnCorrections ?? true}
+            onCheckedChange={(checked) =>
+              void updateSettings({
+                ...settings,
+                transcription: {
+                  ...settings.transcription,
+                  dictationAutoLearnCorrections: checked,
+                },
+              })
+            }
+          />
+        </div>
+
+        <div className="rounded-2xl border border-border/60 bg-background/75 p-4">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="space-y-0.5">
+              <Label>Advanced dictation controls</Label>
+              <p className="text-sm text-muted-foreground">
+                Manage dictionary rules, snippets, routing, insertion, context, live preview,
+                and custom dictation modes from Dictation Controls.
+              </p>
+            </div>
+            <Button variant="secondary" onClick={() => requestMainView("dictation")}>
+              Open Dictation Controls
+            </Button>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Custom Dictation Prompt</Label>
+          <Textarea
+            placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
+            value={settings.transcription.dictationCustomPrompt ?? ""}
+            onChange={(e: any) =>
+              void updateSettings({
+                ...settings,
+                transcription: {
+                  ...settings.transcription,
+                  dictationCustomPrompt: e.target.value,
+                },
+              })
+            }
+            className="min-h-[96px]"
+          />
+          <p className="text-xs text-muted-foreground">
+            Overrides the default Smart Format prompt. The active app name is still provided as context.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Custom Meeting Summary Prompt</Label>
+          <Textarea
+            placeholder="e.g. Summarize the meeting and list action items..."
+            value={settings.transcription.meetingCustomPrompt ?? ""}
+            onChange={(e: any) =>
+              void updateSettings({
+                ...settings,
+                transcription: {
+                  ...settings.transcription,
+                  meetingCustomPrompt: e.target.value,
+                },
+              })
+            }
+            className="min-h-[96px]"
+          />
+          <p className="text-xs text-muted-foreground">
+            Overrides the default Nautilus-style meeting summary prompt.
+          </p>
+        </div>
+
+        {includeMeetingAutoName && (
+          <>
+            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="space-y-0.5">
+                <Label>Auto-name meetings</Label>
+                <p className="text-sm text-muted-foreground">
+                  Generate a title after transcription completes for meetings.
+                </p>
+              </div>
+              <Switch
+                checked={settings.transcription.meetingAutoNameEnabled ?? true}
+                onCheckedChange={(checked) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      meetingAutoNameEnabled: checked,
+                    },
+                  })
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Meeting auto-name model override (optional)</Label>
+              <Input
+                placeholder="Leave empty to use summary model"
+                value={settings.transcription.meetingAutoNameModel ?? ""}
+                onBlur={handleSettingsTextBlur}
+                onKeyDown={handleSettingsTextKeyDown}
+                onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      meetingAutoNameModel: e.target.value.trim() ? e.target.value.trim() : null,
+                    },
+                  })
+                }
+              />
+            </div>
+          </>
+        )}
+
+        <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+          <div className="space-y-0.5">
+            <Label>Copy dictation text to clipboard</Label>
+            <p className="text-sm text-muted-foreground">
+              Keep the latest dictation text available for manual paste.
+            </p>
+          </div>
+          <Switch
+            checked={settings.transcription.dictationCopyToClipboard ?? true}
+            onCheckedChange={(checked) =>
+              void updateSettings({
+                ...settings,
+                transcription: {
+                  ...settings.transcription,
+                  dictationCopyToClipboard: checked,
+                },
+              })
+            }
+          />
+        </div>
+
+          </>
+        )}
+
+        {includeAudioTuning && (
+          <>
+            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="space-y-0.5">
+                <Label>Automatic silence skip</Label>
+                <p className="text-sm text-muted-foreground">Remove silent segments before transcription.</p>
+              </div>
+              <Switch
+                checked={settings.transcription.silenceSkipEnabled}
+                onCheckedChange={(checked) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: { ...settings.transcription, silenceSkipEnabled: checked },
+                  })
+                }
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="space-y-0.5">
+                <Label>Voice activity detection</Label>
+                <p className="text-sm text-muted-foreground">Auto-stop after silence timeout.</p>
+              </div>
+              <Switch
+                checked={settings.audio.voiceActivityDetection}
+                onCheckedChange={(checked) =>
+                  void updateSettings({
+                    ...settings,
+                    audio: { ...settings.audio, voiceActivityDetection: checked },
+                  })
+                }
+              />
+            </div>
+
+            {settings.audio.voiceActivityDetection && (
+              <div className="space-y-3 rounded-2xl border border-border/60 bg-background/75 p-4">
+                <div className="flex items-center justify-between">
+                  <Label>Silence timeout</Label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      max={30}
+                      step={1}
+                      className="w-16 rounded-md border bg-background px-2 py-1 text-center text-sm"
+                      value={Math.round(settings.audio.silenceTimeoutSeconds / 60)}
+                      onBlur={handleSettingsTextBlur}
+                      onKeyDown={handleSettingsTextKeyDown}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                        const minutes = Math.max(1, Math.min(30, parseInt(e.target.value, 10) || 5));
+                        void updateSettings({
+                          ...settings,
+                          audio: { ...settings.audio, silenceTimeoutSeconds: minutes * 60 },
+                        });
+                      }}
+                    />
+                    <span className="text-sm text-muted-foreground">min</span>
+                  </div>
+                </div>
+                <input
+                  type="range"
+                  min={1}
+                  max={30}
+                  step={1}
+                  className="w-full"
+                  value={Math.round(settings.audio.silenceTimeoutSeconds / 60)}
+                  onChange={(e: any) => {
+                    const minutes = parseInt(e.target.value, 10);
+                    void updateSettings({
+                      ...settings,
+                      audio: { ...settings.audio, silenceTimeoutSeconds: minutes * 60 },
+                    });
+                  }}
+                />
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>1 min</span>
+                  <span>5 min</span>
+                  <span>15 min</span>
+                  <span>30 min</span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {[1, 2, 5, 10, 15, 30].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                        Math.round(settings.audio.silenceTimeoutSeconds / 60) === preset
+                          ? "border-trusted bg-trusted text-white"
+                          : "border-border bg-muted hover:bg-muted/80"
+                      }`}
+                      onClick={() =>
+                        void updateSettings({
+                          ...settings,
+                          audio: { ...settings.audio, silenceTimeoutSeconds: preset * 60 },
+                        })
+                      }
+                    >
+                      {preset}m
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="space-y-0.5">
+                <Label>Noise suppression</Label>
+                <p className="text-sm text-muted-foreground">Reduce background noise.</p>
+              </div>
+              <Switch
+                checked={settings.audio.noiseSuppression}
+                onCheckedChange={(checked) =>
+                  void updateSettings({
+                    ...settings,
+                    audio: { ...settings.audio, noiseSuppression: checked },
+                  })
+                }
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="space-y-0.5">
+                <Label>Auto gain control</Label>
+                <p className="text-sm text-muted-foreground">Automatically adjust microphone levels.</p>
+              </div>
+              <Switch
+                checked={settings.audio.autoGainControl}
+                onCheckedChange={(checked) =>
+                  void updateSettings({
+                    ...settings,
+                    audio: { ...settings.audio, autoGainControl: checked },
+                  })
+                }
+              />
+            </div>
+
+            {!settings.audio.autoGainControl && (
+              <div className="space-y-2 rounded-2xl border border-border/60 bg-background/75 p-4">
+                <Label>
+                  Manual gain ({settings.audio.manualGainDb > 0 ? "+" : ""}
+                  {settings.audio.manualGainDb.toFixed(1)} dB)
+                </Label>
+                <input
+                  type="range"
+                  min={-20}
+                  max={20}
+                  step={0.5}
+                  value={settings.audio.manualGainDb}
+                  className="w-full"
+                  onChange={(e: any) =>
+                    void updateSettings({
+                      ...settings,
+                      audio: { ...settings.audio, manualGainDb: Number(e.target.value) },
+                    })
+                  }
+                />
+                <div className="flex justify-between text-xs text-muted-foreground">
+                  <span>-20 dB</span>
+                  <span>0 dB</span>
+                  <span>+20 dB</span>
+                </div>
+              </div>
+            )}
+
+            <div className="rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">Microphone test</p>
+                  <p className="text-xs text-muted-foreground">
+                    Check your mic level and hear the gain effect.
+                  </p>
+                </div>
+                <Button
+                  variant={micTestActive ? "destructive" : "outline"}
+                  size="sm"
+                  onClick={() => (micTestActive ? stopMicTest() : void startMicTest())}
+                >
+                  <Mic className="mr-1.5 h-3.5 w-3.5" />
+                  {micTestActive ? "Stop" : "Start"}
+                </Button>
+              </div>
+
+              {micTestActive && (
+                <>
+                  <div className="mt-4 space-y-1">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span>Level</span>
+                      <span>{micTestLevel}%</span>
+                    </div>
+                    <div className="h-3 w-full overflow-hidden rounded-full bg-muted">
+                      <div
+                        className={`h-full rounded-full transition-none ${
+                          micTestLevel > 80
+                            ? "bg-red-500"
+                            : micTestLevel > 50
+                              ? "bg-yellow-500"
+                              : "bg-emerald-500"
+                        }`}
+                        style={{ width: `${micTestLevel}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={micTestRecording}
+                      onClick={() => void recordMicTest()}
+                      className="text-xs"
+                    >
+                      {micTestRecording ? (
+                        <>
+                          <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                          Recording 3s…
+                        </>
+                      ) : (
+                        "Record 3s"
+                      )}
+                    </Button>
+                    {micTestPlaybackUrl && !micTestRecording && (
+                      <audio
+                        key={micTestPlaybackUrl}
+                        src={micTestPlaybackUrl}
+                        controls
+                        autoPlay
+                        className="h-8 flex-1"
+                      />
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </>
+        )}
+
+        {includePermissions && (
+          <>
+            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="space-y-0.5">
+                <Label>Auto-request dictation permissions</Label>
+                <p className="text-sm text-muted-foreground">
+                  Prompt for speech and microphone permissions before dictation instead of failing silently.
+                </p>
+              </div>
+              <Switch
+                checked={settings.transcription.dictationAutoRequestPermissions ?? true}
+                onCheckedChange={(checked) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      dictationAutoRequestPermissions: checked,
+                    },
+                  })
+                }
+              />
+            </div>
+
+            <div className="space-y-3 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <Label>Permission diagnostics</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Validate microphone, speech recognition, accessibility, and automation permissions.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      const diagnostics = await getPermissionDiagnostics();
+                      setPermissionDiagnostics(diagnostics);
+                    }}
+                  >
+                    Refresh
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      const diagnostics = await requestDictationPermissions();
+                      setPermissionDiagnostics(diagnostics);
+                    }}
+                  >
+                    Request now
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      const diagnostics = await repairCursorInsertPermissions();
+                      setPermissionDiagnostics(diagnostics);
+                    }}
+                  >
+                    Repair insert
+                  </Button>
+                </div>
+              </div>
+              {permissionDiagnostics && (
+                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+                  {[
+                    {
+                      label: "Microphone",
+                      ready: microphonePermissionReady,
+                      action: () => void openPermissionSettings("microphone"),
+                      offLabel: "Needs grant",
+                    },
+                    {
+                      label: "Speech recognition",
+                      ready: permissionDiagnostics.speechRecognitionReady,
+                      action: () => void openPermissionSettings("speech"),
+                      offLabel: "Needs grant",
+                    },
+                    {
+                      label: "Accessibility",
+                      ready: permissionDiagnostics.accessibilityReady,
+                      action: () => void openPermissionSettings("accessibility"),
+                      offLabel: "Needs grant",
+                    },
+                    {
+                      label: "Keyboard events",
+                      ready: permissionDiagnostics.postEventReady,
+                      action: () => void openPermissionSettings("accessibility"),
+                      offLabel: "Fallback unavailable",
+                    },
+                  ].map((item) => (
+                    <div key={item.label} className="rounded-2xl border border-border/60 bg-muted/20 p-3 text-sm">
+                      <p className="font-medium">{item.label}</p>
+                      <p className={item.ready ? "text-green-500" : "text-amber-500"}>
+                        {item.ready ? "Ready" : item.offLabel}
+                      </p>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="mt-1 h-auto px-0 text-xs font-normal text-muted-foreground hover:text-foreground"
+                        onClick={item.action}
+                      >
+                        Open settings
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {permissionDiagnostics?.notes?.length ? (
+                <div className="space-y-1 text-xs text-muted-foreground">
+                  {permissionDiagnostics.notes.map((note) => (
+                    <p key={note}>{note}</p>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </>
+        )}
+
+        {includeCloudSync && (
+          <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+            <div className="space-y-0.5">
+              <Label className="flex items-center gap-2">
+                Cloud sync
+                {!isFeatureAllowed(licenseInfo, "cloudSync") && (
+                  <span className="text-xs text-amber-600">⭐ Friends Club</span>
+                )}
+              </Label>
+              <p className="text-sm text-muted-foreground">Enable external backup sync integrations.</p>
+            </div>
+            <Switch
+              checked={settings.privacy.cloudSync}
+              disabled={!isFeatureAllowed(licenseInfo, "cloudSync")}
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  privacy: { ...settings.privacy, cloudSync: checked },
+                })
+              }
+            />
+          </div>
+        )}
+
+        {includeKeyManager && (
+          <>
+            <div className="space-y-2 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <Label>Credential provider</Label>
+              <div className="flex items-center gap-2">
+                <select
+                  value={provider}
+                  onChange={(e: any) => {
+                    const next = e.target.value;
+                    setProvider(next);
+                    updateSettings({
+                      ...settings,
+                      privacy: { ...settings.privacy, llmProvider: next },
+                    });
+                    void refreshModelsForProvider(next);
+                  }}
+                  className="flex-1 rounded-md border bg-background p-2"
+                >
+                  <option value="openai">OpenAI</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="gemini">Google Gemini</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="ollama-cloud">Ollama Cloud</option>
+                </select>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  title="Refresh model list"
+                  onClick={async () => {
+                    if (apiKey.trim()) {
+                      setSavingApiKey(true);
+                      try {
+                        await setProviderSecret(provider, apiKey.trim());
+                        setApiKey("");
+                        setHasApiKey(true);
+                      } catch (e) {
+                        console.error("Failed to save key on refresh", e);
+                      } finally {
+                        setSavingApiKey(false);
+                      }
+                    }
+                    void refreshModelsForProvider(settings.privacy.llmProvider);
+                  }}
+                  disabled={modelsLoading || savingApiKey}
+                >
+                  {modelsLoading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4" />
+                  )}
+                </Button>
+              </div>
+              {!settings.privacy.remoteProcessingEnabled ? (
+                <p className="text-xs text-amber-600">
+                  Remote processing is disabled. Stored cloud keys stay inactive until policy is enabled.
+                </p>
+              ) : null}
+              {settings.privacy.remoteProcessingEnabled && !hasApiKey ? (
+                <p className="text-xs text-amber-600">
+                  Selected analysis provider has no stored key. Analysis requests will fail with a credential error.
+                </p>
+              ) : null}
+            </div>
+
+            <div className="space-y-2 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <Label>API key</Label>
+              <Input
+                type="password"
+                placeholder={hasApiKey ? "Key already stored (enter to replace)" : "Enter API key"}
+                value={apiKey}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => setApiKey(e.target.value)}
+                onKeyDown={async (e) => {
+                  if (e.key === "Enter" && apiKey.trim()) {
+                    e.preventDefault();
+                    if (savingApiKey) return;
+
+                    setSavingApiKey(true);
+                    setError(null);
+                    try {
+                      await setProviderSecret(provider, apiKey.trim());
+                      setApiKey("");
+                      setHasApiKey(true);
+                      await refreshModelsForProvider(provider);
+                    } catch (e) {
+                      setError(e instanceof Error ? e.message : "Failed to save API key");
+                    } finally {
+                      setSavingApiKey(false);
+                    }
+                  }
+                }}
+              />
+              <div className="flex items-center gap-2">
+                <Button
+                  onClick={async () => {
+                    if (!apiKey.trim()) return;
+                    setSavingApiKey(true);
+                    setError(null);
+                    try {
+                      await setProviderSecret(provider, apiKey.trim());
+                      setApiKey("");
+                      setHasApiKey(true);
+                      await refreshModelsForProvider(provider);
+                    } catch (e) {
+                      setError(e instanceof Error ? e.message : "Failed to save API key");
+                    } finally {
+                      setSavingApiKey(false);
+                    }
+                  }}
+                  disabled={savingApiKey || !apiKey.trim()}
+                >
+                  {savingApiKey ? "Saving..." : "Save Key"}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={async () => {
+                    setSavingApiKey(true);
+                    setError(null);
+                    try {
+                      await clearProviderSecret(provider);
+                      setApiKey("");
+                      setHasApiKey(false);
+                    } catch (e) {
+                      setError(e instanceof Error ? e.message : "Failed to clear API key");
+                    } finally {
+                      setSavingApiKey(false);
+                    }
+                  }}
+                  disabled={savingApiKey}
+                >
+                  Clear Key
+                </Button>
+                {hasApiKey && <span className="text-sm text-muted-foreground">Stored securely</span>}
+              </div>
+            </div>
+
+            <div className="space-y-2 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <Label>Guided cloud onboarding</Label>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  onClick={async () => {
+                    setError(null);
+                    const checks: string[] = [];
+                    if (!settings.privacy.remoteProcessingEnabled) {
+                      checks.push("Remote processing is disabled.");
+                    }
+                    const keyPresent = await hasProviderSecret(settings.privacy.llmProvider);
+                    if (!keyPresent) {
+                      checks.push(`No API key stored for ${settings.privacy.llmProvider}.`);
+                    }
+                    if (checks.length === 0) {
+                      setCloudReadinessMessage("Cloud readiness checks passed.");
+                    } else {
+                      setCloudReadinessMessage(checks.join(" "));
+                    }
+                  }}
+                >
+                  Run Readiness Check
+                </Button>
+                {!settings.privacy.remoteProcessingEnabled && (
+                  <Button
+                    onClick={async () => {
+                      const confirmed = window.confirm(
+                        "Enable remote processing? This allows transcript text to be sent to cloud providers."
+                      );
+                      if (!confirmed) {
+                        return;
+                      }
+                      updateSettings(
+                        {
+                          ...settings,
+                          privacy: {
+                            ...settings.privacy,
+                            remoteProcessingEnabled: true,
+                          },
+                        },
+                        { immediate: true }
+                      );
+                      setCloudReadinessMessage(
+                        "Remote processing enabled. Run readiness check again."
+                      );
+                    }}
+                  >
+                    Enable Remote Processing (Opt-in)
+                  </Button>
+                )}
+              </div>
+              {cloudReadinessMessage ? (
+                <p className="text-xs text-muted-foreground">{cloudReadinessMessage}</p>
+              ) : null}
+            </div>
+          </>
+        )}
+
+        {includeMemory && (
+          <div className="space-y-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+            <div className="space-y-1">
+              <Label className="flex items-center gap-2">
+                <Database className="h-4 w-4 text-violet-600" />
+                Memory Search
+              </Label>
+              <p className="text-sm text-muted-foreground">
+                How Memory searches your transcripts when you ask a question.
+              </p>
+            </div>
+
+            <div className="grid gap-3 lg:grid-cols-3">
+              <div className="rounded-2xl border border-border/60 bg-muted/20 p-3">
+                <p className="text-sm font-medium">Memory workspace</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Review transcript-backed context and search results.
+                </p>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="mt-3"
+                  onClick={() => requestMainView("dashboard")}
+                >
+                  Open Memory
+                </Button>
+              </div>
+              <div className="rounded-2xl border border-border/60 bg-muted/20 p-3">
+                <p className="text-sm font-medium">Relationship memory</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Inspect people, entities, and transcript connections.
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  onClick={() => requestMainView("dashboard")}
+                >
+                  Open Relationship Memory
+                </Button>
+              </div>
+              <div className="rounded-2xl border border-border/60 bg-muted/20 p-3">
+                <p className="text-sm font-medium">Grounded meeting follow-up drafts</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Open Meetings to draft transcript-backed follow-up emails and notes.
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  onClick={() => requestMainView("recordings")}
+                >
+                  Open Meetings
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Search mode</Label>
+              <select
+                value={settings.transcription.memorySearchMode}
+                onChange={(e: any) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      memorySearchMode: e.target.value as "fts" | "ollama_embeddings",
+                    },
+                  })
+                }
+                className="w-full rounded-md border bg-background p-2"
+              >
+                <option value="fts">Full-text search (built-in, no setup needed)</option>
+                <option value="ollama_embeddings">
+                  Ollama Embeddings (semantic search, requires Ollama)
+                </option>
+              </select>
+            </div>
+
+            {settings.transcription.memorySearchMode === "ollama_embeddings" && (
+              <>
+                <div className="space-y-2">
+                  <Label>Embedding model</Label>
+                  <Input
+                    value={settings.transcription.embeddingModel}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          embeddingModel: e.target.value,
+                        },
+                      })
+                    }
+                    placeholder="nomic-embed-text"
+                    className="font-mono text-sm"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Ollama embedding model name. Run <code className="rounded bg-muted px-1">ollama pull nomic-embed-text</code> first.
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-between rounded-2xl border border-border/60 bg-muted/20 p-3">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">Re-index embeddings</p>
+                    <p className="text-xs text-muted-foreground">
+                      Generate embeddings for all existing transcripts. Required after changing models.
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      void (async () => {
+                        try {
+                          const { reindexEmbeddings } = await import("@/lib/tauri");
+                          const result = await reindexEmbeddings();
+                          toast(
+                            `Indexed ${result.segments} segments from ${result.recordings} recordings${result.errors > 0 ? ` (${result.errors} errors)` : ""}`,
+                            result.errors > 0 ? "error" : "success"
+                          );
+                        } catch (err) {
+                          toast(err instanceof Error ? err.message : String(err), "error");
+                        }
+                      })();
+                    }}
+                  >
+                    <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                    Re-index
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
-    <div className="h-full flex flex-col">
-      <div className="p-6 border-b">
-        <h1 className="text-2xl font-semibold">Settings</h1>
-        <p className="text-muted-foreground">Tune transcription, AI, privacy, storage, and app behavior</p>
+    <div className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top_left,rgba(245,158,11,0.09),transparent_22%),radial-gradient(circle_at_bottom_right,rgba(59,130,246,0.08),transparent_26%),linear-gradient(180deg,rgba(15,23,42,0.04),transparent_34%)]">
+      <div className="border-b border-border/60 bg-background/85 backdrop-blur">
+        <div className="mx-auto flex max-w-[1680px] flex-col gap-4 px-4 py-5 sm:px-6">
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.28em] text-amber-600 dark:text-amber-300/80">
+                Nautilus workspace
+              </p>
+              <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">Settings</h1>
+              <p className="mt-1 text-sm text-muted-foreground sm:text-base">
+                Tune transcription, AI, privacy, storage, and app behavior
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2 text-xs">
+              <div className="rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-muted-foreground shadow-sm">
+                Save state <span className="ml-1 font-medium text-foreground">{saveStateLabel}</span>
+              </div>
+              <div className="rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-muted-foreground shadow-sm">
+                AI policy{" "}
+                <span className="ml-1 font-medium text-foreground">
+                  {settings.privacy.remoteProcessingEnabled ? "Remote allowed" : "Local-first"}
+                </span>
+              </div>
+              <div className="rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-muted-foreground shadow-sm">
+                Primary mic{" "}
+                <span className="ml-1 font-medium text-foreground">
+                  {settings.audio.preferredInputDevice?.deviceName ?? "System default"}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="flex-1 overflow-auto">
-        <div className="p-6 max-w-5xl space-y-6">
-          {error && (
-            <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-center gap-2 text-sm text-destructive">
-              <AlertCircle className="h-4 w-4" />
-              {error}
+        <div className="mx-auto grid max-w-[1680px] gap-4 p-4 sm:p-6 lg:grid-cols-[292px_minmax(0,1fr)] xl:gap-6">
+          <aside className="order-first h-fit overflow-hidden rounded-[28px] border border-slate-800/70 bg-[linear-gradient(180deg,rgba(2,6,23,0.98),rgba(15,23,42,0.95))] text-slate-50 shadow-[0_28px_80px_rgba(2,6,23,0.18)] lg:sticky lg:top-6">
+            <div className="border-b border-white/10 px-5 py-5">
+              <p className="text-[11px] uppercase tracking-[0.28em] text-amber-300/80">Studio settings</p>
+              <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Control room</h2>
+              <p className="mt-2 text-sm leading-6 text-slate-300/80">
+                A launch-ready workspace for capture, privacy, AI, storage, and device health.
+              </p>
             </div>
-          )}
 
-          <div className="grid w-full grid-cols-2 gap-1 rounded-md bg-muted p-1 md:grid-cols-4 xl:grid-cols-7">
-            {tabList.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-medium rounded-sm transition-all ${activeTab === tab.id
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
-                  }`}
-              >
-                <tab.icon className="h-4 w-4" />
-                {tab.label}
-              </button>
-            ))}
-          </div>
+            <div className="space-y-4 px-4 py-4 sm:px-5 sm:py-5">
+              <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4 lg:grid-cols-2">
+                <div className={`rounded-2xl border p-3 ${readyChipTone(microphonePermissionReady)}`}>
+                  <p className="text-current/70">Mic</p>
+                  <p className="mt-1 font-medium">{microphonePermissionReady ? "Ready" : "Needs setup"}</p>
+                </div>
+                <div className={`rounded-2xl border p-3 ${readyChipTone(diarizationAvailable)}`}>
+                  <p className="text-current/70">Speakers</p>
+                  <p className="mt-1 font-medium">{diarizationAvailable ? "Installed" : "Optional"}</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                  <p className="text-slate-400">Routing</p>
+                  <p className="mt-1 font-medium text-white">
+                    {settings.transcription.useSharedAsrSelection ? "Shared" : "Split"}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                  <p className="text-slate-400">Sync</p>
+                  <p className="mt-1 font-medium text-white">{saveStateLabel}</p>
+                </div>
+              </div>
 
+              <div className="rounded-[24px] border border-white/10 bg-white/[0.03] p-2">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-1">
+                  {SETTINGS_TABS.map((tab) => (
+                    <button
+                      key={tab.id}
+                      onClick={() => setActiveTab(tab.id)}
+                      className={`group flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-all ${
+                        activeTab === tab.id
+                          ? "border-amber-300/45 bg-[linear-gradient(135deg,rgba(245,158,11,0.18),rgba(120,53,15,0.08))] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+                          : "border-transparent bg-transparent text-slate-300 hover:border-white/10 hover:bg-white/[0.04] hover:text-white"
+                      }`}
+                    >
+                      <div className={`mt-0.5 rounded-xl p-2 ${activeTab === tab.id ? "bg-amber-300/15 text-amber-100" : "bg-white/5 text-slate-400 group-hover:text-slate-200"}`}>
+                        <tab.icon className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium">{tab.label}</p>
+                        <p className="mt-1 text-xs leading-5 text-current/70">{tab.railSummary}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-slate-300/80">
+                <p className="font-medium text-slate-100">Current focus</p>
+                <p className="mt-1 leading-5">{activeTabConfig.summary}</p>
+              </div>
+            </div>
+          </aside>
+
+          <div className="min-w-0 space-y-4 sm:space-y-5">
+            {error && (
+              <div className="flex items-center gap-2 rounded-2xl border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
+                <AlertCircle className="h-4 w-4" />
+                {error}
+              </div>
+            )}
+
+            <section className="overflow-hidden rounded-[30px] border border-slate-800/70 bg-[linear-gradient(180deg,rgba(248,250,252,0.96),rgba(241,245,249,0.94))] shadow-[0_28px_90px_rgba(15,23,42,0.10)] dark:bg-[linear-gradient(180deg,rgba(2,6,23,0.96),rgba(15,23,42,0.93))]">
+              <div className="border-b border-border/60 px-4 py-5 sm:px-6 sm:py-6">
+                <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+                  <div className="max-w-3xl">
+                    <p className="text-[11px] uppercase tracking-[0.26em] text-amber-600 dark:text-amber-300/80">
+                      {activeTabConfig.eyebrow}
+                    </p>
+                    <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950 dark:text-slate-50 sm:text-4xl">
+                      {activeTabConfig.title}
+                    </h2>
+                    <p className="mt-3 text-sm leading-6 text-slate-600 dark:text-slate-300 sm:text-base">
+                      {activeTabConfig.summary}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    <div className="rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-muted-foreground shadow-sm">
+                      Primary mic <span className="ml-1 font-medium text-foreground">{settings.audio.preferredInputDevice?.deviceName ?? "System default"}</span>
+                    </div>
+                    <div className="rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-muted-foreground shadow-sm">
+                      Dictation mode <span className="ml-1 font-medium text-foreground">{dictationShortcutBehavior.replace(/_/g, " ")}</span>
+                    </div>
+                    <div className="rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-muted-foreground shadow-sm">
+                      Routes <span className="ml-1 font-medium text-foreground">{settings.transcription.useSharedAsrSelection ? "Shared" : "Split"}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-6 px-4 py-5 sm:px-6 sm:py-6">
           {activeTab === "asr" && (
             <Card>
               <CardHeader>
@@ -950,6 +2242,178 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               <CardContent className="space-y-5">
                 <div className="space-y-3">
                   <AsrProviderManager />
+                </div>
+
+                <div className="rounded-[26px] border border-amber-400/20 bg-[linear-gradient(135deg,rgba(245,158,11,0.08),rgba(15,23,42,0.18))] p-5 text-slate-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <p className="text-[11px] uppercase tracking-[0.22em] text-amber-300/80">Capture routing</p>
+                      <h3 className="mt-2 text-xl font-semibold text-white">Microphone control room</h3>
+                      <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300/85">
+                        Pick one app-wide microphone, then override dictation or meetings when you need a dedicated input chain.
+                      </p>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => void refreshAudioDevices()}>
+                      <RefreshCw className="mr-2 h-4 w-4" />
+                      Refresh devices
+                    </Button>
+                  </div>
+
+                  <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.18em] text-slate-400">App-wide default</p>
+                        <p className="mt-1 text-sm text-slate-300">Used whenever a mode-specific override is off.</p>
+                      </div>
+                      <select
+                        aria-label="App-wide microphone"
+                        className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                        value={appWideDeviceId}
+                        onChange={(event) => {
+                          const nextDevice = resolveAudioDevicePreference(event.target.value || null);
+                          void updateSettings({
+                            ...settings,
+                            audio: {
+                              ...settings.audio,
+                              preferredInputDevice: nextDevice,
+                            },
+                          });
+                        }}
+                      >
+                        <option value="">System default microphone</option>
+                        {currentAudioDevices.map((device) => (
+                          <option key={device.deviceId} value={device.deviceId}>
+                            {renderDeviceOptionLabel(device)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Dictation override</p>
+                          <p className="mt-1 text-sm text-slate-300">Use a dedicated input just for hotkey dictation.</p>
+                        </div>
+                        <Switch
+                          checked={settings.audio.dictationInputOverrideEnabled ?? false}
+                          onCheckedChange={(checked) =>
+                            void updateSettings({
+                              ...settings,
+                              audio: {
+                                ...settings.audio,
+                                dictationInputOverrideEnabled: checked,
+                                dictationInputDevice: checked
+                                  ? settings.audio.dictationInputDevice ?? settings.audio.preferredInputDevice ?? null
+                                  : null,
+                              },
+                            })
+                          }
+                        />
+                      </div>
+                      <select
+                        aria-label="Dictation microphone override"
+                        disabled={!(settings.audio.dictationInputOverrideEnabled ?? false)}
+                        className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-sm text-slate-100 disabled:opacity-50"
+                        value={dictationDeviceId}
+                        onChange={(event) => {
+                          const nextDevice = resolveAudioDevicePreference(event.target.value || null);
+                          void updateSettings({
+                            ...settings,
+                            audio: {
+                              ...settings.audio,
+                              dictationInputDevice: nextDevice,
+                            },
+                          });
+                        }}
+                      >
+                        <option value="">Follow app-wide microphone</option>
+                        {currentAudioDevices.map((device) => (
+                          <option key={`dictation-${device.deviceId}`} value={device.deviceId}>
+                            {renderDeviceOptionLabel(device)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4 md:col-span-2 xl:col-span-1">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Meeting override</p>
+                          <p className="mt-1 text-sm text-slate-300">Use a separate microphone for mic-only meetings and mixed capture.</p>
+                        </div>
+                        <Switch
+                          checked={settings.audio.meetingInputOverrideEnabled ?? false}
+                          onCheckedChange={(checked) =>
+                            void updateSettings({
+                              ...settings,
+                              audio: {
+                                ...settings.audio,
+                                meetingInputOverrideEnabled: checked,
+                                meetingInputDevice: checked
+                                  ? settings.audio.meetingInputDevice ?? settings.audio.preferredInputDevice ?? null
+                                  : null,
+                              },
+                            })
+                          }
+                        />
+                      </div>
+                      <select
+                        aria-label="Meeting microphone override"
+                        disabled={!(settings.audio.meetingInputOverrideEnabled ?? false)}
+                        className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-sm text-slate-100 disabled:opacity-50"
+                        value={meetingDeviceId}
+                        onChange={(event) => {
+                          const nextDevice = resolveAudioDevicePreference(event.target.value || null);
+                          void updateSettings({
+                            ...settings,
+                            audio: {
+                              ...settings.audio,
+                              meetingInputDevice: nextDevice,
+                            },
+                          });
+                        }}
+                      >
+                        <option value="">Follow app-wide microphone</option>
+                        {currentAudioDevices.map((device) => (
+                          <option key={`meeting-${device.deviceId}`} value={device.deviceId}>
+                            {renderDeviceOptionLabel(device)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {currentAudioDevices.map((device) => (
+                      <div key={`card-${device.deviceId}`} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-medium text-white">{device.deviceName}</p>
+                            <p className="mt-1 text-xs text-slate-400">
+                              {deviceTransportLabel(device)}
+                              {device.channelCount ? ` - ${device.channelCount} ch` : ""}
+                              {device.sampleRate ? ` - ${device.sampleRate} Hz` : ""}
+                            </p>
+                          </div>
+                          {device.isDefault ? (
+                            <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em] text-emerald-200">
+                              Default
+                            </span>
+                          ) : null}
+                        </div>
+                        {device.isBluetoothLike ? (
+                          <p className="mt-3 text-xs leading-5 text-amber-200">
+                            Bluetooth headset mics can lower playback quality while dictating. Built-in or USB mics usually sound cleaner.
+                          </p>
+                        ) : (
+                          <p className="mt-3 text-xs leading-5 text-slate-400">
+                            Stable local input for dictation, meetings, and mic tests.
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
 
                 <div className="h-px bg-border" />
@@ -1220,475 +2684,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 {advancedTabs.asr && (
                   <div className="pt-4 border-t space-y-5">
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
-                    
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-2 w-full">
-                        <Label>Hotkey behavior</Label>
-                        <p className="text-sm text-muted-foreground">
-                          {dictationShortcutBehaviorHint}
-                        </p>
-                        <select
-                          aria-label="Hotkey behavior"
-                          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                          value={dictationShortcutBehavior}
-                          onChange={(event) =>
-                            updateDictationShortcutBehavior(
-                              event.target.value as DictationHotkeyBehavior
-                            )
-                          }
-                        >
-                          <option value="hold_to_talk">Hold-to-talk</option>
-                          <option value="toggle">Toggle press</option>
-                          <option value="hands_free">Hands-free</option>
-                        </select>
-                      </div>
-                    </div>
-                    
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="flex items-center gap-1.5">
-                          Smart Format
-                          {!canUseFormattingAssistant(licenseInfo) && (
-                            <span className="text-xs text-amber-600">Pro</span>
-                          )}
-                        </Label>
-                        <p className="text-sm text-muted-foreground">
-                          Use the default LLM to format and correct dictation before pasting
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationAiFormatting}
-                        disabled={!canUseFormattingAssistant(licenseInfo)}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationAiFormatting: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Command mode</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Enable corrections like &quot;command undo that&quot; and
-                          &quot;command replace roadmap with launch plan&quot;, plus case fixes like
-                          &quot;command uppercase selection&quot;.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationCommandModeEnabled ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCommandModeEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Command prefix</Label>
-                      <Input
-                        value={settings.transcription.dictationCommandPrefix ?? "command"}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCommandPrefix: e.target.value,
-                            },
-                          })
-                        }
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Use the wake word that starts correction and transform commands.
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Snippets</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Expand saved text shortcuts after dictionary normalization.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationSnippetsEnabled ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationSnippetsEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Auto-learn corrections</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Learn safe word and short-phrase fixes from confirmed dictation edits.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationAutoLearnCorrections ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationAutoLearnCorrections: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
-                      <div className="space-y-0.5">
-                        <Label>Advanced dictation controls</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Manage dictionary rules, snippets, routing, insertion, context, live preview,
-                          and custom dictation modes from Dictation Controls.
-                        </p>
-                      </div>
-                      <Button variant="secondary" onClick={() => requestMainView("dictation")}>
-                        Open Dictation Controls
-                      </Button>
-                    </div>
-                    
-                    <div className="space-y-2">
-                      <Label>Custom Dictation Prompt</Label>
-                      <Textarea
-                        placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
-                        value={settings.transcription.dictationCustomPrompt ?? ""}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCustomPrompt: e.target.value,
-                            },
-                          })
-                        }
-                        className="min-h-[80px]"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Overrides the default Smart Format prompt. The active app name is still provided as context.
-                      </p>
-                    </div>
-                    
-                    <div className="space-y-2">
-                      <Label>Custom Meeting Summary Prompt</Label>
-                      <Textarea
-                        placeholder="e.g. Summarize the meeting and list action items..."
-                        value={settings.transcription.meetingCustomPrompt ?? ""}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              meetingCustomPrompt: e.target.value,
-                            },
-                          })
-                        }
-                        className="min-h-[80px]"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Overrides the default Nautilus-style meeting summary prompt.
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Auto-name meetings</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Generate a title after transcription completes (meetings only)
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.meetingAutoNameEnabled ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              meetingAutoNameEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Meeting auto-name model override (optional)</Label>
-                      <Input
-                        placeholder="Leave empty to use summary model"
-                        value={settings.transcription.meetingAutoNameModel ?? ""}
-                        onBlur={handleSettingsTextBlur}
-                        onKeyDown={handleSettingsTextKeyDown}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              meetingAutoNameModel: e.target.value.trim() ? e.target.value.trim() : null,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Copy dictation text to clipboard</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Keep the latest dictation text available for manual paste
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationCopyToClipboard ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCopyToClipboard: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                    
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Automatic silence skip</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Remove silent segments before transcription
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.silenceSkipEnabled}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: { ...settings.transcription, silenceSkipEnabled: checked },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Voice activity detection</Label>
-                        <p className="text-sm text-muted-foreground">Auto-stop after silence timeout</p>
-                      </div>
-                      <Switch
-                        checked={settings.audio.voiceActivityDetection}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            audio: { ...settings.audio, voiceActivityDetection: checked },
-                          })
-                        }
-                      />
-                    </div>
-
-                    {settings.audio.voiceActivityDetection && (
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between">
-                          <Label>Silence timeout</Label>
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="number"
-                              min={1}
-                              max={30}
-                              step={1}
-                              className="w-16 rounded-md border bg-background px-2 py-1 text-sm text-center"
-                              value={Math.round(settings.audio.silenceTimeoutSeconds / 60)}
-                              onBlur={handleSettingsTextBlur}
-                              onKeyDown={handleSettingsTextKeyDown}
-                              onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                                const minutes = Math.max(1, Math.min(30, parseInt(e.target.value, 10) || 5));
-                                void updateSettings({
-                                  ...settings,
-                                  audio: { ...settings.audio, silenceTimeoutSeconds: minutes * 60 },
-                                });
-                              }}
-                            />
-                            <span className="text-sm text-muted-foreground">min</span>
-                          </div>
-                        </div>
-                        <input
-                          type="range"
-                          min={1}
-                          max={30}
-                          step={1}
-                          className="w-full"
-                          value={Math.round(settings.audio.silenceTimeoutSeconds / 60)}
-                          onChange={(e: any) => {
-                            const minutes = parseInt(e.target.value, 10);
-                            void updateSettings({
-                              ...settings,
-                              audio: { ...settings.audio, silenceTimeoutSeconds: minutes * 60 },
-                            });
-                          }}
-                        />
-                        <div className="flex justify-between text-xs text-muted-foreground">
-                          <span>1 min</span>
-                          <span>5 min</span>
-                          <span>15 min</span>
-                          <span>30 min</span>
-                        </div>
-                        <div className="flex gap-2">
-                          {[1, 2, 5, 10, 15, 30].map((preset) => (
-                            <button
-                              key={preset}
-                              type="button"
-                              className={`rounded px-2 py-0.5 text-xs border transition-colors ${Math.round(settings.audio.silenceTimeoutSeconds / 60) === preset ? "bg-trusted text-white border-trusted" : "bg-muted hover:bg-muted/80 border-border"}`}
-                              onClick={() =>
-                                void updateSettings({
-                                  ...settings,
-                                  audio: { ...settings.audio, silenceTimeoutSeconds: preset * 60 },
-                                })
-                              }
-                            >
-                              {preset}m
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Noise suppression</Label>
-                        <p className="text-sm text-muted-foreground">Reduce background noise</p>
-                      </div>
-                      <Switch
-                        checked={settings.audio.noiseSuppression}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            audio: { ...settings.audio, noiseSuppression: checked },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Auto gain control</Label>
-                        <p className="text-sm text-muted-foreground">Automatically adjust microphone levels</p>
-                      </div>
-                      <Switch
-                        checked={settings.audio.autoGainControl}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            audio: { ...settings.audio, autoGainControl: checked },
-                          })
-                        }
-                      />
-                    </div>
-
-                    {!settings.audio.autoGainControl && (
-                      <div className="space-y-2">
-                        <Label>Manual gain ({settings.audio.manualGainDb > 0 ? "+" : ""}{settings.audio.manualGainDb.toFixed(1)} dB)</Label>
-                        <input
-                          type="range"
-                          min={-20}
-                          max={20}
-                          step={0.5}
-                          value={settings.audio.manualGainDb}
-                          className="w-full"
-                          onChange={(e: any) =>
-                            void updateSettings({
-                              ...settings,
-                              audio: { ...settings.audio, manualGainDb: Number(e.target.value) },
-                            })
-                          }
-                        />
-                        <div className="flex justify-between text-xs text-muted-foreground">
-                          <span>-20 dB</span>
-                          <span>0 dB</span>
-                          <span>+20 dB</span>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="rounded-md border border-border bg-muted/20 p-3 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="text-sm font-medium">Microphone test</p>
-                          <p className="text-xs text-muted-foreground">Check your mic level and hear the gain effect</p>
-                        </div>
-                        <Button
-                          variant={micTestActive ? "destructive" : "outline"}
-                          size="sm"
-                          onClick={() => micTestActive ? stopMicTest() : void startMicTest()}
-                        >
-                          <Mic className="h-3.5 w-3.5 mr-1.5" />
-                          {micTestActive ? "Stop" : "Start"}
-                        </Button>
-                      </div>
-
-                      {micTestActive && (
-                        <>
-                          <div className="space-y-1">
-                            <div className="flex items-center justify-between text-xs text-muted-foreground">
-                              <span>Level</span>
-                              <span>{micTestLevel}%</span>
-                            </div>
-                            <div className="h-3 w-full rounded-full bg-muted overflow-hidden">
-                              <div
-                                className={`h-full rounded-full transition-none ${micTestLevel > 80 ? "bg-red-500" : micTestLevel > 50 ? "bg-yellow-500" : "bg-emerald-500"}`}
-                                style={{ width: `${micTestLevel}%` }}
-                              />
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-2">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={micTestRecording}
-                              onClick={() => void recordMicTest()}
-                              className="text-xs"
-                            >
-                              {micTestRecording ? (
-                                <>
-                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                                  Recording 3s…
-                                </>
-                              ) : (
-                                "Record 3s"
-                              )}
-                            </Button>
-                            {micTestPlaybackUrl && !micTestRecording && (
-                              <audio
-                                key={micTestPlaybackUrl}
-                                src={micTestPlaybackUrl}
-                                controls
-                                autoPlay
-                                className="h-8 flex-1"
-                              />
-                            )}
-                          </div>
-                        </>
-                      )}
-                    </div>
+                    {renderSharedDictationControls({
+                      includeMeetingAutoName: true,
+                      includeAudioTuning: true,
+                    })}
                   </div>
                 )}
               </CardContent>
@@ -1865,272 +2864,21 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 {advancedTabs.general && (
                   <div className="pt-4 border-t space-y-5">
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
-                    
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-2 w-full">
-                        <Label>Hotkey behavior</Label>
-                        <p className="text-sm text-muted-foreground">
-                          {dictationShortcutBehaviorHint}
-                        </p>
-                        <select
-                          aria-label="Hotkey behavior"
-                          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                          value={dictationShortcutBehavior}
-                          onChange={(event) =>
-                            updateDictationShortcutBehavior(
-                              event.target.value as DictationHotkeyBehavior
-                            )
-                          }
-                        >
-                          <option value="hold_to_talk">Hold-to-talk</option>
-                          <option value="toggle">Toggle press</option>
-                          <option value="hands_free">Hands-free</option>
-                        </select>
+                    <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                        <div>
+                          <p className="text-sm font-medium text-foreground">Dictation defaults live in Transcription</p>
+                          <p className="text-sm text-muted-foreground">
+                            Keep the recording shell clean here and manage Smart Format, prompts, routing, and audio behavior from the dedicated Transcription workspace.
+                          </p>
+                        </div>
+                        <Button variant="secondary" onClick={() => setActiveTab("asr")}>
+                          Open Transcription
+                        </Button>
                       </div>
-                    </div>
-                    
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="flex items-center gap-1.5">
-                          Smart Format
-                          {!canUseFormattingAssistant(licenseInfo) && (
-                            <span className="text-xs text-amber-600">Pro</span>
-                          )}
-                        </Label>
-                        <p className="text-sm text-muted-foreground">
-                          Use the default LLM to format and correct dictation before pasting
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationAiFormatting}
-                        disabled={!canUseFormattingAssistant(licenseInfo)}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationAiFormatting: checked,
-                            },
-                          })
-                        }
-                      />
                     </div>
 
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Command mode</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Enable corrections like &quot;command undo that&quot; and
-                          &quot;command replace roadmap with launch plan&quot;, plus case fixes like
-                          &quot;command uppercase selection&quot;.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationCommandModeEnabled ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCommandModeEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Command prefix</Label>
-                      <Input
-                        value={settings.transcription.dictationCommandPrefix ?? "command"}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCommandPrefix: e.target.value,
-                            },
-                          })
-                        }
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Use the wake word that starts correction and transform commands.
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Snippets</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Expand saved text shortcuts after dictionary normalization.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationSnippetsEnabled ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationSnippetsEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Auto-learn corrections</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Learn safe word and short-phrase fixes from confirmed dictation edits.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationAutoLearnCorrections ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationAutoLearnCorrections: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
-                      <div className="space-y-0.5">
-                        <Label>Advanced dictation controls</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Manage dictionary rules, snippets, routing, insertion, context, live preview,
-                          and custom dictation modes from Dictation Controls.
-                        </p>
-                      </div>
-                      <Button variant="secondary" onClick={() => requestMainView("dictation")}>
-                        Open Dictation Controls
-                      </Button>
-                    </div>
-                    
-                    <div className="space-y-2">
-                      <Label>Custom Dictation Prompt</Label>
-                      <Textarea
-                        placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
-                        value={settings.transcription.dictationCustomPrompt ?? ""}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCustomPrompt: e.target.value,
-                            },
-                          })
-                        }
-                        className="min-h-[80px]"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Overrides the default Smart Format prompt. The active app name is still provided as context.
-                      </p>
-                    </div>
-                    
-                    <div className="space-y-2">
-                      <Label>Custom Meeting Summary Prompt</Label>
-                      <Textarea
-                        placeholder="e.g. Summarize the meeting and list action items..."
-                        value={settings.transcription.meetingCustomPrompt ?? ""}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              meetingCustomPrompt: e.target.value,
-                            },
-                          })
-                        }
-                        className="min-h-[80px]"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Overrides the default Nautilus-style meeting summary prompt.
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Copy dictation text to clipboard</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Keep the latest dictation text available for manual paste
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationCopyToClipboard ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCopyToClipboard: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                    
-                    <div className="space-y-3 pt-2 border-t">
-                      <div className="space-y-1">
-                        <Label>Global keyboard shortcuts</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Click a field and press your desired shortcut combination
-                        </p>
-                      </div>
-                      <div className="grid gap-2">
-                        {SHORTCUT_FIELD_CONFIG.map(({ key, label }) => {
-                          const currentVal = settings.shortcuts[key]
-                            ? formatShortcutForDisplay(settings.shortcuts[key])
-                            : "None";
-                          const isCapturing = capturingShortcut === key;
-                          return (
-                            <div key={key} className="flex items-center justify-between">
-                              <span className="text-sm text-muted-foreground">{label}</span>
-                              <div className="flex items-center gap-2">
-                                <Input
-                                  value={isCapturing ? "Listening..." : currentVal}
-                                  readOnly
-                                  className={`w-32 text-center text-xs font-mono h-8 ${isCapturing ? "border-primary ring-1 ring-primary" : ""}`}
-                                  onFocus={() => {
-                                    setCapturingShortcut(key);
-                                  }}
-                                  onBlur={() => {
-                                    if (capturingShortcut === key) {
-                                      setCapturingShortcut(null);
-                                    }
-                                  }}
-                                  onKeyDown={handleShortcutKeyDown(key)}
-                                />
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-8 px-2"
-                                  onClick={() => {
-                                    const next: Settings = {
-                                      ...settings,
-                                      shortcuts: { ...settings.shortcuts, [key]: "" },
-                                    };
-                                    setDraftSettings(next);
-                                    queueSettingsSave(next, 0);
-                                  }}
-                                >
-                                  Clear
-                                </Button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                      <p className="text-xs text-muted-foreground">
-                        Changes save immediately, duplicate conflicts are blocked, and new bindings apply instantly.
-                      </p>
-                    </div>
+                    {renderShortcutsSection()}
                   </div>
                 )}
               </CardContent>
@@ -2190,352 +2938,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 {advancedTabs.security && (
                   <div className="pt-4 border-t space-y-5">
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
-                    
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-2 w-full">
-                        <Label>Hotkey behavior</Label>
-                        <p className="text-sm text-muted-foreground">
-                          {dictationShortcutBehaviorHint}
-                        </p>
-                        <select
-                          aria-label="Hotkey behavior"
-                          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                          value={dictationShortcutBehavior}
-                          onChange={(event) =>
-                            updateDictationShortcutBehavior(
-                              event.target.value as DictationHotkeyBehavior
-                            )
-                          }
-                        >
-                          <option value="hold_to_talk">Hold-to-talk</option>
-                          <option value="toggle">Toggle press</option>
-                          <option value="hands_free">Hands-free</option>
-                        </select>
-                      </div>
-                    </div>
-                    
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="flex items-center gap-1.5">
-                          Smart Format
-                          {!canUseFormattingAssistant(licenseInfo) && (
-                            <span className="text-xs text-amber-600">Pro</span>
-                          )}
-                        </Label>
-                        <p className="text-sm text-muted-foreground">
-                          Use the default LLM to format and correct dictation before pasting
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationAiFormatting}
-                        disabled={!canUseFormattingAssistant(licenseInfo)}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationAiFormatting: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Command mode</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Enable corrections like &quot;command undo that&quot; and
-                          &quot;command replace roadmap with launch plan&quot;, plus case fixes like
-                          &quot;command uppercase selection&quot;.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationCommandModeEnabled ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCommandModeEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Command prefix</Label>
-                      <Input
-                        value={settings.transcription.dictationCommandPrefix ?? "command"}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCommandPrefix: e.target.value,
-                            },
-                          })
-                        }
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Use the wake word that starts correction and transform commands.
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Snippets</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Expand saved text shortcuts after dictionary normalization.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationSnippetsEnabled ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationSnippetsEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Auto-learn corrections</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Learn safe word and short-phrase fixes from confirmed dictation edits.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationAutoLearnCorrections ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationAutoLearnCorrections: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
-                      <div className="space-y-0.5">
-                        <Label>Advanced dictation controls</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Manage dictionary rules, snippets, routing, insertion, context, live preview,
-                          and custom dictation modes from Dictation Controls.
-                        </p>
-                      </div>
-                      <Button variant="secondary" onClick={() => requestMainView("dictation")}>
-                        Open Dictation Controls
-                      </Button>
-                    </div>
-                    
-                    <div className="space-y-2">
-                      <Label>Custom Dictation Prompt</Label>
-                      <Textarea
-                        placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
-                        value={settings.transcription.dictationCustomPrompt ?? ""}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCustomPrompt: e.target.value,
-                            },
-                          })
-                        }
-                        className="min-h-[80px]"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Overrides the default Smart Format prompt. The active app name is still provided as context.
-                      </p>
-                    </div>
-                    
-                    <div className="space-y-2">
-                      <Label>Custom Meeting Summary Prompt</Label>
-                      <Textarea
-                        placeholder="e.g. Summarize the meeting and list action items..."
-                        value={settings.transcription.meetingCustomPrompt ?? ""}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              meetingCustomPrompt: e.target.value,
-                            },
-                          })
-                        }
-                        className="min-h-[80px]"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Overrides the default Nautilus-style meeting summary prompt.
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Copy dictation text to clipboard</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Keep the latest dictation text available for manual paste
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationCopyToClipboard ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCopyToClipboard: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Auto-request dictation permissions</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Prompt for speech/mic permissions before dictation instead of failing silently
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationAutoRequestPermissions ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationAutoRequestPermissions: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                    
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <Label>Permission diagnostics</Label>
-                          <p className="text-sm text-muted-foreground">
-                            Validate microphone, speech recognition, accessibility, and automation permissions
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={async () => {
-                              const diagnostics = await getPermissionDiagnostics();
-                              setPermissionDiagnostics(diagnostics);
-                            }}
-                          >
-                            Refresh
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={async () => {
-                              const diagnostics = await requestDictationPermissions();
-                              setPermissionDiagnostics(diagnostics);
-                            }}
-                          >
-                            Request now
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={async () => {
-                              const diagnostics = await repairCursorInsertPermissions();
-                              setPermissionDiagnostics(diagnostics);
-                            }}
-                          >
-                            Repair insert
-                          </Button>
-                        </div>
-                      </div>
-                      {permissionDiagnostics && (
-                        <div className="grid grid-cols-1 md:grid-cols-4 gap-2 text-sm">
-                          <div className="p-2 rounded border bg-muted/20">
-                            <p className="font-medium">Microphone</p>
-                            <p className={microphonePermissionReady ? "text-green-500" : "text-amber-500"}>
-                              {microphonePermissionReady ? "Ready" : "Needs grant"}
-                            </p>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="mt-1 px-0 h-auto font-normal text-xs text-muted-foreground hover:text-foreground"
-                              onClick={() => void openPermissionSettings("microphone")}
-                            >
-                              Open settings
-                            </Button>
-                          </div>
-                          <div className="p-2 rounded border bg-muted/20">
-                            <p className="font-medium">Speech recognition</p>
-                            <p
-                              className={
-                                permissionDiagnostics.speechRecognitionReady
-                                  ? "text-green-500"
-                                  : "text-amber-500"
-                              }
-                            >
-                              {permissionDiagnostics.speechRecognitionReady ? "Ready" : "Needs grant"}
-                            </p>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="mt-1 px-0 h-auto font-normal text-xs text-muted-foreground hover:text-foreground"
-                              onClick={() => void openPermissionSettings("speech")}
-                            >
-                              Open settings
-                            </Button>
-                          </div>
-                          <div className="p-2 rounded border bg-muted/20">
-                            <p className="font-medium">Accessibility</p>
-                            <p className={permissionDiagnostics.accessibilityReady ? "text-green-500" : "text-amber-500"}>
-                              {permissionDiagnostics.accessibilityReady ? "Ready" : "Needs grant"}
-                            </p>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="mt-1 px-0 h-auto font-normal text-xs text-muted-foreground hover:text-foreground"
-                              onClick={() => void openPermissionSettings("accessibility")}
-                            >
-                              Open settings
-                            </Button>
-                          </div>
-                          <div className="p-2 rounded border bg-muted/20">
-                            <p className="font-medium">Keyboard events</p>
-                            <p className={permissionDiagnostics.postEventReady ? "text-green-500" : "text-amber-500"}>
-                              {permissionDiagnostics.postEventReady ? "Ready" : "Fallback unavailable"}
-                            </p>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="mt-1 px-0 h-auto font-normal text-xs text-muted-foreground hover:text-foreground"
-                              onClick={() => void openPermissionSettings("accessibility")}
-                            >
-                              Open settings
-                            </Button>
-                          </div>
-                        </div>
-                      )}
-                      {permissionDiagnostics?.notes?.length ? (
-                        <div className="text-xs text-muted-foreground space-y-1">
-                          {permissionDiagnostics.notes.map((note) => (
-                            <p key={note}>{note}</p>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
+                    {renderSharedDictationControls({
+                      includeCoreControls: false,
+                      includePermissions: true,
+                    })}
 
                     <div className="space-y-2">
                       <Label>Vault password</Label>
@@ -2605,27 +3011,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       ) : null}
                     </div>
 
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="flex items-center gap-2">
-                          Cloud sync
-                          {!isFeatureAllowed(licenseInfo, "cloudSync") && (
-                            <span className="text-xs text-amber-600">⭐ Friends Club</span>
-                          )}
-                        </Label>
-                        <p className="text-sm text-muted-foreground">Enable external backup sync integrations</p>
-                      </div>
-                      <Switch
-                        checked={settings.privacy.cloudSync}
-                        disabled={!isFeatureAllowed(licenseInfo, "cloudSync")}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            privacy: { ...settings.privacy, cloudSync: checked },
-                          })
-                        }
-                      />
-                    </div>
+                    {renderSharedDictationControls({
+                      includeCoreControls: false,
+                      includeCloudSync: true,
+                    })}
                   </div>
                 )}
               </CardContent>
@@ -3002,215 +3391,18 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 {advancedTabs.storage && backupConfig && (
                   <div className="pt-4 border-t space-y-5">
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
-                    
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-2 w-full">
-                        <Label>Hotkey behavior</Label>
-                        <p className="text-sm text-muted-foreground">
-                          {dictationShortcutBehaviorHint}
-                        </p>
-                        <select
-                          aria-label="Hotkey behavior"
-                          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                          value={dictationShortcutBehavior}
-                          onChange={(event) =>
-                            updateDictationShortcutBehavior(
-                              event.target.value as DictationHotkeyBehavior
-                            )
-                          }
-                        >
-                          <option value="hold_to_talk">Hold-to-talk</option>
-                          <option value="toggle">Toggle press</option>
-                          <option value="hands_free">Hands-free</option>
-                        </select>
+                    <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                        <div>
+                          <p className="text-sm font-medium text-foreground">Retention stays separate from dictation behavior</p>
+                          <p className="text-sm text-muted-foreground">
+                            Storage now focuses on exports, retention, backups, and recovery. Adjust dictation prompts, routing, and capture behavior from Transcription.
+                          </p>
+                        </div>
+                        <Button variant="secondary" onClick={() => setActiveTab("asr")}>
+                          Open Transcription
+                        </Button>
                       </div>
-                    </div>
-                    
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="flex items-center gap-1.5">
-                          Smart Format
-                          {!canUseFormattingAssistant(licenseInfo) && (
-                            <span className="text-xs text-amber-600">Pro</span>
-                          )}
-                        </Label>
-                        <p className="text-sm text-muted-foreground">
-                          Use the default LLM to format and correct dictation before pasting
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationAiFormatting}
-                        disabled={!canUseFormattingAssistant(licenseInfo)}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationAiFormatting: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Command mode</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Enable corrections like &quot;command undo that&quot; and
-                          &quot;command replace roadmap with launch plan&quot;, plus case fixes like
-                          &quot;command uppercase selection&quot;.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationCommandModeEnabled ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCommandModeEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Command prefix</Label>
-                      <Input
-                        value={settings.transcription.dictationCommandPrefix ?? "command"}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCommandPrefix: e.target.value,
-                            },
-                          })
-                        }
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Use the wake word that starts correction and transform commands.
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Snippets</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Expand saved text shortcuts after dictionary normalization.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationSnippetsEnabled ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationSnippetsEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Auto-learn corrections</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Learn safe word and short-phrase fixes from confirmed dictation edits.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationAutoLearnCorrections ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationAutoLearnCorrections: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
-                      <div className="space-y-0.5">
-                        <Label>Advanced dictation controls</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Manage dictionary rules, snippets, routing, insertion, context, live preview,
-                          and custom dictation modes from Dictation Controls.
-                        </p>
-                      </div>
-                      <Button variant="secondary" onClick={() => requestMainView("dictation")}>
-                        Open Dictation Controls
-                      </Button>
-                    </div>
-                    
-                    <div className="space-y-2">
-                      <Label>Custom Dictation Prompt</Label>
-                      <Textarea
-                        placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
-                        value={settings.transcription.dictationCustomPrompt ?? ""}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCustomPrompt: e.target.value,
-                            },
-                          })
-                        }
-                        className="min-h-[80px]"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Overrides the default Smart Format prompt. The active app name is still provided as context.
-                      </p>
-                    </div>
-                    
-                    <div className="space-y-2">
-                      <Label>Custom Meeting Summary Prompt</Label>
-                      <Textarea
-                        placeholder="e.g. Summarize the meeting and list action items..."
-                        value={settings.transcription.meetingCustomPrompt ?? ""}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              meetingCustomPrompt: e.target.value,
-                            },
-                          })
-                        }
-                        className="min-h-[80px]"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Overrides the default Nautilus-style meeting summary prompt.
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Copy dictation text to clipboard</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Keep the latest dictation text available for manual paste
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationCopyToClipboard ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCopyToClipboard: checked,
-                            },
-                          })
-                        }
-                      />
                     </div>
 
                     <div className="flex items-center justify-between">
@@ -3834,504 +4026,25 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 {advancedTabs.ai && (
                   <div className="pt-4 border-t space-y-5">
                     <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
-                    
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-2 w-full">
-                        <Label>Hotkey behavior</Label>
-                        <p className="text-sm text-muted-foreground">
-                          {dictationShortcutBehaviorHint}
-                        </p>
-                        <select
-                          aria-label="Hotkey behavior"
-                          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                          value={dictationShortcutBehavior}
-                          onChange={(event) =>
-                            updateDictationShortcutBehavior(
-                              event.target.value as DictationHotkeyBehavior
-                            )
-                          }
-                        >
-                          <option value="hold_to_talk">Hold-to-talk</option>
-                          <option value="toggle">Toggle press</option>
-                          <option value="hands_free">Hands-free</option>
-                        </select>
-                      </div>
-                    </div>
-                    
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="flex items-center gap-1.5">
-                          Smart Format
-                          {!canUseFormattingAssistant(licenseInfo) && (
-                            <span className="text-xs text-amber-600">Pro</span>
-                          )}
-                        </Label>
-                        <p className="text-sm text-muted-foreground">
-                          Use the default LLM to format and correct dictation before pasting
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationAiFormatting}
-                        disabled={!canUseFormattingAssistant(licenseInfo)}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationAiFormatting: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Command mode</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Enable corrections like &quot;command undo that&quot; and
-                          &quot;command replace roadmap with launch plan&quot;, plus case fixes like
-                          &quot;command uppercase selection&quot;.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationCommandModeEnabled ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCommandModeEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Command prefix</Label>
-                      <Input
-                        value={settings.transcription.dictationCommandPrefix ?? "command"}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCommandPrefix: e.target.value,
-                            },
-                          })
-                        }
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Use the wake word that starts correction and transform commands.
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Snippets</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Expand saved text shortcuts after dictionary normalization.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationSnippetsEnabled ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationSnippetsEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Auto-learn corrections</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Learn safe word and short-phrase fixes from confirmed dictation edits.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationAutoLearnCorrections ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationAutoLearnCorrections: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
-                      <div className="space-y-0.5">
-                        <Label>Advanced dictation controls</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Manage dictionary rules, snippets, routing, insertion, context, live preview,
-                          and custom dictation modes from Dictation Controls.
-                        </p>
-                      </div>
-                      <Button variant="secondary" onClick={() => requestMainView("dictation")}>
-                        Open Dictation Controls
-                      </Button>
-                    </div>
-                    
-                    <div className="space-y-2">
-                      <Label>Custom Dictation Prompt</Label>
-                      <Textarea
-                        placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
-                        value={settings.transcription.dictationCustomPrompt ?? ""}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCustomPrompt: e.target.value,
-                            },
-                          })
-                        }
-                        className="min-h-[80px]"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Overrides the default Smart Format prompt. The active app name is still provided as context.
-                      </p>
-                    </div>
-                    
-                    <div className="space-y-2">
-                      <Label>Custom Meeting Summary Prompt</Label>
-                      <Textarea
-                        placeholder="e.g. Summarize the meeting and list action items..."
-                        value={settings.transcription.meetingCustomPrompt ?? ""}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              meetingCustomPrompt: e.target.value,
-                            },
-                          })
-                        }
-                        className="min-h-[80px]"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Overrides the default Nautilus-style meeting summary prompt.
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Copy dictation text to clipboard</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Keep the latest dictation text available for manual paste
-                        </p>
-                      </div>
-                      <Switch
-                        checked={settings.transcription.dictationCopyToClipboard ?? true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationCopyToClipboard: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>Credential provider</Label>
-                      <div className="flex gap-2 items-center">
-                        <select
-                          value={provider}
-                          onChange={(e: any) => {
-                            const next = e.target.value;
-                            setProvider(next);
-                            // Persist provider selection to settings so it survives restarts
-                            if (settings) {
-                              updateSettings({
-                                ...settings,
-                                privacy: { ...settings.privacy, llmProvider: next },
-                              });
-                            }
-                            // Immediately refresh model list for the newly selected provider
-                            void refreshModelsForProvider(next);
-                          }}
-                          className="flex-1 p-2 border rounded-md bg-background"
-                        >
-                          <option value="openai">OpenAI</option>
-                          <option value="anthropic">Anthropic</option>
-                          <option value="gemini">Google Gemini</option>
-                          <option value="deepseek">DeepSeek</option>
-                          <option value="ollama-cloud">Ollama Cloud</option>
-                        </select>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          title="Refresh model list"
-                          onClick={async () => {
-                            if (apiKey.trim()) {
-                              // If user typed a key but didn't save, save it now!
-                              setSavingApiKey(true);
-                              try {
-                                await setProviderSecret(provider, apiKey.trim());
-                                setApiKey("");
-                                setHasApiKey(true);
-                              } catch (e) {
-                                console.error("Failed to save key on refresh", e);
-                              } finally {
-                                setSavingApiKey(false);
-                              }
-                            }
-                            void refreshModelsForProvider(settings.privacy.llmProvider);
-                          }}
-                          disabled={modelsLoading || savingApiKey}
-                        >
-                          {modelsLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-                        </Button>
-                      </div>
-                      {!settings.privacy.remoteProcessingEnabled ? (
-                        <p className="text-xs text-amber-600">
-                          Remote processing is disabled. Stored cloud keys will not be used until policy is enabled.
-                        </p>
-                      ) : null}
-                      {true && settings.privacy.remoteProcessingEnabled && !hasApiKey ? (
-                        <p className="text-xs text-amber-600">
-                          Selected analysis provider has no stored key. Analysis requests will fail with a credential error.
-                        </p>
-                      ) : null}
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>API key</Label>
-                      <Input
-                        type="password"
-                        placeholder={hasApiKey ? "Key already stored (enter to replace)" : "Enter API key"}
-                        value={apiKey}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setApiKey(e.target.value)}
-                        onKeyDown={async (e) => {
-                          if (e.key === "Enter" && apiKey.trim()) {
-                            e.preventDefault();
-                            if (savingApiKey) return;
-
-                            setSavingApiKey(true);
-                            setError(null);
-                            try {
-                              await setProviderSecret(provider, apiKey.trim());
-                              setApiKey("");
-                              setHasApiKey(true);
-                              await refreshModelsForProvider(provider);
-                            } catch (e) {
-                              setError(e instanceof Error ? e.message : "Failed to save API key");
-                            } finally {
-                              setSavingApiKey(false);
-                            }
-                          }
-                        }}
-                      />
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <Button
-                        onClick={async () => {
-                          if (!apiKey.trim()) return;
-                          setSavingApiKey(true);
-                          setError(null);
-                          try {
-                            await setProviderSecret(provider, apiKey.trim());
-                            setApiKey("");
-                            setHasApiKey(true);
-                            // Refresh models for this provider after saving key
-                            await refreshModelsForProvider(provider);
-                          } catch (e) {
-                            setError(e instanceof Error ? e.message : "Failed to save API key");
-                          } finally {
-                            setSavingApiKey(false);
-                          }
-                        }}
-                        disabled={savingApiKey || !apiKey.trim()}
-                      >
-                        {savingApiKey ? "Saving..." : "Save Key"}
-                      </Button>
-                      <Button
-                        variant="outline"
-                        onClick={async () => {
-                          setSavingApiKey(true);
-                          setError(null);
-                          try {
-                            await clearProviderSecret(provider);
-                            setApiKey("");
-                            setHasApiKey(false);
-                          } catch (e) {
-                            setError(e instanceof Error ? e.message : "Failed to clear API key");
-                          } finally {
-                            setSavingApiKey(false);
-                          }
-                        }}
-                        disabled={savingApiKey}
-                      >
-                        Clear Key
-                      </Button>
-                      {hasApiKey && <span className="text-sm text-muted-foreground">Stored securely</span>}
-                    </div>
-
-                    <div className="space-y-2 mt-4">
-                      <Label>Guided cloud onboarding</Label>
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          variant="outline"
-                          onClick={async () => {
-                            setError(null);
-                            const checks: string[] = [];
-                            if (!settings.privacy.remoteProcessingEnabled) {
-                              checks.push("Remote processing is disabled.");
-                            }
-                            const keyPresent = await hasProviderSecret(settings.privacy.llmProvider);
-                            if (!keyPresent) {
-                              checks.push(`No API key stored for ${settings.privacy.llmProvider}.`);
-                            }
-                            if (checks.length === 0) {
-                              setCloudReadinessMessage("Cloud readiness checks passed.");
-                            } else {
-                              setCloudReadinessMessage(checks.join(" "));
-                            }
-                          }}
-                        >
-                          Run Readiness Check
-                        </Button>
-                        {!settings.privacy.remoteProcessingEnabled && (
-                          <Button
-                            onClick={async () => {
-                              const confirmed = window.confirm(
-                                "Enable remote processing? This allows transcript text to be sent to cloud providers."
-                              );
-                              if (!confirmed) {
-                                return;
-                              }
-                              updateSettings(
-                                {
-                                  ...settings,
-                                  privacy: {
-                                    ...settings.privacy,
-                                    remoteProcessingEnabled: true,
-                                  },
-                                },
-                                { immediate: true }
-                              );
-                              setCloudReadinessMessage("Remote processing enabled. Run readiness check again.");
-                            }}
-                          >
-                            Enable Remote Processing (Opt-in)
-                          </Button>
-                        )}
-                      </div>
-                      {cloudReadinessMessage ? (
-                        <p className="text-xs text-muted-foreground">{cloudReadinessMessage}</p>
-                      ) : null}
-                    </div>
-
-                    <div className="pt-4 border-t space-y-4">
-                      <div className="space-y-1">
-                        <Label className="flex items-center gap-2">
-                          <Database className="h-4 w-4 text-violet-600" />
-                          Memory Search
-                        </Label>
-                        <p className="text-sm text-muted-foreground">How Memory searches your transcripts when you ask a question</p>
-                      </div>
-
-                      <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 p-3">
-                        <div className="space-y-0.5">
-                          <p className="text-sm font-medium">Grounded meeting follow-up drafts</p>
-                          <p className="text-xs text-muted-foreground">
-                            Open Meetings to draft transcript-backed follow-up emails and notes.
+                    <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                        <div>
+                          <p className="text-sm font-medium text-foreground">Transcription behavior is managed in one place</p>
+                          <p className="text-sm text-muted-foreground">
+                            AI settings now focus on analysis providers, credentials, and memory search. Hotkey behavior, Smart Format, and capture defaults stay in Transcription.
                           </p>
                         </div>
-                        <Button variant="secondary" size="sm" onClick={() => requestMainView("recordings")}>
-                          Open Meetings
+                        <Button variant="secondary" onClick={() => setActiveTab("asr")}>
+                          Open Transcription
                         </Button>
                       </div>
-                      
-                      <div className="space-y-2">
-                        <Label>Search mode</Label>
-                        <select
-                          value={settings.transcription.memorySearchMode}
-                          onChange={(e: any) =>
-                            void updateSettings({
-                              ...settings,
-                              transcription: {
-                                ...settings.transcription,
-                                memorySearchMode: e.target.value as "fts" | "ollama_embeddings",
-                              },
-                            })
-                          }
-                          className="w-full p-2 border rounded-md bg-background"
-                        >
-                          <option value="fts">Full-text search (built-in, no setup needed)</option>
-                          <option value="ollama_embeddings">Ollama Embeddings (semantic search, requires Ollama)</option>
-                        </select>
-                      </div>
-
-                      {settings.transcription.memorySearchMode === "ollama_embeddings" && (
-                        <>
-                          <div className="space-y-2">
-                            <Label>Embedding model</Label>
-                            <Input
-                              value={settings.transcription.embeddingModel}
-                              onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                                void updateSettings({
-                                  ...settings,
-                                  transcription: {
-                                    ...settings.transcription,
-                                    embeddingModel: e.target.value,
-                                  },
-                                })
-                              }
-                              placeholder="nomic-embed-text"
-                              className="font-mono text-sm"
-                            />
-                            <p className="text-xs text-muted-foreground">
-                              Ollama embedding model name. Run <code className="bg-muted px-1 rounded">ollama pull nomic-embed-text</code> first.
-                            </p>
-                          </div>
-
-                          <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 p-3">
-                            <div className="space-y-0.5">
-                              <p className="text-sm font-medium">Re-index embeddings</p>
-                              <p className="text-xs text-muted-foreground">
-                                Generate embeddings for all existing transcripts. Required after changing models.
-                              </p>
-                            </div>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => {
-                                void (async () => {
-                                  try {
-                                    const { reindexEmbeddings } = await import("@/lib/tauri");
-                                    const result = await reindexEmbeddings();
-                                    toast(
-                                      `Indexed ${result.segments} segments from ${result.recordings} recordings${result.errors > 0 ? ` (${result.errors} errors)` : ""}`,
-                                      result.errors > 0 ? "error" : "success"
-                                    );
-                                  } catch (err) {
-                                    toast(err instanceof Error ? err.message : String(err), "error");
-                                  }
-                                })();
-                              }}
-                            >
-                              <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-                              Re-index
-                            </Button>
-                          </div>
-                        </>
-                      )}
                     </div>
+
+                    {renderSharedDictationControls({
+                      includeCoreControls: false,
+                      includeKeyManager: true,
+                      includeMemory: true,
+                    })}
                   </div>
                 )}
               </CardContent>
@@ -4608,6 +4321,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
           {!isSaving && hasUnsavedChanges && (
             <div className="text-sm text-muted-foreground">Changes queued for save...</div>
           )}
+              </div>
+            </section>
+          </div>
         </div>
       </div>
     </div>

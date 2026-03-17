@@ -6,7 +6,7 @@
  * Run once from the nautilus-bot directory after `npm install`:
  *   node scripts/setup-updater-key.js
  *
- * Keep the printed PRIVATE KEY in TAURI_PRIVATE_KEY (CI/CD secret).
+ * Keep the printed PRIVATE KEY in TAURI_SIGNING_PRIVATE_KEY (CI/CD secret).
  * NEVER commit the private key to git.
  */
 const { spawnSync } = require("child_process");
@@ -61,6 +61,6 @@ fs.writeFileSync(TAURI_CONF, JSON.stringify(conf, null, 2) + "\n");
 
 console.log(`\n✅  Updated src-tauri/tauri.conf.json with the generated public key.`);
 console.log("\n⚠️   Save the PRIVATE KEY printed above as:");
-console.log("      TAURI_PRIVATE_KEY  — CI/CD secret (GitHub Actions, etc.)");
-console.log("      TAURI_KEY_PASSWORD — if you set a password above");
+console.log("      TAURI_SIGNING_PRIVATE_KEY          — CI/CD secret (GitHub Actions, etc.)");
+console.log("      TAURI_SIGNING_PRIVATE_KEY_PASSWORD — if you set a password above");
 console.log("\n    Do NOT commit the private key to git.");

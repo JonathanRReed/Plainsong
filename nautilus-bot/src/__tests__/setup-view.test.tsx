@@ -171,7 +171,7 @@ describe("SetupView", () => {
     expect(screen.getByRole("button", { name: "Rerun onboarding" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Fix dictation setup" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: "Set up meetings" }).length).toBeGreaterThan(0);
-    expect(screen.getByText(/every route’s runtime state/i)).toBeInTheDocument();
+    expect(screen.getByText(/every route's runtime state/i)).toBeInTheDocument();
   });
 
   it("downloads a missing provider model and refreshes runtime probes", async () => {

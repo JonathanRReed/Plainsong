@@ -8,6 +8,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "category": "Productivity",
     "copyright": "© 2026 NautilusBot. All rights reserved.",

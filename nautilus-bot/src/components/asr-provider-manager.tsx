@@ -3,12 +3,17 @@ import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
 import {
+  isDictationOnlyProvider as sharedIsDictationOnlyProvider,
   isMeetingEligibleModel as sharedIsMeetingEligibleModel,
   isMeetingEligibleProvider as sharedIsMeetingEligibleProvider,
+  isSharedMeetingCompatible as sharedIsSharedMeetingCompatible,
   isVisibleAsrProvider,
   modelSupportsMlxAcceleration,
-  visibleRouteForMlxModel,
 } from "@/lib/asr-capabilities";
+import {
+  mergeSelectionStateUpdate,
+  selectionStateFromSettings,
+} from "@/lib/asr-route-selection";
 import {
   refreshAsrRuntimeProbes,
   repairLocalModelCache,
@@ -95,15 +100,8 @@ export function AsrProviderManager({
     { value: "windows_foundry_local", label: "Windows Foundry Local" },
   ] as const;
 
-  const dictationOnlyProviders = new Set<AsrProviderType>([
-    "macos_apple_speech",
-    "windows_sdk_dictation",
-    "moonshine",
-    "whisper",
-  ]);
-
   const isMeetingEligibleProvider = (providerType: AsrProviderType) =>
-    !dictationOnlyProviders.has(providerType) &&
+    !sharedIsDictationOnlyProvider(providerType) &&
     sharedIsMeetingEligibleProvider(providerType);
 
   const isMeetingEligibleModel = (providerType: AsrProviderType, modelId: string) => {
@@ -120,36 +118,13 @@ export function AsrProviderManager({
   };
 
   const isSharedMeetingCompatible = (providerType: AsrProviderType, modelId: string) =>
-    isMeetingEligibleProvider(providerType) && isMeetingEligibleModel(providerType, modelId);
-
-  const fallbackMeetingProvider = (preferred?: AsrProviderType) => {
-    if (preferred && isMeetingEligibleProvider(preferred)) {
-      return preferred;
-    }
-
-    const providerFromList = providers.find((provider) =>
-      isMeetingEligibleProvider(provider.providerType)
-    )?.providerType;
-
-    return providerFromList ?? "distil_whisper";
-  };
+    sharedIsSharedMeetingCompatible(providerType, modelId) &&
+    isMeetingEligibleModel(providerType, modelId);
 
   const meetingModelOptionsForProvider = (providerType: AsrProviderType) =>
     modelOptionsForProvider(providerType).filter((option) =>
       isMeetingEligibleModel(providerType, option.id)
     );
-
-  const fallbackMeetingModel = (providerType: AsrProviderType, preferred?: string) => {
-    if (preferred && isMeetingEligibleModel(providerType, preferred)) {
-      return preferred;
-    }
-
-    return (
-      meetingModelOptionsForProvider(providerType)[0]?.id ??
-      modelOptionsForProvider(providerType)[0]?.id ??
-      providerType
-    );
-  };
 
   const defaultPlatformSettings = (): PlatformOptimizationSettings => ({
     mode: "auto",
@@ -378,100 +353,19 @@ export function AsrProviderManager({
   const loadSelectionSettings = async (providerListOverride?: AsrProviderInfo[]) => {
     try {
       const providerList = providerListOverride ?? providers;
-      const modelOptionsForProviderFromList = (providerType: AsrProviderType) =>
-        providerList.find((provider) => provider.providerType === providerType)?.modelOptions ?? [];
       const settings = await getSettings();
-      let loadedDefaultProvider =
-        (settings.transcription.defaultProvider as AsrProviderType) ?? "distil_whisper";
-      let loadedDefaultModelId = settings.transcription.selectedModelId ?? "distil-large-v3.5";
-      let loadedDictationProvider =
-        (settings.transcription.dictationProvider as AsrProviderType) ??
-        loadedDefaultProvider;
-      let loadedDictationModelId =
-        settings.transcription.dictationModelId ?? loadedDefaultModelId;
-      let loadedMeetingProvider =
-        (settings.transcription.meetingProvider as AsrProviderType) ?? loadedDefaultProvider;
-      let loadedMeetingModelId =
-        settings.transcription.meetingModelId ?? loadedDefaultModelId;
-      const migratedMlxProviders: AsrProviderType[] = [];
-      if (loadedDefaultProvider === "mlx_audio") {
-        const mapped = visibleRouteForMlxModel(loadedDefaultModelId);
-        if (mapped) {
-          loadedDefaultProvider = mapped.providerType;
-          loadedDefaultModelId = mapped.modelId;
-          migratedMlxProviders.push(mapped.providerType);
-        }
-      }
-      if (loadedDictationProvider === "mlx_audio") {
-        const mapped = visibleRouteForMlxModel(loadedDictationModelId);
-        if (mapped) {
-          loadedDictationProvider = mapped.providerType;
-          loadedDictationModelId = mapped.modelId;
-          migratedMlxProviders.push(mapped.providerType);
-        }
-      }
-      if (loadedMeetingProvider === "mlx_audio") {
-        const mapped = visibleRouteForMlxModel(loadedMeetingModelId);
-        if (mapped) {
-          loadedMeetingProvider = mapped.providerType;
-          loadedMeetingModelId = mapped.modelId;
-          migratedMlxProviders.push(mapped.providerType);
-        }
-      }
-      const loadedMeetingRoutePolicy =
-        settings.transcription.meetingRoutePolicy === "best_available"
-          ? "best_available"
-          : "prefer_local";
-      const sharedProviderEligible = !dictationOnlyProviders.has(loadedDefaultProvider);
-      const sharedModelEligible =
-        !loadedDefaultModelId.trim() ||
-        modelOptionsForProviderFromList(loadedDefaultProvider).some(
-          (option) => option.id === loadedDefaultModelId.trim()
-        );
-      const sanitizedShared =
-        (settings.transcription.useSharedAsrSelection ?? true) &&
-        sharedProviderEligible &&
-        sharedModelEligible;
-      const splittingSharedSelection =
-        (settings.transcription.useSharedAsrSelection ?? true) && !sanitizedShared;
-      const sanitizedDictationProvider = splittingSharedSelection
-        ? loadedDefaultProvider
-        : loadedDictationProvider;
-      const sanitizedDictationModelId = splittingSharedSelection
-        ? loadedDefaultModelId
-        : loadedDictationModelId;
-      const sanitizedMeetingProvider = sanitizedShared
-        ? loadedDefaultProvider
-        : fallbackMeetingProvider(loadedMeetingProvider);
-      const sanitizedMeetingModelId = sanitizedShared
-        ? loadedDefaultModelId
-        : fallbackMeetingModel(
-            sanitizedMeetingProvider,
-            loadedMeetingProvider === sanitizedMeetingProvider ? loadedMeetingModelId : undefined
-          );
-      // Migrate legacy mlxAcceleratedProviders list → per-slot booleans when new flags absent.
-      let loadedDictationMlxEnabled = settings.transcription.dictationMlxEnabled ?? false;
-      let loadedMeetingMlxEnabled = settings.transcription.meetingMlxEnabled ?? false;
-      if (!loadedDictationMlxEnabled && !loadedMeetingMlxEnabled) {
-        const legacy = (settings.transcription.mlxAcceleratedProviders ?? []) as AsrProviderType[];
-        if (legacy.includes(sanitizedDictationProvider) || migratedMlxProviders.includes(sanitizedDictationProvider)) {
-          loadedDictationMlxEnabled = true;
-        }
-        if (legacy.includes(sanitizedMeetingProvider) || migratedMlxProviders.includes(sanitizedMeetingProvider)) {
-          loadedMeetingMlxEnabled = true;
-        }
-      }
+      const selection = selectionStateFromSettings(providerList, settings.transcription);
 
-      setDefaultProvider(loadedDefaultProvider);
-      setDefaultModelId(loadedDefaultModelId);
-      setUseSharedAsrSelection(sanitizedShared);
-      setDictationProvider(sanitizedDictationProvider);
-      setDictationModelId(sanitizedDictationModelId);
-      setMeetingProvider(sanitizedMeetingProvider);
-      setMeetingModelId(sanitizedMeetingModelId);
-      setDictationMlxEnabled(loadedDictationMlxEnabled);
-      setMeetingMlxEnabled(loadedMeetingMlxEnabled);
-      setMeetingRoutePolicy(loadedMeetingRoutePolicy);
+      setDefaultProvider(selection.defaultProvider);
+      setDefaultModelId(selection.defaultModelId);
+      setUseSharedAsrSelection(selection.useSharedAsrSelection);
+      setDictationProvider(selection.dictationProvider);
+      setDictationModelId(selection.dictationModelId);
+      setMeetingProvider(selection.meetingProvider);
+      setMeetingModelId(selection.meetingModelId);
+      setDictationMlxEnabled(selection.dictationMlxEnabled);
+      setMeetingMlxEnabled(selection.meetingMlxEnabled);
+      setMeetingRoutePolicy(selection.meetingRoutePolicy);
     } catch (error) {
       console.error("Failed to load ASR selection settings:", error);
     }
@@ -490,75 +384,61 @@ export function AsrProviderManager({
     meetingRoutePolicy?: "prefer_local" | "best_available";
   }) => {
     const settings = await getSettings();
-    const nextUseShared = updates.useSharedAsrSelection ?? useSharedAsrSelection;
-    const nextDefaultProvider = updates.defaultProvider ?? defaultProvider;
-    const nextSelectedModelId = updates.selectedModelId ?? defaultModelId;
-    const nextDictationProvider = updates.dictationProvider ?? dictationProvider;
-    const nextDictationModelId = updates.dictationModelId ?? dictationModelId;
-    const nextMeetingProvider = updates.meetingProvider ?? meetingProvider;
-    const nextMeetingModelId = updates.meetingModelId ?? meetingModelId;
-    const nextDictationMlxEnabled = updates.dictationMlxEnabled ?? dictationMlxEnabled;
-    const nextMeetingMlxEnabled = updates.meetingMlxEnabled ?? meetingMlxEnabled;
-    const nextMeetingRoutePolicy = updates.meetingRoutePolicy ?? meetingRoutePolicy;
-    const sanitizedShared =
-      nextUseShared && isSharedMeetingCompatible(nextDefaultProvider, nextSelectedModelId);
-    const splittingSharedSelection = nextUseShared && !sanitizedShared;
-    const sanitizedMeetingProvider = sanitizedShared
-      ? nextDefaultProvider
-      : fallbackMeetingProvider(nextMeetingProvider);
-    const sanitizedMeetingModelId = sanitizedShared
-      ? nextSelectedModelId
-      : fallbackMeetingModel(
-          sanitizedMeetingProvider,
-          sanitizedMeetingProvider === nextMeetingProvider ? nextMeetingModelId : undefined
-        );
-    const sanitizedDictationProvider =
-      splittingSharedSelection && !updates.dictationProvider
-        ? nextDefaultProvider
-        : sanitizedShared
-          ? nextDefaultProvider
-          : nextDictationProvider;
-    const sanitizedDictationModelId =
-      splittingSharedSelection && !updates.dictationModelId
-        ? nextSelectedModelId
-        : sanitizedShared
-          ? nextSelectedModelId
-          : nextDictationModelId;
-    // Guard: MLX flag only applies when the provider supports it for the chosen model.
-    const sanitizedDictationMlx =
-      nextDictationMlxEnabled &&
-      providerHasMlxAcceleration(sanitizedDictationProvider, sanitizedDictationModelId);
-    const sanitizedMeetingMlx =
-      nextMeetingMlxEnabled &&
-      providerHasMlxAcceleration(sanitizedMeetingProvider, sanitizedMeetingModelId);
+    const selection = mergeSelectionStateUpdate(
+      providers,
+      {
+        defaultProvider,
+        defaultModelId,
+        useSharedAsrSelection,
+        dictationProvider,
+        dictationModelId,
+        meetingProvider,
+        meetingModelId,
+        dictationMlxEnabled,
+        meetingMlxEnabled,
+        meetingRoutePolicy,
+      },
+      {
+        defaultProvider: updates.defaultProvider,
+        defaultModelId: updates.selectedModelId,
+        useSharedAsrSelection: updates.useSharedAsrSelection,
+        dictationProvider: updates.dictationProvider,
+        dictationModelId: updates.dictationModelId,
+        meetingProvider: updates.meetingProvider,
+        meetingModelId: updates.meetingModelId,
+        dictationMlxEnabled: updates.dictationMlxEnabled,
+        meetingMlxEnabled: updates.meetingMlxEnabled,
+        meetingRoutePolicy: updates.meetingRoutePolicy,
+      }
+    );
 
     await saveSettings({
       ...settings,
       transcription: {
         ...settings.transcription,
-        useSharedAsrSelection: sanitizedShared,
-        defaultProvider: nextDefaultProvider,
-        selectedModelId: nextSelectedModelId,
-        dictationProvider: sanitizedDictationProvider,
-        dictationModelId: sanitizedDictationModelId,
-        meetingProvider: sanitizedMeetingProvider,
-        meetingModelId: sanitizedMeetingModelId,
-        dictationMlxEnabled: sanitizedDictationMlx,
-        meetingMlxEnabled: sanitizedMeetingMlx,
-        meetingRoutePolicy: nextMeetingRoutePolicy,
+        useSharedAsrSelection: selection.useSharedAsrSelection,
+        defaultProvider: selection.defaultProvider,
+        selectedModelId: selection.defaultModelId,
+        dictationProvider: selection.dictationProvider,
+        dictationModelId: selection.dictationModelId,
+        meetingProvider: selection.meetingProvider,
+        meetingModelId: selection.meetingModelId,
+        dictationMlxEnabled: selection.dictationMlxEnabled,
+        meetingMlxEnabled: selection.meetingMlxEnabled,
+        meetingRoutePolicy: selection.meetingRoutePolicy,
       },
     });
 
-    setUseSharedAsrSelection(sanitizedShared);
-    setDefaultProvider(nextDefaultProvider);
-    setDefaultModelId(nextSelectedModelId);
-    setDictationProvider(sanitizedDictationProvider);
-    setDictationModelId(sanitizedDictationModelId);
-    setMeetingProvider(sanitizedMeetingProvider);
-    setMeetingModelId(sanitizedMeetingModelId);
-    setDictationMlxEnabled(sanitizedDictationMlx);
-    setMeetingMlxEnabled(sanitizedMeetingMlx);
-    setMeetingRoutePolicy(nextMeetingRoutePolicy);
+    setUseSharedAsrSelection(selection.useSharedAsrSelection);
+    setDefaultProvider(selection.defaultProvider);
+    setDefaultModelId(selection.defaultModelId);
+    setDictationProvider(selection.dictationProvider);
+    setDictationModelId(selection.dictationModelId);
+    setMeetingProvider(selection.meetingProvider);
+    setMeetingModelId(selection.meetingModelId);
+    setDictationMlxEnabled(selection.dictationMlxEnabled);
+    setMeetingMlxEnabled(selection.meetingMlxEnabled);
+    setMeetingRoutePolicy(selection.meetingRoutePolicy);
     await loadProviders();
   };
 
@@ -639,7 +519,7 @@ export function AsrProviderManager({
 
   const providerUiDescription = (provider: AsrProviderInfo) =>
     provider.providerType === "mlx_audio"
-      ? "Extra Apple Silicon MLX routes that do not map cleanly to another Nautilus provider family. Use the MLX toggle on Whisper and Moonshine when you want the same family through mlx-audio."
+      ? "Extra Apple Silicon MLX routes that do not map cleanly to another Nautilus provider family. Use the MLX toggle on Whisper, Moonshine, Parakeet, and Voxtral when you want the same family through mlx-audio."
       : provider.description;
 
   const providerUsesManagedModel = (providerType: AsrProviderType) =>
@@ -1724,8 +1604,8 @@ export function AsrProviderManager({
               {!isSharedMeetingCompatible(defaultProvider, defaultModelId) ? (
                 <p className="text-xs text-amber-300">
                   Meetings use meeting-grade ASR only. Apple Native Speech, Windows Native Speech,
-                  Moonshine, and standard Whisper are dictation-only, so meetings will use a
-                  separate stronger model instead.
+                  Moonshine, Whisper Candle, and standard Whisper are dictation-only, so meetings
+                  will use a separate stronger model instead.
                 </p>
               ) : null}
               <label className="space-y-1 text-sm">
@@ -1814,11 +1694,11 @@ export function AsrProviderManager({
                   useSharedAsrSelection ? defaultModelId : dictationModelId,
                   useSharedAsrSelection ? "shared" : "dictation"
                 )}
-                {!useSharedAsrSelection && dictationProvider !== defaultProvider ? (
+                {!useSharedAsrSelection && dictationProvider !== meetingProvider ? (
                   <p className="text-xs text-amber-500">
-                    ⚠ Dictation is using{" "}
+                    Dictation is using{" "}
                     {providerByType(dictationProvider)?.name ?? dictationProvider}, not{" "}
-                    {providerByType(defaultProvider)?.name ?? defaultProvider}.
+                    {providerByType(meetingProvider)?.name ?? meetingProvider}.
                   </p>
                 ) : null}
                 {!useSharedAsrSelection ? (
@@ -1863,11 +1743,11 @@ export function AsrProviderManager({
                 {!useSharedAsrSelection
                   ? renderMlxAccelerationToggle(meetingProvider, meetingModelId, "meeting")
                   : null}
-                {!useSharedAsrSelection && meetingProvider !== defaultProvider ? (
+                {!useSharedAsrSelection && meetingProvider !== dictationProvider ? (
                   <p className="text-xs text-amber-500">
-                    ⚠ Meeting is using{" "}
+                    Meeting is using{" "}
                     {providerByType(meetingProvider)?.name ?? meetingProvider}, not{" "}
-                    {providerByType(defaultProvider)?.name ?? defaultProvider}.
+                    {providerByType(dictationProvider)?.name ?? dictationProvider}.
                   </p>
                 ) : null}
               </div>
@@ -2110,7 +1990,7 @@ export function AsrProviderManager({
                     {platformSettings.manualEnginePriority.map((engineId, index) => (
                       <div key={`${engineId}-${index}`} className="flex flex-wrap items-center gap-2">
                         <select
-                          className="min-w-[220px] flex-1 rounded-md border bg-background px-3 py-2 text-sm"
+                          className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2 text-sm"
                           value={engineId}
                           disabled={platformSaveBusy}
                           onChange={(event) => {

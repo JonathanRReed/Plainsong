@@ -92,6 +92,7 @@ impl MixedAudioCapture {
         &mut self,
         capture_mic: bool,
         capture_system: bool,
+        mic_device: Option<cpal::Device>,
         waveform_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
         streaming_queue: Option<Arc<crossbeam::queue::ArrayQueue<Vec<f32>>>>,
     ) -> Result<MixedAudioCaptureStart> {
@@ -142,9 +143,11 @@ impl MixedAudioCapture {
             let mut system_sample_rate = None;
 
             if capture_mic {
+                let preferred_mic_device = mic_device.clone();
                 let mut setup = || -> Result<cpal::Stream> {
-                    let device = host
-                        .default_input_device()
+                    let device = preferred_mic_device
+                        .clone()
+                        .or_else(|| host.default_input_device())
                         .context("No microphone available")?;
                     let config = device.default_input_config()?;
                     mic_sample_rate = Some(config.sample_rate().0);

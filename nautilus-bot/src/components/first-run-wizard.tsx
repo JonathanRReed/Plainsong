@@ -324,6 +324,16 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       setLoopbackDevice(detectedLoopbackDevice);
       setMeetingRecommendedRoute(getRecommendedMeetingRoute(providers));
       return { routeReady, systemAudioAvailable };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setMeetingRouteSummary("Meeting setup check failed");
+      setMeetingRouteReady(false);
+      setMeetingRouteError(message || "Could not verify the meeting setup right now.");
+      setMeetingVerificationDetails([]);
+      setMeetingSystemAudioAvailable(null);
+      setLoopbackDevice(null);
+      setMeetingRecommendedRoute(null);
+      return { routeReady: false, systemAudioAvailable: false };
     } finally {
       setMeetingSetupLoading(false);
     }
