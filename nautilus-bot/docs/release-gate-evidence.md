@@ -1,6 +1,6 @@
 # Release Gate Evidence
 
-This file records launch-gate outcomes after the March hardening pass and blocker-first strict run on **2026-03-05**.
+This file records launch-gate outcomes after the March hardening pass, the blocker-first strict run on **2026-03-05**, and the local ship-path verification refresh on **2026-03-20**.
 
 ## Frontend Gates
 
@@ -24,8 +24,12 @@ This file records launch-gate outcomes after the March hardening pass and blocke
 
 | Command | Outcome | Notes |
 | --- | --- | --- |
-| `node scripts/size-gate.mjs --app src-tauri/target/release/bundle/macos/Nautilus.app --max-mb 35` | PASS | 32.37 MB |
+| `node scripts/size-gate.mjs --app src-tauri/target/release/bundle/macos/Nautilus.app --max-mb 35` | PASS | 33.7 MB after removing the packaged benchmark helper binary |
 | `node scripts/cold-start-gate.mjs --threshold-ms 2500 --ready-command "pgrep -f '/Nautilus.app/Contents/MacOS/nautilus-bot'" -- <launch-command>` | PASS (historical) | 168 ms on prior baseline run |
+| `npm run tauri build -- --bundles app` | PASS (local packaging path) | Succeeds without updater artifacts when no `TAURI_SIGNING_PRIVATE_KEY` is present |
+| `TAURI_SIGNING_PRIVATE_KEY_PATH=<temp-key> TAURI_SIGNING_PRIVATE_KEY_PASSWORD=<password> npm run tauri build -- --bundles app` | PASS (local signed updater path) | Generated `Nautilus.app.tar.gz` and `Nautilus.app.tar.gz.sig`; production release still requires the canonical private key that matches the committed updater public key |
+| `codesign --verify --deep --strict --verbose=2 src-tauri/target/release/bundle/macos/Nautilus.app` | PASS | Local bundle signature validates with the dev identity |
+| `spctl -a -vv src-tauri/target/release/bundle/macos/Nautilus.app` | FAIL (expected) | Rejected as `origin=Nautilus Local Dev`; real Gatekeeper acceptance still requires Apple release signing + notarization |
 
 ## Strict Artifact Gates (Blocked-First Run)
 
@@ -52,4 +56,5 @@ This file records launch-gate outcomes after the March hardening pass and blocke
   - `docs/dictation-app-compatibility-matrix.md`
   - `docs/dictation-blocked-app-register.md`
 - Cloud smoke gate is blocked by missing required live keys: `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `MISTRAL_API_KEY`.
-- Signed update/install validation remains blocked by unavailable Apple notarization setup and Windows signing certificate.
+- Signed updater artifact generation is now proven locally, but production update validation still depends on the canonical updater private key matching `plugins.updater.pubkey`.
+- Signed install validation remains blocked by unavailable Apple notarization setup and Windows signing certificate.

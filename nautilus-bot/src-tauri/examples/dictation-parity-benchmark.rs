@@ -1,4 +1,4 @@
-#[path = "../dictation_parity.rs"]
+#[path = "../src/dictation_parity.rs"]
 mod dictation_parity;
 
 use dictation_parity::{
@@ -8,11 +8,13 @@ use std::fs;
 use std::path::PathBuf;
 
 fn arg_value(args: &[String], name: &str, default: Option<&str>) -> String {
-    args.windows(2)
-        .find(|window| window[0] == name)
-        .map(|window| window[1].clone())
-        .or_else(|| default.map(str::to_string))
-        .unwrap_or_default()
+    let mut resolved = default.map(str::to_string).unwrap_or_default();
+    for window in args.windows(2) {
+        if window[0] == name {
+            resolved = window[1].clone();
+        }
+    }
+    resolved
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

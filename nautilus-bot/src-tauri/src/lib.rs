@@ -125,7 +125,7 @@ const DEFAULT_HANDS_FREE_SILENCE_TIMEOUT_SECONDS: f32 = 1.8;
 const MIN_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 0.8;
 const MAX_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 30.0;
 const DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
-const DICTATION_IDLE_RESET_SUCCESS_MS: u64 = 650;
+const DICTATION_IDLE_RESET_SUCCESS_MS: u64 = 1800;
 const DICTATION_IDLE_RESET_STARTUP_ERROR_MS: u64 = 900;
 const DICTATION_IDLE_RESET_SHORT_ERROR_MS: u64 = 900;
 const DICTATION_IDLE_RESET_ERROR_MS: u64 = 1300;
@@ -194,6 +194,32 @@ impl DictationInsertionMode {
             Self::Inline => "inline",
             Self::ClipboardOnly => "clipboard_only",
         }
+    }
+}
+
+fn dictation_cursor_insert_required(mode: &str) -> bool {
+    !matches!(
+        DictationInsertionMode::from_settings_value(mode),
+        DictationInsertionMode::ClipboardOnly
+    )
+}
+
+fn dictation_cursor_insert_ready(mode: &str, permissions: &PermissionDiagnostics) -> bool {
+    !dictation_cursor_insert_required(mode) || permissions.cursor_insertion_ready
+}
+
+fn describe_dictation_cursor_insert_status(
+    mode: &str,
+    permissions: &PermissionDiagnostics,
+) -> &'static str {
+    if !dictation_cursor_insert_required(mode) {
+        "not needed (clipboard only)"
+    } else if dictation_cursor_insert_ready(mode, permissions) && !permissions.accessibility_ready {
+        "ready via keyboard fallback"
+    } else if dictation_cursor_insert_ready(mode, permissions) {
+        "ready"
+    } else {
+        "needs access"
     }
 }
 
@@ -1746,6 +1772,10 @@ async fn verify_dictation_setup(
 ) -> Result<SetupVerificationResult, String> {
     let permissions = collect_permission_diagnostics(state.inner(), Vec::new()).await;
     let settings = state.settings_manager.lock().await.settings().clone();
+    let dictation_insertion_mode = settings.transcription.dictation_insertion_mode.as_str();
+    let cursor_insert_required = dictation_cursor_insert_required(dictation_insertion_mode);
+    let cursor_insert_ready =
+        dictation_cursor_insert_ready(dictation_insertion_mode, &permissions);
 
     let mut details = vec![
         format!(
@@ -1758,11 +1788,7 @@ async fn verify_dictation_setup(
         ),
         format!(
             "Cursor insert: {}",
-            if permissions.accessibility_ready {
-                "ready"
-            } else {
-                "needs access"
-            }
+            describe_dictation_cursor_insert_status(dictation_insertion_mode, &permissions)
         ),
     ];
 
@@ -1799,7 +1825,7 @@ async fn verify_dictation_setup(
             }
 
             let ok = permissions.microphone_ready
-                && permissions.accessibility_ready
+                && cursor_insert_ready
                 && (provider != asr::AsrProviderType::MacosAppleSpeech
                     || permissions.speech_recognition_ready);
 
@@ -1807,7 +1833,13 @@ async fn verify_dictation_setup(
                 ok,
                 title: "Dictation verification".to_string(),
                 summary: if ok {
-                    "Dictation route, microphone, and insertion permissions are ready.".to_string()
+                    if cursor_insert_required {
+                        "Dictation route, microphone, and insertion permissions are ready."
+                            .to_string()
+                    } else {
+                        "Dictation route and microphone are ready. Clipboard-only delivery does not need cursor insertion."
+                            .to_string()
+                    }
                 } else {
                     "Dictation route resolved, but one or more permissions still need attention."
                         .to_string()
@@ -4941,7 +4973,7 @@ async fn learn_dictation_correction(
 ) -> Result<models::LearnDictationCorrectionResult, String> {
     let candidate = match infer_learned_correction_result(&request) {
         Ok(candidate) => candidate,
-        Err(result) => return Ok(result),
+        Err(result) => return Ok(*result),
     };
 
     let mut db = state.db.lock().await;
@@ -6512,6 +6544,7 @@ async fn save_settings(
             provider_model_map_to_settings(&provider_model_map);
 
         let dictation_options = dictation_options_from_settings(&settings);
+        let ui_settings = settings.ui.clone();
         state
             .asr_manager
             .set_provider_model_map(provider_model_map)
@@ -6665,6 +6698,7 @@ async fn save_settings(
         sync_dictation_overlay_visibility(state.inner(), &app).await;
         sync_recording_overlay_visibility(state.inner(), &app).await;
         sync_primary_tray(app.clone()).await;
+        apply_main_window_ui_settings(&app, &ui_settings);
 
         Ok(())
     }
@@ -8728,10 +8762,7 @@ async fn stop_dictation_session_for_session(
                 .await
         }
     }
-    .map_err(|error| {
-        let message = error.to_string();
-        message
-    });
+    .map_err(|error| error.to_string());
 
     let mut result = match result {
         Ok(result) => result,
@@ -9558,7 +9589,6 @@ async fn stop_dictation_session_for_session(
             Some(stop_reason),
             Some(outcome),
         );
-        hide_overlay_window(app, DICTATION_OVERLAY_LABEL);
         schedule_dictation_idle_reset(
             app.clone(),
             session_id,
@@ -10041,6 +10071,10 @@ async fn force_stop_dictation_session(
     Ok("Dictation force stopped".to_string())
 }
 
+fn should_render_dictation_overlay_state(phase: &str, dismissed: bool) -> bool {
+    !dismissed && !matches!(phase, "idle")
+}
+
 async fn should_show_dictation_overlay(state: &AppState) -> bool {
     let settings_manager = state.settings_manager.lock().await;
     let popup_enabled = settings_manager.settings().ui.show_dictation_popup;
@@ -10053,7 +10087,7 @@ async fn should_show_dictation_overlay(state: &AppState) -> bool {
     state
         .dictation_overlay_state
         .lock()
-        .map(|overlay| !overlay.dismissed && !matches!(overlay.phase.as_str(), "idle" | "done"))
+        .map(|overlay| should_render_dictation_overlay_state(&overlay.phase, overlay.dismissed))
         .unwrap_or(false)
 }
 
@@ -10533,9 +10567,10 @@ fn emit_recording_state(
         state.system_audio_active = system_audio_active;
         state.consent_prompt_shown = consent_prompt_shown;
         state.message = message.map(str::to_string);
-        if phase == "idle" {
-            state.dismissed = false;
-        } else if previous_phase == "idle" || previous_recording_id.as_deref() != recording_id {
+        if phase == "idle"
+            || previous_phase == "idle"
+            || previous_recording_id.as_deref() != recording_id
+        {
             state.dismissed = false;
         }
     }
@@ -11139,17 +11174,7 @@ async fn prepare_dictation_overlay_for_external_insert(
 }
 
 fn show_main_window(app: &AppHandle) -> Result<(), String> {
-    let window = app.get_webview_window("main").or_else(|| {
-        app.webview_windows()
-            .into_iter()
-            .find_map(|(label, window)| {
-                if label == DICTATION_OVERLAY_LABEL || label == RECORDING_OVERLAY_LABEL {
-                    None
-                } else {
-                    Some(window)
-                }
-            })
-    });
+    let window = get_main_window(app);
 
     let Some(window) = window else {
         return Err("Main window was not found".to_string());
@@ -11167,6 +11192,35 @@ fn show_main_window(app: &AppHandle) -> Result<(), String> {
     window.show().map_err(|e| e.to_string())?;
     window.set_focus().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+fn get_main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    app.get_webview_window("main").or_else(|| {
+        app.webview_windows()
+            .into_iter()
+            .find_map(|(label, window)| {
+                if label == DICTATION_OVERLAY_LABEL || label == RECORDING_OVERLAY_LABEL {
+                    None
+                } else {
+                    Some(window)
+                }
+            })
+    })
+}
+
+fn apply_main_window_ui_settings(app: &AppHandle, ui_settings: &settings::UiSettings) {
+    let Some(window) = get_main_window(app) else {
+        tracing::warn!("Main window was not found while applying UI settings");
+        return;
+    };
+
+    if let Err(error) = window.set_always_on_top(ui_settings.always_on_top) {
+        tracing::warn!(
+            "Failed to apply always-on-top={} to main window: {}",
+            ui_settings.always_on_top,
+            error
+        );
+    }
 }
 
 pub(crate) fn normalize_provider_secret_name(provider: &str) -> Result<&'static str, String> {
@@ -12442,21 +12496,21 @@ fn infer_learned_correction_result(
     request: &models::LearnDictationCorrectionRequest,
 ) -> Result<
     crate::dictation_parity::LearnedCorrectionCandidate,
-    models::LearnDictationCorrectionResult,
+    Box<models::LearnDictationCorrectionResult>,
 > {
     crate::dictation_parity::infer_learned_correction(
         &request.original_text,
         &request.corrected_text,
         request.force,
     )
-    .map_err(|reason| models::LearnDictationCorrectionResult {
+    .map_err(|reason| Box::new(models::LearnDictationCorrectionResult {
         learned: false,
         action: None,
         reason: Some(reason),
         spoken_form: None,
         replacement: None,
         entry: None,
-    })
+    }))
 }
 
 fn apply_learned_correction_candidate(
@@ -12621,9 +12675,9 @@ fn dictation_mode_transform_prompt(mode_preset: &str) -> Option<&'static str> {
     }
 }
 
-fn active_dictation_custom_mode<'a>(
-    settings: &'a settings::Settings,
-) -> Option<&'a settings::DictationCustomMode> {
+fn active_dictation_custom_mode(
+    settings: &settings::Settings,
+) -> Option<&settings::DictationCustomMode> {
     settings
         .transcription
         .dictation_selected_custom_mode_id
@@ -13207,41 +13261,41 @@ async fn run_title_with_provider(
 
     let raw = match provider {
         AnalysisProvider::Ollama => ollama_client
-            .generate(&selected_model, &format!("{}\n\n{}", system_prompt, prompt))
+            .generate(selected_model, &format!("{}\n\n{}", system_prompt, prompt))
             .await
             .map_err(|e| e.to_string())?,
         AnalysisProvider::OpenAi => {
             let api_key = provider_secret_for(provider)?;
             llm::OpenAIClient::with_api_key(Some(api_key))
-                .generate(&selected_model, &prompt, Some(system_prompt))
+                .generate(selected_model, &prompt, Some(system_prompt))
                 .await
                 .map_err(|e| e.to_string())?
         }
         AnalysisProvider::Anthropic => {
             let api_key = provider_secret_for(provider)?;
             llm::AnthropicClient::with_api_key(Some(api_key))
-                .generate(&selected_model, &prompt, Some(system_prompt))
+                .generate(selected_model, &prompt, Some(system_prompt))
                 .await
                 .map_err(|e| e.to_string())?
         }
         AnalysisProvider::Gemini => {
             let api_key = provider_secret_for(provider)?;
             llm::GeminiClient::with_api_key(Some(api_key))
-                .generate(&selected_model, &prompt, Some(system_prompt))
+                .generate(selected_model, &prompt, Some(system_prompt))
                 .await
                 .map_err(|e| e.to_string())?
         }
         AnalysisProvider::DeepSeek => {
             let api_key = provider_secret_for(provider)?;
             llm::DeepSeekClient::with_api_key(Some(api_key))
-                .generate(&selected_model, &prompt, Some(system_prompt))
+                .generate(selected_model, &prompt, Some(system_prompt))
                 .await
                 .map_err(|e| e.to_string())?
         }
         AnalysisProvider::OllamaCloud => {
             let api_key = provider_secret_for(provider)?;
             llm::OllamaCloudClient::with_api_key(Some(api_key))
-                .generate(&selected_model, &format!("{}\n\n{}", system_prompt, prompt))
+                .generate(selected_model, &format!("{}\n\n{}", system_prompt, prompt))
                 .await
                 .map_err(|e| e.to_string())?
         }
@@ -13967,6 +14021,12 @@ pub fn run() {
                 }
             }
 
+            let initial_ui_settings = tauri::async_runtime::block_on(async {
+                let settings_manager = state.settings_manager.lock().await;
+                settings_manager.settings().ui.clone()
+            });
+            apply_main_window_ui_settings(app.handle(), &initial_ui_settings);
+
             {
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -14586,6 +14646,14 @@ mod tests {
     }
 
     #[test]
+    fn dictation_overlay_stays_visible_for_done_until_idle_reset() {
+        assert!(should_render_dictation_overlay_state("done", false));
+        assert!(should_render_dictation_overlay_state("recording", false));
+        assert!(!should_render_dictation_overlay_state("idle", false));
+        assert!(!should_render_dictation_overlay_state("done", true));
+    }
+
+    #[test]
     fn infers_speaker_name_from_intro_phrase() {
         let segments = vec![seg("S1", "This is jonathan speaking about the roadmap.")];
         let aliases = infer_speaker_aliases_from_segments(&segments);
@@ -15155,6 +15223,64 @@ mod tests {
             "clipboard_only"
         );
         assert_eq!(normalize_dictation_insertion_mode("unknown"), "auto");
+    }
+
+    #[test]
+    fn clipboard_only_mode_does_not_require_cursor_insert() {
+        let permissions = PermissionDiagnostics {
+            microphone_ready: true,
+            microphone_permission_ready: true,
+            speech_recognition_ready: true,
+            accessibility_ready: false,
+            accessibility_trusted: false,
+            post_event_ready: false,
+            automation_ready: false,
+            cursor_insertion_ready: false,
+            cursor_insertion_observed: false,
+            preferred_insert_strategy: None,
+            available_insert_strategies: Vec::new(),
+            last_cursor_insert_status: None,
+            running_from_disk_image: false,
+            app_bundle_path: None,
+            recommended_app_bundle_path: None,
+            notes: Vec::new(),
+        };
+
+        assert!(!dictation_cursor_insert_required("clipboard_only"));
+        assert!(dictation_cursor_insert_ready("clipboard_only", &permissions));
+        assert_eq!(
+            describe_dictation_cursor_insert_status("clipboard_only", &permissions),
+            "not needed (clipboard only)"
+        );
+    }
+
+    #[test]
+    fn keyboard_fallback_counts_as_cursor_insert_ready() {
+        let permissions = PermissionDiagnostics {
+            microphone_ready: true,
+            microphone_permission_ready: true,
+            speech_recognition_ready: true,
+            accessibility_ready: false,
+            accessibility_trusted: false,
+            post_event_ready: true,
+            automation_ready: false,
+            cursor_insertion_ready: true,
+            cursor_insertion_observed: false,
+            preferred_insert_strategy: Some(CursorInsertStrategy::SimulatedTyping),
+            available_insert_strategies: vec![CursorInsertStrategy::SimulatedTyping],
+            last_cursor_insert_status: None,
+            running_from_disk_image: false,
+            app_bundle_path: None,
+            recommended_app_bundle_path: None,
+            notes: Vec::new(),
+        };
+
+        assert!(dictation_cursor_insert_required("auto"));
+        assert!(dictation_cursor_insert_ready("auto", &permissions));
+        assert_eq!(
+            describe_dictation_cursor_insert_status("auto", &permissions),
+            "ready via keyboard fallback"
+        );
     }
 
     #[test]
@@ -15900,14 +16026,16 @@ mod tests {
 
     #[test]
     fn native_providers_are_dictation_only_for_meetings() {
-        let mut transcription = settings::TranscriptionSettings::default();
-        transcription.use_shared_asr_selection = true;
-        transcription.default_provider = "macos_apple_speech".to_string();
-        transcription.selected_model_id = "macos_apple_speech".to_string();
-        transcription.dictation_provider = "macos_apple_speech".to_string();
-        transcription.dictation_model_id = "macos_apple_speech".to_string();
-        transcription.meeting_provider = "macos_apple_speech".to_string();
-        transcription.meeting_model_id = "macos_apple_speech".to_string();
+        let mut transcription = settings::TranscriptionSettings {
+            use_shared_asr_selection: true,
+            default_provider: "macos_apple_speech".to_string(),
+            selected_model_id: "macos_apple_speech".to_string(),
+            dictation_provider: "macos_apple_speech".to_string(),
+            dictation_model_id: "macos_apple_speech".to_string(),
+            meeting_provider: "macos_apple_speech".to_string(),
+            meeting_model_id: "macos_apple_speech".to_string(),
+            ..Default::default()
+        };
 
         normalize_contextual_asr_settings(&mut transcription);
 
@@ -15923,14 +16051,16 @@ mod tests {
 
     #[test]
     fn whisper_is_dictation_only_for_shared_meeting_routes() {
-        let mut transcription = settings::TranscriptionSettings::default();
-        transcription.use_shared_asr_selection = true;
-        transcription.default_provider = "whisper".to_string();
-        transcription.selected_model_id = "base.en".to_string();
-        transcription.dictation_provider = "whisper".to_string();
-        transcription.dictation_model_id = "base.en".to_string();
-        transcription.meeting_provider = "whisper".to_string();
-        transcription.meeting_model_id = "base.en".to_string();
+        let mut transcription = settings::TranscriptionSettings {
+            use_shared_asr_selection: true,
+            default_provider: "whisper".to_string(),
+            selected_model_id: "base.en".to_string(),
+            dictation_provider: "whisper".to_string(),
+            dictation_model_id: "base.en".to_string(),
+            meeting_provider: "whisper".to_string(),
+            meeting_model_id: "base.en".to_string(),
+            ..Default::default()
+        };
 
         normalize_contextual_asr_settings(&mut transcription);
 
@@ -15948,14 +16078,16 @@ mod tests {
 
     #[test]
     fn moonshine_is_dictation_only_for_meetings() {
-        let mut transcription = settings::TranscriptionSettings::default();
-        transcription.use_shared_asr_selection = true;
-        transcription.default_provider = "moonshine".to_string();
-        transcription.selected_model_id = "moonshine-base".to_string();
-        transcription.dictation_provider = "moonshine".to_string();
-        transcription.dictation_model_id = "moonshine-base".to_string();
-        transcription.meeting_provider = "moonshine".to_string();
-        transcription.meeting_model_id = "moonshine-base".to_string();
+        let mut transcription = settings::TranscriptionSettings {
+            use_shared_asr_selection: true,
+            default_provider: "moonshine".to_string(),
+            selected_model_id: "moonshine-base".to_string(),
+            dictation_provider: "moonshine".to_string(),
+            dictation_model_id: "moonshine-base".to_string(),
+            meeting_provider: "moonshine".to_string(),
+            meeting_model_id: "moonshine-base".to_string(),
+            ..Default::default()
+        };
 
         normalize_contextual_asr_settings(&mut transcription);
 
@@ -15999,14 +16131,16 @@ mod tests {
 
     #[test]
     fn whisper_candle_is_dictation_only_for_meetings() {
-        let mut transcription = settings::TranscriptionSettings::default();
-        transcription.use_shared_asr_selection = true;
-        transcription.default_provider = "whisper_candle".to_string();
-        transcription.selected_model_id = "whisper-large-v3-turbo".to_string();
-        transcription.dictation_provider = "whisper_candle".to_string();
-        transcription.dictation_model_id = "whisper-large-v3-turbo".to_string();
-        transcription.meeting_provider = "whisper_candle".to_string();
-        transcription.meeting_model_id = "whisper-large-v3-turbo".to_string();
+        let mut transcription = settings::TranscriptionSettings {
+            use_shared_asr_selection: true,
+            default_provider: "whisper_candle".to_string(),
+            selected_model_id: "whisper-large-v3-turbo".to_string(),
+            dictation_provider: "whisper_candle".to_string(),
+            dictation_model_id: "whisper-large-v3-turbo".to_string(),
+            meeting_provider: "whisper_candle".to_string(),
+            meeting_model_id: "whisper-large-v3-turbo".to_string(),
+            ..Default::default()
+        };
 
         normalize_contextual_asr_settings(&mut transcription);
 
@@ -16024,11 +16158,13 @@ mod tests {
 
     #[test]
     fn legacy_mlx_audio_selection_migrates_to_visible_provider_toggle() {
-        let mut transcription = settings::TranscriptionSettings::default();
-        transcription.default_provider = "mlx_audio".to_string();
-        transcription.selected_model_id = "UsefulSensors/moonshine-base".to_string();
-        transcription.dictation_provider = "mlx_audio".to_string();
-        transcription.dictation_model_id = "UsefulSensors/moonshine-base".to_string();
+        let mut transcription = settings::TranscriptionSettings {
+            default_provider: "mlx_audio".to_string(),
+            selected_model_id: "UsefulSensors/moonshine-base".to_string(),
+            dictation_provider: "mlx_audio".to_string(),
+            dictation_model_id: "UsefulSensors/moonshine-base".to_string(),
+            ..Default::default()
+        };
 
         normalize_contextual_asr_settings(&mut transcription);
 
@@ -16556,6 +16692,7 @@ fn dictation_mode_label(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sync_dictation_overlay_runtime_metadata(
     app: &AppHandle,
     settings: &settings::Settings,
@@ -18148,11 +18285,9 @@ fn preferred_meeting_provider_candidates(
         }
     }
 
-    for candidate in ordered_candidates {
-        if let Some(provider) = candidate {
-            if meeting_provider_is_supported(provider) && !candidates.contains(&provider) {
-                candidates.push(provider);
-            }
+    for provider in ordered_candidates.into_iter().flatten() {
+        if meeting_provider_is_supported(provider) && !candidates.contains(&provider) {
+            candidates.push(provider);
         }
     }
     candidates
@@ -18164,12 +18299,15 @@ fn preferred_meeting_provider(
     dictation_provider: asr::AsrProviderType,
     meeting_provider: Option<asr::AsrProviderType>,
 ) -> asr::AsrProviderType {
-    for provider in preferred_meeting_provider_candidates(
+    if let Some(provider) = preferred_meeting_provider_candidates(
         policy,
         default_provider,
         dictation_provider,
         meeting_provider,
-    ) {
+    )
+    .into_iter()
+    .next()
+    {
         return provider;
     }
 
@@ -18684,6 +18822,7 @@ fn build_source_aware_models_transcript(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn transcribe_meeting_recording(
     app: &AppHandle,
     asr_manager: Arc<asr::AsrManager>,

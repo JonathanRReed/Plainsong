@@ -186,7 +186,6 @@ function makeTranscriptionSettings(
     numSpeakers: 0,
     speakerNamingMethod: "auto",
     silenceSkipEnabled: false,
-    dictationPasteToCursor: true,
     dictationPushToTalk: true,
     dictationAiFormatting: false,
     dictationCustomPrompt: null,

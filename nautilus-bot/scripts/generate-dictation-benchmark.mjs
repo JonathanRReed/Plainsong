@@ -7,9 +7,13 @@ import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);
 
 function valueFor(name, fallback = null) {
-  const index = args.indexOf(name);
-  if (index < 0 || index === args.length - 1) return fallback;
-  return args[index + 1];
+  let resolved = fallback;
+  for (let index = 0; index < args.length - 1; index += 1) {
+    if (args[index] === name) {
+      resolved = args[index + 1];
+    }
+  }
+  return resolved;
 }
 
 function run(command, commandArgs, options = {}) {
@@ -63,7 +67,7 @@ run(
     "run",
     "--manifest-path",
     "src-tauri/Cargo.toml",
-    "--bin",
+    "--example",
     "dictation-parity-benchmark",
     "--",
     "--fixtures",

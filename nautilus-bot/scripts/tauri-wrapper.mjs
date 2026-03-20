@@ -17,6 +17,14 @@ function run(command, args, options = {}) {
     ...process.env,
     ...(options.env ?? {}),
   };
+  const privateKeyPath = String(mergedEnv.TAURI_SIGNING_PRIVATE_KEY_PATH ?? "").trim();
+  const privateKey = String(mergedEnv.TAURI_SIGNING_PRIVATE_KEY ?? "").trim();
+  if (!privateKey && privateKeyPath) {
+    if (!existsSync(privateKeyPath)) {
+      throw new Error(`TAURI_SIGNING_PRIVATE_KEY_PATH does not exist: ${privateKeyPath}`);
+    }
+    mergedEnv.TAURI_SIGNING_PRIVATE_KEY = readFileSync(privateKeyPath, "utf8").trim();
+  }
   const result = spawnSync(command, args, {
     cwd: projectRoot,
     stdio: "inherit",
@@ -31,6 +39,11 @@ function run(command, args, options = {}) {
   if ((result.status ?? 1) !== 0) {
     process.exit(result.status ?? 1);
   }
+}
+
+function isTruthyEnv(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
 }
 
 function resolveLocalMacSigningIdentity() {
@@ -120,12 +133,70 @@ function ensureUpdaterPubkey() {
     return;
   }
 
-  const ci = String(process.env.CI ?? "").toLowerCase();
-  const runningInCi = ci === "1" || ci === "true" || ci === "yes";
+  const runningInCi = isTruthyEnv(process.env.CI);
   if (runningInCi && currentPubkey === UPDATER_PUBKEY_PLACEHOLDER) {
     throw new Error(
       "TAURI_SIGNING_PUBLIC_KEY is missing and updater pubkey is still placeholder. Refusing CI build."
     );
+  }
+}
+
+function hasUpdaterPrivateKey() {
+  return Boolean(
+    String(process.env.TAURI_SIGNING_PRIVATE_KEY ?? "").trim() ||
+      String(process.env.TAURI_SIGNING_PRIVATE_KEY_PATH ?? "").trim()
+  );
+}
+
+function applyLocalBuildOverrides(args) {
+  const runningInCi = isTruthyEnv(process.env.CI);
+  const hasPrivateKey = hasUpdaterPrivateKey();
+
+  if (runningInCi && !hasPrivateKey) {
+    throw new Error(
+      "TAURI_SIGNING_PRIVATE_KEY or TAURI_SIGNING_PRIVATE_KEY_PATH is required in CI builds when updater is active."
+    );
+  }
+
+  if (hasPrivateKey) {
+    return { args, cleanup: () => {} };
+  }
+
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), "nautilus-tauri-config-"));
+  const overridePath = path.join(tempDir, "tauri.local-build.override.json");
+  writeFileSync(
+    overridePath,
+    `${JSON.stringify({ bundle: { createUpdaterArtifacts: false } }, null, 2)}\n`,
+    "utf8"
+  );
+  console.log("No updater private key found. Disabling updater artifact generation for this local build.");
+  return {
+    args: [...args, "--config", overridePath],
+    cleanup: () => rmSync(tempDir, { recursive: true, force: true }),
+  };
+}
+
+function removeStaleReleaseArtifacts() {
+  const releaseDir = path.join(projectRoot, "src-tauri", "target", "release");
+  const stalePaths = [
+    path.join(releaseDir, "dictation-parity-benchmark"),
+    path.join(releaseDir, "dictation-parity-benchmark.d"),
+    path.join(releaseDir, "dictation-parity-benchmark.dSYM"),
+    path.join(
+      releaseDir,
+      "bundle",
+      "macos",
+      "Nautilus.app",
+      "Contents",
+      "MacOS",
+      "dictation-parity-benchmark"
+    ),
+  ];
+
+  for (const stalePath of stalePaths) {
+    if (existsSync(stalePath)) {
+      rmSync(stalePath, { recursive: true, force: true });
+    }
   }
 }
 
@@ -199,9 +270,15 @@ const wantsDmg = !bundleTargets || bundleTargets.includes("all") || bundleTarget
 
 if (!wantsDmg) {
   const signingIdentity = resolveLocalMacSigningIdentity();
-  run("tauri", args, {
-    env: signingIdentity ? { APPLE_SIGNING_IDENTITY: signingIdentity } : undefined,
-  });
+  removeStaleReleaseArtifacts();
+  const { args: localBuildArgs, cleanup } = applyLocalBuildOverrides(args);
+  try {
+    run("tauri", localBuildArgs, {
+      env: signingIdentity ? { APPLE_SIGNING_IDENTITY: signingIdentity } : undefined,
+    });
+  } finally {
+    cleanup();
+  }
   process.exit(0);
 }
 
@@ -210,9 +287,20 @@ const signingIdentity = resolveLocalMacSigningIdentity();
 if (signingIdentity) {
   console.log(`Using macOS signing identity: ${signingIdentity}`);
 }
-run("tauri", ["build", "--bundles", "app", ...buildArgs], {
-  env: signingIdentity ? { APPLE_SIGNING_IDENTITY: signingIdentity } : undefined,
-});
+removeStaleReleaseArtifacts();
+const { args: appBuildArgs, cleanup: cleanupLocalOverrides } = applyLocalBuildOverrides([
+  "build",
+  "--bundles",
+  "app",
+  ...buildArgs,
+]);
+try {
+  run("tauri", appBuildArgs, {
+    env: signingIdentity ? { APPLE_SIGNING_IDENTITY: signingIdentity } : undefined,
+  });
+} finally {
+  cleanupLocalOverrides();
+}
 
 try {
   buildDmgWithApfs();

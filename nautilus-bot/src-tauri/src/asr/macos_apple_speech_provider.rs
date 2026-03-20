@@ -14,6 +14,12 @@ impl MacosAppleSpeechProvider {
     }
 }
 
+impl Default for MacosAppleSpeechProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl AsrProvider for MacosAppleSpeechProvider {
     fn name(&self) -> &str {

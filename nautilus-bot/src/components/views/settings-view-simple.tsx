@@ -133,7 +133,7 @@ const SETTINGS_TABS = [
     id: "asr" as TabId,
     label: "Transcription",
     title: "Capture and transcription",
-    eyebrow: "Voice Stack",
+    eyebrow: "Capture Stack",
     summary:
       "Choose microphones, tune dictation and meeting routes, and make capture behavior feel deterministic before you start speaking.",
     railSummary: "Microphones, ASR routes, and dictation behavior",
@@ -2131,10 +2131,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         <div className="mx-auto grid max-w-[1680px] gap-4 p-4 sm:p-6 lg:grid-cols-[292px_minmax(0,1fr)] xl:gap-6">
           <aside className="order-first h-fit overflow-hidden rounded-[28px] border border-slate-800/70 bg-[linear-gradient(180deg,rgba(2,6,23,0.98),rgba(15,23,42,0.95))] text-slate-50 shadow-[0_28px_80px_rgba(2,6,23,0.18)] lg:sticky lg:top-6">
             <div className="border-b border-white/10 px-5 py-5">
-              <p className="text-[11px] uppercase tracking-[0.28em] text-amber-300/80">Studio settings</p>
-              <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Control room</h2>
+              <p className="text-[11px] uppercase tracking-[0.28em] text-amber-300/80">Settings</p>
+              <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Overview</h2>
               <p className="mt-2 text-sm leading-6 text-slate-300/80">
-                A launch-ready workspace for capture, privacy, AI, storage, and device health.
+                Manage capture, privacy, AI, storage, and device status.
               </p>
             </div>
 
@@ -2248,7 +2248,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div>
                       <p className="text-[11px] uppercase tracking-[0.22em] text-amber-300/80">Capture routing</p>
-                      <h3 className="mt-2 text-xl font-semibold text-white">Microphone control room</h3>
+                      <h3 className="mt-2 text-xl font-semibold text-white">Microphone routing</h3>
                       <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300/85">
                         Pick one app-wide microphone, then override dictation or meetings when you need a dedicated input chain.
                       </p>

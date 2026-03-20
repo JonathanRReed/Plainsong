@@ -656,8 +656,7 @@ fn sanitize_model_id(model_id: &str) -> String {
     model_id
         .trim()
         .replace('/', "__")
-        .replace(':', "_")
-        .replace(' ', "_")
+        .replace([':', ' '], "_")
 }
 
 pub fn normalize_model_id(model_id: &str) -> String {

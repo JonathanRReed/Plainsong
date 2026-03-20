@@ -23,9 +23,9 @@ if (!fs.existsSync(TAURI_BIN)) {
 }
 
 console.log("Generating Tauri updater keypair…");
-console.log("You may be prompted for a password (press Enter for none).\n");
+console.log("Generating an unencrypted local updater key for build automation.\n");
 
-const result = spawnSync(TAURI_BIN, ["signer", "generate"], {
+const result = spawnSync(TAURI_BIN, ["signer", "generate", "--ci", "--password", ""], {
   stdio: ["inherit", "pipe", "pipe"],
   encoding: "utf-8",
 });

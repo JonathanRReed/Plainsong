@@ -96,6 +96,7 @@ export function SetupView() {
     loading,
     error,
     refresh,
+    settings,
     permissions,
     providers,
     systemAudioAvailable,
@@ -114,6 +115,15 @@ export function SetupView() {
   } = useSetupStatus();
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const dictationInsertionMode = settings?.transcription.dictationInsertionMode ?? "auto";
+  const cursorInsertLabel =
+    dictationInsertionMode === "clipboard_only"
+      ? "Not needed"
+      : permissions?.cursorInsertionReady
+        ? permissions?.accessibilityReady
+          ? "Ready"
+          : "Keyboard fallback"
+        : "Needs access";
 
   const sortedProviders = useMemo(() => {
     return [...providers].sort((left, right) => {
@@ -175,7 +185,7 @@ export function SetupView() {
             <div>
               <h1 className="text-2xl font-semibold">Setup</h1>
               <p className="text-sm text-muted-foreground">
-                Keep dictation and meetings launch-ready, rerun guided setup, and verify every route from one place.
+                Check dictation and meetings, rerun guided setup, and verify every route from one place.
               </p>
             </div>
           </div>
@@ -243,9 +253,7 @@ export function SetupView() {
                   </div>
                   <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
                     <div className="text-xs text-current opacity-70">Cursor insert</div>
-                    <div className="mt-1 font-medium">
-                      {permissions?.accessibilityReady ? "Ready" : "Needs access"}
-                    </div>
+                    <div className="mt-1 font-medium">{cursorInsertLabel}</div>
                   </div>
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
