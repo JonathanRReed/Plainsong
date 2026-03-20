@@ -2,6 +2,11 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DictationView } from "@/components/views/dictation-view";
 
+const speechSynthesisMock = {
+  speak: vi.fn(),
+  cancel: vi.fn(),
+};
+
 const tauriMocks = vi.hoisted(() => ({
   eventListeners: new Map<string, (event: { payload: any }) => void>(),
   saveSettings: vi.fn(async () => {}),
@@ -151,6 +156,7 @@ vi.mock("@/lib/tauri", () => ({
     topAppTarget: "Slack",
     topAppTargetCount: 2,
   })),
+  captureSelectedTextForPlayback: vi.fn(async () => "Read this selected sentence"),
   getAsrProviders: vi.fn(async () => [
     {
       providerType: "moonshine",
@@ -272,6 +278,23 @@ describe("DictationView modes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     tauriMocks.eventListeners.clear();
+    speechSynthesisMock.speak.mockClear();
+    speechSynthesisMock.cancel.mockClear();
+    Object.assign(window, {
+      speechSynthesis: speechSynthesisMock,
+      SpeechSynthesisUtterance: class SpeechSynthesisUtterance {
+        text: string;
+        rate = 1;
+        pitch = 1;
+        lang = "";
+        onend: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+
+        constructor(text = "") {
+          this.text = text;
+        }
+      },
+    });
   });
 
   it("renders the new mode presets", async () => {
@@ -379,6 +402,44 @@ describe("DictationView modes", () => {
 
     await waitFor(() => {
       expect(tauriMocks.refetchDictationHistory).toHaveBeenCalled();
+    });
+  });
+
+  it("can read the latest result aloud from the dictation hero surface", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("Flow Profiles");
+    const handler = tauriMocks.eventListeners.get("dictation-text-ready");
+    expect(handler).toBeTruthy();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          text: "Ship the beta update after lunch.",
+          actualProvider: "distil_whisper",
+        },
+      });
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Read aloud" }));
+
+    await waitFor(() => {
+      expect(speechSynthesisMock.cancel).toHaveBeenCalled();
+      expect(speechSynthesisMock.speak).toHaveBeenCalled();
+    });
+  });
+
+  it("can read selected text aloud from the capture card", async () => {
+    const tauri = await import("@/lib/tauri");
+
+    render(<DictationView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Read selected text" }));
+
+    await waitFor(() => {
+      expect(tauri.captureSelectedTextForPlayback).toHaveBeenCalled();
+      expect(speechSynthesisMock.cancel).toHaveBeenCalled();
+      expect(speechSynthesisMock.speak).toHaveBeenCalled();
     });
   });
 

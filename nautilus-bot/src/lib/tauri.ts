@@ -6,6 +6,7 @@ import type {
   AuditLogEntry,
   AsrProviderInfo,
   AsrModelOption,
+  AsrProviderInventory,
   AsrRuntimeDiagnostics,
   AsrProviderType,
   BenchmarkResult,
@@ -182,6 +183,10 @@ export async function smokeTestCursorInsert(
   text?: string
 ): Promise<CursorInsertSmokeTestResult> {
   return await invoke("smoke_test_cursor_insert", { text });
+}
+
+export async function captureSelectedTextForPlayback(): Promise<string | null> {
+  return await invoke("capture_selected_text_for_playback");
 }
 
 export async function getDictationAudioLevel(): Promise<number> {
@@ -664,6 +669,10 @@ export async function getAuditLog(): Promise<AuditLogEntry[]> {
 // ASR Provider APIs
 export async function getAsrProviders(): Promise<AsrProviderInfo[]> {
   return await invoke("get_asr_providers");
+}
+
+export async function getAsrProviderInventory(): Promise<AsrProviderInventory[]> {
+  return await invoke("get_asr_provider_inventory");
 }
 
 export async function getAsrRuntimeDiagnostics(

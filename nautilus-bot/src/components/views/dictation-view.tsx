@@ -41,6 +41,7 @@ import {
   getDictationHistoryDetails,
   getDictationInsights,
   getAsrProviders,
+  captureSelectedTextForPlayback,
 } from "@/lib/tauri";
 import {
   defaultDictationShortcut,
@@ -56,6 +57,7 @@ import {
   type DictationRoutePreference,
 } from "@/lib/asr-capabilities";
 import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labels";
+import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -1026,6 +1028,7 @@ export function DictationView() {
   const [historyCorrectionText, setHistoryCorrectionText] = useState("");
   const [historyCorrectionBaseline, setHistoryCorrectionBaseline] = useState("");
   const [historyLearnStatus, setHistoryLearnStatus] = useState<string | null>(null);
+  const [activeSpeechTarget, setActiveSpeechTarget] = useState<string | null>(null);
   const [dismissedCoachSteps, setDismissedCoachSteps] = useState<DictationCoachStep[]>([]);
   const [isLoadingTranscript, setIsLoadingTranscript] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -1053,6 +1056,62 @@ export function DictationView() {
       ),
     []
   );
+
+  useEffect(() => {
+    return () => {
+      stopSpeakingText();
+    };
+  }, []);
+
+  const toggleReadAloudPlayback = (text: string, target: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    if (activeSpeechTarget === target) {
+      stopSpeakingText();
+      setActiveSpeechTarget(null);
+      setPasteStatus("Stopped read aloud");
+      return;
+    }
+
+    setPasteStatus(null);
+    setActiveSpeechTarget(target);
+    const started = speakTextAloud(trimmed, {
+      onEnd: () => setActiveSpeechTarget((current) => (current === target ? null : current)),
+      onError: () => setPasteStatus("Read aloud unavailable"),
+    });
+
+    if (!started) {
+      setActiveSpeechTarget(null);
+      setPasteStatus("Read aloud not supported here");
+    }
+  };
+
+  const handleReadSelectedText = async () => {
+    if (activeSpeechTarget === "selected-text") {
+      stopSpeakingText();
+      setActiveSpeechTarget(null);
+      setPasteStatus("Stopped playback");
+      return;
+    }
+
+    setPasteStatus(null);
+
+    try {
+      const selectedText = await captureSelectedTextForPlayback();
+      const trimmed = selectedText?.trim();
+      if (!trimmed) {
+        setPasteStatus("No selected text found");
+        return;
+      }
+
+      toggleReadAloudPlayback(trimmed, "selected-text");
+    } catch (error) {
+      setPasteStatus(error instanceof Error ? error.message : "Couldn't read the selected text");
+    }
+  };
 
   const selectedCustomMode = useMemo(
     () =>
@@ -3550,6 +3609,18 @@ export function DictationView() {
                   </div>
                 )}
               </div>
+                {!isDictationCaptureLive && !isDictationBusy ? (
+                  <div className="flex flex-wrap items-center justify-center gap-2 border-t border-border/60 pt-4">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => void handleReadSelectedText()}
+                    >
+                      <Volume2 className="mr-2 h-4 w-4" />
+                      {activeSpeechTarget === "selected-text" ? "Stop reading" : "Read selected text"}
+                    </Button>
+                  </div>
+                ) : null}
               </div>
             </CardContent>
           </Card>
@@ -3883,14 +3954,24 @@ export function DictationView() {
                     {pasteStatus ?? "Latest dictation result"}
                   </CardDescription>
                 </div>
-                <Button 
-                  variant="outline" 
-                  size="sm"
-                  onClick={() => navigator.clipboard.writeText(transcribedText)}
-                >
-                  <Save className="h-4 w-4 mr-2" />
-                  Copy Again
-                </Button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void toggleReadAloudPlayback(transcribedText, "latest-result")}
+                  >
+                    <Volume2 className="h-4 w-4 mr-2" />
+                    {activeSpeechTarget === "latest-result" ? "Stop reading" : "Read aloud"}
+                  </Button>
+                  <Button 
+                    variant="outline" 
+                    size="sm"
+                    onClick={() => navigator.clipboard.writeText(transcribedText)}
+                  >
+                    <Save className="h-4 w-4 mr-2" />
+                    Copy Again
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent>
                 <div className="space-y-3">
@@ -5228,6 +5309,23 @@ export function DictationView() {
               <DialogTitle>{selectedRecording?.title ?? "Dictation"}</DialogTitle>
               {selectedRecording && (
                 <div className="flex gap-2">
+                  {selectedTranscript?.fullText?.trim() && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        void toggleReadAloudPlayback(
+                          selectedTranscript.fullText,
+                          `history-${selectedRecording.id}`
+                        )
+                      }
+                    >
+                      <Volume2 className="h-4 w-4 mr-2" />
+                      {activeSpeechTarget === `history-${selectedRecording.id}`
+                        ? "Stop reading"
+                        : "Read aloud"}
+                    </Button>
+                  )}
                   <Button
                     variant="outline"
                     size="sm"

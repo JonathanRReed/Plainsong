@@ -3,6 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RecordingsView } from "@/components/views/recordings-view";
 import type { Recording } from "@/types";
 
+const speechSynthesisMock = {
+  speak: vi.fn(),
+  cancel: vi.fn(),
+};
+
 const mocks = vi.hoisted(() => ({
   eventListeners: new Map<string, (event: { payload: any }) => void>(),
   refetch: vi.fn(),
@@ -230,9 +235,26 @@ describe("RecordingsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.eventListeners.clear();
+    speechSynthesisMock.speak.mockClear();
+    speechSynthesisMock.cancel.mockClear();
     Object.assign(navigator, {
       clipboard: {
         writeText: vi.fn(async () => {}),
+      },
+    });
+    Object.assign(window, {
+      speechSynthesis: speechSynthesisMock,
+      SpeechSynthesisUtterance: class SpeechSynthesisUtterance {
+        text: string;
+        rate = 1;
+        pitch = 1;
+        lang = "";
+        onend: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+
+        constructor(text = "") {
+          this.text = text;
+        }
       },
     });
     mocks.recordingState = {
@@ -495,6 +517,46 @@ describe("RecordingsView", () => {
     expect(screen.getByText("Follow-up tools")).toBeInTheDocument();
     expect(screen.getByText("Jon owns the launch checklist and follow-up.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy Follow-up Email" })).toBeInTheDocument();
+  });
+
+  it("can read the meeting summary aloud from the review surface", async () => {
+    mocks.getRecording.mockResolvedValue({
+      ...mocks.recordings[0],
+      summary: "Canonical meeting summary",
+      actionItems: ["Ship launch checklist"],
+    });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByDisplayValue("Canonical meeting summary");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Read aloud" })[0]);
+
+    await waitFor(() => {
+      expect(speechSynthesisMock.cancel).toHaveBeenCalled();
+      expect(speechSynthesisMock.speak).toHaveBeenCalled();
+    });
+  });
+
+  it("can read the meeting follow-up draft aloud from the review toolbar", async () => {
+    mocks.getRecording.mockResolvedValue({
+      ...mocks.recordings[0],
+      summary: "Canonical meeting summary",
+      actionItems: ["Ship launch checklist"],
+    });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("Review workflow");
+
+    fireEvent.click(screen.getByRole("button", { name: "Read Follow-up" }));
+
+    await waitFor(() => {
+      expect(speechSynthesisMock.cancel).toHaveBeenCalled();
+      expect(speechSynthesisMock.speak).toHaveBeenCalled();
+    });
   });
 
   it("runs cross-meeting recall from the meeting review sidebar", async () => {

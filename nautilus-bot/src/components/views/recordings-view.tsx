@@ -41,6 +41,7 @@ import {
   openExportPath,
   getRelationshipMemory,
 } from "@/lib/tauri";
+import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import type {
   CompanyMemoryProfile,
   MeetingChatMessage,
@@ -85,6 +86,7 @@ import {
   Rocket,
   ClipboardList,
   CalendarClock,
+  Volume2,
 } from "lucide-react";
 import type { AnalysisTemplate } from "@/types";
 import type { LlmCitation } from "@/types";
@@ -704,6 +706,7 @@ export function RecordingsView() {
   const [meetingRecallError, setMeetingRecallError] = useState<string | null>(null);
   const [isRefreshingSummary, setIsRefreshingSummary] = useState(false);
   const [isRefreshingActionItems, setIsRefreshingActionItems] = useState(false);
+  const [activeSpeechTarget, setActiveSpeechTarget] = useState<string | null>(null);
   const meetingChatRequestGuard = useScopedRequestGuard<string | null>();
   const meetingSummaryRequestGuard = useScopedRequestGuard<string | null>();
   const meetingActionItemsRequestGuard = useScopedRequestGuard<string | null>();
@@ -785,6 +788,38 @@ export function RecordingsView() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      stopSpeakingText();
+    };
+  }, []);
+
+  const toggleReadAloudPlayback = (text: string, target: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      toast("Nothing to read aloud.", "error");
+      return;
+    }
+
+    if (activeSpeechTarget === target) {
+      stopSpeakingText();
+      setActiveSpeechTarget(null);
+      toast("Stopped playback.", "success");
+      return;
+    }
+
+    setActiveSpeechTarget(target);
+    const started = speakTextAloud(trimmed, {
+      onEnd: () => setActiveSpeechTarget((current) => (current === target ? null : current)),
+      onError: () => toast("Read aloud unavailable.", "error"),
+    });
+
+    if (!started) {
+      setActiveSpeechTarget(null);
+      toast("Read aloud not supported here.", "error");
+    }
+  };
 
   type RecordingStatusChangedEvent = {
     recordingId: string;
@@ -2850,6 +2885,26 @@ export function RecordingsView() {
                             type="button"
                             size="sm"
                             variant="outline"
+                            onClick={() =>
+                              toggleReadAloudPlayback(
+                                deterministicMeetingFollowUp,
+                                "meeting-follow-up"
+                              )
+                            }
+                            disabled={
+                              !selectedRecording ||
+                              (!meetingSummary.trim() && selectedMeetingActionItems.length === 0)
+                            }
+                          >
+                            <Volume2 className="mr-2 h-4 w-4" />
+                            {activeSpeechTarget === "meeting-follow-up"
+                              ? "Stop reading"
+                              : "Read Follow-up"}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
                             onClick={() => void handleCopyMeetingShareMarkdown()}
                             disabled={!selectedRecording || !selectedMeetingShareMarkdown.trim()}
                           >
@@ -2883,6 +2938,20 @@ export function RecordingsView() {
                               <RefreshCw className="mr-2 h-4 w-4" />
                             )}
                             Refresh Summary
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() =>
+                              toggleReadAloudPlayback(meetingSummary, "meeting-summary")
+                            }
+                            disabled={!selectedRecording || !meetingSummary.trim()}
+                          >
+                            <Volume2 className="mr-2 h-4 w-4" />
+                            {activeSpeechTarget === "meeting-summary"
+                              ? "Stop reading"
+                              : "Read aloud"}
                           </Button>
                         </div>
                         <textarea
@@ -2918,6 +2987,23 @@ export function RecordingsView() {
                               <RefreshCw className="mr-2 h-4 w-4" />
                             )}
                             Refresh Action Items
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() =>
+                              toggleReadAloudPlayback(
+                                meetingActionItemsText,
+                                "meeting-action-items"
+                              )
+                            }
+                            disabled={!selectedRecording || !meetingActionItemsText.trim()}
+                          >
+                            <Volume2 className="mr-2 h-4 w-4" />
+                            {activeSpeechTarget === "meeting-action-items"
+                              ? "Stop reading"
+                              : "Read aloud"}
                           </Button>
                         </div>
                         <textarea
