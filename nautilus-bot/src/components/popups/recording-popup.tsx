@@ -372,17 +372,17 @@ export function RecordingPopup() {
           void window.startDragging();
         }}
       >
-        <div className="flex items-center gap-2 rounded-full border border-cyan-400/25 bg-slate-950/92 px-3 py-2 text-white shadow-[0_20px_60px_rgba(2,6,23,0.45)] backdrop-blur-md">
-          <span className={`h-2.5 w-2.5 rounded-full ${isTranscribing ? "bg-cyan-400" : "bg-rose-400"}`} />
+        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/92 px-3 py-2 text-white shadow-[0_20px_60px_rgba(2,6,23,0.45)] backdrop-blur-md">
+          <span className={`h-2.5 w-2.5 rounded-full ${isTranscribing ? "bg-slate-200" : "bg-white"}`} />
           <span className="text-xs font-medium uppercase tracking-[0.18em]">
             {isTranscribing ? "Processing" : captureModeLabel}
           </span>
-          <span className="font-mono text-sm text-cyan-100">
+          <span className="font-mono text-sm text-slate-200">
             {isTranscribing ? "..." : elapsedText}
           </span>
           <button
             type="button"
-            className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/8 text-white hover:bg-white/15"
+            className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-white/8 text-white hover:bg-white/12"
             onMouseDown={(event) => event.stopPropagation()}
             onClick={() => void openMainApp("recordings", recordingId)}
             aria-label="Open meeting view"
@@ -392,7 +392,7 @@ export function RecordingPopup() {
           {!isTranscribing && (
             <button
               type="button"
-              className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-rose-500/90 text-white hover:bg-rose-500 disabled:opacity-50"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-white/12 bg-white/10 text-white hover:bg-white/15 disabled:opacity-50"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={handleStop}
               disabled={stopping}
@@ -414,7 +414,7 @@ export function RecordingPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="max-h-[calc(100vh-24px)] overflow-y-auto rounded-[28px] border border-cyan-400/20 bg-[linear-gradient(180deg,rgba(2,6,23,0.96),rgba(15,23,42,0.92))] px-4 py-3 text-white shadow-[0_24px_80px_rgba(2,6,23,0.5)] backdrop-blur-xl">
+      <div className="max-h-[calc(100vh-24px)] overflow-y-auto rounded-[24px] border border-white/10 bg-slate-950/92 px-4 py-3 text-white shadow-[0_24px_80px_rgba(2,6,23,0.5)] backdrop-blur-xl">
         <div
           data-tauri-drag-region
           className="mb-3 flex cursor-grab select-none items-center justify-between text-slate-300 active:cursor-grabbing"
@@ -426,12 +426,12 @@ export function RecordingPopup() {
         >
           <div className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.2em]">
             <GripHorizontal className="h-3 w-3" />
-            Move
+            Drag
           </div>
           <div className="inline-flex items-center gap-1">
             <button
               type="button"
-              className="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-white/10"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-white/8 hover:text-white"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void cycleDisplayMode()}
               aria-label={displayMode === "compact" ? "Minimal popup" : "Compact popup"}
@@ -444,7 +444,7 @@ export function RecordingPopup() {
             </button>
             <button
               type="button"
-              className="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-white/10"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-white/8 hover:text-white"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void openMainApp()}
               aria-label="Open app"
@@ -453,7 +453,7 @@ export function RecordingPopup() {
             </button>
             <button
               type="button"
-              className="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-white/10"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-white/8 hover:text-white"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void hidePopup()}
               aria-label="Hide popup"
@@ -464,7 +464,7 @@ export function RecordingPopup() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-2 rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-cyan-100">
+          <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-slate-100">
             {isTranscribing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mic className="h-3.5 w-3.5" />}
             {statusLabel}
           </span>
@@ -476,13 +476,13 @@ export function RecordingPopup() {
             Template: {meetingTemplateLabel}
           </span>
           {consentStatus.tracked ? (
-            <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-medium text-emerald-100">
+            <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium text-slate-100">
               <CheckCircle2 className="h-3.5 w-3.5" />
               {consentStatus.label}
             </span>
           ) : null}
           {transcriptionPreview.trim() ? (
-            <span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[11px] font-medium text-emerald-100">
+            <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium text-slate-100">
               <CheckCircle2 className="h-3.5 w-3.5" />
               Live transcript preview
             </span>
@@ -492,11 +492,11 @@ export function RecordingPopup() {
         <div className={`mt-3 ${displayMode === "compact" ? "flex items-center justify-between gap-3" : "space-y-4"}`}>
           <div className="flex items-center gap-3">
             {displayMode === "full" && (
-              <div className="flex h-14 items-end gap-1.5 rounded-2xl border border-white/8 bg-white/[0.04] px-3 py-2">
+              <div className="flex h-14 items-end gap-1.5 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2">
                 {waveformBars.map((level, idx) => (
                   <span
                     key={`${idx}-${Math.round(level * 100)}`}
-                    className="w-1.5 rounded-full bg-cyan-300/90 transition-all"
+                    className="w-1.5 rounded-full bg-white/75 transition-all"
                     style={{ height: `${Math.max(18, Math.round(level * 100))}%` }}
                   />
                 ))}
@@ -518,18 +518,18 @@ export function RecordingPopup() {
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-right">
-              <p className="text-[10px] uppercase tracking-[0.18em] text-cyan-100/80">
+            <div className="rounded-2xl border border-white/10 bg-white/[0.05] px-3 py-2 text-right">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">
                 {isTranscribing ? "Status" : "Elapsed"}
               </p>
-              <p className="font-mono text-base text-cyan-100">
+              <p className="font-mono text-base text-slate-100">
                 {isTranscribing ? "Saving" : elapsedText}
               </p>
             </div>
             {!isTranscribing && (
               <button
                 type="button"
-                className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-rose-500/90 text-white hover:bg-rose-500 disabled:opacity-50"
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/12 bg-white/10 text-white hover:bg-white/15 disabled:opacity-50"
                 onClick={handleStop}
                 disabled={stopping}
                 aria-label="Stop recording"
@@ -577,7 +577,7 @@ export function RecordingPopup() {
               {copiedNotice ? <span>Copied.</span> : null}
             </div>
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1.05fr)_minmax(220px,0.95fr)]">
-              <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-3">
+              <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
                     Live notes
@@ -589,10 +589,10 @@ export function RecordingPopup() {
                   onChange={(event) => setMeetingNotes(event.target.value)}
                   placeholder="Capture decisions, blockers, names, and next steps without leaving the overlay."
                   rows={8}
-                  className="min-h-[176px] w-full resize-none rounded-xl border border-white/10 bg-slate-950/60 px-3 py-3 text-sm leading-6 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-400/50"
+                  className="min-h-[176px] w-full resize-none rounded-xl border border-white/10 bg-slate-950/70 px-3 py-3 text-sm leading-6 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-white/20"
                 />
               </div>
-              <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-3">
+              <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
                     Transcript preview
@@ -644,7 +644,7 @@ export function RecordingPopup() {
                 </button>
               </div>
             </div>
-            <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-3">
+            <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
                   Notes snapshot
@@ -653,7 +653,7 @@ export function RecordingPopup() {
               </div>
               <p className="line-clamp-3 text-sm leading-6 text-slate-100">{notesSummary}</p>
             </div>
-            <div className="rounded-2xl border border-white/8 bg-white/[0.04] p-3">
+            <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
                   Transcript preview

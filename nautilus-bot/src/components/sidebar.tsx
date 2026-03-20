@@ -228,7 +228,7 @@ export function Sidebar({
         <div className="p-4 flex items-center justify-between">
           <div className={cn(isCollapsed && "hidden")}>
             <h1 className="font-semibold text-lg">Nautilus</h1>
-            <p className="text-xs text-muted-foreground mt-1">Solo voice workspace for dictation and meetings</p>
+            <p className="mt-1 text-xs text-muted-foreground">Dictation first. Meetings included.</p>
           </div>
           {onToggleCollapse && (
             <Button
@@ -260,7 +260,11 @@ export function Sidebar({
                     <TooltipTrigger asChild>
                       <Button
                         variant={isActive ? "secondary" : "ghost"}
-                        className={cn("w-full justify-start", isCollapsed && "justify-center px-2")}
+                        className={cn(
+                          "w-full justify-start border border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                          isActive && "border-border bg-muted text-foreground shadow-none",
+                          isCollapsed && "justify-center px-2"
+                        )}
                         onClick={() => onViewChange(item.id as ViewId)}
                       >
                         <Icon className="h-4 w-4 shrink-0" />
@@ -288,7 +292,11 @@ export function Sidebar({
                     <TooltipTrigger asChild>
                       <Button
                         variant={isActive ? "secondary" : "ghost"}
-                        className={cn("w-full justify-start", isCollapsed && "justify-center px-2")}
+                        className={cn(
+                          "w-full justify-start border border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                          isActive && "border-border bg-muted text-foreground shadow-none",
+                          isCollapsed && "justify-center px-2"
+                        )}
                         onClick={() => onViewChange(item.id as ViewId)}
                       >
                         <Icon className="h-4 w-4 shrink-0" />
@@ -311,13 +319,13 @@ export function Sidebar({
           {isRecording && (
             <div
               className={cn(
-                "flex items-center gap-2 rounded-md border border-active/40 bg-active/10 px-2 py-1 text-xs",
+                "flex items-center gap-2 rounded-md border border-border bg-muted/60 px-2 py-1 text-xs",
                 isCollapsed && "justify-center"
               )}
             >
               <div className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
               {!isCollapsed && (
-                <span className="font-medium text-active">
+                <span className="font-medium text-foreground">
                   {recordingMode === "meeting" ? "Meeting" : "Dictation"} {formattedDuration}
                 </span>
               )}

@@ -43,6 +43,7 @@ import {
   speakTextAloud,
   stopSpeakingText,
 } from "@/lib/text-to-speech";
+import { playDictationEarcon } from "@/lib/dictation-earcons";
 import { cn } from "@/lib/utils";
 import type { AsrProviderType } from "@/types";
 import type { DictationCustomMode } from "@/types/settings";
@@ -343,17 +344,17 @@ function PopupActionButton({
     <button
       type="button"
       className={cn(
-        "group flex items-start gap-3 rounded-2xl border px-3 py-3 text-left transition-colors",
+        "group flex items-start gap-3 rounded-xl border px-3 py-3 text-left transition-colors",
         tone === "primary"
-          ? "border-emerald-400/25 bg-emerald-400/10 hover:bg-emerald-400/15"
-          : "border-white/10 bg-white/5 hover:bg-white/10"
+          ? "border-white/12 bg-white/8 hover:bg-white/12"
+          : "border-white/10 bg-white/[0.045] hover:bg-white/[0.075]"
       )}
       onClick={onClick}
     >
       <div
         className={cn(
-          "mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl",
-          tone === "primary" ? "bg-emerald-300/15 text-emerald-100" : "bg-white/10 text-slate-100"
+          "mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
+          tone === "primary" ? "bg-white/10 text-white" : "bg-white/[0.08] text-slate-100"
         )}
       >
         <Icon className="h-4 w-4" />
@@ -368,6 +369,10 @@ function PopupActionButton({
 
 export function DictationPopup() {
   const window = getCurrentWindow();
+  const runtime = globalThis as typeof globalThis & {
+    requestAnimationFrame?: (callback: FrameRequestCallback) => number;
+    cancelAnimationFrame?: (handle: number) => void;
+  };
   const [phase, setPhase] = useState<DictationPhase>("idle");
   const [startedAtMs, setStartedAtMs] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
@@ -378,6 +383,7 @@ export function DictationPopup() {
   const [pushToTalk, setPushToTalk] = useState(true);
   const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [displayAudioLevel, setDisplayAudioLevel] = useState(0);
   const [modePreset, setModePreset] = useState<DictationModePreset>("voice");
   const [contextSource, setContextSource] = useState<DictationContextSource>("none");
   const [selectedCustomModeId, setSelectedCustomModeId] = useState<string | null>(null);
@@ -408,6 +414,7 @@ export function DictationPopup() {
   const lastSessionIdRef = useRef<number | null>(null);
   const lastActiveStartedAtRef = useRef<number | null>(null);
   const sessionClockStartedAtRef = useRef<number | null>(null);
+  const previousPhaseRef = useRef<DictationPhase>("idle");
 
   const refreshPopupSettings = async () => {
     const settings = await getSettings();
@@ -666,8 +673,52 @@ export function DictationPopup() {
           setAudioLevel(scaled);
         })
         .catch(() => setAudioLevel(0));
-    }, 120);
+    }, 160);
     return () => clearInterval(id);
+  }, [phase]);
+
+  useEffect(() => {
+    if (phase !== "recording") {
+      setDisplayAudioLevel(0);
+      return;
+    }
+
+    const scheduleFrame =
+      runtime.requestAnimationFrame ??
+      ((callback: FrameRequestCallback) => globalThis.setTimeout(() => callback(Date.now()), 16));
+    const cancelFrame =
+      runtime.cancelAnimationFrame ??
+      ((handle: number) => globalThis.clearTimeout(handle));
+
+    let frameId = 0;
+    const animate = () => {
+      setDisplayAudioLevel((current) => {
+        const delta = audioLevel - current;
+        if (Math.abs(delta) < 0.01) {
+          return audioLevel;
+        }
+        return current + delta * 0.25;
+      });
+      frameId = scheduleFrame(animate);
+    };
+
+    frameId = scheduleFrame(animate);
+    return () => cancelFrame(frameId);
+  }, [audioLevel, phase, runtime.cancelAnimationFrame, runtime.requestAnimationFrame]);
+
+  useEffect(() => {
+    const previousPhase = previousPhaseRef.current;
+
+    if (phase !== previousPhase) {
+      if (phase === "recording" && previousPhase !== "recording") {
+        void playDictationEarcon("start");
+      } else if (phase === "done" && previousPhase !== "done") {
+        void playDictationEarcon("success");
+      } else if (phase === "error" && previousPhase !== "error") {
+        void playDictationEarcon("error");
+      }
+      previousPhaseRef.current = phase;
+    }
   }, [phase]);
 
   const elapsedText = useMemo(() => {
@@ -839,7 +890,7 @@ export function DictationPopup() {
         onDoubleClick={() => void cycleDisplayMode()}
         title="Double-click to expand"
       >
-        <div className="flex items-center gap-2 rounded-full bg-[#1a1f2e]/90 px-3 py-[10px] backdrop-blur-md shadow-lg border border-white/10">
+        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/88 px-3 py-[10px] shadow-lg backdrop-blur-md">
           <div className="flex items-center gap-[5px]">
             {[0, 1, 2, 3, 4].map((i) => (
               <span
@@ -854,7 +905,7 @@ export function DictationPopup() {
           </div>
           <button
             type="button"
-            className="inline-flex h-6 w-6 items-center justify-center rounded-full text-slate-300 hover:bg-white/10 hover:text-white"
+            className="inline-flex h-6 w-6 items-center justify-center rounded-full text-slate-300 hover:bg-white/8 hover:text-white"
             onMouseDown={(event) => event.stopPropagation()}
             onClick={() => void hidePopup()}
             aria-label="Hide popup"
@@ -891,7 +942,7 @@ export function DictationPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="max-h-[calc(100vh-24px)] overflow-y-auto rounded-[22px] border border-white/10 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.08),_transparent_38%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.96))] px-4 py-3 backdrop-blur-2xl shadow-[0_18px_60px_rgba(2,6,23,0.55)]">
+      <div className="max-h-[calc(100vh-24px)] overflow-y-auto rounded-[22px] border border-white/10 bg-slate-950/92 px-4 py-3 backdrop-blur-2xl shadow-[0_18px_60px_rgba(2,6,23,0.55)]">
         <div
           data-tauri-drag-region
           className="mb-2 flex cursor-grab select-none items-center justify-between text-slate-300 active:cursor-grabbing"
@@ -903,12 +954,12 @@ export function DictationPopup() {
         >
           <div className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide">
             <GripHorizontal className="h-3 w-3" />
-            Move
+            Drag
           </div>
           <div className="inline-flex items-center gap-1">
             <button
               type="button"
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md hover:bg-white/10"
+              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-slate-300 hover:bg-white/8 hover:text-white"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void cycleDisplayMode()}
               aria-label={compact ? "Expand popup" : "Compact popup"}
@@ -917,7 +968,7 @@ export function DictationPopup() {
             </button>
             <button
               type="button"
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md hover:bg-white/10"
+              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-slate-300 hover:bg-white/8 hover:text-white"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void openMainApp()}
               aria-label="Open app"
@@ -926,7 +977,7 @@ export function DictationPopup() {
             </button>
             <button
               type="button"
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md hover:bg-white/10"
+              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-slate-300 hover:bg-white/8 hover:text-white"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void hidePopup()}
               aria-label="Hide popup"
@@ -938,20 +989,20 @@ export function DictationPopup() {
 
         {!compact && (
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <div className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium ${modeMeta.accent}`}>
+            <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium text-slate-100">
               <modeMeta.icon className="h-3.5 w-3.5" />
               {selectedModeLabel}
             </div>
             {useSharedAsrSelection ? (
-              <div className="inline-flex items-center gap-1.5 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-100">
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium text-slate-200">
                 {hostingLabel === "cloud" ? "Cloud route" : "Local route"}
               </div>
             ) : (
               <>
-                <div className="inline-flex items-center gap-1.5 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-medium text-cyan-100">
+                <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium text-slate-200">
                   Dictation: {hostingLabel === "cloud" ? "Cloud" : "Local"}
                 </div>
-                <div className="inline-flex items-center gap-1.5 rounded-full border border-violet-400/20 bg-violet-400/10 px-2.5 py-1 text-[11px] font-medium text-violet-100">
+                <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium text-slate-200">
                   Meeting: {meetingHostingLabel === "cloud" ? "Cloud" : "Local"}
                 </div>
               </>
@@ -973,18 +1024,33 @@ export function DictationPopup() {
 
         {isCapturePhase && (
           <div className="flex items-center gap-3 text-white">
-            <div className="relative rounded-full bg-orange-500/15 p-3 ring-1 ring-orange-300/25">
-              <div className="absolute inset-0 rounded-full bg-orange-400/10 blur-md" />
+            <div className="relative flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-white/[0.045]">
+              <span
+                aria-hidden="true"
+                className="absolute inset-0 rounded-full border border-white/12 transition-transform duration-150"
+                style={{
+                  opacity: 0.18 + displayAudioLevel * 0.28,
+                  transform: `scale(${1 + displayAudioLevel * 0.16})`,
+                }}
+              />
+              <span
+                aria-hidden="true"
+                className="absolute inset-[5px] rounded-full border border-white/10 transition-transform duration-150"
+                style={{
+                  opacity: 0.12 + displayAudioLevel * 0.24,
+                  transform: `scale(${1 + displayAudioLevel * 0.08})`,
+                }}
+              />
               <Mic
                 className={cn(
-                  "relative h-5 w-5 text-orange-300",
-                  phase === "recording" ? "animate-pulse" : "opacity-90"
+                  "relative h-5 w-5 text-slate-100 transition-opacity",
+                  phase === "recording" ? "opacity-100" : "opacity-90"
                 )}
               />
             </div>
             <div className="flex-1">
               <p className="text-sm font-semibold">
-                {phase === "primed" ? "Mic primed" : "Listening"}
+                {phase === "primed" ? "Ready" : "Listening"}
               </p>
               {!compact ? (
                 <>
@@ -993,26 +1059,39 @@ export function DictationPopup() {
                     {runtimeAppTarget ? ` · Target ${runtimeAppTarget}` : ""}
                   </p>
                   {autoActivationDetail && (
-                    <p className="mt-1 text-xs text-cyan-200/90">{autoActivationDetail}</p>
+                    <p className="mt-1 text-xs text-slate-400">{autoActivationDetail}</p>
                   )}
                   {phase === "recording" ? (
                     <>
-                      <div className="mt-2 h-2.5 w-full max-w-[220px] rounded-full bg-slate-700/50 overflow-hidden">
-                        <div
-                          className="h-full bg-linear-to-r from-emerald-500 via-orange-400 to-rose-500 transition-all duration-50 rounded-full"
-                          style={{ width: `${Math.min(100, audioLevel * 100)}%` }}
-                        />
+                      <div className="mt-2 flex w-full max-w-[220px] items-center gap-1.5">
+                        {[0.34, 0.48, 0.66, 0.52, 0.38].map((threshold, index) => {
+                          const intensity = Math.max(
+                            0.22,
+                            Math.min(1, (displayAudioLevel + 0.08 * index) / threshold)
+                          );
+                          return (
+                            <span
+                              key={`dictation-bar-${threshold}`}
+                              className="h-8 flex-1 rounded-full bg-white/70 transition-all duration-150"
+                              style={{
+                                opacity: 0.2 + intensity * 0.65,
+                                transform: `scaleY(${0.4 + intensity * (index % 2 === 0 ? 0.8 : 0.68)})`,
+                                transformOrigin: "center bottom",
+                              }}
+                            />
+                          );
+                        })}
                       </div>
-                      <p className="text-xs text-slate-300 mt-1.5">
+                      <p className="mt-1.5 text-xs text-slate-300">
                         {handsFreeEnabled
                           ? `Speak naturally. Nautilus stops after silence${dictationInsertionMode === "clipboard_only" ? " and copies to clipboard" : ""}. Press again to stop sooner.`
                           : pushToTalk
-                          ? `Release hotkey to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`
-                          : `Press the hotkey again to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`}
+                            ? `Release hotkey to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`
+                            : `Press the hotkey again to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`}
                       </p>
                     </>
                   ) : (
-                    <p className="text-xs text-slate-300 mt-1.5">
+                    <p className="mt-1.5 text-xs text-slate-300">
                       Preparing the capture path now. Start speaking immediately.
                     </p>
                   )}
@@ -1023,12 +1102,12 @@ export function DictationPopup() {
                 </p>
               )}
             </div>
-            <span className="font-mono text-sm text-orange-200">
+            <span className="font-mono text-sm text-slate-300">
               {phase === "recording" ? elapsedText : "--:--"}
             </span>
             <button
               type="button"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-rose-500/90 text-white hover:bg-rose-500"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/12 bg-white/10 text-white hover:bg-white/15"
               onClick={() => void handleStopFromPopup()}
               aria-label="Stop dictation"
             >
@@ -1037,7 +1116,7 @@ export function DictationPopup() {
             {!compact && elapsed >= 10 && (
               <button
                 type="button"
-                className="text-xs text-rose-300 underline underline-offset-2"
+                className="text-xs text-slate-300 underline underline-offset-2"
                 onClick={() => void handleStopFromPopup()}
               >
                 Stop now
@@ -1048,9 +1127,9 @@ export function DictationPopup() {
 
         {phase === "stopping" && (
           <div className="flex items-center gap-3 text-white">
-            <Loader2 className="h-5 w-5 animate-spin text-orange-300" />
+            <Loader2 className="h-5 w-5 animate-spin text-slate-200" />
             <div>
-              <p className="text-sm font-semibold">Stopping capture</p>
+              <p className="text-sm font-semibold">Stopping</p>
               <p className="text-xs text-slate-300">Finalizing audio and preserving context…</p>
             </div>
           </div>
@@ -1058,7 +1137,7 @@ export function DictationPopup() {
 
         {phase === "transcribing" && (
           <div className="flex items-center gap-3 text-white">
-            <Loader2 className="h-5 w-5 animate-spin text-cyan-300" />
+            <Loader2 className="h-5 w-5 animate-spin text-slate-200" />
             <div>
               <p className="text-sm font-semibold">Transcribing</p>
               <p className="text-xs text-slate-300">
@@ -1066,10 +1145,10 @@ export function DictationPopup() {
                   `${selectedModeLabel} is shaping the result for ${insertionMeta.label.toLowerCase()}${targetDetail}.`}
               </p>
               {autoActivationDetail && (
-                <p className="mt-1 text-xs text-cyan-200/90">{autoActivationDetail}</p>
+                <p className="mt-1 text-xs text-slate-400">{autoActivationDetail}</p>
               )}
               {!compact && preview && (
-                <div className="mt-2 max-w-[330px] rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                <div className="mt-2 max-w-[330px] rounded-xl border border-white/10 bg-white/[0.045] px-3 py-2">
                   <p className="text-[11px] uppercase tracking-wide text-slate-400">Live preview</p>
                   <p className="mt-1 text-xs leading-relaxed text-slate-200 line-clamp-4">
                     {preview}
@@ -1082,16 +1161,16 @@ export function DictationPopup() {
 
         {phase === "delivering" && (
           <div className="flex items-center gap-3 text-white">
-            <Loader2 className="h-5 w-5 animate-spin text-emerald-300" />
+            <Loader2 className="h-5 w-5 animate-spin text-slate-200" />
             <div>
-              <p className="text-sm font-semibold">Delivering result</p>
+              <p className="text-sm font-semibold">Inserting</p>
               <p className="text-xs text-slate-300">
                 {message ??
                   `Finishing ${insertionMeta.label.toLowerCase()}${targetDetail} with ${routeLabel}.`}
               </p>
               {!compact && preview && (
-                <div className="mt-2 max-w-[330px] rounded-xl border border-white/10 bg-white/5 px-3 py-2">
-                  <p className="text-[11px] uppercase tracking-wide text-slate-400">Ready to deliver</p>
+                <div className="mt-2 max-w-[330px] rounded-xl border border-white/10 bg-white/[0.045] px-3 py-2">
+                  <p className="text-[11px] uppercase tracking-wide text-slate-400">Latest text</p>
                   <p className="mt-1 text-xs leading-relaxed text-slate-200 line-clamp-4">
                     {preview}
                   </p>
@@ -1103,7 +1182,7 @@ export function DictationPopup() {
 
         {phase === "done" && (
           <div className="flex items-center gap-3 text-white">
-            <CheckCircle2 className="h-5 w-5 text-emerald-300" />
+            <CheckCircle2 className="h-5 w-5 text-slate-100" />
             <div className="min-w-0 flex-1">
               <p className="text-sm font-semibold">{doneTitle}</p>
               {!compact && (
@@ -1112,12 +1191,12 @@ export function DictationPopup() {
               {!compact && (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-200">
                   {commandLabel && (
-                    <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1">
+                    <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1">
                       {commandLabel}
                     </span>
                   )}
                   {finalSnippetAppliedCount > 0 && (
-                    <span className="rounded-full border border-violet-400/20 bg-violet-400/10 px-2.5 py-1">
+                    <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1">
                       {finalSnippetAppliedCount === 1
                         ? "1 snippet"
                         : `${finalSnippetAppliedCount} snippets`}
@@ -1134,7 +1213,7 @@ export function DictationPopup() {
                 </div>
               )}
               {!compact && (finalText || preview) && (
-                <div className="mt-3 max-w-[330px] rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                <div className="mt-3 max-w-[330px] rounded-xl border border-white/10 bg-white/[0.045] px-3 py-2">
                   <p className="text-[11px] uppercase tracking-wide text-slate-400">Latest result</p>
                   <p className="mt-1 text-xs leading-relaxed text-slate-200 line-clamp-4">
                     {finalText ?? preview}
@@ -1142,7 +1221,7 @@ export function DictationPopup() {
                 </div>
               )}
               {!compact && (
-                <div className="mt-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
+                <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.045] px-3 py-2">
                   <p className="text-[11px] uppercase tracking-wide text-slate-400">
                     Try an edit command
                   </p>
@@ -1150,7 +1229,7 @@ export function DictationPopup() {
                     {spokenEditHints.map((hint) => (
                       <span
                         key={hint}
-                        className="rounded-full border border-white/10 bg-slate-900/70 px-2.5 py-1"
+                        className="rounded-full border border-white/10 bg-slate-950/90 px-2.5 py-1"
                       >
                         {hint}
                       </span>
@@ -1200,7 +1279,7 @@ export function DictationPopup() {
                 </div>
               )}
               {!compact && actionFeedback && (
-                <p className="mt-2 text-xs text-cyan-200">{actionFeedback}</p>
+                <p className="mt-2 text-xs text-slate-300">{actionFeedback}</p>
               )}
             </div>
           </div>
@@ -1208,14 +1287,14 @@ export function DictationPopup() {
 
         {phase === "error" && (
           <div className="flex items-center gap-3 text-white">
-            <TriangleAlert className="h-5 w-5 text-rose-300" />
+            <TriangleAlert className="h-5 w-5 text-slate-100" />
             <div>
-              <p className="text-sm font-semibold">Dictation failed</p>
+              <p className="text-sm font-semibold">Problem</p>
               {!compact && message && (
                 <p className="max-w-[330px] text-xs leading-relaxed text-slate-300">{message}</p>
               )}
               {!compact && (
-                <p className="text-xs text-rose-200/90">
+                <p className="text-xs text-slate-400">
                   Check microphone access, {routeLabel.toLowerCase()}, and shortcut permissions.
                 </p>
               )}
@@ -1223,7 +1302,7 @@ export function DictationPopup() {
                 <div className="mt-2 flex items-center gap-2 text-xs text-slate-300">
                   <button
                     type="button"
-                    className="rounded-lg border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1.5 hover:bg-emerald-400/15"
+                    className="rounded-lg border border-white/10 bg-white/[0.05] px-2.5 py-1.5 hover:bg-white/[0.08]"
                     onClick={() => void handleStartAgain()}
                   >
                     Start again

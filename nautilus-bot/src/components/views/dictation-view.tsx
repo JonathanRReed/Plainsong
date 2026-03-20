@@ -3404,7 +3404,7 @@ export function DictationView() {
 
           {/* Quick Capture Card */}
           <Card className={cn(
-            "border-2 transition-all duration-300",
+            "border transition-colors duration-200 shadow-sm",
             isDictationBusy ? "border-active" : "border-muted"
           )}>
             <CardHeader>
@@ -3422,7 +3422,7 @@ export function DictationView() {
             <CardContent>
               <div className="space-y-4">
                 <div className="grid gap-3 md:grid-cols-3">
-                  <div className="rounded-xl border bg-background/70 p-3">
+                  <div className="rounded-xl border bg-background p-3">
                     <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                       Active lane
                     </p>
@@ -3434,13 +3434,13 @@ export function DictationView() {
                       </p>
                     ) : null}
                   </div>
-                  <div className="rounded-xl border bg-background/70 p-3">
+                  <div className="rounded-xl border bg-background p-3">
                     <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                       Smart context
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">{smartContextSummary}</p>
                   </div>
-                  <div className="rounded-xl border bg-background/70 p-3">
+                  <div className="rounded-xl border bg-background p-3">
                     <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                       Teaching Nautilus
                     </p>
@@ -3451,12 +3451,12 @@ export function DictationView() {
                   className={cn(
                     "rounded-xl border p-4",
                     dictationPhaseSummary.tone === "active"
-                      ? "border-active/40 bg-active/10"
+                      ? "border-active/30 bg-active/5"
                       : dictationPhaseSummary.tone === "success"
-                        ? "border-emerald-500/30 bg-emerald-500/10"
+                        ? "border-emerald-500/20 bg-emerald-500/5"
                         : dictationPhaseSummary.tone === "error"
-                          ? "border-destructive/30 bg-destructive/10"
-                          : "border-border bg-background/70"
+                          ? "border-destructive/20 bg-destructive/5"
+                          : "border-border bg-background"
                   )}
                 >
                   <div className="flex items-start justify-between gap-3">
@@ -3471,11 +3471,11 @@ export function DictationView() {
                       className={cn(
                         "rounded-full border px-2.5 py-1 text-[11px] font-semibold",
                         dictationPhaseSummary.tone === "active"
-                          ? "border-active/40 bg-active/10 text-active"
+                          ? "border-active/30 bg-active/5 text-active"
                           : dictationPhaseSummary.tone === "success"
-                            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                            ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300"
                             : dictationPhaseSummary.tone === "error"
-                              ? "border-destructive/30 bg-destructive/10 text-destructive"
+                              ? "border-destructive/20 bg-destructive/5 text-destructive"
                               : "border-border bg-background text-muted-foreground"
                       )}
                     >
@@ -3483,12 +3483,12 @@ export function DictationView() {
                     </div>
                   </div>
                   {dictationPhasePreview ? (
-                    <div className="mt-3 rounded-md border bg-background/80 px-3 py-2 text-sm text-muted-foreground">
+                    <div className="mt-3 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
                       {dictationPhasePreview}
                     </div>
                   ) : null}
                 </div>
-                <div className="rounded-xl border border-border bg-muted/20 p-3">
+                <div className="rounded-xl border border-border bg-muted/10 p-3">
                   <div className="flex flex-wrap gap-2 text-xs">
                     <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
                       Backtrack: <span className="font-medium text-foreground">scratch that</span>
@@ -3504,29 +3504,32 @@ export function DictationView() {
                     </span>
                   </div>
                 </div>
-              <div className="flex flex-col items-center gap-6 py-8">
+              <div className="rounded-[20px] border border-border bg-background px-5 py-8">
+                <div className="flex flex-col items-center gap-6">
                 {isDictationCaptureLive ? (
                   <div className="flex flex-col items-center gap-4">
-                    <div className="h-24 w-24 rounded-full bg-active flex items-center justify-center animate-pulse shadow-lg shadow-active/50">
-                      <Mic className="h-12 w-12 text-active-foreground" />
+                    <div className="relative flex h-24 w-24 items-center justify-center rounded-full border border-active/20 bg-active/5">
+                      <span className="absolute inset-0 rounded-full border border-active/20 animate-ping opacity-40" />
+                      <span className="absolute inset-[10px] rounded-full border border-active/20 opacity-60" />
+                      <Mic className="relative h-10 w-10 text-active" />
                     </div>
                     <div className="text-center">
                       <p className="text-lg font-medium">
-                        {dictationPhase === "primed" ? "Warming up..." : "Dictating..."}
+                        {dictationPhase === "primed" ? "Ready" : "Listening"}
                       </p>
-                      <p className="text-3xl font-mono mt-2 font-bold text-active">
+                      <p className="mt-2 text-3xl font-mono font-semibold text-foreground">
                         {dictationPhase === "recording" ? formattedDuration : "--:--"}
                       </p>
                     </div>
-                    <Button variant="destructive" size="lg" onClick={handleStopDictation} className="mt-4">
+                    <Button variant="outline" size="lg" onClick={handleStopDictation} className="mt-2">
                       <Square className="h-4 w-4 mr-2 fill-current" />
                       Stop Dictation
                     </Button>
                   </div>
                 ) : isDictationBusy ? (
                   <div className="flex flex-col items-center gap-4">
-                    <div className="h-24 w-24 rounded-full bg-muted flex items-center justify-center">
-                      <RefreshCw className="h-12 w-12 animate-spin text-primary" />
+                    <div className="flex h-24 w-24 items-center justify-center rounded-full border border-border bg-muted/20">
+                      <RefreshCw className="h-10 w-10 animate-spin text-foreground" />
                     </div>
                     <div className="text-center">
                       <p className="text-lg font-medium">{dictationPhaseSummary.title}</p>
@@ -3539,8 +3542,8 @@ export function DictationView() {
                   </div>
                 ) : dictationPhase === "done" ? (
                   <div className="flex flex-col items-center gap-4">
-                    <div className="h-24 w-24 rounded-full bg-emerald-500/10 flex items-center justify-center">
-                      <CheckCircle2 className="h-12 w-12 text-emerald-600 dark:text-emerald-300" />
+                    <div className="flex h-24 w-24 items-center justify-center rounded-full border border-emerald-500/20 bg-emerald-500/5">
+                      <CheckCircle2 className="h-10 w-10 text-emerald-600 dark:text-emerald-300" />
                     </div>
                     <div className="text-center">
                       <p className="text-lg font-medium">Result ready</p>
@@ -3558,8 +3561,8 @@ export function DictationView() {
                   </div>
                 ) : dictationPhase === "error" ? (
                   <div className="flex flex-col items-center gap-4">
-                    <div className="h-24 w-24 rounded-full bg-destructive/10 flex items-center justify-center">
-                      <TriangleAlert className="h-12 w-12 text-destructive" />
+                    <div className="flex h-24 w-24 items-center justify-center rounded-full border border-destructive/20 bg-destructive/5">
+                      <TriangleAlert className="h-10 w-10 text-destructive" />
                     </div>
                     <div className="text-center">
                       <p className="text-lg font-medium">Capture needs attention</p>
@@ -3578,12 +3581,26 @@ export function DictationView() {
                 ) : (
                   <div className="flex flex-col items-center gap-4">
                     <div className={cn(
-                      "h-24 w-24 rounded-full flex items-center justify-center transition-all",
-                      hotkeyPressed ? "bg-active scale-110" : "bg-muted"
+                      "relative flex h-24 w-24 items-center justify-center rounded-full border transition-transform duration-150",
+                      hotkeyPressed ? "scale-[1.03] border-active/30 bg-active/5" : "border-border bg-muted/20"
                     )}>
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          "absolute inset-0 rounded-full border transition-all duration-150",
+                          hotkeyPressed ? "border-active/30 opacity-100" : "border-border/60 opacity-70"
+                        )}
+                      />
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          "absolute inset-[10px] rounded-full border transition-all duration-150",
+                          hotkeyPressed ? "border-active/25 opacity-100" : "border-border/50 opacity-70"
+                        )}
+                      />
                       <Mic className={cn(
-                        "h-12 w-12 transition-all",
-                        hotkeyPressed ? "text-active-foreground" : "text-muted-foreground"
+                        "relative h-10 w-10 transition-colors",
+                        hotkeyPressed ? "text-active" : "text-muted-foreground"
                       )} />
                     </div>
                     <div className="text-center">
@@ -3608,6 +3625,7 @@ export function DictationView() {
                     </Button>
                   </div>
                 )}
+                </div>
               </div>
                 {!isDictationCaptureLive && !isDictationBusy ? (
                   <div className="flex flex-wrap items-center justify-center gap-2 border-t border-border/60 pt-4">
