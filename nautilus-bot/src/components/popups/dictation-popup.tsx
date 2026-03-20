@@ -420,32 +420,49 @@ function PopupActionButton({
   );
 }
 
-function CompactAudioMeter({
+function DictationWaveStrip({
   level,
   active,
+  compact = false,
 }: {
   level: number;
   active: boolean;
+  compact?: boolean;
 }) {
-  const bars = [0.24, 0.42, 0.66, 0.88, 0.72, 0.46, 0.3];
+  const bars = compact
+    ? [0.28, 0.52, 0.82, 1, 0.82, 0.52, 0.28]
+    : [0.16, 0.28, 0.44, 0.66, 0.88, 1, 0.88, 0.66, 0.44, 0.28, 0.16];
+  const baseHeight = compact ? 4 : 5;
+  const maxExtraHeight = compact ? 12 : 17;
 
   return (
-    <div className="flex h-6 items-end gap-1" aria-hidden="true">
+    <div
+      className={cn(
+        "relative flex items-center gap-1",
+        compact ? "h-[18px]" : "h-6",
+      )}
+      aria-hidden="true"
+    >
+      <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-white/10" />
       {bars.map((weight, index) => {
         const intensity = active
-          ? Math.max(0.16, Math.min(1, level * weight * 1.35 + 0.08))
-          : 0.18;
+          ? Math.max(0.16, Math.min(1, level * (0.72 + weight * 0.72) + 0.08))
+          : 0.16;
         return (
-          <span
-            key={`meter-bar-${index}`}
-            className="w-1.5 rounded-full bg-white/85 transition-[height,opacity,transform] duration-150"
-            style={{
-              height: `${6 + intensity * 14}px`,
-              opacity: active ? 0.28 + intensity * 0.72 : 0.28,
-              transform: `scaleY(${0.92 + intensity * 0.08})`,
-              transformOrigin: "center bottom",
-            }}
-          />
+          <div key={`meter-bar-${index}`} className="flex h-full items-center">
+            <span
+              className={cn(
+                "rounded-full bg-white/85 transition-[height,opacity,transform] duration-150",
+                compact ? "w-1" : "w-1.5",
+              )}
+              style={{
+                height: `${baseHeight + intensity * maxExtraHeight * weight}px`,
+                opacity: active ? 0.24 + intensity * 0.76 : 0.24,
+                transform: `scaleY(${0.94 + intensity * 0.06})`,
+                transformOrigin: "center center",
+              }}
+            />
+          </div>
         );
       })}
     </div>
@@ -1005,17 +1022,14 @@ export function DictationPopup() {
 
   // ── Minimal pill mode ────────────────────────────────────────────────────
   if (displayMode === "minimal") {
-    const dotColor =
+    const statusLabel =
       phase === "recording"
-        ? "bg-orange-400"
-        : phase === "primed" ||
-            phase === "transcribing" ||
-            phase === "delivering" ||
-            phase === "stopping"
-          ? "bg-cyan-400"
-          : phase === "done"
-            ? "bg-emerald-400"
-            : "bg-rose-400";
+        ? "Listening"
+        : phase === "done"
+          ? "Ready"
+          : phase === "error"
+            ? "Problem"
+            : "Working";
 
     return (
       <div
@@ -1028,19 +1042,18 @@ export function DictationPopup() {
         onDoubleClick={() => void cycleDisplayMode()}
         title="Double-click to expand"
       >
-        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/88 px-3 py-[10px] shadow-lg backdrop-blur-md">
-          <div className="flex items-center gap-[5px]">
-            {[0, 1, 2, 3, 4].map((i) => (
-              <span
-                key={i}
-                className={`block h-[6px] w-[6px] rounded-full ${dotColor}`}
-                style={{
-                  animation: `dictation-dot-pulse 1.2s ease-in-out ${i * 0.15}s infinite`,
-                  opacity: phase === "done" ? 1 : undefined,
-                }}
-              />
-            ))}
+        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/88 px-3 py-[9px] shadow-lg backdrop-blur-md">
+          <div className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/[0.08] text-slate-100">
+            <Mic className="h-3.5 w-3.5" />
           </div>
+          <DictationWaveStrip
+            level={displayAudioLevel}
+            active={phase === "recording"}
+            compact
+          />
+          <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-200">
+            {statusLabel}
+          </span>
           <button
             type="button"
             className="inline-flex h-6 w-6 items-center justify-center rounded-full text-slate-300 hover:bg-white/8 hover:text-white"
@@ -1051,12 +1064,6 @@ export function DictationPopup() {
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
-        <style>{`
-          @keyframes dictation-dot-pulse {
-            0%, 80%, 100% { transform: scale(0.7); opacity: 0.4; }
-            40% { transform: scale(1); opacity: 1; }
-          }
-        `}</style>
       </div>
     );
   }
@@ -1099,9 +1106,8 @@ export function DictationPopup() {
             void window.startDragging();
           }}
         >
-          <div className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wide">
+          <div className="inline-flex h-6 items-center gap-1 rounded-full border border-white/8 bg-white/[0.03] px-2 text-slate-400">
             <GripHorizontal className="h-3 w-3" />
-            Drag
           </div>
           <div className="inline-flex items-center gap-1">
             <button
@@ -1188,7 +1194,7 @@ export function DictationPopup() {
                   )}
                 />
               </div>
-              <CompactAudioMeter
+              <DictationWaveStrip
                 level={displayAudioLevel}
                 active={phase === "recording"}
               />

@@ -2644,10 +2644,19 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
                 <div className="space-y-6 px-4 py-5 sm:px-6 sm:py-6">
                   {activeTab === "asr" && (
-                    <Card>
-                      <CardHeader>
-                        <div className="flex items-center justify-between">
-                          <CardTitle>Transcription</CardTitle>
+                    <div className="space-y-5">
+                      <div className="flex flex-col gap-3 border-b border-border/60 pb-4 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="space-y-1">
+                          <h3 className="text-lg font-semibold text-foreground">
+                            Transcription
+                          </h3>
+                          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
+                            Choose how Nautilus transcribes dictation and
+                            meetings, then tune language, audio, and speaker
+                            labeling.
+                          </p>
+                        </div>
+                        <div className="self-start">
                           <AdvancedToggle
                             checked={advancedTabs.asr}
                             onCheckedChange={(c) =>
@@ -2655,13 +2664,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             }
                           />
                         </div>
-                        <CardDescription>
-                          Choose how Nautilus transcribes dictation and
-                          meetings, then tune language, audio, and speaker
-                          labeling.
-                        </CardDescription>
-                      </CardHeader>
-                      <CardContent className="space-y-5">
+                      </div>
+                      <div className="space-y-5">
                         <div className="space-y-3">
                           <AsrProviderManager />
                         </div>
@@ -3257,7 +3261,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         </div>
 
                         {advancedTabs.asr && (
-                          <div className="pt-4 border-t space-y-5">
+                          <div className="space-y-5 border-t pt-4">
                             <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
                               Power user
                             </h3>
@@ -3267,8 +3271,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             })}
                           </div>
                         )}
-                      </CardContent>
-                    </Card>
+                      </div>
+                    </div>
                   )}
 
                   {activeTab === "general" && (

@@ -16,7 +16,12 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { getRecording, getWaveformData, stopRecording, updateRecordingNotes } from "@/lib/tauri";
+import {
+  getRecording,
+  getWaveformData,
+  stopRecording,
+  updateRecordingNotes,
+} from "@/lib/tauri";
 import {
   describeMeetingConsent,
   MEETING_CONSENT_NOTICE_TEXT,
@@ -44,27 +49,73 @@ interface RecordingTranscriptionStreamEvent {
 
 type DisplayMode = "full" | "compact" | "minimal";
 
+function MeetingWaveStrip({
+  levels,
+  compact = false,
+}: {
+  levels: number[];
+  compact?: boolean;
+}) {
+  const bars = levels.length
+    ? levels
+    : compact
+      ? [0.18, 0.34, 0.52, 0.66, 0.52, 0.34, 0.18]
+      : [0.14, 0.22, 0.34, 0.48, 0.64, 0.82, 0.64, 0.48, 0.34, 0.22, 0.14];
+
+  return (
+    <div
+      className={`relative flex items-center gap-1 ${compact ? "h-[18px]" : "h-8"}`}
+      aria-hidden="true"
+    >
+      <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-white/10" />
+      {bars.map((level, index) => {
+        const normalized = Math.max(0.14, Math.min(1, level));
+        return (
+          <div
+            key={`meeting-wave-${index}`}
+            className="flex h-full items-center"
+          >
+            <span
+              className={`${compact ? "w-1" : "w-1.5"} rounded-full bg-white/80 transition-[height,opacity] duration-150`}
+              style={{
+                height: `${(compact ? 4 : 6) + normalized * (compact ? 10 : 18)}px`,
+                opacity: 0.24 + normalized * 0.76,
+              }}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function RecordingPopup() {
   const window = getCurrentWindow();
   const [recordingId, setRecordingId] = useState<string | null>(null);
   const [startedAtMs, setStartedAtMs] = useState<number | null>(null);
   const [systemAudioActive, setSystemAudioActive] = useState(false);
-  const [phase, setPhase] = useState<"recording" | "transcribing" | "error">("recording");
+  const [phase, setPhase] = useState<"recording" | "transcribing" | "error">(
+    "recording",
+  );
   const [transcriptionPreview, setTranscriptionPreview] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [stopping, setStopping] = useState(false);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("full");
   const [levels, setLevels] = useState<number[]>([]);
   const [message, setMessage] = useState<string | null>(null);
-  const [consentNoticeMessage, setConsentNoticeMessage] = useState<string | null>(null);
+  const [consentNoticeMessage, setConsentNoticeMessage] = useState<
+    string | null
+  >(null);
   const [recordingTitle, setRecordingTitle] = useState("Live meeting");
   const [meetingNotes, setMeetingNotes] = useState("");
   const [meetingTemplateLabel, setMeetingTemplateLabel] = useState("Auto");
   const [meetingTemplateDescription, setMeetingTemplateDescription] = useState(
-    "Nautilus chooses the note format based on what you captured."
+    "Nautilus chooses the note format based on what you captured.",
   );
   const [consentPromptShown, setConsentPromptShown] = useState(false);
-  const [consentNoticeMode, setConsentNoticeMode] = useState<string | null>(null);
+  const [consentNoticeMode, setConsentNoticeMode] = useState<string | null>(
+    null,
+  );
   const [copiedNotice, setCopiedNotice] = useState(false);
   const recordingIdRef = useRef<string | null>(null);
   const lastSavedMeetingNotesRef = useRef("");
@@ -80,15 +131,18 @@ export function RecordingPopup() {
     const setup = async () => {
       try {
         const initialState = await invoke<MeetingRecordingStateChangedEvent>(
-          "get_recording_overlay_state"
+          "get_recording_overlay_state",
         );
         if (
-          (initialState.phase === "recording" || initialState.phase === "transcribing") &&
+          (initialState.phase === "recording" ||
+            initialState.phase === "transcribing") &&
           initialState.recordingId
         ) {
           setRecordingId(initialState.recordingId);
           setStartedAtMs(
-            typeof initialState.startedAtMs === "number" ? initialState.startedAtMs : Date.now()
+            typeof initialState.startedAtMs === "number"
+              ? initialState.startedAtMs
+              : Date.now(),
           );
           setSystemAudioActive(Boolean(initialState.systemAudioActive));
           setConsentPromptShown(Boolean(initialState.consentPromptShown));
@@ -105,10 +159,16 @@ export function RecordingPopup() {
         "meeting-recording-state-changed",
         (event) => {
           const payload = event.payload;
-          if ((payload.phase === "recording" || payload.phase === "transcribing") && payload.recordingId) {
+          if (
+            (payload.phase === "recording" ||
+              payload.phase === "transcribing") &&
+            payload.recordingId
+          ) {
             setRecordingId(payload.recordingId);
             setStartedAtMs(
-              typeof payload.startedAtMs === "number" ? payload.startedAtMs : Date.now()
+              typeof payload.startedAtMs === "number"
+                ? payload.startedAtMs
+                : Date.now(),
             );
             setSystemAudioActive(Boolean(payload.systemAudioActive));
             setConsentPromptShown(Boolean(payload.consentPromptShown));
@@ -133,14 +193,17 @@ export function RecordingPopup() {
           setMessage(null);
           setTranscriptionPreview("");
           setStopping(false);
-        }
+        },
       );
 
       unlistenStream = await listen<RecordingTranscriptionStreamEvent>(
         "recording-transcription-stream",
         (event) => {
           const currentRecordingId = recordingIdRef.current;
-          if (!currentRecordingId || event.payload.recordingId !== currentRecordingId) {
+          if (
+            !currentRecordingId ||
+            event.payload.recordingId !== currentRecordingId
+          ) {
             return;
           }
           if (event.payload.text.trim()) {
@@ -149,7 +212,7 @@ export function RecordingPopup() {
           if (event.payload.isFinal) {
             setMessage("Transcript preview is ready in Meetings.");
           }
-        }
+        },
       );
     };
 
@@ -190,10 +253,15 @@ export function RecordingPopup() {
         const targetBars = 18;
         const stride = Math.max(1, Math.floor(samples.length / targetBars));
         const bars: number[] = [];
-        for (let i = 0; i < samples.length && bars.length < targetBars; i += stride) {
+        for (
+          let i = 0;
+          i < samples.length && bars.length < targetBars;
+          i += stride
+        ) {
           const slice = samples.slice(i, i + stride);
           const avg =
-            slice.reduce((acc, value) => acc + Math.abs(value), 0) / Math.max(1, slice.length);
+            slice.reduce((acc, value) => acc + Math.abs(value), 0) /
+            Math.max(1, slice.length);
           bars.push(Math.min(1, avg * 12));
         }
         setLevels(bars);
@@ -214,7 +282,7 @@ export function RecordingPopup() {
       setMeetingNotes("");
       setMeetingTemplateLabel("Auto");
       setMeetingTemplateDescription(
-        "Nautilus chooses the note format based on what you captured."
+        "Nautilus chooses the note format based on what you captured.",
       );
       setConsentNoticeMode(null);
       setConsentNoticeMessage(null);
@@ -234,7 +302,9 @@ export function RecordingPopup() {
         setMeetingNotes(nextNotes);
         lastSavedMeetingNotesRef.current = nextNotes;
 
-        const template = getMeetingTemplateOption(recording.meetingTemplateId ?? "auto");
+        const template = getMeetingTemplateOption(
+          recording.meetingTemplateId ?? "auto",
+        );
         setMeetingTemplateLabel(template.label);
         setMeetingTemplateDescription(template.description);
         setConsentPromptShown(Boolean(recording.consentPromptShown));
@@ -296,7 +366,11 @@ export function RecordingPopup() {
 
   const cycleDisplayMode = async () => {
     const next: DisplayMode =
-      displayMode === "full" ? "compact" : displayMode === "compact" ? "minimal" : "full";
+      displayMode === "full"
+        ? "compact"
+        : displayMode === "compact"
+          ? "minimal"
+          : "full";
     setDisplayMode(next);
     try {
       if (next === "minimal") {
@@ -320,10 +394,16 @@ export function RecordingPopup() {
     }
   };
 
-  const openMainApp = async (view?: "recordings" | "settings", targetRecordingId?: string) => {
+  const openMainApp = async (
+    view?: "recordings" | "settings",
+    targetRecordingId?: string,
+  ) => {
     try {
       if (view) {
-        await invoke("open_main_window_to", { view, recordingId: targetRecordingId ?? null });
+        await invoke("open_main_window_to", {
+          view,
+          recordingId: targetRecordingId ?? null,
+        });
       } else {
         await invoke("open_main_window");
       }
@@ -351,7 +431,8 @@ export function RecordingPopup() {
 
   const statusLabel = isTranscribing ? "Processing" : "Live meeting";
   const captureModeLabel = systemAudioActive ? "Me + Them" : "Mic only";
-  const notesSummary = meetingNotes.trim() || "Open the meeting view to keep notes current.";
+  const notesSummary =
+    meetingNotes.trim() || "Open the meeting view to keep notes current.";
   const consentStatus = describeMeetingConsent({
     consentPromptShown,
     consentNoticeMode,
@@ -373,7 +454,14 @@ export function RecordingPopup() {
         }}
       >
         <div className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/92 px-3 py-2 text-white shadow-[0_20px_60px_rgba(2,6,23,0.45)] backdrop-blur-md">
-          <span className={`h-2.5 w-2.5 rounded-full ${isTranscribing ? "bg-slate-200" : "bg-white"}`} />
+          <div className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/[0.08] text-slate-100">
+            {isTranscribing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Mic className="h-3.5 w-3.5" />
+            )}
+          </div>
+          <MeetingWaveStrip levels={levels} compact />
           <span className="text-xs font-medium uppercase tracking-[0.18em]">
             {isTranscribing ? "Processing" : captureModeLabel}
           </span>
@@ -424,9 +512,8 @@ export function RecordingPopup() {
             void window.startDragging();
           }}
         >
-          <div className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.2em]">
+          <div className="inline-flex h-6 items-center gap-1 rounded-full border border-white/8 bg-white/[0.03] px-2 text-slate-400">
             <GripHorizontal className="h-3 w-3" />
-            Drag
           </div>
           <div className="inline-flex items-center gap-1">
             <button
@@ -434,7 +521,9 @@ export function RecordingPopup() {
               className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-300 hover:bg-white/8 hover:text-white"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void cycleDisplayMode()}
-              aria-label={displayMode === "compact" ? "Minimal popup" : "Compact popup"}
+              aria-label={
+                displayMode === "compact" ? "Minimal popup" : "Compact popup"
+              }
             >
               {displayMode === "compact" ? (
                 <PanelsTopLeft className="h-3.5 w-3.5" />
@@ -465,11 +554,19 @@ export function RecordingPopup() {
 
         <div className="flex flex-wrap items-center gap-2">
           <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-slate-100">
-            {isTranscribing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mic className="h-3.5 w-3.5" />}
+            {isTranscribing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Mic className="h-3.5 w-3.5" />
+            )}
             {statusLabel}
           </span>
           <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-slate-200">
-            {systemAudioActive ? <Monitor className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
+            {systemAudioActive ? (
+              <Monitor className="h-3.5 w-3.5" />
+            ) : (
+              <Mic className="h-3.5 w-3.5" />
+            )}
             {captureModeLabel}
           </span>
           <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-slate-200">
@@ -489,17 +586,13 @@ export function RecordingPopup() {
           ) : null}
         </div>
 
-        <div className={`mt-3 ${displayMode === "compact" ? "flex items-center justify-between gap-3" : "space-y-4"}`}>
+        <div
+          className={`mt-3 ${displayMode === "compact" ? "flex items-center justify-between gap-3" : "space-y-4"}`}
+        >
           <div className="flex items-center gap-3">
             {displayMode === "full" && (
-              <div className="flex h-14 items-end gap-1.5 rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2">
-                {waveformBars.map((level, idx) => (
-                  <span
-                    key={`${idx}-${Math.round(level * 100)}`}
-                    className="w-1.5 rounded-full bg-white/75 transition-all"
-                    style={{ height: `${Math.max(18, Math.round(level * 100))}%` }}
-                  />
-                ))}
+              <div className="flex h-14 items-center rounded-2xl border border-white/10 bg-white/[0.04] px-3">
+                <MeetingWaveStrip levels={waveformBars} />
               </div>
             )}
             <div>
@@ -563,7 +656,9 @@ export function RecordingPopup() {
                   className="inline-flex items-center rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
                   onClick={async () => {
                     try {
-                      await navigator.clipboard.writeText(MEETING_CONSENT_NOTICE_TEXT);
+                      await navigator.clipboard.writeText(
+                        MEETING_CONSENT_NOTICE_TEXT,
+                      );
                       setCopiedNotice(true);
                     } catch {
                       setCopiedNotice(false);
@@ -582,7 +677,9 @@ export function RecordingPopup() {
                   <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
                     Live notes
                   </p>
-                  <p className="text-[11px] text-slate-400">Autosaves to this meeting</p>
+                  <p className="text-[11px] text-slate-400">
+                    Autosaves to this meeting
+                  </p>
                 </div>
                 <textarea
                   value={meetingNotes}
@@ -598,7 +695,9 @@ export function RecordingPopup() {
                     Transcript preview
                   </p>
                   <p className="text-[11px] text-slate-400">
-                    {isTranscribing ? "Updates while processing" : "Live support for your notes"}
+                    {isTranscribing
+                      ? "Updates while processing"
+                      : "Live support for your notes"}
                   </p>
                 </div>
                 <p className="max-h-[176px] overflow-y-auto text-sm leading-6 text-slate-100">
@@ -613,7 +712,9 @@ export function RecordingPopup() {
           <div className="mt-4 space-y-3">
             <div className="flex items-center justify-between gap-3 text-xs text-slate-300">
               <div className="min-w-0">
-                <p className="truncate font-medium text-slate-100">{recordingTitle}</p>
+                <p className="truncate font-medium text-slate-100">
+                  {recordingTitle}
+                </p>
                 <p className="truncate text-slate-400">
                   {meetingTemplateLabel} · {consentStatus.label}
                 </p>
@@ -625,7 +726,9 @@ export function RecordingPopup() {
                     className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
                     onClick={async () => {
                       try {
-                        await navigator.clipboard.writeText(MEETING_CONSENT_NOTICE_TEXT);
+                        await navigator.clipboard.writeText(
+                          MEETING_CONSENT_NOTICE_TEXT,
+                        );
                         setCopiedNotice(true);
                       } catch {
                         setCopiedNotice(false);
@@ -651,7 +754,9 @@ export function RecordingPopup() {
                 </p>
                 <p className="text-[11px] text-slate-400">{captureModeLabel}</p>
               </div>
-              <p className="line-clamp-3 text-sm leading-6 text-slate-100">{notesSummary}</p>
+              <p className="line-clamp-3 text-sm leading-6 text-slate-100">
+                {notesSummary}
+              </p>
             </div>
             <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
               <div className="mb-2 flex items-center justify-between">
@@ -660,7 +765,9 @@ export function RecordingPopup() {
                 </p>
                 <p className="text-[11px] text-slate-400">{statusLabel}</p>
               </div>
-              <p className="line-clamp-3 text-sm leading-6 text-slate-100">{previewText}</p>
+              <p className="line-clamp-3 text-sm leading-6 text-slate-100">
+                {previewText}
+              </p>
             </div>
           </div>
         )}
