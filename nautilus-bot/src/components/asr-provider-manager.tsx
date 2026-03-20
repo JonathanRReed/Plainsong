@@ -29,11 +29,16 @@ import {
 } from "@/lib/tauri";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type {
   AsrBenchmarkEntry,
@@ -55,46 +60,63 @@ import {
   Zap,
   CloudLightning,
   Moon,
-  Mic
+  Mic,
 } from "lucide-react";
 
 interface AsrProviderManagerProps {
   className?: string;
 }
 
-export function AsrProviderManager({
-  className,
-}: AsrProviderManagerProps) {
-  const [meetingRoutePolicy, setMeetingRoutePolicy] = useState<"prefer_local" | "best_available">(
-    "prefer_local"
-  );
+export function AsrProviderManager({ className }: AsrProviderManagerProps) {
+  const [meetingRoutePolicy, setMeetingRoutePolicy] = useState<
+    "prefer_local" | "best_available"
+  >("prefer_local");
   const [inventory, setInventory] = useState<AsrProviderInventory[]>([]);
   const [providers, setProviders] = useState<AsrProviderInfo[]>([]);
-  const [defaultProvider, setDefaultProvider] = useState<AsrProviderType>("whisper");
+  const [defaultProvider, setDefaultProvider] =
+    useState<AsrProviderType>("whisper");
   const [defaultModelId, setDefaultModelId] = useState("distil-large-v3.5");
   const [useSharedAsrSelection, setUseSharedAsrSelection] = useState(true);
-  const [dictationProvider, setDictationProvider] = useState<AsrProviderType>("distil_whisper");
+  const [dictationProvider, setDictationProvider] =
+    useState<AsrProviderType>("distil_whisper");
   const [dictationModelId, setDictationModelId] = useState("distil-large-v3.5");
-  const [meetingProvider, setMeetingProvider] = useState<AsrProviderType>("distil_whisper");
+  const [meetingProvider, setMeetingProvider] =
+    useState<AsrProviderType>("distil_whisper");
   const [meetingModelId, setMeetingModelId] = useState("distil-large-v3.5");
   const [dictationMlxEnabled, setDictationMlxEnabled] = useState(false);
   const [meetingMlxEnabled, setMeetingMlxEnabled] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResult[]>([]);
-  const [benchmarkHistory, setBenchmarkHistory] = useState<AsrBenchmarkEntry[]>([]);
-  const [benchmarkFileName, setBenchmarkFileName] = useState<string | null>(null);
+  const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResult[]>(
+    [],
+  );
+  const [benchmarkHistory, setBenchmarkHistory] = useState<AsrBenchmarkEntry[]>(
+    [],
+  );
+  const [benchmarkFileName, setBenchmarkFileName] = useState<string | null>(
+    null,
+  );
   const [isBenchmarking, setIsBenchmarking] = useState(false);
-  const [providerErrors, setProviderErrors] = useState<Record<string, string>>({});
-  const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
+  const [providerErrors, setProviderErrors] = useState<Record<string, string>>(
+    {},
+  );
+  const [downloadProgress, setDownloadProgress] = useState<
+    Record<string, number>
+  >({});
   const [repairingCache, setRepairingCache] = useState(false);
   const [repairSummary, setRepairSummary] = useState<string | null>(null);
-  const [platformSettings, setPlatformSettings] = useState<PlatformOptimizationSettings | null>(null);
+  const [platformSettings, setPlatformSettings] =
+    useState<PlatformOptimizationSettings | null>(null);
   const [platformSaveBusy, setPlatformSaveBusy] = useState(false);
-  const [platformSaveError, setPlatformSaveError] = useState<string | null>(null);
+  const [platformSaveError, setPlatformSaveError] = useState<string | null>(
+    null,
+  );
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
-  const [routeTab, setRouteTab] = useState<"shared" | "dictation" | "meeting">("shared");
+  const [routeTab, setRouteTab] = useState<"shared" | "dictation" | "meeting">(
+    "shared",
+  );
   const [permissionActionBusy, setPermissionActionBusy] = useState(false);
-  const [permissionDiagnostics, setPermissionDiagnostics] = useState<PermissionDiagnostics | null>(null);
+  const [permissionDiagnostics, setPermissionDiagnostics] =
+    useState<PermissionDiagnostics | null>(null);
   const benchmarkFileInputRef = useRef<HTMLInputElement | null>(null);
   const autoPromptedNativePermissionRef = useRef<string | null>(null);
 
@@ -108,7 +130,10 @@ export function AsrProviderManager({
 
   type WorkflowLane = "dictation" | "meeting" | "shared";
 
-  const isMeetingEligibleModel = (providerType: AsrProviderType, modelId: string) => {
+  const isMeetingEligibleModel = (
+    providerType: AsrProviderType,
+    modelId: string,
+  ) => {
     if (!sharedIsMeetingEligibleModel(providerType, modelId)) {
       return false;
     }
@@ -118,10 +143,15 @@ export function AsrProviderManager({
       return true;
     }
 
-    return modelOptionsForProvider(providerType).some((option) => option.id === normalizedModelId);
+    return modelOptionsForProvider(providerType).some(
+      (option) => option.id === normalizedModelId,
+    );
   };
 
-  const isSharedMeetingCompatible = (providerType: AsrProviderType, modelId: string) =>
+  const isSharedMeetingCompatible = (
+    providerType: AsrProviderType,
+    modelId: string,
+  ) =>
     sharedIsSharedMeetingCompatible(providerType, modelId) &&
     isMeetingEligibleModel(providerType, modelId);
 
@@ -140,7 +170,9 @@ export function AsrProviderManager({
   });
 
   const normalizeManualEnginePriority = (priority: string[]): string[] => {
-    const validIds = new Set<string>(manualEngineOptions.map((option) => option.value));
+    const validIds = new Set<string>(
+      manualEngineOptions.map((option) => option.value),
+    );
     const seen = new Set<string>();
     const normalized: string[] = [];
     for (const id of priority) {
@@ -152,17 +184,20 @@ export function AsrProviderManager({
   };
 
   const withNormalizedManualPriority = (
-    settings: PlatformOptimizationSettings
+    settings: PlatformOptimizationSettings,
   ): PlatformOptimizationSettings => ({
     ...settings,
-    manualEnginePriority: normalizeManualEnginePriority(settings.manualEnginePriority ?? []),
+    manualEnginePriority: normalizeManualEnginePriority(
+      settings.manualEnginePriority ?? [],
+    ),
   });
 
   const withoutNativeRouteOverrides = (
-    settings: PlatformOptimizationSettings
+    settings: PlatformOptimizationSettings,
   ): PlatformOptimizationSettings => {
     const nextPriority = settings.manualEnginePriority.filter(
-      (engine) => engine !== "macos_apple_speech" && engine !== "windows_sdk_dictation"
+      (engine) =>
+        engine !== "macos_apple_speech" && engine !== "windows_sdk_dictation",
     );
 
     return {
@@ -188,7 +223,8 @@ export function AsrProviderManager({
   const readyEngineIds = useMemo(() => {
     const ids = new Set<string>();
     for (const provider of providers) {
-      for (const engineId of provider.engineDiagnostics?.availableEngines ?? []) {
+      for (const engineId of provider.engineDiagnostics?.availableEngines ??
+        []) {
         ids.add(engineId);
       }
     }
@@ -204,7 +240,9 @@ export function AsrProviderManager({
     let changed = false;
 
     if (next.macos.appleNativeEnabled && !appleNativeEngineReady) {
-      const nextPriority = next.manualEnginePriority.filter((engine) => engine !== "macos_apple_speech");
+      const nextPriority = next.manualEnginePriority.filter(
+        (engine) => engine !== "macos_apple_speech",
+      );
       next = {
         ...next,
         macos: {
@@ -212,7 +250,8 @@ export function AsrProviderManager({
           appleNativeEnabled: false,
         },
         mode: nextPriority.length === 0 ? "auto" : next.mode,
-        fallbackPolicy: nextPriority.length === 0 ? "local_only" : next.fallbackPolicy,
+        fallbackPolicy:
+          nextPriority.length === 0 ? "local_only" : next.fallbackPolicy,
         manualEnginePriority: nextPriority,
       };
       changed = true;
@@ -220,7 +259,7 @@ export function AsrProviderManager({
 
     if (next.windows.windowsSdkDictationEnabled && !windowsSdkEngineReady) {
       const nextPriority = next.manualEnginePriority.filter(
-        (engine) => engine !== "windows_sdk_dictation"
+        (engine) => engine !== "windows_sdk_dictation",
       );
       next = {
         ...next,
@@ -229,7 +268,8 @@ export function AsrProviderManager({
           windowsSdkDictationEnabled: false,
         },
         mode: nextPriority.length === 0 ? "auto" : next.mode,
-        fallbackPolicy: nextPriority.length === 0 ? "local_only" : next.fallbackPolicy,
+        fallbackPolicy:
+          nextPriority.length === 0 ? "local_only" : next.fallbackPolicy,
         manualEnginePriority: nextPriority,
       };
       changed = true;
@@ -260,13 +300,15 @@ export function AsrProviderManager({
     void listen<[AsrProviderType, number]>("asr-download-progress", (event) => {
       const [providerType, progress] = event.payload;
       setDownloadProgress((prev) => ({ ...prev, [providerType]: progress }));
-    }).then(() => {
-      // Cleanup if component unmounts - simpler to just let it leak in this top-level component 
-      // or store unlisten function in a ref if strictly needed. 
-      // For now, this is acceptable for a main view component.
-    }).catch((error) => {
-      console.warn("Failed to subscribe to ASR download progress:", error);
-    });
+    })
+      .then(() => {
+        // Cleanup if component unmounts - simpler to just let it leak in this top-level component
+        // or store unlisten function in a ref if strictly needed.
+        // For now, this is acceptable for a main view component.
+      })
+      .catch((error) => {
+        console.warn("Failed to subscribe to ASR download progress:", error);
+      });
   }, []);
 
   useEffect(() => {
@@ -300,14 +342,18 @@ export function AsrProviderManager({
       const settings = await getSettings();
       const normalized = withNormalizedManualPriority(
         withoutNativeRouteOverrides(
-          settings.transcription.platformOptimization ?? defaultPlatformSettings()
-        )
+          settings.transcription.platformOptimization ??
+            defaultPlatformSettings(),
+        ),
       );
       setPlatformSettings(normalized);
 
       if (
         JSON.stringify(normalized) !==
-        JSON.stringify(settings.transcription.platformOptimization ?? defaultPlatformSettings())
+        JSON.stringify(
+          settings.transcription.platformOptimization ??
+            defaultPlatformSettings(),
+        )
       ) {
         await saveSettings({
           ...settings,
@@ -323,7 +369,9 @@ export function AsrProviderManager({
     }
   };
 
-  const persistPlatformSettings = async (next: PlatformOptimizationSettings) => {
+  const persistPlatformSettings = async (
+    next: PlatformOptimizationSettings,
+  ) => {
     const normalizedNext = withNormalizedManualPriority(next);
     setPlatformSaveBusy(true);
     setPlatformSaveError(null);
@@ -345,7 +393,9 @@ export function AsrProviderManager({
     }
   };
 
-  const toInventory = (providerList: AsrProviderInfo[]): AsrProviderInventory[] =>
+  const toInventory = (
+    providerList: AsrProviderInfo[],
+  ): AsrProviderInventory[] =>
     providerList.map((provider) => ({
       providerType: provider.providerType,
       name: provider.name,
@@ -384,11 +434,16 @@ export function AsrProviderManager({
     }
   };
 
-  const loadSelectionSettings = async (providerListOverride?: SelectionProvider[]) => {
+  const loadSelectionSettings = async (
+    providerListOverride?: SelectionProvider[],
+  ) => {
     try {
       const providerList = providerListOverride ?? inventory;
       const settings = await getSettings();
-      const selection = selectionStateFromSettings(providerList, settings.transcription);
+      const selection = selectionStateFromSettings(
+        providerList,
+        settings.transcription,
+      );
 
       setDefaultProvider(selection.defaultProvider);
       setDefaultModelId(selection.defaultModelId);
@@ -443,7 +498,7 @@ export function AsrProviderManager({
         dictationMlxEnabled: updates.dictationMlxEnabled,
         meetingMlxEnabled: updates.meetingMlxEnabled,
         meetingRoutePolicy: updates.meetingRoutePolicy,
-      }
+      },
     );
 
     await saveSettings({
@@ -482,27 +537,32 @@ export function AsrProviderManager({
     providers.find((provider) => provider.providerType === providerType);
 
   const selectionProviderByType = (providerType: AsrProviderType) =>
-    selectionProviders.find((provider) => provider.providerType === providerType);
+    selectionProviders.find(
+      (provider) => provider.providerType === providerType,
+    );
 
   const modelOptionsForProvider = (providerType: AsrProviderType) =>
     selectionProviderByType(providerType)?.modelOptions ?? [];
 
-  const providerHasMlxAcceleration = (providerType: AsrProviderType, modelId: string) =>
-    modelSupportsMlxAcceleration(providerType, modelId);
+  const providerHasMlxAcceleration = (
+    providerType: AsrProviderType,
+    modelId: string,
+  ) => modelSupportsMlxAcceleration(providerType, modelId);
 
   const providerUsesMlxAcceleration = (
     providerType: AsrProviderType,
     modelId: string,
-    slot: "dictation" | "meeting"
+    slot: "dictation" | "meeting",
   ) => {
-    const mlxEnabled = slot === "dictation" ? dictationMlxEnabled : meetingMlxEnabled;
+    const mlxEnabled =
+      slot === "dictation" ? dictationMlxEnabled : meetingMlxEnabled;
     return mlxEnabled && providerHasMlxAcceleration(providerType, modelId);
   };
 
   const providerDisplayName = (
     providerType: AsrProviderType,
     modelId: string,
-    slot: "dictation" | "meeting" = "dictation"
+    slot: "dictation" | "meeting" = "dictation",
   ) => {
     const provider = providerByType(providerType);
     const baseLabel = provider ? providerUiName(provider) : providerType;
@@ -512,11 +572,12 @@ export function AsrProviderManager({
   };
 
   const visibleProviders = providers.filter((provider) =>
-    isVisibleAsrProvider(provider.providerType)
+    isVisibleAsrProvider(provider.providerType),
   );
   const routeSelectableProviders = selectionProviders.filter(
     (provider) =>
-      isVisibleAsrProvider(provider.providerType) || provider.providerType === "mlx_audio"
+      isVisibleAsrProvider(provider.providerType) ||
+      provider.providerType === "mlx_audio",
   );
   const advancedMlxProvider =
     providers.find((provider) => provider.providerType === "mlx_audio") ?? null;
@@ -550,7 +611,7 @@ export function AsrProviderManager({
   const lanePriority = (
     lane: WorkflowLane,
     providerType: AsrProviderType,
-    policy: "prefer_local" | "best_available"
+    policy: "prefer_local" | "best_available",
   ) => {
     if (lane === "dictation") {
       const ordered: AsrProviderType[] = [
@@ -600,10 +661,12 @@ export function AsrProviderManager({
           return true;
         }
 
-        const eligibleModels = modelOptionsForProvider(provider.providerType).filter((option) =>
+        const eligibleModels = modelOptionsForProvider(
+          provider.providerType,
+        ).filter((option) =>
           lane === "meeting"
             ? isMeetingEligibleModel(provider.providerType, option.id)
-            : isSharedMeetingCompatible(provider.providerType, option.id)
+            : isSharedMeetingCompatible(provider.providerType, option.id),
         );
 
         return eligibleModels.length > 0;
@@ -611,8 +674,10 @@ export function AsrProviderManager({
       .sort((left, right) => {
         const leftReadiness = inventoryReadiness(left);
         const rightReadiness = inventoryReadiness(right);
-        if (leftReadiness.label === "Ready" && rightReadiness.label !== "Ready") return -1;
-        if (leftReadiness.label !== "Ready" && rightReadiness.label === "Ready") return 1;
+        if (leftReadiness.label === "Ready" && rightReadiness.label !== "Ready")
+          return -1;
+        if (leftReadiness.label !== "Ready" && rightReadiness.label === "Ready")
+          return 1;
 
         return (
           lanePriority(lane, left.providerType, meetingRoutePolicy) -
@@ -620,10 +685,13 @@ export function AsrProviderManager({
         );
       });
 
-  const recommendedLaneProvider = (lane: WorkflowLane) => laneProviders(lane)[0] ?? null;
+  const recommendedLaneProvider = (lane: WorkflowLane) =>
+    laneProviders(lane)[0] ?? null;
 
   const providerUiName = (provider: SelectionProvider) =>
-    provider.providerType === "mlx_audio" ? "Additional MLX models" : provider.name;
+    provider.providerType === "mlx_audio"
+      ? "Additional MLX models"
+      : provider.name;
 
   const providerUiDescription = (provider: SelectionProvider) =>
     provider.providerType === "mlx_audio"
@@ -631,7 +699,8 @@ export function AsrProviderManager({
       : provider.description;
 
   const providerUsesManagedModel = (providerType: AsrProviderType) =>
-    providerType === "macos_apple_speech" || providerType === "windows_sdk_dictation";
+    providerType === "macos_apple_speech" ||
+    providerType === "windows_sdk_dictation";
 
   const managedModelLabel = (providerType: AsrProviderType) =>
     providerType === "macos_apple_speech"
@@ -641,9 +710,13 @@ export function AsrProviderManager({
         : "Built into your system";
 
   const handleSetDefault = async (providerType: AsrProviderType) => {
-    const selected = providers.find((provider) => provider.providerType === providerType);
+    const selected = providers.find(
+      (provider) => provider.providerType === providerType,
+    );
     if (!selected?.inferenceEnabled) {
-      console.warn(`${providerType} is not enabled for inference in this build`);
+      console.warn(
+        `${providerType} is not enabled for inference in this build`,
+      );
       return;
     }
 
@@ -661,7 +734,10 @@ export function AsrProviderManager({
       const message = error instanceof Error ? error.message : String(error);
       setProviderErrors((previous) => ({
         ...previous,
-        [providerType]: message.replace(/^Error invoking command '[^']+':\s*/i, ""),
+        [providerType]: message.replace(
+          /^Error invoking command '[^']+':\s*/i,
+          "",
+        ),
       }));
     }
   };
@@ -697,18 +773,21 @@ export function AsrProviderManager({
     }
   };
 
-  const handleModelChange = async (providerType: AsrProviderType, modelId: string) => {
+  const handleModelChange = async (
+    providerType: AsrProviderType,
+    modelId: string,
+  ) => {
     try {
       await invoke("set_asr_provider_model", { providerType, modelId });
       setProviders((prev) =>
         prev.map((provider) =>
           provider.providerType === providerType
             ? {
-              ...provider,
-              selectedModelId: modelId,
-            }
-            : provider
-        )
+                ...provider,
+                selectedModelId: modelId,
+              }
+            : provider,
+        ),
       );
       if (defaultProvider === providerType) {
         setDefaultModelId(modelId);
@@ -745,9 +824,12 @@ export function AsrProviderManager({
     setIsBenchmarking(true);
     try {
       const fileBytes = new Uint8Array(await selectedFile.arrayBuffer());
-      const results = await invoke<BenchmarkResult[]>("benchmark_asr_providers_bytes", {
-        audioBytes: Array.from(fileBytes),
-      });
+      const results = await invoke<BenchmarkResult[]>(
+        "benchmark_asr_providers_bytes",
+        {
+          audioBytes: Array.from(fileBytes),
+        },
+      );
       setBenchmarkResults(results);
       await loadBenchmarkHistory();
     } catch (error) {
@@ -759,7 +841,9 @@ export function AsrProviderManager({
 
   const loadBenchmarkHistory = async () => {
     try {
-      const history = await invoke<AsrBenchmarkEntry[]>("list_asr_benchmarks", { limit: 20 });
+      const history = await invoke<AsrBenchmarkEntry[]>("list_asr_benchmarks", {
+        limit: 20,
+      });
       setBenchmarkHistory(history);
     } catch (error) {
       console.error("Failed to load benchmark history:", error);
@@ -795,11 +879,16 @@ export function AsrProviderManager({
     const activeProgress = downloadProgress[provider.providerType];
 
     // Show progress bar if we have active progress and not yet fully downloaded/updated
-    if (activeProgress !== undefined && normalizedStatus.kind !== "downloaded") {
+    if (
+      activeProgress !== undefined &&
+      normalizedStatus.kind !== "downloaded"
+    ) {
       return (
         <div className="flex items-center gap-2">
           <Progress value={activeProgress} className="w-20 h-2" />
-          <span className="text-xs text-muted-foreground">{activeProgress.toFixed(0)}%</span>
+          <span className="text-xs text-muted-foreground">
+            {activeProgress.toFixed(0)}%
+          </span>
         </div>
       );
     }
@@ -825,7 +914,9 @@ export function AsrProviderManager({
         return (
           <div className="flex items-center gap-2">
             <Progress value={progress} className="w-20 h-2" />
-            <span className="text-xs text-muted-foreground">{progress.toFixed(0)}%</span>
+            <span className="text-xs text-muted-foreground">
+              {progress.toFixed(0)}%
+            </span>
           </div>
         );
       }
@@ -841,7 +932,9 @@ export function AsrProviderManager({
     }
   };
 
-  const isNotDownloaded = (status: AsrProviderInfo["downloadStatus"]): boolean => {
+  const isNotDownloaded = (
+    status: AsrProviderInfo["downloadStatus"],
+  ): boolean => {
     return normalizeDownloadStatus(status).kind === "not_downloaded";
   };
 
@@ -889,7 +982,9 @@ export function AsrProviderManager({
       await loadProviders();
       const removed = report.removedPaths.length;
       if (removed > 0) {
-        setRepairSummary(`Removed ${removed} invalid artifact${removed === 1 ? "" : "s"}.`);
+        setRepairSummary(
+          `Removed ${removed} invalid artifact${removed === 1 ? "" : "s"}.`,
+        );
       } else {
         setRepairSummary("No invalid artifacts found.");
       }
@@ -905,7 +1000,7 @@ export function AsrProviderManager({
     label: string,
     providerType: AsrProviderType,
     modelId: string,
-    slot: "dictation" | "meeting" = "dictation"
+    slot: "dictation" | "meeting" = "dictation",
   ) => {
     const provider = providerByType(providerType);
     const lightweightProvider = selectionProviderByType(providerType);
@@ -914,14 +1009,18 @@ export function AsrProviderManager({
     if (!provider && lightweightProvider) {
       return (
         <p className="text-xs text-muted-foreground">
-          {label}: {routeLabel} is {inventoryReadiness(lightweightProvider).label.toLowerCase()}.
+          {label}: {routeLabel} is{" "}
+          {inventoryReadiness(lightweightProvider).label.toLowerCase()}.
         </p>
       );
     }
     if (!provider) {
       return null;
     }
-    if (providerType === "macos_apple_speech" && permissionDiagnostics?.speechRecognitionReady) {
+    if (
+      providerType === "macos_apple_speech" &&
+      permissionDiagnostics?.speechRecognitionReady
+    ) {
       return (
         <p className="text-xs text-muted-foreground">
           {label}: {routeLabel} is ready.
@@ -940,8 +1039,10 @@ export function AsrProviderManager({
     return (
       <div className="space-y-2">
         <p className="text-xs text-amber-300">
-          {label}: {provider.runtimeMessage ?? `${routeLabel} is not ready yet.`}{" "}
-          {provider.runtimeDetails.setupAction ?? "Choose another provider if you need to keep working."}
+          {label}:{" "}
+          {provider.runtimeMessage ?? `${routeLabel} is not ready yet.`}{" "}
+          {provider.runtimeDetails.setupAction ??
+            "Choose another provider if you need to keep working."}
         </p>
         {canRequestSpeechPermission ? (
           <div className="flex flex-wrap gap-2">
@@ -957,7 +1058,10 @@ export function AsrProviderManager({
                   await loadProviders();
                   await loadSelectionSettings();
                 } catch (error) {
-                  console.error("Failed to request dictation permissions:", error);
+                  console.error(
+                    "Failed to request dictation permissions:",
+                    error,
+                  );
                 } finally {
                   setPermissionActionBusy(false);
                 }
@@ -973,7 +1077,10 @@ export function AsrProviderManager({
                 try {
                   await openPermissionSettings("speech");
                 } catch (error) {
-                  console.error("Failed to open speech permission settings:", error);
+                  console.error(
+                    "Failed to open speech permission settings:",
+                    error,
+                  );
                 }
               }}
             >
@@ -987,7 +1094,8 @@ export function AsrProviderManager({
 
   const selectedRouteUsesAppleNative = useSharedAsrSelection
     ? defaultProvider === "macos_apple_speech"
-    : dictationProvider === "macos_apple_speech" || meetingProvider === "macos_apple_speech";
+    : dictationProvider === "macos_apple_speech" ||
+      meetingProvider === "macos_apple_speech";
 
   const appleNativeUsedForDictation = useSharedAsrSelection
     ? defaultProvider === "macos_apple_speech"
@@ -1007,7 +1115,9 @@ export function AsrProviderManager({
       return;
     }
 
-    const promptKey = useSharedAsrSelection ? "shared" : `${dictationProvider}:${meetingProvider}`;
+    const promptKey = useSharedAsrSelection
+      ? "shared"
+      : `${dictationProvider}:${meetingProvider}`;
     if (autoPromptedNativePermissionRef.current === promptKey) {
       return;
     }
@@ -1015,13 +1125,16 @@ export function AsrProviderManager({
     autoPromptedNativePermissionRef.current = promptKey;
     setPermissionActionBusy(true);
     void (async () => {
-              try {
-                await requestDictationPermissions();
-                await refreshAppleNativeReadiness();
-              } catch (error) {
-                console.error("Failed to auto-request Apple native permissions:", error);
-              } finally {
-                setPermissionActionBusy(false);
+      try {
+        await requestDictationPermissions();
+        await refreshAppleNativeReadiness();
+      } catch (error) {
+        console.error(
+          "Failed to auto-request Apple native permissions:",
+          error,
+        );
+      } finally {
+        setPermissionActionBusy(false);
       }
     })();
   }, [
@@ -1039,7 +1152,7 @@ export function AsrProviderManager({
     providerType: AsrProviderType,
     value: string,
     onChange: (modelId: string) => void,
-    options?: Array<{ id: string; label: string }>
+    options?: Array<{ id: string; label: string }>,
   ) => {
     if (providerUsesManagedModel(providerType)) {
       return (
@@ -1073,14 +1186,18 @@ export function AsrProviderManager({
   const renderMlxAccelerationToggle = (
     providerType: AsrProviderType,
     modelId: string,
-    slot: "dictation" | "meeting" | "shared"
+    slot: "dictation" | "meeting" | "shared",
   ) => {
     if (!providerHasMlxAcceleration(providerType, modelId)) {
       return null;
     }
 
     const effectiveSlot = slot === "shared" ? "dictation" : slot;
-    const checked = providerUsesMlxAcceleration(providerType, modelId, effectiveSlot);
+    const checked = providerUsesMlxAcceleration(
+      providerType,
+      modelId,
+      effectiveSlot,
+    );
     const globalMlxEnabled = platformSettings?.macos.mlxEnabled ?? true;
 
     return (
@@ -1088,7 +1205,8 @@ export function AsrProviderManager({
         <div className="space-y-1 pr-3">
           <span className="font-medium">Use MLX route</span>
           <p className="text-xs text-muted-foreground">
-            Run this compatible local model through `mlx-audio` on Apple Silicon.
+            Run this compatible local model through `mlx-audio` on Apple
+            Silicon.
             {!globalMlxEnabled
               ? " Global MLX acceleration is currently off in Compatibility & Runtime Tuning."
               : ""}
@@ -1106,7 +1224,10 @@ export function AsrProviderManager({
                   ? { dictationMlxEnabled: enabled }
                   : { meetingMlxEnabled: enabled };
             void persistSelectionSettings(update).catch((error) => {
-              console.error("Failed to update MLX acceleration setting:", error);
+              console.error(
+                "Failed to update MLX acceleration setting:",
+                error,
+              );
             });
           }}
         />
@@ -1122,9 +1243,16 @@ export function AsrProviderManager({
         : selectionProviderByType(dictationProvider);
 
   const activeModelIdForLane = (lane: WorkflowLane) =>
-    lane === "shared" ? defaultModelId : lane === "meeting" ? meetingModelId : dictationModelId;
+    lane === "shared"
+      ? defaultModelId
+      : lane === "meeting"
+        ? meetingModelId
+        : dictationModelId;
 
-  const laneModelOptions = (lane: WorkflowLane, providerType: AsrProviderType) => {
+  const laneModelOptions = (
+    lane: WorkflowLane,
+    providerType: AsrProviderType,
+  ) => {
     const options = modelOptionsForProvider(providerType);
     if (lane === "dictation") {
       return options;
@@ -1132,12 +1260,18 @@ export function AsrProviderManager({
     return options.filter((option) =>
       lane === "meeting"
         ? isMeetingEligibleModel(providerType, option.id)
-        : isSharedMeetingCompatible(providerType, option.id)
+        : isSharedMeetingCompatible(providerType, option.id),
     );
   };
 
-  const applyLaneProviderSelection = async (lane: WorkflowLane, providerType: AsrProviderType) => {
-    const nextModelId = laneModelOptions(lane, providerType)[0]?.id ?? modelOptionsForProvider(providerType)[0]?.id ?? providerType;
+  const applyLaneProviderSelection = async (
+    lane: WorkflowLane,
+    providerType: AsrProviderType,
+  ) => {
+    const nextModelId =
+      laneModelOptions(lane, providerType)[0]?.id ??
+      modelOptionsForProvider(providerType)[0]?.id ??
+      providerType;
     const updates =
       lane === "shared"
         ? { defaultProvider: providerType, selectedModelId: nextModelId }
@@ -1157,7 +1291,10 @@ export function AsrProviderManager({
     }
   };
 
-  const applyLaneModelSelection = async (lane: WorkflowLane, modelId: string) => {
+  const applyLaneModelSelection = async (
+    lane: WorkflowLane,
+    modelId: string,
+  ) => {
     const updates =
       lane === "shared"
         ? { selectedModelId: modelId }
@@ -1174,11 +1311,19 @@ export function AsrProviderManager({
     const activeProvider = activeProviderForLane(lane);
     const recommendedProvider = recommendedLaneProvider(lane);
     const activeProviderType =
-      lane === "shared" ? defaultProvider : lane === "meeting" ? meetingProvider : dictationProvider;
+      lane === "shared"
+        ? defaultProvider
+        : lane === "meeting"
+          ? meetingProvider
+          : dictationProvider;
     const activeModelId = activeModelIdForLane(lane);
     const modelOptions = laneModelOptions(lane, activeProviderType);
     const laneTitle =
-      lane === "shared" ? "Shared route" : lane === "meeting" ? "Meetings" : "Dictation";
+      lane === "shared"
+        ? "Shared route"
+        : lane === "meeting"
+          ? "Meetings"
+          : "Dictation";
     const laneDescription =
       lane === "shared"
         ? "One route that stays good enough for both dictation and meetings."
@@ -1192,7 +1337,9 @@ export function AsrProviderManager({
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="text-sm font-semibold">{laneTitle}</p>
-              <p className="mt-1 text-sm text-muted-foreground">{laneDescription}</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {laneDescription}
+              </p>
             </div>
             {activeProvider ? (
               <Badge variant="outline" className="bg-background/70">
@@ -1205,10 +1352,16 @@ export function AsrProviderManager({
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <p className="text-sm font-medium">{providerUiName(recommendedProvider)}</p>
+                    <p className="text-sm font-medium">
+                      {providerUiName(recommendedProvider)}
+                    </p>
                     <Badge variant="outline">Recommended</Badge>
-                    <Badge variant="outline">{providerHostingLabel(recommendedProvider.providerType)}</Badge>
-                    <Badge variant="outline">{inventoryReadiness(recommendedProvider).label}</Badge>
+                    <Badge variant="outline">
+                      {providerHostingLabel(recommendedProvider.providerType)}
+                    </Badge>
+                    <Badge variant="outline">
+                      {inventoryReadiness(recommendedProvider).label}
+                    </Badge>
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {providerUiDescription(recommendedProvider)}
@@ -1216,15 +1369,26 @@ export function AsrProviderManager({
                 </div>
                 <Button
                   size="sm"
-                  variant={activeProviderType === recommendedProvider.providerType ? "default" : "outline"}
-                  onClick={() => void applyLaneProviderSelection(lane, recommendedProvider.providerType)}
+                  variant={
+                    activeProviderType === recommendedProvider.providerType
+                      ? "default"
+                      : "outline"
+                  }
+                  onClick={() =>
+                    void applyLaneProviderSelection(
+                      lane,
+                      recommendedProvider.providerType,
+                    )
+                  }
                 >
-                  {activeProviderType === recommendedProvider.providerType ? "Selected" : "Use recommended"}
+                  {activeProviderType === recommendedProvider.providerType
+                    ? "Selected"
+                    : "Use recommended"}
                 </Button>
               </div>
             </div>
           ) : null}
-          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          <div className="mt-4 grid gap-3 xl:grid-cols-2 2xl:grid-cols-3">
             {providersForLane.map((provider) => (
               <button
                 key={`${lane}-${provider.providerType}`}
@@ -1233,25 +1397,33 @@ export function AsrProviderManager({
                   "rounded-lg border px-4 py-3 text-left transition-colors",
                   activeProviderType === provider.providerType
                     ? "border-trusted bg-trusted/5"
-                    : "bg-background hover:bg-muted/20"
+                    : "bg-background hover:bg-muted/20",
                 )}
-                onClick={() => void applyLaneProviderSelection(lane, provider.providerType)}
+                onClick={() =>
+                  void applyLaneProviderSelection(lane, provider.providerType)
+                }
               >
                 <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm font-medium">{providerUiName(provider)}</p>
-                  <Badge variant="outline">{inventoryReadiness(provider).label}</Badge>
+                  <p className="text-sm font-medium">
+                    {providerUiName(provider)}
+                  </p>
+                  <Badge variant="outline">
+                    {inventoryReadiness(provider).label}
+                  </Badge>
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
                   {providerHostingLabel(provider.providerType)} ·{" "}
                   {providerCapabilityLabel(provider.providerType)}
                 </p>
-                <p className="mt-2 text-xs text-muted-foreground">{providerUiDescription(provider)}</p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {providerUiDescription(provider)}
+                </p>
               </button>
             ))}
           </div>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_280px]">
+        <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_280px]">
           <div className="rounded-xl border bg-background/70 p-4">
             {renderModelControl(
               `${laneTitle} model`,
@@ -1262,10 +1434,14 @@ export function AsrProviderManager({
                   console.error("Failed to update ASR model selection:", error);
                 });
               },
-              modelOptions
+              modelOptions,
             )}
             <div className="mt-3">
-              {renderMlxAccelerationToggle(activeProviderType, activeModelId, lane)}
+              {renderMlxAccelerationToggle(
+                activeProviderType,
+                activeModelId,
+                lane,
+              )}
             </div>
           </div>
 
@@ -1274,7 +1450,9 @@ export function AsrProviderManager({
               Route notes
             </p>
             <p className="mt-2 text-sm font-medium">
-              {activeProvider ? providerUiName(activeProvider) : "No route selected"}
+              {activeProvider
+                ? providerUiName(activeProvider)
+                : "No route selected"}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
               {activeProvider
@@ -1325,33 +1503,46 @@ export function AsrProviderManager({
     },
   ];
 
-  const appleNativeReadyForMeetings = !!permissionDiagnostics?.speechRecognitionReady;
+  const appleNativeReadyForMeetings =
+    !!permissionDiagnostics?.speechRecognitionReady;
   const appleNativeTranscriptionReady = appleNativeReadyForMeetings;
-  const appleNativeAccessibilityReady = !!permissionDiagnostics?.accessibilityReady;
+  const appleNativeAccessibilityReady =
+    !!permissionDiagnostics?.accessibilityReady;
   const appleNativeAccessibilityTrusted =
-    permissionDiagnostics?.accessibilityTrusted ?? appleNativeAccessibilityReady;
+    permissionDiagnostics?.accessibilityTrusted ??
+    appleNativeAccessibilityReady;
   const postEventReady = !!permissionDiagnostics?.postEventReady;
-  const appleNativeCursorInsertionReady = !!permissionDiagnostics?.cursorInsertionReady;
-  const preferredInsertStrategy = permissionDiagnostics?.preferredInsertStrategy ?? null;
+  const appleNativeCursorInsertionReady =
+    !!permissionDiagnostics?.cursorInsertionReady;
+  const preferredInsertStrategy =
+    permissionDiagnostics?.preferredInsertStrategy ?? null;
   const lastCursorInsertStatus = permissionDiagnostics?.lastCursorInsertStatus;
   const lastCursorInsertFailure = lastCursorInsertStatus?.copiedOnly
-    ? lastCursorInsertStatus.message ??
-      "Nautilus copied the dictation result, but macOS blocked the final paste."
+    ? (lastCursorInsertStatus.message ??
+      "Nautilus copied the dictation result, but macOS blocked the final paste.")
     : null;
   const needsInsertRepair =
     !permissionDiagnostics?.runningFromDiskImage &&
     (!!lastCursorInsertFailure || !appleNativeAccessibilityTrusted) &&
     (!appleNativeCursorInsertionReady ||
       /grant accessibility|not enabled for nautilus|re-enable nautilus|this app copy/i.test(
-        lastCursorInsertFailure ?? ""
+        lastCursorInsertFailure ?? "",
       ));
   const permissionBadgeLabel = (key: string, ready: boolean) => {
     if (ready) return "Ready";
     if (key === "speech") return "Needs grant";
     if (key === "keyboardEvents") {
-      return appleNativeAccessibilityTrusted ? "Optional" : appleNativeUsedForDictation ? "Fallback off" : "Optional";
+      return appleNativeAccessibilityTrusted
+        ? "Optional"
+        : appleNativeUsedForDictation
+          ? "Fallback off"
+          : "Optional";
     }
-    if (key === "accessibility" && appleNativeCursorInsertionReady && postEventReady) {
+    if (
+      key === "accessibility" &&
+      appleNativeCursorInsertionReady &&
+      postEventReady
+    ) {
       return "Direct text unverified";
     }
     return appleNativeUsedForDictation ? "Needed for insert" : "Optional";
@@ -1386,23 +1577,33 @@ export function AsrProviderManager({
       <div className="rounded-lg border border-border bg-muted/10 p-4 space-y-4">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
-            <Badge variant={overallReady ? "default" : "secondary"} className={overallReady ? "bg-green-600" : ""}>
+            <Badge
+              variant={overallReady ? "default" : "secondary"}
+              className={overallReady ? "bg-green-600" : ""}
+            >
               {overallReady ? "Ready for transcription" : "Setup required"}
             </Badge>
             <span className="text-sm font-medium">Apple Native setup</span>
           </div>
           <p className="text-sm text-muted-foreground">
-            {routeSummary} Nautilus will request speech access automatically. For cursor insertion, Nautilus first tries direct Accessibility text insertion and can fall back to a native Cmd+V keyboard path when macOS allows it for this app copy.
+            {routeSummary} Nautilus will request speech access automatically.
+            For cursor insertion, Nautilus first tries direct Accessibility text
+            insertion and can fall back to a native Cmd+V keyboard path when
+            macOS allows it for this app copy.
           </p>
         </div>
 
-        {appleNativeTranscriptionReady && appleNativeUsedForDictation && !appleNativeCursorInsertionReady ? (
+        {appleNativeTranscriptionReady &&
+        appleNativeUsedForDictation &&
+        !appleNativeCursorInsertionReady ? (
           <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
             <p className="text-sm font-medium text-amber-200">
               Apple Native transcription is ready.
             </p>
             <p className="text-xs text-amber-100/90">
-              Cursor insertion is not ready yet. Enable Nautilus in Privacy & Security &gt; Accessibility so it can insert text into the target app.
+              Cursor insertion is not ready yet. Enable Nautilus in Privacy &
+              Security &gt; Accessibility so it can insert text into the target
+              app.
             </p>
           </div>
         ) : null}
@@ -1417,7 +1618,8 @@ export function AsrProviderManager({
               Apple Native transcription is ready.
             </p>
             <p className="text-xs text-amber-100/90">
-              Native Cmd+V fallback is available. Direct Accessibility text insertion is not currently verified for this app copy.
+              Native Cmd+V fallback is available. Direct Accessibility text
+              insertion is not currently verified for this app copy.
             </p>
           </div>
         ) : null}
@@ -1436,11 +1638,13 @@ export function AsrProviderManager({
         {permissionDiagnostics?.runningFromDiskImage ? (
           <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 space-y-2">
             <p className="text-sm font-medium text-amber-200">
-              You are running Nautilus from the mounted DMG, not the installed app.
+              You are running Nautilus from the mounted DMG, not the installed
+              app.
             </p>
             <p className="text-xs text-amber-100/90">
-              macOS permissions granted to the installed app do not apply to the disk image copy.
-              Open the installed app in <code>/Applications</code>, then quit this DMG copy.
+              macOS permissions granted to the installed app do not apply to the
+              disk image copy. Open the installed app in{" "}
+              <code>/Applications</code>, then quit this DMG copy.
             </p>
             <div className="flex flex-wrap gap-2">
               <Button
@@ -1456,15 +1660,24 @@ export function AsrProviderManager({
 
         <div className="grid gap-3 md:grid-cols-3">
           {appleNativePermissionRows.map((row) => (
-            <div key={row.key} className="rounded-md border bg-background/60 p-3 space-y-2">
+            <div
+              key={row.key}
+              className="rounded-md border bg-background/60 p-3 space-y-2"
+            >
               <div className="flex items-center justify-between gap-2">
                 <p className="text-sm font-medium">{row.label}</p>
-                <Badge variant={row.ready ? "default" : "secondary"} className={row.ready ? "bg-green-600" : ""}>
+                <Badge
+                  variant={row.ready ? "default" : "secondary"}
+                  className={row.ready ? "bg-green-600" : ""}
+                >
                   {permissionBadgeLabel(row.key, row.ready)}
                 </Badge>
               </div>
               <p className="text-xs text-muted-foreground">{row.detail}</p>
-              {!row.ready && !(row.key === "keyboardEvents" && appleNativeAccessibilityTrusted) ? (
+              {!row.ready &&
+              !(
+                row.key === "keyboardEvents" && appleNativeAccessibilityTrusted
+              ) ? (
                 <Button size="sm" variant="outline" onClick={row.onClick}>
                   {row.action}
                 </Button>
@@ -1484,13 +1697,18 @@ export function AsrProviderManager({
                 await requestDictationPermissions();
                 await refreshAppleNativeReadiness();
               } catch (error) {
-                console.error("Failed to request Apple native permissions:", error);
+                console.error(
+                  "Failed to request Apple native permissions:",
+                  error,
+                );
               } finally {
                 setPermissionActionBusy(false);
               }
             }}
           >
-            {permissionActionBusy ? "Requesting..." : "Request Apple permissions"}
+            {permissionActionBusy
+              ? "Requesting..."
+              : "Request Apple permissions"}
           </Button>
           {needsInsertRepair ? (
             <Button
@@ -1510,7 +1728,9 @@ export function AsrProviderManager({
                 }
               }}
             >
-              {permissionActionBusy ? "Repairing..." : "Repair insert permissions"}
+              {permissionActionBusy
+                ? "Repairing..."
+                : "Repair insert permissions"}
             </Button>
           ) : null}
           <Button
@@ -1552,13 +1772,19 @@ export function AsrProviderManager({
         <div className="flex items-center justify-between gap-3">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <Badge variant={insertReady ? "default" : "secondary"} className={insertReady ? "bg-green-600" : ""}>
-                {insertReady ? "Auto-insert ready" : "Auto-insert needs attention"}
+              <Badge
+                variant={insertReady ? "default" : "secondary"}
+                className={insertReady ? "bg-green-600" : ""}
+              >
+                {insertReady
+                  ? "Auto-insert ready"
+                  : "Auto-insert needs attention"}
               </Badge>
               <span className="text-sm font-medium">Cursor Insert</span>
             </div>
             <p className="text-sm text-muted-foreground">
-              This repair path is shared by Whisper, Apple Native, and every other dictation provider on macOS.
+              This repair path is shared by Whisper, Apple Native, and every
+              other dictation provider on macOS.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1579,12 +1805,22 @@ export function AsrProviderManager({
                 }
               }}
             >
-              {permissionActionBusy ? "Repairing..." : "Repair insert permissions"}
+              {permissionActionBusy
+                ? "Repairing..."
+                : "Repair insert permissions"}
             </Button>
-            <Button size="sm" variant="outline" onClick={() => void openPermissionSettings("accessibility")}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void openPermissionSettings("accessibility")}
+            >
               Open Accessibility
             </Button>
-            <Button size="sm" variant="outline" onClick={() => void refreshAppleNativeReadiness()}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void refreshAppleNativeReadiness()}
+            >
               Re-check readiness
             </Button>
           </div>
@@ -1598,18 +1834,20 @@ export function AsrProviderManager({
     const selection = getProviderSelectionStatus(provider);
     const runtimeIssue =
       selection.reason === "runtime_unavailable"
-        ? provider.runtimeMessage ?? "Runtime setup required."
+        ? (provider.runtimeMessage ?? "Runtime setup required.")
         : null;
     const providerError = providerErrors[provider.providerType];
     const modelOptions = provider.modelOptions ?? [];
-    const selectedModelId = provider.selectedModelId || modelOptions[0]?.id || "";
+    const selectedModelId =
+      provider.selectedModelId || modelOptions[0]?.id || "";
 
     return (
       <Card
         key={provider.providerType}
         className={cn(
           "transition-all",
-          defaultProvider === provider.providerType && "border-trusted ring-1 ring-trusted"
+          defaultProvider === provider.providerType &&
+            "border-trusted ring-1 ring-trusted",
         )}
       >
         <CardHeader className="pb-3">
@@ -1620,7 +1858,9 @@ export function AsrProviderManager({
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <CardTitle className="text-lg">{providerUiName(provider)}</CardTitle>
+                  <CardTitle className="text-lg">
+                    {providerUiName(provider)}
+                  </CardTitle>
                   {defaultProvider === provider.providerType ? (
                     <Badge variant="outline" className="text-xs">
                       Default
@@ -1632,12 +1872,14 @@ export function AsrProviderManager({
                     </Badge>
                   ) : null}
                 </div>
-                <CardDescription className="line-clamp-2 mt-1">
+                <CardDescription className="mt-1">
                   {providerUiDescription(provider)}
                 </CardDescription>
               </div>
             </div>
-            <div className="flex items-center gap-2">{getDownloadStatusBadge(provider)}</div>
+            <div className="flex items-center gap-2">
+              {getDownloadStatusBadge(provider)}
+            </div>
           </div>
         </CardHeader>
 
@@ -1646,10 +1888,14 @@ export function AsrProviderManager({
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
               <div className="p-2 bg-muted rounded-lg">
                 <div className="text-muted-foreground text-xs">Size</div>
-                <div className="font-medium">{provider.modelInfo.sizeMb} MB</div>
+                <div className="font-medium">
+                  {provider.modelInfo.sizeMb} MB
+                </div>
               </div>
               <div className="p-2 bg-muted rounded-lg">
-                <div className="text-muted-foreground text-xs">Model / Parameters</div>
+                <div className="text-muted-foreground text-xs">
+                  Model / Parameters
+                </div>
                 <div className="font-medium">
                   {provider.modelInfo.name || provider.modelInfo.parameters}
                 </div>
@@ -1669,12 +1915,12 @@ export function AsrProviderManager({
             </div>
           )}
 
-          {provider.modelInfo?.languages && provider.modelInfo.languages.length > 0 && (
-            <div>
-              <div className="text-sm text-muted-foreground mb-2">
-                Supported Languages ({provider.modelInfo.languages.length})
-              </div>
-              <ScrollArea className="h-16">
+          {provider.modelInfo?.languages &&
+            provider.modelInfo.languages.length > 0 && (
+              <div>
+                <div className="text-sm text-muted-foreground mb-2">
+                  Supported Languages ({provider.modelInfo.languages.length})
+                </div>
                 <div className="flex flex-wrap gap-1">
                   {provider.modelInfo.languages.slice(0, 10).map((lang) => (
                     <Badge key={lang} variant="secondary" className="text-xs">
@@ -1687,9 +1933,8 @@ export function AsrProviderManager({
                     </Badge>
                   )}
                 </div>
-              </ScrollArea>
-            </div>
-          )}
+              </div>
+            )}
 
           <div className="space-y-2">
             <p className="text-xs text-muted-foreground">Model</p>
@@ -1698,7 +1943,10 @@ export function AsrProviderManager({
                 className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                 value={selectedModelId}
                 onChange={(event) => {
-                  void handleModelChange(provider.providerType, event.target.value);
+                  void handleModelChange(
+                    provider.providerType,
+                    event.target.value,
+                  );
                 }}
               >
                 {modelOptions.map((option) => (
@@ -1714,14 +1962,17 @@ export function AsrProviderManager({
             )}
           </div>
 
-          {null /* MLX toggle is per-slot (dictation / meeting) in the route selector below */}
+          {
+            null /* MLX toggle is per-slot (dictation / meeting) in the route selector below */
+          }
 
           {provider.engineDiagnostics ? (
             <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs space-y-1">
               <p className="text-muted-foreground">
                 Active engine:{" "}
                 <span className="font-mono">
-                  {provider.engineDiagnostics.activeEngine ?? "provider_default"}
+                  {provider.engineDiagnostics.activeEngine ??
+                    "provider_default"}
                 </span>
               </p>
               <p className="text-muted-foreground">
@@ -1732,11 +1983,16 @@ export function AsrProviderManager({
                     : "none"}
                 </span>
               </p>
-              {provider.engineDiagnostics.notes.slice(0, 2).map((note, index) => (
-                <p key={`${provider.providerType}-engine-note-${index}`} className="text-muted-foreground">
-                  {note}
-                </p>
-              ))}
+              {provider.engineDiagnostics.notes
+                .slice(0, 2)
+                .map((note, index) => (
+                  <p
+                    key={`${provider.providerType}-engine-note-${index}`}
+                    className="text-muted-foreground"
+                  >
+                    {note}
+                  </p>
+                ))}
             </div>
           ) : null}
 
@@ -1774,11 +2030,17 @@ export function AsrProviderManager({
               {selection.selectable ? (
                 <>
                   <Button
-                    variant={defaultProvider === provider.providerType ? "default" : "outline"}
+                    variant={
+                      defaultProvider === provider.providerType
+                        ? "default"
+                        : "outline"
+                    }
                     size="sm"
                     onClick={() => handleSetDefault(provider.providerType)}
                   >
-                    {defaultProvider === provider.providerType ? "Default" : "Set Default"}
+                    {defaultProvider === provider.providerType
+                      ? "Default"
+                      : "Set Default"}
                   </Button>
                   {selection.reason === "download_required" &&
                   isNotDownloaded(provider.downloadStatus) ? (
@@ -1796,7 +2058,9 @@ export function AsrProviderManager({
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => void copySetupCommand(provider.providerType)}
+                        onClick={() =>
+                          void copySetupCommand(provider.providerType)
+                        }
                       >
                         Copy setup info
                       </Button>
@@ -1807,7 +2071,10 @@ export function AsrProviderManager({
                           try {
                             await refreshAsrRuntimeProbes();
                           } catch (error) {
-                            console.warn("Failed to refresh runtime probes:", error);
+                            console.warn(
+                              "Failed to refresh runtime probes:",
+                              error,
+                            );
                           }
                           await loadProviders();
                         }}
@@ -1861,7 +2128,9 @@ export function AsrProviderManager({
                   {provider.runtimeDetails?.pythonPath ? (
                     <p className="text-amber-100">
                       Detected Python:{" "}
-                      <span className="font-mono">{provider.runtimeDetails.pythonPath}</span>
+                      <span className="font-mono">
+                        {provider.runtimeDetails.pythonPath}
+                      </span>
                     </p>
                   ) : null}
                 </>
@@ -1886,19 +2155,26 @@ export function AsrProviderManager({
             <CardHeader className="pb-3">
               <CardTitle className="text-base">Model Routes</CardTitle>
               <CardDescription>
-                Choose by workflow first. Downloads, runtime repair, and raw provider details live below.
+                Choose by workflow first. Downloads, runtime repair, and raw
+                provider details live below.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
+              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_240px]">
                 <div className="rounded-xl border bg-muted/10 p-4">
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="grid gap-2 sm:grid-cols-2">
                     <Button
                       variant={useSharedAsrSelection ? "default" : "outline"}
                       size="sm"
+                      className="h-auto min-h-10 justify-start whitespace-normal px-3 py-2 text-left leading-snug"
                       onClick={() => {
-                        void persistSelectionSettings({ useSharedAsrSelection: true }).catch((error) => {
-                          console.error("Failed to enable shared ASR selection:", error);
+                        void persistSelectionSettings({
+                          useSharedAsrSelection: true,
+                        }).catch((error) => {
+                          console.error(
+                            "Failed to enable shared ASR selection:",
+                            error,
+                          );
                         });
                       }}
                     >
@@ -1907,8 +2183,11 @@ export function AsrProviderManager({
                     <Button
                       variant={!useSharedAsrSelection ? "default" : "outline"}
                       size="sm"
+                      className="h-auto min-h-10 justify-start whitespace-normal px-3 py-2 text-left leading-snug"
                       onClick={() => {
-                        void persistSelectionSettings({ useSharedAsrSelection: false }).catch((error) => {
+                        void persistSelectionSettings({
+                          useSharedAsrSelection: false,
+                        }).catch((error) => {
                           console.error("Failed to split ASR routes:", error);
                         });
                       }}
@@ -1917,20 +2196,28 @@ export function AsrProviderManager({
                     </Button>
                   </div>
                   <p className="mt-3 text-sm text-muted-foreground">
-                    Shared is simpler. Split gives you a faster dictation route and a stronger meeting route.
+                    Shared is simpler. Split gives you a faster dictation route
+                    and a stronger meeting route.
                   </p>
                 </div>
 
                 <label className="space-y-1 rounded-xl border bg-background/70 p-4 text-sm">
-                  <span className="text-muted-foreground">Meeting quality policy</span>
+                  <span className="text-muted-foreground">
+                    Meeting quality policy
+                  </span>
                   <select
                     className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                     value={meetingRoutePolicy}
                     onChange={(event) => {
                       void persistSelectionSettings({
-                        meetingRoutePolicy: event.target.value as "prefer_local" | "best_available",
+                        meetingRoutePolicy: event.target.value as
+                          | "prefer_local"
+                          | "best_available",
                       }).catch((error) => {
-                        console.error("Failed to update meeting route policy:", error);
+                        console.error(
+                          "Failed to update meeting route policy:",
+                          error,
+                        );
                       });
                     }}
                   >
@@ -1938,16 +2225,20 @@ export function AsrProviderManager({
                     <option value="best_available">Best available</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Controls how aggressively meetings favor cloud routes over strong local ones.
+                    Controls how aggressively meetings favor cloud routes over
+                    strong local ones.
                   </p>
                 </label>
               </div>
 
               {inventory.length === 0 && isLoading ? (
                 <div className="rounded-xl border bg-muted/10 p-6 text-center">
-                  <p className="text-sm text-muted-foreground">Loading model routes…</p>
+                  <p className="text-sm text-muted-foreground">
+                    Loading model routes…
+                  </p>
                   <p className="mt-2 text-xs text-muted-foreground">
-                    The first inventory load is now lightweight. Runtime diagnostics load only in Advanced.
+                    The first inventory load is now lightweight. Runtime
+                    diagnostics load only in Advanced.
                   </p>
                 </div>
               ) : null}
@@ -1955,7 +2246,12 @@ export function AsrProviderManager({
               {useSharedAsrSelection ? (
                 renderWorkflowLane("shared")
               ) : (
-                <Tabs value={routeTab} onValueChange={(value) => setRouteTab(value as "dictation" | "meeting" | "shared")}>
+                <Tabs
+                  value={routeTab}
+                  onValueChange={(value) =>
+                    setRouteTab(value as "dictation" | "meeting" | "shared")
+                  }
+                >
                   <TabsList className="grid w-full grid-cols-2">
                     <TabsTrigger value="dictation">Dictation</TabsTrigger>
                     <TabsTrigger value="meeting">Meetings</TabsTrigger>
@@ -1977,24 +2273,42 @@ export function AsrProviderManager({
                       A quick summary of what Nautilus will use right now.
                     </p>
                   </div>
-                  <Badge variant="outline">{useSharedAsrSelection ? "Shared" : "Split"}</Badge>
+                  <Badge variant="outline">
+                    {useSharedAsrSelection ? "Shared" : "Split"}
+                  </Badge>
                 </div>
-                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <div className="mt-4 grid gap-3 xl:grid-cols-2">
                   <div className="rounded-lg border bg-background/70 p-3">
                     <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                       Dictation
                     </p>
                     <p className="mt-1 text-sm font-medium">
-                      {selectionProviderByType(useSharedAsrSelection ? defaultProvider : dictationProvider)
+                      {selectionProviderByType(
+                        useSharedAsrSelection
+                          ? defaultProvider
+                          : dictationProvider,
+                      )
                         ? providerUiName(
-                            selectionProviderByType(useSharedAsrSelection ? defaultProvider : dictationProvider)!
+                            selectionProviderByType(
+                              useSharedAsrSelection
+                                ? defaultProvider
+                                : dictationProvider,
+                            )!,
                           )
                         : "No route selected"}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      {selectionProviderByType(useSharedAsrSelection ? defaultProvider : dictationProvider)
+                      {selectionProviderByType(
+                        useSharedAsrSelection
+                          ? defaultProvider
+                          : dictationProvider,
+                      )
                         ? inventoryReadiness(
-                            selectionProviderByType(useSharedAsrSelection ? defaultProvider : dictationProvider)!
+                            selectionProviderByType(
+                              useSharedAsrSelection
+                                ? defaultProvider
+                                : dictationProvider,
+                            )!,
                           ).label
                         : "Choose a dictation route"}
                     </p>
@@ -2004,16 +2318,32 @@ export function AsrProviderManager({
                       Meetings
                     </p>
                     <p className="mt-1 text-sm font-medium">
-                      {selectionProviderByType(useSharedAsrSelection ? defaultProvider : meetingProvider)
+                      {selectionProviderByType(
+                        useSharedAsrSelection
+                          ? defaultProvider
+                          : meetingProvider,
+                      )
                         ? providerUiName(
-                            selectionProviderByType(useSharedAsrSelection ? defaultProvider : meetingProvider)!
+                            selectionProviderByType(
+                              useSharedAsrSelection
+                                ? defaultProvider
+                                : meetingProvider,
+                            )!,
                           )
                         : "No route selected"}
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      {selectionProviderByType(useSharedAsrSelection ? defaultProvider : meetingProvider)
+                      {selectionProviderByType(
+                        useSharedAsrSelection
+                          ? defaultProvider
+                          : meetingProvider,
+                      )
                         ? inventoryReadiness(
-                            selectionProviderByType(useSharedAsrSelection ? defaultProvider : meetingProvider)!
+                            selectionProviderByType(
+                              useSharedAsrSelection
+                                ? defaultProvider
+                                : meetingProvider,
+                            )!,
                           ).label
                         : "Choose a meeting route"}
                     </p>
@@ -2026,19 +2356,37 @@ export function AsrProviderManager({
 
               <div className="space-y-1">
                 {useSharedAsrSelection
-                  ? renderRouteStatus("Shared route", defaultProvider, defaultModelId, "dictation")
-                  : renderRouteStatus("Dictation route", dictationProvider, dictationModelId, "dictation")}
+                  ? renderRouteStatus(
+                      "Shared route",
+                      defaultProvider,
+                      defaultModelId,
+                      "dictation",
+                    )
+                  : renderRouteStatus(
+                      "Dictation route",
+                      dictationProvider,
+                      dictationModelId,
+                      "dictation",
+                    )}
                 {!useSharedAsrSelection
-                  ? renderRouteStatus("Meeting route", meetingProvider, meetingModelId, "meeting")
+                  ? renderRouteStatus(
+                      "Meeting route",
+                      meetingProvider,
+                      meetingModelId,
+                      "meeting",
+                    )
                   : null}
               </div>
             </CardContent>
           </Card>
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Downloads & Diagnostics</CardTitle>
+              <CardTitle className="text-base">
+                Downloads & Diagnostics
+              </CardTitle>
               <CardDescription>
-                Model downloads, compatibility tuning, and repair tools for power users.
+                Model downloads, compatibility tuning, and repair tools for
+                power users.
               </CardDescription>
             </CardHeader>
             <CardContent className="pt-0">
@@ -2054,9 +2402,12 @@ export function AsrProviderManager({
           {showAdvancedTools && platformSettings ? (
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-base">Compatibility & Runtime Tuning</CardTitle>
+                <CardTitle className="text-base">
+                  Compatibility & Runtime Tuning
+                </CardTitle>
                 <CardDescription>
-                  Optional macOS and Windows tuning for compatibility, local performance, and repair.
+                  Optional macOS and Windows tuning for compatibility, local
+                  performance, and repair.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -2080,7 +2431,9 @@ export function AsrProviderManager({
                     </select>
                   </label>
                   <label className="space-y-1 text-sm">
-                    <span className="text-muted-foreground">Fallback policy</span>
+                    <span className="text-muted-foreground">
+                      Fallback policy
+                    </span>
                     <select
                       className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                       value={platformSettings.fallbackPolicy}
@@ -2152,102 +2505,127 @@ export function AsrProviderManager({
                         No override engines configured yet.
                       </p>
                     ) : null}
-                    {platformSettings.manualEnginePriority.map((engineId, index) => (
-                      <div key={`${engineId}-${index}`} className="flex flex-wrap items-center gap-2">
-                        <select
-                          className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2 text-sm"
-                          value={engineId}
-                          disabled={platformSaveBusy}
-                          onChange={(event) => {
-                            const nextPriority = [...platformSettings.manualEnginePriority];
-                            nextPriority[index] = event.target.value;
-                            const next: PlatformOptimizationSettings = {
-                              ...platformSettings,
-                              manualEnginePriority: nextPriority,
-                            };
-                            void persistPlatformSettings(next);
-                          }}
+                    {platformSettings.manualEnginePriority.map(
+                      (engineId, index) => (
+                        <div
+                          key={`${engineId}-${index}`}
+                          className="flex flex-wrap items-center gap-2"
                         >
-                          {manualEngineOptions
-                            .filter(
-                              (option) =>
-                                option.value === engineId ||
-                                !platformSettings.manualEnginePriority.includes(option.value)
-                            )
-                            .map((option) => (
-                              <option key={option.value} value={option.value}>
-                                {option.label}
-                              </option>
-                            ))}
-                        </select>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={platformSaveBusy || index === 0}
-                          onClick={() => {
-                            if (index === 0) return;
-                            const nextPriority = [...platformSettings.manualEnginePriority];
-                            [nextPriority[index - 1], nextPriority[index]] = [
-                              nextPriority[index],
-                              nextPriority[index - 1],
-                            ];
-                            void persistPlatformSettings({
-                              ...platformSettings,
-                              manualEnginePriority: nextPriority,
-                            });
-                          }}
-                        >
-                          Up
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={
-                            platformSaveBusy || index === platformSettings.manualEnginePriority.length - 1
-                          }
-                          onClick={() => {
-                            if (index === platformSettings.manualEnginePriority.length - 1) return;
-                            const nextPriority = [...platformSettings.manualEnginePriority];
-                            [nextPriority[index], nextPriority[index + 1]] = [
-                              nextPriority[index + 1],
-                              nextPriority[index],
-                            ];
-                            void persistPlatformSettings({
-                              ...platformSettings,
-                              manualEnginePriority: nextPriority,
-                            });
-                          }}
-                        >
-                          Down
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={platformSaveBusy}
-                          onClick={() => {
-                            const nextPriority = platformSettings.manualEnginePriority.filter(
-                              (_value, currentIndex) => currentIndex !== index
-                            );
-                            void persistPlatformSettings({
-                              ...platformSettings,
-                              manualEnginePriority: nextPriority,
-                            });
-                          }}
-                        >
-                          Remove
-                        </Button>
-                      </div>
-                    ))}
+                          <select
+                            className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2 text-sm"
+                            value={engineId}
+                            disabled={platformSaveBusy}
+                            onChange={(event) => {
+                              const nextPriority = [
+                                ...platformSettings.manualEnginePriority,
+                              ];
+                              nextPriority[index] = event.target.value;
+                              const next: PlatformOptimizationSettings = {
+                                ...platformSettings,
+                                manualEnginePriority: nextPriority,
+                              };
+                              void persistPlatformSettings(next);
+                            }}
+                          >
+                            {manualEngineOptions
+                              .filter(
+                                (option) =>
+                                  option.value === engineId ||
+                                  !platformSettings.manualEnginePriority.includes(
+                                    option.value,
+                                  ),
+                              )
+                              .map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                          </select>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={platformSaveBusy || index === 0}
+                            onClick={() => {
+                              if (index === 0) return;
+                              const nextPriority = [
+                                ...platformSettings.manualEnginePriority,
+                              ];
+                              [nextPriority[index - 1], nextPriority[index]] = [
+                                nextPriority[index],
+                                nextPriority[index - 1],
+                              ];
+                              void persistPlatformSettings({
+                                ...platformSettings,
+                                manualEnginePriority: nextPriority,
+                              });
+                            }}
+                          >
+                            Up
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={
+                              platformSaveBusy ||
+                              index ===
+                                platformSettings.manualEnginePriority.length - 1
+                            }
+                            onClick={() => {
+                              if (
+                                index ===
+                                platformSettings.manualEnginePriority.length - 1
+                              )
+                                return;
+                              const nextPriority = [
+                                ...platformSettings.manualEnginePriority,
+                              ];
+                              [nextPriority[index], nextPriority[index + 1]] = [
+                                nextPriority[index + 1],
+                                nextPriority[index],
+                              ];
+                              void persistPlatformSettings({
+                                ...platformSettings,
+                                manualEnginePriority: nextPriority,
+                              });
+                            }}
+                          >
+                            Down
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={platformSaveBusy}
+                            onClick={() => {
+                              const nextPriority =
+                                platformSettings.manualEnginePriority.filter(
+                                  (_value, currentIndex) =>
+                                    currentIndex !== index,
+                                );
+                              void persistPlatformSettings({
+                                ...platformSettings,
+                                manualEnginePriority: nextPriority,
+                              });
+                            }}
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      ),
+                    )}
                     <Button
                       size="sm"
                       variant="outline"
                       disabled={
                         platformSaveBusy ||
-                        platformSettings.manualEnginePriority.length >= manualEngineOptions.length
+                        platformSettings.manualEnginePriority.length >=
+                          manualEngineOptions.length
                       }
                       onClick={() => {
                         const nextOption = manualEngineOptions.find(
-                          (option) => !platformSettings.manualEnginePriority.includes(option.value)
+                          (option) =>
+                            !platformSettings.manualEnginePriority.includes(
+                              option.value,
+                            ),
                         );
                         if (!nextOption) return;
                         void persistPlatformSettings({
@@ -2262,58 +2640,73 @@ export function AsrProviderManager({
                       Add engine
                     </Button>
                     <p className="text-[11px] text-muted-foreground">
-                      Advanced routing is for runtime tuning only. Native Apple and Windows speech are selected in the main route picker above.
+                      Advanced routing is for runtime tuning only. Native Apple
+                      and Windows speech are selected in the main route picker
+                      above.
                     </p>
                   </div>
                 ) : null}
 
                 {platformSaveError ? (
-                  <p className="text-xs text-destructive">{platformSaveError}</p>
+                  <p className="text-xs text-destructive">
+                    {platformSaveError}
+                  </p>
                 ) : null}
               </CardContent>
             </Card>
           ) : null}
           {showAdvancedTools ? (
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Local Model Cache Repair</CardTitle>
-              <CardDescription>
-                Deletes only invalid local ASR artifacts, then re-checks runtime probes.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="flex items-center gap-3">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleRepairLocalCache}
-                disabled={repairingCache}
-              >
-                {repairingCache ? "Repairing..." : "Repair local cache"}
-              </Button>
-              {repairSummary ? (
-                <p className="text-xs text-muted-foreground">{repairSummary}</p>
-              ) : null}
-            </CardContent>
-          </Card>
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">
+                  Local Model Cache Repair
+                </CardTitle>
+                <CardDescription>
+                  Deletes only invalid local ASR artifacts, then re-checks
+                  runtime probes.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex items-center gap-3">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleRepairLocalCache}
+                  disabled={repairingCache}
+                >
+                  {repairingCache ? "Repairing..." : "Repair local cache"}
+                </Button>
+                {repairSummary ? (
+                  <p className="text-xs text-muted-foreground">
+                    {repairSummary}
+                  </p>
+                ) : null}
+              </CardContent>
+            </Card>
           ) : null}
           {showAdvancedTools ? (
-          <div className="grid gap-4">
-            {providers.length === 0 ? (
-              <Card>
-                <CardContent className="p-6 text-center">
-                  <p className="text-muted-foreground">Loading providers...</p>
-                  <p className="text-xs text-muted-foreground mt-2">
-                    This may take up to 15 seconds on first load
-                  </p>
-                </CardContent>
-              </Card>
-            ) : (
-              <>
-                {visibleProviders.map((provider) => renderProviderCard(provider))}
-                {advancedMlxProvider ? renderProviderCard(advancedMlxProvider, true) : null}
-              </>
-            )}
-          </div>
+            <div className="grid gap-4">
+              {providers.length === 0 ? (
+                <Card>
+                  <CardContent className="p-6 text-center">
+                    <p className="text-muted-foreground">
+                      Loading providers...
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-2">
+                      This may take up to 15 seconds on first load
+                    </p>
+                  </CardContent>
+                </Card>
+              ) : (
+                <>
+                  {visibleProviders.map((provider) =>
+                    renderProviderCard(provider),
+                  )}
+                  {advancedMlxProvider
+                    ? renderProviderCard(advancedMlxProvider, true)
+                    : null}
+                </>
+              )}
+            </div>
           ) : null}
         </TabsContent>
 
@@ -2325,7 +2718,8 @@ export function AsrProviderManager({
                 Performance Benchmark
               </CardTitle>
               <CardDescription>
-                Compare transcription speed and accuracy across all available providers
+                Compare transcription speed and accuracy across all available
+                providers
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -2333,7 +2727,8 @@ export function AsrProviderManager({
                 <div className="text-center">
                   <FileAudio className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
                   <p className="text-sm text-muted-foreground mb-4">
-                    Upload a WAV test audio file to benchmark all available providers
+                    Upload a WAV test audio file to benchmark all available
+                    providers
                   </p>
                   <input
                     ref={benchmarkFileInputRef}
@@ -2346,14 +2741,23 @@ export function AsrProviderManager({
                     }}
                   />
                   <div className="flex flex-col items-center gap-2">
-                    <Button variant="outline" onClick={() => benchmarkFileInputRef.current?.click()}>
+                    <Button
+                      variant="outline"
+                      onClick={() => benchmarkFileInputRef.current?.click()}
+                    >
                       Choose WAV File
                     </Button>
                     {benchmarkFileName ? (
-                      <p className="text-xs text-muted-foreground">{benchmarkFileName}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {benchmarkFileName}
+                      </p>
                     ) : null}
                   </div>
-                  <Button className="mt-3" onClick={runBenchmark} disabled={isBenchmarking || !benchmarkFileName}>
+                  <Button
+                    className="mt-3"
+                    onClick={runBenchmark}
+                    disabled={isBenchmarking || !benchmarkFileName}
+                  >
                     <Clock className="h-4 w-4 mr-2" />
                     {isBenchmarking ? "Running..." : "Run Benchmark"}
                   </Button>
@@ -2370,18 +2774,21 @@ export function AsrProviderManager({
                       <div>
                         <p className="font-medium">{result.providerName}</p>
                         <p className="text-sm text-muted-foreground">
-                          {result.modelId} · {result.runtimeStatus} · Confidence:{" "}
-                          {(result.confidence * 100).toFixed(1)}%
+                          {result.modelId} · {result.runtimeStatus} ·
+                          Confidence: {(result.confidence * 100).toFixed(1)}%
                         </p>
                         <p className="text-xs text-muted-foreground">
-                          Transcript: {result.nonEmptyTranscript ? "non-empty" : "empty"}
+                          Transcript:{" "}
+                          {result.nonEmptyTranscript ? "non-empty" : "empty"}
                         </p>
                       </div>
                       <div className="text-right">
                         <p className="font-mono font-medium">
                           {(result.processingTimeMs / 1000).toFixed(2)}s
                         </p>
-                        <p className="text-xs text-muted-foreground">Processing time</p>
+                        <p className="text-xs text-muted-foreground">
+                          Processing time
+                        </p>
                       </div>
                     </div>
                   ))}
@@ -2390,9 +2797,14 @@ export function AsrProviderManager({
 
               {benchmarkHistory.length > 0 && (
                 <div className="space-y-2 pt-2">
-                  <p className="text-xs font-medium text-muted-foreground">Recent benchmark history</p>
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Recent benchmark history
+                  </p>
                   {benchmarkHistory.map((entry) => (
-                    <div key={entry.id} className="flex items-center justify-between rounded-lg border p-2 text-xs">
+                    <div
+                      key={entry.id}
+                      className="flex items-center justify-between rounded-lg border p-2 text-xs"
+                    >
                       <div>
                         <p className="font-medium">{entry.providerName}</p>
                         <p className="text-muted-foreground">
@@ -2425,28 +2837,37 @@ export function AsrProviderManager({
                 <div className="p-3 bg-muted/50 rounded-lg">
                   <p className="font-medium mb-1">🌍 Whisper (Enabled)</p>
                   <p className="text-muted-foreground">
-                    Production local transcription provider. Supports model selection including
-                    turbo variants.
+                    Production local transcription provider. Supports model
+                    selection including turbo variants.
                   </p>
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">⚡ Parakeet (Enabled when runtime ready)</p>
+                  <p className="font-medium mb-1">
+                    ⚡ Parakeet (Enabled when runtime ready)
+                  </p>
                   <p className="text-muted-foreground">
-                    Uses a local NeMo runtime bridge. Provider becomes selectable only when model
-                    files and runtime health checks are both ready.
+                    Uses a local NeMo runtime bridge. Provider becomes
+                    selectable only when model files and runtime health checks
+                    are both ready.
                   </p>
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">🏎️ Distil Whisper (Enabled)</p>
+                  <p className="font-medium mb-1">
+                    🏎️ Distil Whisper (Enabled)
+                  </p>
                   <p className="text-muted-foreground">
-                    Native local Distil runtime using model artifacts from distil-large-v3.5.
+                    Native local Distil runtime using model artifacts from
+                    distil-large-v3.5.
                   </p>
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">🧪 Whisper Candle (Experimental)</p>
+                  <p className="font-medium mb-1">
+                    🧪 Whisper Candle (Experimental)
+                  </p>
                   <p className="text-muted-foreground">
-                    Uses Whisper Large V3 Turbo through the native Candle runtime. Best for
-                    Apple Silicon dictation experiments after the local bundle is downloaded.
+                    Uses Whisper Large V3 Turbo through the native Candle
+                    runtime. Best for Apple Silicon dictation experiments after
+                    the local bundle is downloaded.
                   </p>
                 </div>
               </div>

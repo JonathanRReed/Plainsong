@@ -9,12 +9,25 @@ import {
 } from "react";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useTheme } from "@/components/theme-provider";
 import {
   createBackupDefault,
@@ -50,14 +63,37 @@ import {
   unlockVault,
   verifyBackupCloudConnection,
 } from "@/lib/tauri";
-import type { BackupConfig, BackupInfo, CloudSetupReport, SecurityStatus, LicenseInfo, } from "@/lib/tauri";
+import type {
+  BackupConfig,
+  BackupInfo,
+  CloudSetupReport,
+  SecurityStatus,
+  LicenseInfo,
+} from "@/lib/tauri";
 import type { PermissionDiagnostics } from "@/lib/tauri";
-import { validateLicense, activateLicense, deactivateLicense, isDiarizationModelAvailable, downloadDiarizationModel, listDiarizationModels } from "@/lib/tauri";
+import {
+  validateLicense,
+  activateLicense,
+  deactivateLicense,
+  isDiarizationModelAvailable,
+  downloadDiarizationModel,
+  listDiarizationModels,
+} from "@/lib/tauri";
 import type { DiarizationModelOption } from "@/lib/tauri";
-import type { AudioInputDeviceInfo, AudioInputDeviceInventory } from "@/lib/tauri";
-import { isFeatureAllowed, canUseFormattingAssistant, getThemeAccessLevel } from "@/hooks/use-license-features";
+import type {
+  AudioInputDeviceInfo,
+  AudioInputDeviceInventory,
+} from "@/lib/tauri";
+import {
+  isFeatureAllowed,
+  canUseFormattingAssistant,
+  getThemeAccessLevel,
+} from "@/hooks/use-license-features";
 import type { Settings } from "@/types/settings";
-import { normalizeThemeSchemeForAccess, themeSchemesForAccess } from "@/lib/theme-schemes";
+import {
+  normalizeThemeSchemeForAccess,
+  themeSchemesForAccess,
+} from "@/lib/theme-schemes";
 import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
 import { ONBOARDING_STORAGE_KEY, requestOnboarding } from "@/lib/onboarding";
 import { requestMainView } from "@/lib/navigation";
@@ -83,7 +119,14 @@ import {
 import { UpdateStatusWidget, BetaChannelToggle } from "@/components/update";
 import { useToast } from "@/components/toast";
 
-type TabId = "asr" | "general" | "security" | "storage" | "ai" | "license" | "updates";
+type TabId =
+  | "asr"
+  | "general"
+  | "security"
+  | "storage"
+  | "ai"
+  | "license"
+  | "updates";
 type QueuedSettingsSave = {
   version: number;
   settings: Settings;
@@ -202,7 +245,9 @@ const SETTINGS_TABS = [
 ] as const;
 
 function normalizeActiveLanguageSet(languages: string[] | undefined): string[] {
-  const allowed = new Set<string>(DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => option.value));
+  const allowed = new Set<string>(
+    DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => option.value),
+  );
   const normalized: string[] = [];
   for (const language of languages ?? []) {
     const value = language.trim().toLowerCase();
@@ -222,18 +267,23 @@ function markSettingsPerf(markName: string) {
   console.debug(`[perf] ${markName}`);
 }
 
-
-function AdvancedToggle({ 
-  checked, 
-  onCheckedChange 
-}: { 
-  checked: boolean; 
-  onCheckedChange: (checked: boolean) => void 
+function AdvancedToggle({
+  checked,
+  onCheckedChange,
+}: {
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
 }) {
   return (
     <div className="flex items-center gap-2">
-      <Label className="text-xs text-muted-foreground font-normal cursor-pointer">Power user details</Label>
-      <Switch checked={checked} onCheckedChange={onCheckedChange} className="scale-75 data-[state=checked]:bg-amber-600" />
+      <Label className="text-xs text-muted-foreground font-normal cursor-pointer">
+        Power user details
+      </Label>
+      <Switch
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+        className="scale-75 data-[state=checked]:bg-amber-600"
+      />
     </div>
   );
 }
@@ -267,18 +317,31 @@ type SettingsViewProps = {
 
 type DictationHotkeyBehavior = "hold_to_talk" | "toggle" | "hands_free";
 
-function resolveDictationHotkeyBehavior(settings: Settings | null): DictationHotkeyBehavior {
+function resolveDictationHotkeyBehavior(
+  settings: Settings | null,
+): DictationHotkeyBehavior {
   if (settings?.transcription.dictationHandsFreeEnabled) {
     return "hands_free";
   }
-  return settings?.transcription.dictationPushToTalk ? "hold_to_talk" : "toggle";
+  return settings?.transcription.dictationPushToTalk
+    ? "hold_to_talk"
+    : "toggle";
 }
 
 export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const { theme, setTheme } = useTheme();
   const [activeTab, setActiveTab] = useState<TabId>("general");
+  const [useDesktopSettingsRail, setUseDesktopSettingsRail] = useState(() => {
+    if (typeof window === "undefined") {
+      return true;
+    }
+
+    return window.innerWidth >= 1280;
+  });
   const [draftSettings, setDraftSettings] = useState<Settings | null>(null);
-  const [persistedSettings, setPersistedSettings] = useState<Settings | null>(null);
+  const [persistedSettings, setPersistedSettings] = useState<Settings | null>(
+    null,
+  );
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [provider, setProvider] = useState("openai");
@@ -289,23 +352,35 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const [backups, setBackups] = useState<BackupInfo[]>([]);
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
-  const [backupSetupReport, setBackupSetupReport] = useState<CloudSetupReport | null>(null);
-  const [permissionDiagnostics, setPermissionDiagnostics] = useState<PermissionDiagnostics | null>(null);
-  const [securityStatus, setSecurityStatus] = useState<SecurityStatus | null>(null);
+  const [backupSetupReport, setBackupSetupReport] =
+    useState<CloudSetupReport | null>(null);
+  const [permissionDiagnostics, setPermissionDiagnostics] =
+    useState<PermissionDiagnostics | null>(null);
+  const [securityStatus, setSecurityStatus] = useState<SecurityStatus | null>(
+    null,
+  );
   const [vaultPassword, setVaultPassword] = useState("");
-  const [cloudReadinessMessage, setCloudReadinessMessage] = useState<string | null>(null);
+  const [cloudReadinessMessage, setCloudReadinessMessage] = useState<
+    string | null
+  >(null);
   const [ollamaAvailable, setOllamaAvailable] = useState<boolean | null>(null);
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [ollamaCloudModels, setOllamaCloudModels] = useState<string[]>([]);
   const [diarizationAvailable, setDiarizationAvailable] = useState(false);
   const [diarizationDownloading, setDiarizationDownloading] = useState(false);
-  const [diarizationModels, setDiarizationModels] = useState<DiarizationModelOption[]>([]);
-  const [selectedDiarizationModel, setSelectedDiarizationModel] = useState("ecapa_tdnn_speaker");
+  const [diarizationModels, setDiarizationModels] = useState<
+    DiarizationModelOption[]
+  >([]);
+  const [selectedDiarizationModel, setSelectedDiarizationModel] =
+    useState("ecapa_tdnn_speaker");
   const [micTestActive, setMicTestActive] = useState(false);
   const [micTestLevel, setMicTestLevel] = useState(0);
   const [micTestRecording, setMicTestRecording] = useState(false);
-  const [micTestPlaybackUrl, setMicTestPlaybackUrl] = useState<string | null>(null);
-  const [audioDeviceInventory, setAudioDeviceInventory] = useState<AudioInputDeviceInventory | null>(null);
+  const [micTestPlaybackUrl, setMicTestPlaybackUrl] = useState<string | null>(
+    null,
+  );
+  const [audioDeviceInventory, setAudioDeviceInventory] =
+    useState<AudioInputDeviceInventory | null>(null);
   const micTestContextRef = useRef<AudioContext | null>(null);
   const micTestAnimFrameRef = useRef<number | null>(null);
   const micTestStreamRef = useRef<MediaStream | null>(null);
@@ -325,7 +400,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const [licenseKeyInput, setLicenseKeyInput] = useState("");
   const [licenseActivating, setLicenseActivating] = useState(false);
   const [licenseError, setLicenseError] = useState<string | null>(null);
-  const [capturingShortcut, setCapturingShortcut] = useState<ShortcutFieldKey | null>(null);
+  const [capturingShortcut, setCapturingShortcut] =
+    useState<ShortcutFieldKey | null>(null);
   const [advancedTabs, setAdvancedTabs] = useState<Record<TabId, boolean>>({
     asr: true,
     general: true,
@@ -348,33 +424,50 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const { toast } = useToast();
   const latestProfileSnapshot = useMemo(
     () => backups.find((backup) => backup.backupType === "settings") ?? null,
-    [backups]
+    [backups],
   );
   const latestFullBackup = useMemo(
     () => backups.find((backup) => backup.backupType === "full") ?? null,
-    [backups]
+    [backups],
   );
   const microphonePermissionReady =
-    permissionDiagnostics?.microphonePermissionReady ?? permissionDiagnostics?.microphoneReady ?? false;
+    permissionDiagnostics?.microphonePermissionReady ??
+    permissionDiagnostics?.microphoneReady ??
+    false;
   const dictationShortcutBehavior = resolveDictationHotkeyBehavior(settings);
-  const dictationShortcutBehaviorHint = settings?.transcription.dictationHandsFreeEnabled
+  const dictationShortcutBehaviorHint = settings?.transcription
+    .dictationHandsFreeEnabled
     ? "Press shortcut once to start hands-free dictation, then pause speaking or press again to stop"
     : settings?.transcription.dictationPushToTalk
-    ? "Hold shortcut to record, release to stop"
-    : "Press shortcut once to start, then press again to stop";
+      ? "Hold shortcut to record, release to stop"
+      : "Press shortcut once to start, then press again to stop";
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const updateLayoutMode = () => {
+      setUseDesktopSettingsRail(window.innerWidth >= 1280);
+    };
+
+    updateLayoutMode();
+    window.addEventListener("resize", updateLayoutMode);
+    return () => window.removeEventListener("resize", updateLayoutMode);
+  }, []);
 
   const applySecurityStatusFromSettings = useCallback((next: Settings) => {
     setSecurityStatus((current) =>
       current
         ? {
-          ...current,
-          vaultInitialized: next.privacy.vaultInitialized,
-          recordingsEncrypted: next.privacy.encryptRecordings,
-          llmProvider: next.privacy.llmProvider,
-          remoteProcessingEnabled: next.privacy.remoteProcessingEnabled,
-          exportRoot: next.privacy.exportRoot ?? null,
-        }
-        : current
+            ...current,
+            vaultInitialized: next.privacy.vaultInitialized,
+            recordingsEncrypted: next.privacy.encryptRecordings,
+            llmProvider: next.privacy.llmProvider,
+            remoteProcessingEnabled: next.privacy.remoteProcessingEnabled,
+            exportRoot: next.privacy.exportRoot ?? null,
+          }
+        : current,
     );
   }, []);
 
@@ -411,7 +504,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
             }
           } catch (e) {
             if (mountedRef.current) {
-              setError(e instanceof Error ? e.message : "Failed to save settings");
+              setError(
+                e instanceof Error ? e.message : "Failed to save settings",
+              );
             }
           }
         }
@@ -423,7 +518,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         markSettingsPerf("settings-save-flush-end");
       }
     },
-    [applySecurityStatusFromSettings]
+    [applySecurityStatusFromSettings],
   );
 
   const queueSettingsSave = useCallback(
@@ -443,7 +538,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       }, debounceMs);
       markSettingsPerf("settings-save-queued");
     },
-    [flushPendingSettingsSave]
+    [flushPendingSettingsSave],
   );
 
   const performReset = useCallback(async () => {
@@ -454,7 +549,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       localStorage.removeItem(ONBOARDING_STORAGE_KEY);
       toast(
         `Reset complete. Removed ${result.deletedRecordings} recordings and deleted ${result.deletedAudioFiles} audio files.`,
-        "success"
+        "success",
       );
       if (
         result.failedAudioFileDeletions.length > 0 ||
@@ -462,13 +557,15 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       ) {
         toast(
           "Reset completed with warnings. Open logs for file or keychain cleanup failures.",
-          "error"
+          "error",
         );
       }
       window.location.reload();
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : "Failed to reset application state";
+        err instanceof Error
+          ? err.message
+          : "Failed to reset application state";
       setError(message);
       toast(message, "error");
     } finally {
@@ -476,33 +573,38 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     }
   }, [toast]);
 
-  const formatShortcutFromKeyboardEvent = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
-    const parts: string[] = [];
-    if (event.metaKey) parts.push("Cmd");
-    if (event.ctrlKey) parts.push("Ctrl");
-    if (event.altKey) parts.push("Alt");
-    if (event.shiftKey) parts.push("Shift");
+  const formatShortcutFromKeyboardEvent = useCallback(
+    (event: KeyboardEvent<HTMLInputElement>) => {
+      const parts: string[] = [];
+      if (event.metaKey) parts.push("Cmd");
+      if (event.ctrlKey) parts.push("Ctrl");
+      if (event.altKey) parts.push("Alt");
+      if (event.shiftKey) parts.push("Shift");
 
-    const key = event.key;
-    if (["Meta", "Control", "Alt", "Shift"].includes(key)) {
-      return null;
-    }
-    if (parts.length === 0) {
-      return null;
-    }
+      const key = event.key;
+      if (["Meta", "Control", "Alt", "Shift"].includes(key)) {
+        return null;
+      }
+      if (parts.length === 0) {
+        return null;
+      }
 
-    let mainKey = "";
-    if (key === " ") {
-      mainKey = "Space";
-    } else if (key.length === 1) {
-      mainKey = key.toUpperCase();
-    } else {
-      const normalized = key.startsWith("Arrow") ? key.replace("Arrow", "") : key;
-      mainKey = normalized.charAt(0).toUpperCase() + normalized.slice(1);
-    }
+      let mainKey = "";
+      if (key === " ") {
+        mainKey = "Space";
+      } else if (key.length === 1) {
+        mainKey = key.toUpperCase();
+      } else {
+        const normalized = key.startsWith("Arrow")
+          ? key.replace("Arrow", "")
+          : key;
+        mainKey = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+      }
 
-    return normalizeShortcut([...parts, mainKey].join("+"));
-  }, []);
+      return normalizeShortcut([...parts, mainKey].join("+"));
+    },
+    [],
+  );
 
   const handleShortcutKeyDown = useCallback(
     (field: ShortcutFieldKey) => (event: KeyboardEvent<HTMLInputElement>) => {
@@ -539,7 +641,12 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       void flushPendingSettingsSave();
       setCapturingShortcut(null);
     },
-    [flushPendingSettingsSave, formatShortcutFromKeyboardEvent, queueSettingsSave, settings]
+    [
+      flushPendingSettingsSave,
+      formatShortcutFromKeyboardEvent,
+      queueSettingsSave,
+      settings,
+    ],
   );
 
   useEffect(() => {
@@ -557,7 +664,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
           setDraftSettings(loaded);
           setPersistedSettings(loaded);
           setBackupConfig(loadedBackupConfig);
-                    markSettingsPerf("settings-initial-load-complete");
+          markSettingsPerf("settings-initial-load-complete");
         }
       } catch (e) {
         if (mountedRef.current) {
@@ -572,7 +679,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       void flushPendingSettingsSave(true);
     };
   }, [flushPendingSettingsSave]);
-
 
   useEffect(() => {
     let mounted = true;
@@ -618,7 +724,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         }
       } catch (e) {
         if (mounted) {
-          setError(e instanceof Error ? e.message : "Failed to load security details");
+          setError(
+            e instanceof Error ? e.message : "Failed to load security details",
+          );
         }
       }
     };
@@ -759,7 +867,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       setDiarizationModels(models);
     };
     load();
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -771,14 +881,40 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
     const loadModels = async () => {
       try {
-        const [ollamaAvail, ollamaList, ollamaCloudList, openaiList, anthropicList, geminiList, deepseekList] = await Promise.all([
+        const [
+          ollamaAvail,
+          ollamaList,
+          ollamaCloudList,
+          openaiList,
+          anthropicList,
+          geminiList,
+          deepseekList,
+        ] = await Promise.all([
           getOllamaStatus(),
-          listOllamaModels().catch((e) => { console.error("Ollama error:", e); return []; }),
-          listOllamaCloudModels().catch((e) => { console.error("Ollama Cloud error:", e); return []; }),
-          listOpenAiModels().catch((e) => { console.error("OpenAI error:", e); return []; }),
-          listAnthropicModels().catch((e) => { console.error("Anthropic error:", e); return []; }),
-          listGeminiModels().catch((e) => { console.error("Gemini error:", e); return []; }),
-          listDeepSeekModels().catch((e) => { console.error("DeepSeek error:", e); return []; }),
+          listOllamaModels().catch((e) => {
+            console.error("Ollama error:", e);
+            return [];
+          }),
+          listOllamaCloudModels().catch((e) => {
+            console.error("Ollama Cloud error:", e);
+            return [];
+          }),
+          listOpenAiModels().catch((e) => {
+            console.error("OpenAI error:", e);
+            return [];
+          }),
+          listAnthropicModels().catch((e) => {
+            console.error("Anthropic error:", e);
+            return [];
+          }),
+          listGeminiModels().catch((e) => {
+            console.error("Gemini error:", e);
+            return [];
+          }),
+          listDeepSeekModels().catch((e) => {
+            console.error("DeepSeek error:", e);
+            return [];
+          }),
         ]);
 
         if (mounted) {
@@ -813,7 +949,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   }, [activeTab]);
 
   const updateSettings = useCallback(
-    (next: Settings, options?: { immediate?: boolean; debounceMs?: number }) => {
+    (
+      next: Settings,
+      options?: { immediate?: boolean; debounceMs?: number },
+    ) => {
       setDraftSettings(next);
       setError(null);
 
@@ -824,7 +963,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       }
       queueSettingsSave(next, options?.debounceMs ?? SETTINGS_SAVE_DEBOUNCE_MS);
     },
-    [flushPendingSettingsSave, queueSettingsSave]
+    [flushPendingSettingsSave, queueSettingsSave],
   );
 
   const updateDictationShortcutBehavior = useCallback(
@@ -842,7 +981,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         },
       });
     },
-    [settings, updateSettings]
+    [settings, updateSettings],
   );
 
   const applyColorScheme = useCallback((scheme: string) => {
@@ -859,7 +998,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       return;
     }
     const themeAccess = getThemeAccessLevel(licenseInfo);
-    const nextScheme = normalizeThemeSchemeForAccess(settings.ui.colorScheme, themeAccess);
+    const nextScheme = normalizeThemeSchemeForAccess(
+      settings.ui.colorScheme,
+      themeAccess,
+    );
     applyColorScheme(nextScheme);
     if (nextScheme !== settings.ui.colorScheme) {
       void updateSettings(
@@ -870,7 +1012,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
             colorScheme: nextScheme,
           },
         },
-        { immediate: true }
+        { immediate: true },
       );
     }
   }, [applyColorScheme, licenseInfo, settings, updateSettings]);
@@ -896,7 +1038,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       if (!deviceId || !audioDeviceInventory) {
         return null;
       }
-      const device = audioDeviceInventory.devices.find((candidate) => candidate.deviceId === deviceId);
+      const device = audioDeviceInventory.devices.find(
+        (candidate) => candidate.deviceId === deviceId,
+      );
       if (!device) {
         return null;
       }
@@ -906,7 +1050,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         transportType: device.transportType ?? null,
       };
     },
-    [audioDeviceInventory]
+    [audioDeviceInventory],
   );
 
   const hasUnsavedChanges = useMemo(() => {
@@ -918,10 +1062,16 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
   const currentAudioDevices = audioDeviceInventory?.devices ?? [];
   const appWideDeviceId = settings?.audio.preferredInputDevice?.deviceId ?? "";
-  const dictationDeviceId = settings?.audio.dictationInputDevice?.deviceId ?? "";
+  const dictationDeviceId =
+    settings?.audio.dictationInputDevice?.deviceId ?? "";
   const meetingDeviceId = settings?.audio.meetingInputDevice?.deviceId ?? "";
-  const saveStateLabel = isSaving ? "Saving" : hasUnsavedChanges ? "Pending" : "Synced";
-  const activeTabConfig = SETTINGS_TABS.find((tab) => tab.id === activeTab) ?? SETTINGS_TABS[0];
+  const saveStateLabel = isSaving
+    ? "Saving"
+    : hasUnsavedChanges
+      ? "Pending"
+      : "Synced";
+  const activeTabConfig =
+    SETTINGS_TABS.find((tab) => tab.id === activeTab) ?? SETTINGS_TABS[0];
   const readyChipTone = (ready: boolean) =>
     ready
       ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
@@ -939,17 +1089,18 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       event.preventDefault();
       void flushPendingSettingsSave();
     },
-    [flushPendingSettingsSave]
+    [flushPendingSettingsSave],
   );
 
   useEffect(() => {
     return () => {
-      if (micTestAnimFrameRef.current !== null) cancelAnimationFrame(micTestAnimFrameRef.current);
+      if (micTestAnimFrameRef.current !== null)
+        cancelAnimationFrame(micTestAnimFrameRef.current);
       micTestStreamRef.current?.getTracks().forEach((t) => t.stop());
       micTestContextRef.current?.close().catch(() => {});
       if (micTestPlaybackUrl) URL.revokeObjectURL(micTestPlaybackUrl);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -980,7 +1131,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         ? settings.audio.dictationInputDevice?.deviceId
         : settings?.audio.preferredInputDevice?.deviceId;
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: preferredDeviceId ? { deviceId: { ideal: preferredDeviceId } } : true,
+        audio: preferredDeviceId
+          ? { deviceId: { ideal: preferredDeviceId } }
+          : true,
         video: false,
       });
       micTestStreamRef.current = stream;
@@ -993,7 +1146,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       const buf = new Float32Array(analyser.fftSize);
       const tick = () => {
         analyser.getFloatTimeDomainData(buf);
-        const rms = Math.sqrt(buf.reduce((sum, v) => sum + v * v, 0) / buf.length);
+        const rms = Math.sqrt(
+          buf.reduce((sum, v) => sum + v * v, 0) / buf.length,
+        );
         const db = 20 * Math.log10(Math.max(rms, 1e-6));
         const pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
         setMicTestLevel(Math.round(pct));
@@ -1004,7 +1159,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     } catch (err) {
       console.error("Mic test failed:", err);
     }
-  }, [settings?.audio.dictationInputDevice?.deviceId, settings?.audio.dictationInputOverrideEnabled, settings?.audio.preferredInputDevice?.deviceId]);
+  }, [
+    settings?.audio.dictationInputDevice?.deviceId,
+    settings?.audio.dictationInputOverrideEnabled,
+    settings?.audio.preferredInputDevice?.deviceId,
+  ]);
 
   const recordMicTest = useCallback(async () => {
     if (!micTestStreamRef.current) return;
@@ -1095,7 +1254,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         })}
       </div>
       <p className="mt-3 text-xs text-muted-foreground">
-        Changes save immediately, duplicate conflicts are blocked, and new bindings apply instantly.
+        Changes save immediately, duplicate conflicts are blocked, and new
+        bindings apply instantly.
       </p>
     </div>
   );
@@ -1126,13 +1286,17 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         {includeHotkeyBehavior && (
           <div className="space-y-2">
             <Label>Hotkey behavior</Label>
-            <p className="text-sm text-muted-foreground">{dictationShortcutBehaviorHint}</p>
+            <p className="text-sm text-muted-foreground">
+              {dictationShortcutBehaviorHint}
+            </p>
             <select
               aria-label="Hotkey behavior"
               className="w-full rounded-md border bg-background px-3 py-2 text-sm"
               value={dictationShortcutBehavior}
               onChange={(event) =>
-                updateDictationShortcutBehavior(event.target.value as DictationHotkeyBehavior)
+                updateDictationShortcutBehavior(
+                  event.target.value as DictationHotkeyBehavior,
+                )
               }
             >
               <option value="hold_to_talk">Hold-to-talk</option>
@@ -1144,238 +1308,259 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
         {includeCoreControls && (
           <>
-
-        <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
-          <div className="space-y-0.5">
-            <Label className="flex items-center gap-1.5">
-              Smart Format
-              {!canUseFormattingAssistant(licenseInfo) && (
-                <span className="text-xs text-amber-600">Pro</span>
-              )}
-            </Label>
-            <p className="text-sm text-muted-foreground">
-              Use the default LLM to format and correct dictation before pasting.
-            </p>
-          </div>
-          <Switch
-            checked={settings.transcription.dictationAiFormatting}
-            disabled={!canUseFormattingAssistant(licenseInfo)}
-            onCheckedChange={(checked) =>
-              void updateSettings({
-                ...settings,
-                transcription: {
-                  ...settings.transcription,
-                  dictationAiFormatting: checked,
-                },
-              })
-            }
-          />
-        </div>
-
-        <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
-          <div className="space-y-0.5">
-            <Label>Command mode</Label>
-            <p className="text-sm text-muted-foreground">
-              Enable corrections like &quot;command undo that&quot; and spoken transforms like
-              &quot;command uppercase selection&quot;.
-            </p>
-          </div>
-          <Switch
-            checked={settings.transcription.dictationCommandModeEnabled ?? true}
-            onCheckedChange={(checked) =>
-              void updateSettings({
-                ...settings,
-                transcription: {
-                  ...settings.transcription,
-                  dictationCommandModeEnabled: checked,
-                },
-              })
-            }
-          />
-        </div>
-
-        <div className="space-y-2">
-          <Label>Command prefix</Label>
-          <Input
-            value={settings.transcription.dictationCommandPrefix ?? "command"}
-            onChange={(e: any) =>
-              void updateSettings({
-                ...settings,
-                transcription: {
-                  ...settings.transcription,
-                  dictationCommandPrefix: e.target.value,
-                },
-              })
-            }
-          />
-          <p className="text-xs text-muted-foreground">
-            Use the wake word that starts correction and transform commands.
-          </p>
-        </div>
-
-        <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
-          <div className="space-y-0.5">
-            <Label>Snippets</Label>
-            <p className="text-sm text-muted-foreground">
-              Expand saved text shortcuts after dictionary normalization.
-            </p>
-          </div>
-          <Switch
-            checked={settings.transcription.dictationSnippetsEnabled ?? true}
-            onCheckedChange={(checked) =>
-              void updateSettings({
-                ...settings,
-                transcription: {
-                  ...settings.transcription,
-                  dictationSnippetsEnabled: checked,
-                },
-              })
-            }
-          />
-        </div>
-
-        <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
-          <div className="space-y-0.5">
-            <Label>Auto-learn corrections</Label>
-            <p className="text-sm text-muted-foreground">
-              Learn safe word and short-phrase fixes from confirmed dictation edits.
-            </p>
-          </div>
-          <Switch
-            checked={settings.transcription.dictationAutoLearnCorrections ?? true}
-            onCheckedChange={(checked) =>
-              void updateSettings({
-                ...settings,
-                transcription: {
-                  ...settings.transcription,
-                  dictationAutoLearnCorrections: checked,
-                },
-              })
-            }
-          />
-        </div>
-
-        <div className="rounded-2xl border border-border/60 bg-background/75 p-4">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="space-y-0.5">
-              <Label>Advanced dictation controls</Label>
-              <p className="text-sm text-muted-foreground">
-                Manage dictionary rules, snippets, routing, insertion, context, live preview,
-                and custom dictation modes from Dictation Controls.
-              </p>
-            </div>
-            <Button variant="secondary" onClick={() => requestMainView("dictation")}>
-              Open Dictation Controls
-            </Button>
-          </div>
-        </div>
-
-        <div className="space-y-2">
-          <Label>Custom Dictation Prompt</Label>
-          <Textarea
-            placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
-            value={settings.transcription.dictationCustomPrompt ?? ""}
-            onChange={(e: any) =>
-              void updateSettings({
-                ...settings,
-                transcription: {
-                  ...settings.transcription,
-                  dictationCustomPrompt: e.target.value,
-                },
-              })
-            }
-            className="min-h-[96px]"
-          />
-          <p className="text-xs text-muted-foreground">
-            Overrides the default Smart Format prompt. The active app name is still provided as context.
-          </p>
-        </div>
-
-        <div className="space-y-2">
-          <Label>Custom Meeting Summary Prompt</Label>
-          <Textarea
-            placeholder="e.g. Summarize the meeting and list action items..."
-            value={settings.transcription.meetingCustomPrompt ?? ""}
-            onChange={(e: any) =>
-              void updateSettings({
-                ...settings,
-                transcription: {
-                  ...settings.transcription,
-                  meetingCustomPrompt: e.target.value,
-                },
-              })
-            }
-            className="min-h-[96px]"
-          />
-          <p className="text-xs text-muted-foreground">
-            Overrides the default Nautilus-style meeting summary prompt.
-          </p>
-        </div>
-
-        {includeMeetingAutoName && (
-          <>
             <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
               <div className="space-y-0.5">
-                <Label>Auto-name meetings</Label>
+                <Label className="flex items-center gap-1.5">
+                  Smart Format
+                  {!canUseFormattingAssistant(licenseInfo) && (
+                    <span className="text-xs text-amber-600">Pro</span>
+                  )}
+                </Label>
                 <p className="text-sm text-muted-foreground">
-                  Generate a title after transcription completes for meetings.
+                  Use the default LLM to format and correct dictation before
+                  pasting.
                 </p>
               </div>
               <Switch
-                checked={settings.transcription.meetingAutoNameEnabled ?? true}
+                checked={settings.transcription.dictationAiFormatting}
+                disabled={!canUseFormattingAssistant(licenseInfo)}
                 onCheckedChange={(checked) =>
                   void updateSettings({
                     ...settings,
                     transcription: {
                       ...settings.transcription,
-                      meetingAutoNameEnabled: checked,
+                      dictationAiFormatting: checked,
                     },
                   })
                 }
               />
             </div>
-            <div className="space-y-2">
-              <Label>Meeting auto-name model override (optional)</Label>
-              <Input
-                placeholder="Leave empty to use summary model"
-                value={settings.transcription.meetingAutoNameModel ?? ""}
-                onBlur={handleSettingsTextBlur}
-                onKeyDown={handleSettingsTextKeyDown}
-                onChange={(e: ChangeEvent<HTMLInputElement>) =>
+
+            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="space-y-0.5">
+                <Label>Command mode</Label>
+                <p className="text-sm text-muted-foreground">
+                  Enable corrections like &quot;command undo that&quot; and
+                  spoken transforms like &quot;command uppercase
+                  selection&quot;.
+                </p>
+              </div>
+              <Switch
+                checked={
+                  settings.transcription.dictationCommandModeEnabled ?? true
+                }
+                onCheckedChange={(checked) =>
                   void updateSettings({
                     ...settings,
                     transcription: {
                       ...settings.transcription,
-                      meetingAutoNameModel: e.target.value.trim() ? e.target.value.trim() : null,
+                      dictationCommandModeEnabled: checked,
                     },
                   })
                 }
               />
             </div>
-          </>
-        )}
 
-        <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
-          <div className="space-y-0.5">
-            <Label>Copy dictation text to clipboard</Label>
-            <p className="text-sm text-muted-foreground">
-              Keep the latest dictation text available for manual paste.
-            </p>
-          </div>
-          <Switch
-            checked={settings.transcription.dictationCopyToClipboard ?? true}
-            onCheckedChange={(checked) =>
-              void updateSettings({
-                ...settings,
-                transcription: {
-                  ...settings.transcription,
-                  dictationCopyToClipboard: checked,
-                },
-              })
-            }
-          />
-        </div>
+            <div className="space-y-2">
+              <Label>Command prefix</Label>
+              <Input
+                value={
+                  settings.transcription.dictationCommandPrefix ?? "command"
+                }
+                onChange={(e: any) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      dictationCommandPrefix: e.target.value,
+                    },
+                  })
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Use the wake word that starts correction and transform commands.
+              </p>
+            </div>
 
+            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="space-y-0.5">
+                <Label>Snippets</Label>
+                <p className="text-sm text-muted-foreground">
+                  Expand saved text shortcuts after dictionary normalization.
+                </p>
+              </div>
+              <Switch
+                checked={
+                  settings.transcription.dictationSnippetsEnabled ?? true
+                }
+                onCheckedChange={(checked) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      dictationSnippetsEnabled: checked,
+                    },
+                  })
+                }
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="space-y-0.5">
+                <Label>Auto-learn corrections</Label>
+                <p className="text-sm text-muted-foreground">
+                  Learn safe word and short-phrase fixes from confirmed
+                  dictation edits.
+                </p>
+              </div>
+              <Switch
+                checked={
+                  settings.transcription.dictationAutoLearnCorrections ?? true
+                }
+                onCheckedChange={(checked) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      dictationAutoLearnCorrections: checked,
+                    },
+                  })
+                }
+              />
+            </div>
+
+            <div className="rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div className="space-y-0.5">
+                  <Label>Advanced dictation controls</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Manage dictionary rules, snippets, routing, insertion,
+                    context, live preview, and custom dictation modes from
+                    Dictation Controls.
+                  </p>
+                </div>
+                <Button
+                  variant="secondary"
+                  onClick={() => requestMainView("dictation")}
+                >
+                  Open Dictation Controls
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Custom Dictation Prompt</Label>
+              <Textarea
+                placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
+                value={settings.transcription.dictationCustomPrompt ?? ""}
+                onChange={(e: any) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      dictationCustomPrompt: e.target.value,
+                    },
+                  })
+                }
+                className="min-h-[96px]"
+              />
+              <p className="text-xs text-muted-foreground">
+                Overrides the default Smart Format prompt. The active app name
+                is still provided as context.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Custom Meeting Summary Prompt</Label>
+              <Textarea
+                placeholder="e.g. Summarize the meeting and list action items..."
+                value={settings.transcription.meetingCustomPrompt ?? ""}
+                onChange={(e: any) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      meetingCustomPrompt: e.target.value,
+                    },
+                  })
+                }
+                className="min-h-[96px]"
+              />
+              <p className="text-xs text-muted-foreground">
+                Overrides the default Nautilus-style meeting summary prompt.
+              </p>
+            </div>
+
+            {includeMeetingAutoName && (
+              <>
+                <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+                  <div className="space-y-0.5">
+                    <Label>Auto-name meetings</Label>
+                    <p className="text-sm text-muted-foreground">
+                      Generate a title after transcription completes for
+                      meetings.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={
+                      settings.transcription.meetingAutoNameEnabled ?? true
+                    }
+                    onCheckedChange={(checked) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          meetingAutoNameEnabled: checked,
+                        },
+                      })
+                    }
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Meeting auto-name model override (optional)</Label>
+                  <Input
+                    placeholder="Leave empty to use summary model"
+                    value={settings.transcription.meetingAutoNameModel ?? ""}
+                    onBlur={handleSettingsTextBlur}
+                    onKeyDown={handleSettingsTextKeyDown}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          meetingAutoNameModel: e.target.value.trim()
+                            ? e.target.value.trim()
+                            : null,
+                        },
+                      })
+                    }
+                  />
+                </div>
+              </>
+            )}
+
+            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+              <div className="space-y-0.5">
+                <Label>Copy dictation text to clipboard</Label>
+                <p className="text-sm text-muted-foreground">
+                  Keep the latest dictation text available for manual paste.
+                </p>
+              </div>
+              <Switch
+                checked={
+                  settings.transcription.dictationCopyToClipboard ?? true
+                }
+                onCheckedChange={(checked) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      dictationCopyToClipboard: checked,
+                    },
+                  })
+                }
+              />
+            </div>
           </>
         )}
 
@@ -1384,14 +1569,19 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
             <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
               <div className="space-y-0.5">
                 <Label>Automatic silence skip</Label>
-                <p className="text-sm text-muted-foreground">Remove silent segments before transcription.</p>
+                <p className="text-sm text-muted-foreground">
+                  Remove silent segments before transcription.
+                </p>
               </div>
               <Switch
                 checked={settings.transcription.silenceSkipEnabled}
                 onCheckedChange={(checked) =>
                   void updateSettings({
                     ...settings,
-                    transcription: { ...settings.transcription, silenceSkipEnabled: checked },
+                    transcription: {
+                      ...settings.transcription,
+                      silenceSkipEnabled: checked,
+                    },
                   })
                 }
               />
@@ -1400,14 +1590,19 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
             <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
               <div className="space-y-0.5">
                 <Label>Voice activity detection</Label>
-                <p className="text-sm text-muted-foreground">Auto-stop after silence timeout.</p>
+                <p className="text-sm text-muted-foreground">
+                  Auto-stop after silence timeout.
+                </p>
               </div>
               <Switch
                 checked={settings.audio.voiceActivityDetection}
                 onCheckedChange={(checked) =>
                   void updateSettings({
                     ...settings,
-                    audio: { ...settings.audio, voiceActivityDetection: checked },
+                    audio: {
+                      ...settings.audio,
+                      voiceActivityDetection: checked,
+                    },
                   })
                 }
               />
@@ -1424,14 +1619,22 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       max={30}
                       step={1}
                       className="w-16 rounded-md border bg-background px-2 py-1 text-center text-sm"
-                      value={Math.round(settings.audio.silenceTimeoutSeconds / 60)}
+                      value={Math.round(
+                        settings.audio.silenceTimeoutSeconds / 60,
+                      )}
                       onBlur={handleSettingsTextBlur}
                       onKeyDown={handleSettingsTextKeyDown}
                       onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                        const minutes = Math.max(1, Math.min(30, parseInt(e.target.value, 10) || 5));
+                        const minutes = Math.max(
+                          1,
+                          Math.min(30, parseInt(e.target.value, 10) || 5),
+                        );
                         void updateSettings({
                           ...settings,
-                          audio: { ...settings.audio, silenceTimeoutSeconds: minutes * 60 },
+                          audio: {
+                            ...settings.audio,
+                            silenceTimeoutSeconds: minutes * 60,
+                          },
                         });
                       }}
                     />
@@ -1449,7 +1652,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     const minutes = parseInt(e.target.value, 10);
                     void updateSettings({
                       ...settings,
-                      audio: { ...settings.audio, silenceTimeoutSeconds: minutes * 60 },
+                      audio: {
+                        ...settings.audio,
+                        silenceTimeoutSeconds: minutes * 60,
+                      },
                     });
                   }}
                 />
@@ -1465,14 +1671,19 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       key={preset}
                       type="button"
                       className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
-                        Math.round(settings.audio.silenceTimeoutSeconds / 60) === preset
+                        Math.round(
+                          settings.audio.silenceTimeoutSeconds / 60,
+                        ) === preset
                           ? "border-trusted bg-trusted text-white"
                           : "border-border bg-muted hover:bg-muted/80"
                       }`}
                       onClick={() =>
                         void updateSettings({
                           ...settings,
-                          audio: { ...settings.audio, silenceTimeoutSeconds: preset * 60 },
+                          audio: {
+                            ...settings.audio,
+                            silenceTimeoutSeconds: preset * 60,
+                          },
                         })
                       }
                     >
@@ -1486,7 +1697,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
             <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
               <div className="space-y-0.5">
                 <Label>Noise suppression</Label>
-                <p className="text-sm text-muted-foreground">Reduce background noise.</p>
+                <p className="text-sm text-muted-foreground">
+                  Reduce background noise.
+                </p>
               </div>
               <Switch
                 checked={settings.audio.noiseSuppression}
@@ -1502,7 +1715,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
             <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
               <div className="space-y-0.5">
                 <Label>Auto gain control</Label>
-                <p className="text-sm text-muted-foreground">Automatically adjust microphone levels.</p>
+                <p className="text-sm text-muted-foreground">
+                  Automatically adjust microphone levels.
+                </p>
               </div>
               <Switch
                 checked={settings.audio.autoGainControl}
@@ -1531,7 +1746,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   onChange={(e: any) =>
                     void updateSettings({
                       ...settings,
-                      audio: { ...settings.audio, manualGainDb: Number(e.target.value) },
+                      audio: {
+                        ...settings.audio,
+                        manualGainDb: Number(e.target.value),
+                      },
                     })
                   }
                 />
@@ -1554,7 +1772,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 <Button
                   variant={micTestActive ? "destructive" : "outline"}
                   size="sm"
-                  onClick={() => (micTestActive ? stopMicTest() : void startMicTest())}
+                  onClick={() =>
+                    micTestActive ? stopMicTest() : void startMicTest()
+                  }
                 >
                   <Mic className="mr-1.5 h-3.5 w-3.5" />
                   {micTestActive ? "Stop" : "Start"}
@@ -1621,11 +1841,14 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               <div className="space-y-0.5">
                 <Label>Auto-request dictation permissions</Label>
                 <p className="text-sm text-muted-foreground">
-                  Prompt for speech and microphone permissions before dictation instead of failing silently.
+                  Prompt for speech and microphone permissions before dictation
+                  instead of failing silently.
                 </p>
               </div>
               <Switch
-                checked={settings.transcription.dictationAutoRequestPermissions ?? true}
+                checked={
+                  settings.transcription.dictationAutoRequestPermissions ?? true
+                }
                 onCheckedChange={(checked) =>
                   void updateSettings({
                     ...settings,
@@ -1643,7 +1866,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 <div>
                   <Label>Permission diagnostics</Label>
                   <p className="text-sm text-muted-foreground">
-                    Validate microphone, speech recognition, accessibility, and automation permissions.
+                    Validate microphone, speech recognition, accessibility, and
+                    automation permissions.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -1697,19 +1921,28 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     {
                       label: "Accessibility",
                       ready: permissionDiagnostics.accessibilityReady,
-                      action: () => void openPermissionSettings("accessibility"),
+                      action: () =>
+                        void openPermissionSettings("accessibility"),
                       offLabel: "Needs grant",
                     },
                     {
                       label: "Keyboard events",
                       ready: permissionDiagnostics.postEventReady,
-                      action: () => void openPermissionSettings("accessibility"),
+                      action: () =>
+                        void openPermissionSettings("accessibility"),
                       offLabel: "Fallback unavailable",
                     },
                   ].map((item) => (
-                    <div key={item.label} className="rounded-2xl border border-border/60 bg-muted/20 p-3 text-sm">
+                    <div
+                      key={item.label}
+                      className="rounded-2xl border border-border/60 bg-muted/20 p-3 text-sm"
+                    >
                       <p className="font-medium">{item.label}</p>
-                      <p className={item.ready ? "text-green-500" : "text-amber-500"}>
+                      <p
+                        className={
+                          item.ready ? "text-green-500" : "text-amber-500"
+                        }
+                      >
                         {item.ready ? "Ready" : item.offLabel}
                       </p>
                       <Button
@@ -1741,10 +1974,14 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               <Label className="flex items-center gap-2">
                 Cloud sync
                 {!isFeatureAllowed(licenseInfo, "cloudSync") && (
-                  <span className="text-xs text-amber-600">⭐ Friends Club</span>
+                  <span className="text-xs text-amber-600">
+                    ⭐ Friends Club
+                  </span>
                 )}
               </Label>
-              <p className="text-sm text-muted-foreground">Enable external backup sync integrations.</p>
+              <p className="text-sm text-muted-foreground">
+                Enable external backup sync integrations.
+              </p>
             </div>
             <Switch
               checked={settings.privacy.cloudSync}
@@ -1813,12 +2050,14 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               </div>
               {!settings.privacy.remoteProcessingEnabled ? (
                 <p className="text-xs text-amber-600">
-                  Remote processing is disabled. Stored cloud keys stay inactive until policy is enabled.
+                  Remote processing is disabled. Stored cloud keys stay inactive
+                  until policy is enabled.
                 </p>
               ) : null}
               {settings.privacy.remoteProcessingEnabled && !hasApiKey ? (
                 <p className="text-xs text-amber-600">
-                  Selected analysis provider has no stored key. Analysis requests will fail with a credential error.
+                  Selected analysis provider has no stored key. Analysis
+                  requests will fail with a credential error.
                 </p>
               ) : null}
             </div>
@@ -1827,9 +2066,15 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               <Label>API key</Label>
               <Input
                 type="password"
-                placeholder={hasApiKey ? "Key already stored (enter to replace)" : "Enter API key"}
+                placeholder={
+                  hasApiKey
+                    ? "Key already stored (enter to replace)"
+                    : "Enter API key"
+                }
                 value={apiKey}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => setApiKey(e.target.value)}
+                onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                  setApiKey(e.target.value)
+                }
                 onKeyDown={async (e) => {
                   if (e.key === "Enter" && apiKey.trim()) {
                     e.preventDefault();
@@ -1843,7 +2088,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       setHasApiKey(true);
                       await refreshModelsForProvider(provider);
                     } catch (e) {
-                      setError(e instanceof Error ? e.message : "Failed to save API key");
+                      setError(
+                        e instanceof Error
+                          ? e.message
+                          : "Failed to save API key",
+                      );
                     } finally {
                       setSavingApiKey(false);
                     }
@@ -1862,7 +2111,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       setHasApiKey(true);
                       await refreshModelsForProvider(provider);
                     } catch (e) {
-                      setError(e instanceof Error ? e.message : "Failed to save API key");
+                      setError(
+                        e instanceof Error
+                          ? e.message
+                          : "Failed to save API key",
+                      );
                     } finally {
                       setSavingApiKey(false);
                     }
@@ -1881,7 +2134,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       setApiKey("");
                       setHasApiKey(false);
                     } catch (e) {
-                      setError(e instanceof Error ? e.message : "Failed to clear API key");
+                      setError(
+                        e instanceof Error
+                          ? e.message
+                          : "Failed to clear API key",
+                      );
                     } finally {
                       setSavingApiKey(false);
                     }
@@ -1890,7 +2147,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 >
                   Clear Key
                 </Button>
-                {hasApiKey && <span className="text-sm text-muted-foreground">Stored securely</span>}
+                {hasApiKey && (
+                  <span className="text-sm text-muted-foreground">
+                    Stored securely
+                  </span>
+                )}
               </div>
             </div>
 
@@ -1905,12 +2166,18 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     if (!settings.privacy.remoteProcessingEnabled) {
                       checks.push("Remote processing is disabled.");
                     }
-                    const keyPresent = await hasProviderSecret(settings.privacy.llmProvider);
+                    const keyPresent = await hasProviderSecret(
+                      settings.privacy.llmProvider,
+                    );
                     if (!keyPresent) {
-                      checks.push(`No API key stored for ${settings.privacy.llmProvider}.`);
+                      checks.push(
+                        `No API key stored for ${settings.privacy.llmProvider}.`,
+                      );
                     }
                     if (checks.length === 0) {
-                      setCloudReadinessMessage("Cloud readiness checks passed.");
+                      setCloudReadinessMessage(
+                        "Cloud readiness checks passed.",
+                      );
                     } else {
                       setCloudReadinessMessage(checks.join(" "));
                     }
@@ -1922,7 +2189,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   <Button
                     onClick={async () => {
                       const confirmed = window.confirm(
-                        "Enable remote processing? This allows transcript text to be sent to cloud providers."
+                        "Enable remote processing? This allows transcript text to be sent to cloud providers.",
                       );
                       if (!confirmed) {
                         return;
@@ -1935,10 +2202,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             remoteProcessingEnabled: true,
                           },
                         },
-                        { immediate: true }
+                        { immediate: true },
                       );
                       setCloudReadinessMessage(
-                        "Remote processing enabled. Run readiness check again."
+                        "Remote processing enabled. Run readiness check again.",
                       );
                     }}
                   >
@@ -1947,7 +2214,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 )}
               </div>
               {cloudReadinessMessage ? (
-                <p className="text-xs text-muted-foreground">{cloudReadinessMessage}</p>
+                <p className="text-xs text-muted-foreground">
+                  {cloudReadinessMessage}
+                </p>
               ) : null}
             </div>
           </>
@@ -1995,9 +2264,12 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 </Button>
               </div>
               <div className="rounded-2xl border border-border/60 bg-muted/20 p-3">
-                <p className="text-sm font-medium">Grounded meeting follow-up drafts</p>
+                <p className="text-sm font-medium">
+                  Grounded meeting follow-up drafts
+                </p>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Open Meetings to draft transcript-backed follow-up emails and notes.
+                  Open Meetings to draft transcript-backed follow-up emails and
+                  notes.
                 </p>
                 <Button
                   variant="outline"
@@ -2019,20 +2291,25 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     ...settings,
                     transcription: {
                       ...settings.transcription,
-                      memorySearchMode: e.target.value as "fts" | "ollama_embeddings",
+                      memorySearchMode: e.target.value as
+                        | "fts"
+                        | "ollama_embeddings",
                     },
                   })
                 }
                 className="w-full rounded-md border bg-background p-2"
               >
-                <option value="fts">Full-text search (built-in, no setup needed)</option>
+                <option value="fts">
+                  Full-text search (built-in, no setup needed)
+                </option>
                 <option value="ollama_embeddings">
                   Ollama Embeddings (semantic search, requires Ollama)
                 </option>
               </select>
             </div>
 
-            {settings.transcription.memorySearchMode === "ollama_embeddings" && (
+            {settings.transcription.memorySearchMode ===
+              "ollama_embeddings" && (
               <>
                 <div className="space-y-2">
                   <Label>Embedding model</Label>
@@ -2051,7 +2328,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     className="font-mono text-sm"
                   />
                   <p className="text-xs text-muted-foreground">
-                    Ollama embedding model name. Run <code className="rounded bg-muted px-1">ollama pull nomic-embed-text</code> first.
+                    Ollama embedding model name. Run{" "}
+                    <code className="rounded bg-muted px-1">
+                      ollama pull nomic-embed-text
+                    </code>{" "}
+                    first.
                   </p>
                 </div>
 
@@ -2059,7 +2340,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   <div className="space-y-0.5">
                     <p className="text-sm font-medium">Re-index embeddings</p>
                     <p className="text-xs text-muted-foreground">
-                      Generate embeddings for all existing transcripts. Required after changing models.
+                      Generate embeddings for all existing transcripts. Required
+                      after changing models.
                     </p>
                   </div>
                   <Button
@@ -2068,14 +2350,18 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                     onClick={() => {
                       void (async () => {
                         try {
-                          const { reindexEmbeddings } = await import("@/lib/tauri");
+                          const { reindexEmbeddings } =
+                            await import("@/lib/tauri");
                           const result = await reindexEmbeddings();
                           toast(
                             `Indexed ${result.segments} segments from ${result.recordings} recordings${result.errors > 0 ? ` (${result.errors} errors)` : ""}`,
-                            result.errors > 0 ? "error" : "success"
+                            result.errors > 0 ? "error" : "success",
                           );
                         } catch (err) {
-                          toast(err instanceof Error ? err.message : String(err), "error");
+                          toast(
+                            err instanceof Error ? err.message : String(err),
+                            "error",
+                          );
                         }
                       })();
                     }}
@@ -2098,25 +2384,33 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         <div className="mx-auto flex max-w-[1680px] flex-col gap-4 px-4 py-5 sm:px-6">
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Settings</h1>
+              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+                Settings
+              </h1>
               <p className="mt-1 text-sm text-muted-foreground sm:text-base">
                 Tune transcription, AI, privacy, storage, and app behavior
               </p>
             </div>
             <div className="flex flex-wrap gap-2 text-xs">
               <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
-                Save state <span className="ml-1 font-medium text-foreground">{saveStateLabel}</span>
+                Save state{" "}
+                <span className="ml-1 font-medium text-foreground">
+                  {saveStateLabel}
+                </span>
               </div>
               <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
                 AI policy{" "}
                 <span className="ml-1 font-medium text-foreground">
-                  {settings.privacy.remoteProcessingEnabled ? "Remote allowed" : "Local-first"}
+                  {settings.privacy.remoteProcessingEnabled
+                    ? "Remote allowed"
+                    : "Local-first"}
                 </span>
               </div>
               <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
                 Primary mic{" "}
                 <span className="ml-1 font-medium text-foreground">
-                  {settings.audio.preferredInputDevice?.deviceName ?? "System default"}
+                  {settings.audio.preferredInputDevice?.deviceName ??
+                    "System default"}
                 </span>
               </div>
             </div>
@@ -2124,2201 +2418,3086 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto">
-        <div className="mx-auto grid max-w-[1680px] gap-4 p-4 sm:p-6 lg:grid-cols-[292px_minmax(0,1fr)] xl:gap-6">
-          <aside className="order-first h-fit overflow-hidden rounded-[24px] border border-border bg-card text-card-foreground shadow-sm lg:sticky lg:top-6">
-            <div className="border-b border-border px-5 py-5">
-              <h2 className="text-xl font-semibold tracking-tight">Overview</h2>
-              <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                Manage capture, privacy, AI, storage, and device status.
-              </p>
-            </div>
-
-            <div className="space-y-4 px-4 py-4 sm:px-5 sm:py-5">
-              <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4 lg:grid-cols-2">
-                <div className={`rounded-2xl border p-3 ${readyChipTone(microphonePermissionReady)}`}>
-                  <p className="text-current/70">Mic</p>
-                  <p className="mt-1 font-medium">{microphonePermissionReady ? "Ready" : "Needs setup"}</p>
-                </div>
-                <div className={`rounded-2xl border p-3 ${readyChipTone(diarizationAvailable)}`}>
-                  <p className="text-current/70">Speakers</p>
-                  <p className="mt-1 font-medium">{diarizationAvailable ? "Installed" : "Optional"}</p>
-                </div>
-                <div className="rounded-2xl border border-border bg-muted/30 p-3">
-                  <p className="text-muted-foreground">Routing</p>
-                  <p className="mt-1 font-medium text-foreground">
-                    {settings.transcription.useSharedAsrSelection ? "Shared" : "Split"}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden">
+        <div className="mx-auto max-w-[1680px] p-4 sm:p-6">
+          <div className="xl:grid xl:grid-cols-[280px_minmax(0,1fr)] xl:gap-6">
+            {useDesktopSettingsRail && (
+              <aside className="h-fit self-start overflow-hidden rounded-[24px] border border-border bg-card text-card-foreground shadow-sm xl:sticky xl:top-6">
+                <div className="border-b border-border px-5 py-5">
+                  <h2 className="text-xl font-semibold tracking-tight">
+                    Overview
+                  </h2>
+                  <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                    Manage capture, privacy, AI, storage, and device status.
                   </p>
                 </div>
-                <div className="rounded-2xl border border-border bg-muted/30 p-3">
-                  <p className="text-muted-foreground">Sync</p>
-                  <p className="mt-1 font-medium text-foreground">{saveStateLabel}</p>
-                </div>
-              </div>
 
-              <div className="rounded-[20px] border border-border bg-muted/20 p-2">
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-1">
-                  {SETTINGS_TABS.map((tab) => (
-                    <button
-                      key={tab.id}
-                      onClick={() => setActiveTab(tab.id)}
-                      className={`group flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-all ${
-                        activeTab === tab.id
-                          ? "border-border bg-background text-foreground"
-                          : "border-transparent bg-transparent text-muted-foreground hover:border-border hover:bg-background/70 hover:text-foreground"
-                      }`}
+                <div className="space-y-4 px-4 py-4 sm:px-5 sm:py-5">
+                  <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4 lg:grid-cols-2">
+                    <div
+                      className={`rounded-2xl border p-3 ${readyChipTone(microphonePermissionReady)}`}
                     >
-                      <div className={`mt-0.5 rounded-xl p-2 ${activeTab === tab.id ? "bg-muted text-foreground" : "bg-muted/40 text-muted-foreground group-hover:text-foreground"}`}>
-                        <tab.icon className="h-4 w-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium">{tab.label}</p>
-                        <p className="mt-1 text-xs leading-5 text-current/70">{tab.railSummary}</p>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
-                <p className="font-medium text-foreground">Current section</p>
-                <p className="mt-1 leading-5">{activeTabConfig.summary}</p>
-              </div>
-            </div>
-          </aside>
-
-          <div className="min-w-0 space-y-4 sm:space-y-5">
-            {error && (
-              <div className="flex items-center gap-2 rounded-2xl border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
-                <AlertCircle className="h-4 w-4" />
-                {error}
-              </div>
-            )}
-
-            <section className="overflow-hidden rounded-[24px] border border-border bg-card shadow-sm">
-              <div className="border-b border-border/60 px-4 py-5 sm:px-6 sm:py-6">
-                <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-                  <div className="max-w-3xl">
-                    <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
-                      {activeTabConfig.eyebrow}
-                    </p>
-                    <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
-                      {activeTabConfig.title}
-                    </h2>
-                    <p className="mt-3 text-sm leading-6 text-muted-foreground sm:text-base">
-                      {activeTabConfig.summary}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2 text-xs">
-                    <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
-                      Primary mic <span className="ml-1 font-medium text-foreground">{settings.audio.preferredInputDevice?.deviceName ?? "System default"}</span>
-                    </div>
-                    <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
-                      Dictation mode <span className="ml-1 font-medium text-foreground">{dictationShortcutBehavior.replace(/_/g, " ")}</span>
-                    </div>
-                    <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
-                      Routes <span className="ml-1 font-medium text-foreground">{settings.transcription.useSharedAsrSelection ? "Shared" : "Split"}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-6 px-4 py-5 sm:px-6 sm:py-6">
-          {activeTab === "asr" && (
-            <Card>
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle>Transcription</CardTitle>
-                  <AdvancedToggle checked={advancedTabs.asr} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, asr: c }))} />
-                </div>
-                <CardDescription>
-                  Choose how Nautilus transcribes dictation and meetings, then tune language, audio, and speaker labeling.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-5">
-                <div className="space-y-3">
-                  <AsrProviderManager />
-                </div>
-
-                <div className="rounded-[24px] border border-border bg-muted/20 p-5 text-foreground">
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                    <div>
-                      <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">Capture routing</p>
-                      <h3 className="mt-2 text-xl font-semibold text-foreground">Microphone routing</h3>
-                      <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-                        Pick one app-wide microphone, then override dictation or meetings when you need a dedicated input chain.
+                      <p className="text-current/70">Mic</p>
+                      <p className="mt-1 font-medium">
+                        {microphonePermissionReady ? "Ready" : "Needs setup"}
                       </p>
                     </div>
-                    <Button variant="outline" size="sm" onClick={() => void refreshAudioDevices()}>
-                      <RefreshCw className="mr-2 h-4 w-4" />
-                      Refresh devices
-                    </Button>
-                  </div>
-
-                  <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                    <div className="space-y-3 rounded-2xl border border-border bg-background p-4">
-                      <div>
-                        <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">App-wide default</p>
-                        <p className="mt-1 text-sm text-muted-foreground">Used whenever a mode-specific override is off.</p>
-                      </div>
-                      <select
-                        aria-label="App-wide microphone"
-                        className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground"
-                        value={appWideDeviceId}
-                        onChange={(event) => {
-                          const nextDevice = resolveAudioDevicePreference(event.target.value || null);
-                          void updateSettings({
-                            ...settings,
-                            audio: {
-                              ...settings.audio,
-                              preferredInputDevice: nextDevice,
-                            },
-                          });
-                        }}
-                      >
-                        <option value="">System default microphone</option>
-                        {currentAudioDevices.map((device) => (
-                          <option key={device.deviceId} value={device.deviceId}>
-                            {renderDeviceOptionLabel(device)}
-                          </option>
-                        ))}
-                      </select>
+                    <div
+                      className={`rounded-2xl border p-3 ${readyChipTone(diarizationAvailable)}`}
+                    >
+                      <p className="text-current/70">Speakers</p>
+                      <p className="mt-1 font-medium">
+                        {diarizationAvailable ? "Installed" : "Optional"}
+                      </p>
                     </div>
-
-                    <div className="space-y-3 rounded-2xl border border-border bg-background p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Dictation override</p>
-                          <p className="mt-1 text-sm text-muted-foreground">Use a dedicated input just for hotkey dictation.</p>
-                        </div>
-                        <Switch
-                          checked={settings.audio.dictationInputOverrideEnabled ?? false}
-                          onCheckedChange={(checked) =>
-                            void updateSettings({
-                              ...settings,
-                              audio: {
-                                ...settings.audio,
-                                dictationInputOverrideEnabled: checked,
-                                dictationInputDevice: checked
-                                  ? settings.audio.dictationInputDevice ?? settings.audio.preferredInputDevice ?? null
-                                  : null,
-                              },
-                            })
-                          }
-                        />
-                      </div>
-                      <select
-                        aria-label="Dictation microphone override"
-                        disabled={!(settings.audio.dictationInputOverrideEnabled ?? false)}
-                        className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground disabled:opacity-50"
-                        value={dictationDeviceId}
-                        onChange={(event) => {
-                          const nextDevice = resolveAudioDevicePreference(event.target.value || null);
-                          void updateSettings({
-                            ...settings,
-                            audio: {
-                              ...settings.audio,
-                              dictationInputDevice: nextDevice,
-                            },
-                          });
-                        }}
-                      >
-                        <option value="">Follow app-wide microphone</option>
-                        {currentAudioDevices.map((device) => (
-                          <option key={`dictation-${device.deviceId}`} value={device.deviceId}>
-                            {renderDeviceOptionLabel(device)}
-                          </option>
-                        ))}
-                      </select>
+                    <div className="rounded-2xl border border-border bg-muted/30 p-3">
+                      <p className="text-muted-foreground">Routing</p>
+                      <p className="mt-1 font-medium text-foreground">
+                        {settings.transcription.useSharedAsrSelection
+                          ? "Shared"
+                          : "Split"}
+                      </p>
                     </div>
-
-                    <div className="space-y-3 rounded-2xl border border-border bg-background p-4 md:col-span-2 xl:col-span-1">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Meeting override</p>
-                          <p className="mt-1 text-sm text-muted-foreground">Use a separate microphone for mic-only meetings and mixed capture.</p>
-                        </div>
-                        <Switch
-                          checked={settings.audio.meetingInputOverrideEnabled ?? false}
-                          onCheckedChange={(checked) =>
-                            void updateSettings({
-                              ...settings,
-                              audio: {
-                                ...settings.audio,
-                                meetingInputOverrideEnabled: checked,
-                                meetingInputDevice: checked
-                                  ? settings.audio.meetingInputDevice ?? settings.audio.preferredInputDevice ?? null
-                                  : null,
-                              },
-                            })
-                          }
-                        />
-                      </div>
-                      <select
-                        aria-label="Meeting microphone override"
-                        disabled={!(settings.audio.meetingInputOverrideEnabled ?? false)}
-                        className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground disabled:opacity-50"
-                        value={meetingDeviceId}
-                        onChange={(event) => {
-                          const nextDevice = resolveAudioDevicePreference(event.target.value || null);
-                          void updateSettings({
-                            ...settings,
-                            audio: {
-                              ...settings.audio,
-                              meetingInputDevice: nextDevice,
-                            },
-                          });
-                        }}
-                      >
-                        <option value="">Follow app-wide microphone</option>
-                        {currentAudioDevices.map((device) => (
-                          <option key={`meeting-${device.deviceId}`} value={device.deviceId}>
-                            {renderDeviceOptionLabel(device)}
-                          </option>
-                        ))}
-                      </select>
+                    <div className="rounded-2xl border border-border bg-muted/30 p-3">
+                      <p className="text-muted-foreground">Sync</p>
+                      <p className="mt-1 font-medium text-foreground">
+                        {saveStateLabel}
+                      </p>
                     </div>
                   </div>
 
-                  <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {currentAudioDevices.map((device) => (
-                      <div key={`card-${device.deviceId}`} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-medium text-white">{device.deviceName}</p>
-                            <p className="mt-1 text-xs text-slate-400">
-                              {deviceTransportLabel(device)}
-                              {device.channelCount ? ` - ${device.channelCount} ch` : ""}
-                              {device.sampleRate ? ` - ${device.sampleRate} Hz` : ""}
+                  <div className="rounded-[20px] border border-border bg-muted/20 p-2">
+                    <div className="grid grid-cols-1 gap-2">
+                      {SETTINGS_TABS.map((tab) => (
+                        <button
+                          key={tab.id}
+                          onClick={() => setActiveTab(tab.id)}
+                          className={`group flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-all ${
+                            activeTab === tab.id
+                              ? "border-border bg-background text-foreground"
+                              : "border-transparent bg-transparent text-muted-foreground hover:border-border hover:bg-background/70 hover:text-foreground"
+                          }`}
+                        >
+                          <div
+                            className={`mt-0.5 rounded-xl p-2 ${activeTab === tab.id ? "bg-muted text-foreground" : "bg-muted/40 text-muted-foreground group-hover:text-foreground"}`}
+                          >
+                            <tab.icon className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium">{tab.label}</p>
+                            <p className="mt-1 text-xs leading-5 text-current/70">
+                              {tab.railSummary}
                             </p>
                           </div>
-                          {device.isDefault ? (
-                            <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em] text-emerald-200">
-                              Default
-                            </span>
-                          ) : null}
-                        </div>
-                        {device.isBluetoothLike ? (
-                          <p className="mt-3 text-xs leading-5 text-amber-200">
-                            Bluetooth headset mics can lower playback quality while dictating. Built-in or USB mics usually sound cleaner.
-                          </p>
-                        ) : (
-                          <p className="mt-3 text-xs leading-5 text-slate-400">
-                            Stable local input for dictation, meetings, and mic tests.
-                          </p>
-                        )}
-                      </div>
-                    ))}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
 
-                <div className="h-px bg-border" />
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Automatic speaker naming</Label>
-                    <p className="text-sm text-muted-foreground">
-                      Run diarization and label speakers after transcription
+                  <div className="rounded-2xl border border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
+                    <p className="font-medium text-foreground">
+                      Current section
                     </p>
+                    <p className="mt-1 leading-5">{activeTabConfig.summary}</p>
                   </div>
-                  {diarizationAvailable ? (
-                    <Switch
-                      checked={settings.transcription.enableDiarization}
-                      onCheckedChange={(checked) =>
-                        void updateSettings({
-                          ...settings,
-                          transcription: { ...settings.transcription, enableDiarization: checked },
-                        })
-                      }
-                    />
-                  ) : (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={diarizationDownloading}
-                      onClick={async () => {
-                        setDiarizationDownloading(true);
-                        try {
-                          await downloadDiarizationModel();
-                          setDiarizationAvailable(true);
-                          updateSettings({
-                            ...settings,
-                            transcription: { ...settings.transcription, enableDiarization: true },
-                          });
-                        } catch (e) {
-                          const msg = e instanceof Error ? e.message : String(e);
-                          setError(`Download failed: ${msg}`);
-                        } finally {
-                          setDiarizationDownloading(false);
-                        }
-                      }}
-                    >
-                      {diarizationDownloading ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Downloading Model...
-                        </>
-                      ) : (
-                        <>
-                          <Download className="mr-2 h-4 w-4" />
-                          Download Model (~25MB)
-                        </>
-                      )}
-                    </Button>
-                  )}
+                </div>
+              </aside>
+            )}
+
+            <div className="min-w-0 space-y-4 sm:space-y-5">
+              {!useDesktopSettingsRail && (
+                <div className="space-y-3">
+                  <div className="rounded-[20px] border border-border bg-card px-4 py-4 shadow-sm sm:px-5">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                          {activeTabConfig.eyebrow}
+                        </p>
+                        <h2 className="mt-2 text-xl font-semibold tracking-tight text-foreground">
+                          {activeTabConfig.title}
+                        </h2>
+                        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                          {activeTabConfig.summary}
+                        </p>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-xs sm:w-[320px]">
+                        <div
+                          className={`rounded-2xl border p-3 ${readyChipTone(microphonePermissionReady)}`}
+                        >
+                          <p className="text-current/70">Mic</p>
+                          <p className="mt-1 font-medium">
+                            {microphonePermissionReady
+                              ? "Ready"
+                              : "Needs setup"}
+                          </p>
+                        </div>
+                        <div
+                          className={`rounded-2xl border p-3 ${readyChipTone(diarizationAvailable)}`}
+                        >
+                          <p className="text-current/70">Speakers</p>
+                          <p className="mt-1 font-medium">
+                            {diarizationAvailable ? "Installed" : "Optional"}
+                          </p>
+                        </div>
+                        <div className="rounded-2xl border border-border bg-muted/30 p-3">
+                          <p className="text-muted-foreground">Routing</p>
+                          <p className="mt-1 font-medium text-foreground">
+                            {settings.transcription.useSharedAsrSelection
+                              ? "Shared"
+                              : "Split"}
+                          </p>
+                        </div>
+                        <div className="rounded-2xl border border-border bg-muted/30 p-3">
+                          <p className="text-muted-foreground">Sync</p>
+                          <p className="mt-1 font-medium text-foreground">
+                            {saveStateLabel}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-[20px] border border-border bg-card p-2 shadow-sm">
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {SETTINGS_TABS.map((tab) => (
+                        <button
+                          key={`compact-${tab.id}`}
+                          onClick={() => setActiveTab(tab.id)}
+                          className={`group flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-all ${
+                            activeTab === tab.id
+                              ? "border-border bg-background text-foreground"
+                              : "border-transparent bg-transparent text-muted-foreground hover:border-border hover:bg-background/70 hover:text-foreground"
+                          }`}
+                        >
+                          <div
+                            className={`mt-0.5 rounded-xl p-2 ${activeTab === tab.id ? "bg-muted text-foreground" : "bg-muted/40 text-muted-foreground group-hover:text-foreground"}`}
+                          >
+                            <tab.icon className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium">{tab.label}</p>
+                            <p className="mt-1 text-xs leading-5 text-current/70">
+                              {tab.railSummary}
+                            </p>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {error && (
+                <div className="flex items-center gap-2 rounded-2xl border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  {error}
+                </div>
+              )}
+
+              <section className="overflow-hidden rounded-[24px] border border-border bg-card shadow-sm">
+                <div className="border-b border-border/60 px-4 py-5 sm:px-6 sm:py-6">
+                  <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+                    {!useDesktopSettingsRail && (
+                      <div>
+                        <p className="text-sm font-medium text-foreground">
+                          {activeTabConfig.label}
+                        </p>
+                      </div>
+                    )}
+                    {useDesktopSettingsRail && (
+                      <div className="max-w-3xl">
+                        <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                          {activeTabConfig.eyebrow}
+                        </p>
+                        <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
+                          {activeTabConfig.title}
+                        </h2>
+                        <p className="mt-3 text-sm leading-6 text-muted-foreground sm:text-base">
+                          {activeTabConfig.summary}
+                        </p>
+                      </div>
+                    )}
+                    <div className="hidden flex-wrap gap-2 text-xs xl:flex">
+                      <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
+                        Primary mic{" "}
+                        <span className="ml-1 font-medium text-foreground">
+                          {settings.audio.preferredInputDevice?.deviceName ??
+                            "System default"}
+                        </span>
+                      </div>
+                      <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
+                        Dictation mode{" "}
+                        <span className="ml-1 font-medium text-foreground">
+                          {dictationShortcutBehavior.replace(/_/g, " ")}
+                        </span>
+                      </div>
+                      <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
+                        Routes{" "}
+                        <span className="ml-1 font-medium text-foreground">
+                          {settings.transcription.useSharedAsrSelection
+                            ? "Shared"
+                            : "Split"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
-                {settings.transcription.enableDiarization && (
-                  <div className="space-y-2">
-                    <Label>Diarization model</Label>
-                    {diarizationModels.length > 0 ? (
-                      <div className="space-y-2">
-                        {diarizationModels.map((model) => (
-                          <div
-                            key={model.id}
-                            className={`rounded-md border p-3 cursor-pointer transition-colors ${selectedDiarizationModel === model.id ? "border-trusted bg-trusted/5" : "border-border bg-muted/20 hover:bg-muted/40"}`}
-                            onClick={() => setSelectedDiarizationModel(model.id)}
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="radio"
-                                  name="diarization-model"
-                                  value={model.id}
-                                  checked={selectedDiarizationModel === model.id}
-                                  onChange={() => setSelectedDiarizationModel(model.id)}
-                                  className="accent-trusted"
-                                />
-                                <div>
-                                  <p className="text-sm font-medium">{model.label}</p>
-                                  <p className="text-xs text-muted-foreground">{model.description}</p>
-                                </div>
+                <div className="space-y-6 px-4 py-5 sm:px-6 sm:py-6">
+                  {activeTab === "asr" && (
+                    <Card>
+                      <CardHeader>
+                        <div className="flex items-center justify-between">
+                          <CardTitle>Transcription</CardTitle>
+                          <AdvancedToggle
+                            checked={advancedTabs.asr}
+                            onCheckedChange={(c) =>
+                              setAdvancedTabs((prev) => ({ ...prev, asr: c }))
+                            }
+                          />
+                        </div>
+                        <CardDescription>
+                          Choose how Nautilus transcribes dictation and
+                          meetings, then tune language, audio, and speaker
+                          labeling.
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-5">
+                        <div className="space-y-3">
+                          <AsrProviderManager />
+                        </div>
+
+                        <div className="rounded-[24px] border border-border bg-muted/20 p-5 text-foreground">
+                          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                            <div>
+                              <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                                Capture routing
+                              </p>
+                              <h3 className="mt-2 text-xl font-semibold text-foreground">
+                                Microphone routing
+                              </h3>
+                              <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
+                                Pick one app-wide microphone, then override
+                                dictation or meetings when you need a dedicated
+                                input chain.
+                              </p>
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => void refreshAudioDevices()}
+                            >
+                              <RefreshCw className="mr-2 h-4 w-4" />
+                              Refresh devices
+                            </Button>
+                          </div>
+
+                          <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                            <div className="space-y-3 rounded-2xl border border-border bg-background p-4">
+                              <div>
+                                <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                                  App-wide default
+                                </p>
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                  Used whenever a mode-specific override is off.
+                                </p>
                               </div>
-                              {model.installed ? (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 shrink-0">
-                                  <CheckCircle2 className="h-3 w-3" /> Installed
-                                </span>
-                              ) : (
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  className="shrink-0 text-xs h-7"
-                                  disabled={diarizationDownloading}
-                                  onClick={async (e) => {
-                                    e.stopPropagation();
-                                    setDiarizationDownloading(true);
-                                    try {
-                                      await downloadDiarizationModel(model.id);
-                                      setDiarizationModels((prev) =>
-                                        prev.map((m) => m.id === model.id ? { ...m, installed: true } : m)
-                                      );
-                                      if (model.id === "ecapa_tdnn_speaker") setDiarizationAvailable(true);
-                                    } catch (e) {
-                                      const msg = e instanceof Error ? e.message : String(e);
-                                      setError(`Download failed: ${msg}`);
-                                    } finally {
-                                      setDiarizationDownloading(false);
-                                    }
-                                  }}
-                                >
-                                  <Download className="h-3 w-3 mr-1" />
-                                  Download
-                                </Button>
-                              )}
+                              <select
+                                aria-label="App-wide microphone"
+                                className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground"
+                                value={appWideDeviceId}
+                                onChange={(event) => {
+                                  const nextDevice =
+                                    resolveAudioDevicePreference(
+                                      event.target.value || null,
+                                    );
+                                  void updateSettings({
+                                    ...settings,
+                                    audio: {
+                                      ...settings.audio,
+                                      preferredInputDevice: nextDevice,
+                                    },
+                                  });
+                                }}
+                              >
+                                <option value="">
+                                  System default microphone
+                                </option>
+                                {currentAudioDevices.map((device) => (
+                                  <option
+                                    key={device.deviceId}
+                                    value={device.deviceId}
+                                  >
+                                    {renderDeviceOptionLabel(device)}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            <div className="space-y-3 rounded-2xl border border-border bg-background p-4">
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                                    Dictation override
+                                  </p>
+                                  <p className="mt-1 text-sm text-muted-foreground">
+                                    Use a dedicated input just for hotkey
+                                    dictation.
+                                  </p>
+                                </div>
+                                <Switch
+                                  checked={
+                                    settings.audio
+                                      .dictationInputOverrideEnabled ?? false
+                                  }
+                                  onCheckedChange={(checked) =>
+                                    void updateSettings({
+                                      ...settings,
+                                      audio: {
+                                        ...settings.audio,
+                                        dictationInputOverrideEnabled: checked,
+                                        dictationInputDevice: checked
+                                          ? (settings.audio
+                                              .dictationInputDevice ??
+                                            settings.audio
+                                              .preferredInputDevice ??
+                                            null)
+                                          : null,
+                                      },
+                                    })
+                                  }
+                                />
+                              </div>
+                              <select
+                                aria-label="Dictation microphone override"
+                                disabled={
+                                  !(
+                                    settings.audio
+                                      .dictationInputOverrideEnabled ?? false
+                                  )
+                                }
+                                className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground disabled:opacity-50"
+                                value={dictationDeviceId}
+                                onChange={(event) => {
+                                  const nextDevice =
+                                    resolveAudioDevicePreference(
+                                      event.target.value || null,
+                                    );
+                                  void updateSettings({
+                                    ...settings,
+                                    audio: {
+                                      ...settings.audio,
+                                      dictationInputDevice: nextDevice,
+                                    },
+                                  });
+                                }}
+                              >
+                                <option value="">
+                                  Follow app-wide microphone
+                                </option>
+                                {currentAudioDevices.map((device) => (
+                                  <option
+                                    key={`dictation-${device.deviceId}`}
+                                    value={device.deviceId}
+                                  >
+                                    {renderDeviceOptionLabel(device)}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+
+                            <div className="space-y-3 rounded-2xl border border-border bg-background p-4 md:col-span-2 xl:col-span-1">
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                                    Meeting override
+                                  </p>
+                                  <p className="mt-1 text-sm text-muted-foreground">
+                                    Use a separate microphone for mic-only
+                                    meetings and mixed capture.
+                                  </p>
+                                </div>
+                                <Switch
+                                  checked={
+                                    settings.audio
+                                      .meetingInputOverrideEnabled ?? false
+                                  }
+                                  onCheckedChange={(checked) =>
+                                    void updateSettings({
+                                      ...settings,
+                                      audio: {
+                                        ...settings.audio,
+                                        meetingInputOverrideEnabled: checked,
+                                        meetingInputDevice: checked
+                                          ? (settings.audio
+                                              .meetingInputDevice ??
+                                            settings.audio
+                                              .preferredInputDevice ??
+                                            null)
+                                          : null,
+                                      },
+                                    })
+                                  }
+                                />
+                              </div>
+                              <select
+                                aria-label="Meeting microphone override"
+                                disabled={
+                                  !(
+                                    settings.audio
+                                      .meetingInputOverrideEnabled ?? false
+                                  )
+                                }
+                                className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground disabled:opacity-50"
+                                value={meetingDeviceId}
+                                onChange={(event) => {
+                                  const nextDevice =
+                                    resolveAudioDevicePreference(
+                                      event.target.value || null,
+                                    );
+                                  void updateSettings({
+                                    ...settings,
+                                    audio: {
+                                      ...settings.audio,
+                                      meetingInputDevice: nextDevice,
+                                    },
+                                  });
+                                }}
+                              >
+                                <option value="">
+                                  Follow app-wide microphone
+                                </option>
+                                {currentAudioDevices.map((device) => (
+                                  <option
+                                    key={`meeting-${device.deviceId}`}
+                                    value={device.deviceId}
+                                  >
+                                    {renderDeviceOptionLabel(device)}
+                                  </option>
+                                ))}
+                              </select>
                             </div>
                           </div>
-                        ))}
-                      </div>
-                    ) : diarizationAvailable ? (
-                      <div className="rounded-md border border-border bg-muted/30 p-3">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <p className="text-sm font-medium">ECAPA-TDNN 512</p>
-                            <p className="text-xs text-muted-foreground">Wespeaker ECAPA-TDNN (speaker embedding)</p>
+
+                          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                            {currentAudioDevices.map((device) => (
+                              <div
+                                key={`card-${device.deviceId}`}
+                                className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <p className="text-sm font-medium text-white">
+                                      {device.deviceName}
+                                    </p>
+                                    <p className="mt-1 text-xs text-slate-400">
+                                      {deviceTransportLabel(device)}
+                                      {device.channelCount
+                                        ? ` - ${device.channelCount} ch`
+                                        : ""}
+                                      {device.sampleRate
+                                        ? ` - ${device.sampleRate} Hz`
+                                        : ""}
+                                    </p>
+                                  </div>
+                                  {device.isDefault ? (
+                                    <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em] text-emerald-200">
+                                      Default
+                                    </span>
+                                  ) : null}
+                                </div>
+                                {device.isBluetoothLike ? (
+                                  <p className="mt-3 text-xs leading-5 text-amber-200">
+                                    Bluetooth headset mics can lower playback
+                                    quality while dictating. Built-in or USB
+                                    mics usually sound cleaner.
+                                  </p>
+                                ) : (
+                                  <p className="mt-3 text-xs leading-5 text-slate-400">
+                                    Stable local input for dictation, meetings,
+                                    and mic tests.
+                                  </p>
+                                )}
+                              </div>
+                            ))}
                           </div>
-                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
-                            <CheckCircle2 className="h-3 w-3" /> Installed
-                          </span>
                         </div>
-                      </div>
-                    ) : null}
-                  </div>
-                )}
 
-                {settings.transcription.enableDiarization && (
-                  <div className="space-y-2">
-                    <Label>Speaker naming method</Label>
-                    <select
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                      value={settings.transcription.speakerNamingMethod}
-                      onChange={(e: any) =>
-                        void updateSettings({
-                          ...settings,
-                          transcription: {
-                            ...settings.transcription,
-                            speakerNamingMethod: e.target.value as "auto" | "numbered" | "manual",
-                          },
-                        })
-                      }
-                    >
-                      <option value="auto">Auto-detect from speech (recommended)</option>
-                      <option value="numbered">Numbered (Speaker 1, Speaker 2, ...)</option>
-                      <option value="manual">Manual only (set names yourself)</option>
-                    </select>
-                  </div>
-                )}
+                        <div className="h-px bg-border" />
 
-                <div className="space-y-2">
-                  <Label>Transcription language</Label>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={settings.transcription.language ?? ""}
-                    onChange={(e: any) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          language: e.target.value || null,
-                        },
-                      })
-                    }
-                  >
-                    <option value="">Auto-detect</option>
-                    <option value="en">English</option>
-                    <option value="es">Spanish</option>
-                    <option value="fr">French</option>
-                    <option value="de">German</option>
-                    <option value="it">Italian</option>
-                    <option value="pt">Portuguese</option>
-                    <option value="ja">Japanese</option>
-                    <option value="ko">Korean</option>
-                    <option value="zh">Chinese</option>
-                    <option value="ru">Russian</option>
-                    <option value="ar">Arabic</option>
-                    <option value="hi">Hindi</option>
-                  </select>
-                  <div className="rounded-md border border-border bg-muted/20 p-3">
-                    <div className="space-y-1">
-                      <p className="text-sm font-medium">Dictation active language set</p>
-                      <p className="text-xs text-muted-foreground">
-                        Applies when Transcription language stays on auto-detect. Keep one language
-                        selected to lock dictation to it, or choose several to keep auto-detect
-                        inside a narrower set.
-                      </p>
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => {
-                        const activeLanguages = normalizeActiveLanguageSet(
-                          settings.transcription.dictationActiveLanguages
-                        );
-                        const selected = activeLanguages.includes(option.value);
-                        return (
-                          <button
-                            key={option.value}
-                            type="button"
-                            aria-pressed={selected}
-                            aria-label={`Toggle ${option.label} in dictation active languages`}
-                            className={`rounded-full border px-3 py-1 text-xs transition-colors ${
-                              selected
-                                ? "border-foreground bg-foreground text-background"
-                                : "border-border bg-background text-muted-foreground hover:text-foreground"
-                            }`}
-                            onClick={() => {
-                              const nextActiveLanguages = selected
-                                ? activeLanguages.filter((language) => language !== option.value)
-                                : [...activeLanguages, option.value];
+                        <div className="flex items-center justify-between">
+                          <div className="space-y-0.5">
+                            <Label>Automatic speaker naming</Label>
+                            <p className="text-sm text-muted-foreground">
+                              Run diarization and label speakers after
+                              transcription
+                            </p>
+                          </div>
+                          {diarizationAvailable ? (
+                            <Switch
+                              checked={settings.transcription.enableDiarization}
+                              onCheckedChange={(checked) =>
+                                void updateSettings({
+                                  ...settings,
+                                  transcription: {
+                                    ...settings.transcription,
+                                    enableDiarization: checked,
+                                  },
+                                })
+                              }
+                            />
+                          ) : (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={diarizationDownloading}
+                              onClick={async () => {
+                                setDiarizationDownloading(true);
+                                try {
+                                  await downloadDiarizationModel();
+                                  setDiarizationAvailable(true);
+                                  updateSettings({
+                                    ...settings,
+                                    transcription: {
+                                      ...settings.transcription,
+                                      enableDiarization: true,
+                                    },
+                                  });
+                                } catch (e) {
+                                  const msg =
+                                    e instanceof Error ? e.message : String(e);
+                                  setError(`Download failed: ${msg}`);
+                                } finally {
+                                  setDiarizationDownloading(false);
+                                }
+                              }}
+                            >
+                              {diarizationDownloading ? (
+                                <>
+                                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                  Downloading Model...
+                                </>
+                              ) : (
+                                <>
+                                  <Download className="mr-2 h-4 w-4" />
+                                  Download Model (~25MB)
+                                </>
+                              )}
+                            </Button>
+                          )}
+                        </div>
+
+                        {settings.transcription.enableDiarization && (
+                          <div className="space-y-2">
+                            <Label>Diarization model</Label>
+                            {diarizationModels.length > 0 ? (
+                              <div className="space-y-2">
+                                {diarizationModels.map((model) => (
+                                  <div
+                                    key={model.id}
+                                    className={`rounded-md border p-3 cursor-pointer transition-colors ${selectedDiarizationModel === model.id ? "border-trusted bg-trusted/5" : "border-border bg-muted/20 hover:bg-muted/40"}`}
+                                    onClick={() =>
+                                      setSelectedDiarizationModel(model.id)
+                                    }
+                                  >
+                                    <div className="flex items-center justify-between">
+                                      <div className="flex items-center gap-2">
+                                        <input
+                                          type="radio"
+                                          name="diarization-model"
+                                          value={model.id}
+                                          checked={
+                                            selectedDiarizationModel ===
+                                            model.id
+                                          }
+                                          onChange={() =>
+                                            setSelectedDiarizationModel(
+                                              model.id,
+                                            )
+                                          }
+                                          className="accent-trusted"
+                                        />
+                                        <div>
+                                          <p className="text-sm font-medium">
+                                            {model.label}
+                                          </p>
+                                          <p className="text-xs text-muted-foreground">
+                                            {model.description}
+                                          </p>
+                                        </div>
+                                      </div>
+                                      {model.installed ? (
+                                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 shrink-0">
+                                          <CheckCircle2 className="h-3 w-3" />{" "}
+                                          Installed
+                                        </span>
+                                      ) : (
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          className="shrink-0 text-xs h-7"
+                                          disabled={diarizationDownloading}
+                                          onClick={async (e) => {
+                                            e.stopPropagation();
+                                            setDiarizationDownloading(true);
+                                            try {
+                                              await downloadDiarizationModel(
+                                                model.id,
+                                              );
+                                              setDiarizationModels((prev) =>
+                                                prev.map((m) =>
+                                                  m.id === model.id
+                                                    ? { ...m, installed: true }
+                                                    : m,
+                                                ),
+                                              );
+                                              if (
+                                                model.id ===
+                                                "ecapa_tdnn_speaker"
+                                              )
+                                                setDiarizationAvailable(true);
+                                            } catch (e) {
+                                              const msg =
+                                                e instanceof Error
+                                                  ? e.message
+                                                  : String(e);
+                                              setError(
+                                                `Download failed: ${msg}`,
+                                              );
+                                            } finally {
+                                              setDiarizationDownloading(false);
+                                            }
+                                          }}
+                                        >
+                                          <Download className="h-3 w-3 mr-1" />
+                                          Download
+                                        </Button>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : diarizationAvailable ? (
+                              <div className="rounded-md border border-border bg-muted/30 p-3">
+                                <div className="flex items-center justify-between">
+                                  <div>
+                                    <p className="text-sm font-medium">
+                                      ECAPA-TDNN 512
+                                    </p>
+                                    <p className="text-xs text-muted-foreground">
+                                      Wespeaker ECAPA-TDNN (speaker embedding)
+                                    </p>
+                                  </div>
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                                    <CheckCircle2 className="h-3 w-3" />{" "}
+                                    Installed
+                                  </span>
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                        )}
+
+                        {settings.transcription.enableDiarization && (
+                          <div className="space-y-2">
+                            <Label>Speaker naming method</Label>
+                            <select
+                              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                              value={settings.transcription.speakerNamingMethod}
+                              onChange={(e: any) =>
+                                void updateSettings({
+                                  ...settings,
+                                  transcription: {
+                                    ...settings.transcription,
+                                    speakerNamingMethod: e.target.value as
+                                      | "auto"
+                                      | "numbered"
+                                      | "manual",
+                                  },
+                                })
+                              }
+                            >
+                              <option value="auto">
+                                Auto-detect from speech (recommended)
+                              </option>
+                              <option value="numbered">
+                                Numbered (Speaker 1, Speaker 2, ...)
+                              </option>
+                              <option value="manual">
+                                Manual only (set names yourself)
+                              </option>
+                            </select>
+                          </div>
+                        )}
+
+                        <div className="space-y-2">
+                          <Label>Transcription language</Label>
+                          <select
+                            className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                            value={settings.transcription.language ?? ""}
+                            onChange={(e: any) =>
                               void updateSettings({
                                 ...settings,
                                 transcription: {
                                   ...settings.transcription,
-                                  dictationActiveLanguages: normalizeActiveLanguageSet(
-                                    nextActiveLanguages
-                                  ),
+                                  language: e.target.value || null,
+                                },
+                              })
+                            }
+                          >
+                            <option value="">Auto-detect</option>
+                            <option value="en">English</option>
+                            <option value="es">Spanish</option>
+                            <option value="fr">French</option>
+                            <option value="de">German</option>
+                            <option value="it">Italian</option>
+                            <option value="pt">Portuguese</option>
+                            <option value="ja">Japanese</option>
+                            <option value="ko">Korean</option>
+                            <option value="zh">Chinese</option>
+                            <option value="ru">Russian</option>
+                            <option value="ar">Arabic</option>
+                            <option value="hi">Hindi</option>
+                          </select>
+                          <div className="rounded-md border border-border bg-muted/20 p-3">
+                            <div className="space-y-1">
+                              <p className="text-sm font-medium">
+                                Dictation active language set
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                Applies when Transcription language stays on
+                                auto-detect. Keep one language selected to lock
+                                dictation to it, or choose several to keep
+                                auto-detect inside a narrower set.
+                              </p>
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              {DICTATION_ACTIVE_LANGUAGE_OPTIONS.map(
+                                (option) => {
+                                  const activeLanguages =
+                                    normalizeActiveLanguageSet(
+                                      settings.transcription
+                                        .dictationActiveLanguages,
+                                    );
+                                  const selected = activeLanguages.includes(
+                                    option.value,
+                                  );
+                                  return (
+                                    <button
+                                      key={option.value}
+                                      type="button"
+                                      aria-pressed={selected}
+                                      aria-label={`Toggle ${option.label} in dictation active languages`}
+                                      className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                                        selected
+                                          ? "border-foreground bg-foreground text-background"
+                                          : "border-border bg-background text-muted-foreground hover:text-foreground"
+                                      }`}
+                                      onClick={() => {
+                                        const nextActiveLanguages = selected
+                                          ? activeLanguages.filter(
+                                              (language) =>
+                                                language !== option.value,
+                                            )
+                                          : [...activeLanguages, option.value];
+                                        void updateSettings({
+                                          ...settings,
+                                          transcription: {
+                                            ...settings.transcription,
+                                            dictationActiveLanguages:
+                                              normalizeActiveLanguageSet(
+                                                nextActiveLanguages,
+                                              ),
+                                          },
+                                        });
+                                      }}
+                                    >
+                                      {option.label}
+                                    </button>
+                                  );
+                                },
+                              )}
+                            </div>
+                            <p className="mt-3 text-xs text-muted-foreground">
+                              {normalizeActiveLanguageSet(
+                                settings.transcription.dictationActiveLanguages,
+                              ).length === 0
+                                ? "No dictation language set saved yet. Auto-detect stays fully open."
+                                : normalizeActiveLanguageSet(
+                                      settings.transcription
+                                        .dictationActiveLanguages,
+                                    ).length === 1
+                                  ? `Dictation will lock to ${
+                                      DICTATION_ACTIVE_LANGUAGE_OPTIONS.find(
+                                        (option) =>
+                                          option.value ===
+                                          normalizeActiveLanguageSet(
+                                            settings.transcription
+                                              .dictationActiveLanguages,
+                                          )[0],
+                                      )?.label ??
+                                      normalizeActiveLanguageSet(
+                                        settings.transcription
+                                          .dictationActiveLanguages,
+                                      )[0]
+                                    } when the language select stays on auto-detect.`
+                                  : `Dictation auto-detect will stay inside ${normalizeActiveLanguageSet(
+                                      settings.transcription
+                                        .dictationActiveLanguages,
+                                    )
+                                      .map(
+                                        (language) =>
+                                          DICTATION_ACTIVE_LANGUAGE_OPTIONS.find(
+                                            (option) =>
+                                              option.value === language,
+                                          )?.label ?? language,
+                                      )
+                                      .join(", ")}.`}
+                            </p>
+                          </div>
+                        </div>
+
+                        {advancedTabs.asr && (
+                          <div className="pt-4 border-t space-y-5">
+                            <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                              Power user
+                            </h3>
+                            {renderSharedDictationControls({
+                              includeMeetingAutoName: true,
+                              includeAudioTuning: true,
+                            })}
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {activeTab === "general" && (
+                    <Card>
+                      <CardHeader>
+                        <div className="flex items-center justify-between">
+                          <CardTitle>General</CardTitle>
+                          <AdvancedToggle
+                            checked={advancedTabs.general}
+                            onCheckedChange={(c) =>
+                              setAdvancedTabs((prev) => ({
+                                ...prev,
+                                general: c,
+                              }))
+                            }
+                          />
+                        </div>
+                        <CardDescription>
+                          Appearance, shortcuts, overlays, and everyday app
+                          behavior
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-5">
+                        <div className="space-y-2">
+                          <Label>Theme</Label>
+                          <div className="flex gap-2">
+                            <Button
+                              variant={
+                                theme === "light" ? "default" : "outline"
+                              }
+                              size="sm"
+                              onClick={() => setTheme("light")}
+                              className="flex items-center gap-2"
+                            >
+                              <Sun className="h-4 w-4" />
+                              Light
+                            </Button>
+                            <Button
+                              variant={theme === "dark" ? "default" : "outline"}
+                              size="sm"
+                              onClick={() => setTheme("dark")}
+                              className="flex items-center gap-2"
+                            >
+                              <Moon className="h-4 w-4" />
+                              Dark
+                            </Button>
+                            <Button
+                              variant={
+                                theme === "system" ? "default" : "outline"
+                              }
+                              size="sm"
+                              onClick={() => setTheme("system")}
+                              className="flex items-center gap-2"
+                            >
+                              <Monitor className="h-4 w-4" />
+                              System
+                            </Button>
+                          </div>
+                        </div>
+
+                        {(() => {
+                          const themeAccess = getThemeAccessLevel(licenseInfo);
+                          const options = themeSchemesForAccess(themeAccess);
+                          const currentScheme = normalizeThemeSchemeForAccess(
+                            settings.ui.colorScheme,
+                            themeAccess,
+                          );
+                          return (
+                            <div className="space-y-2">
+                              <Label className="flex items-center gap-1.5">
+                                Color scheme
+                                {themeAccess === "basic" && (
+                                  <span className="text-xs text-amber-600">
+                                    Pro unlocks more
+                                  </span>
+                                )}
+                              </Label>
+                              <select
+                                aria-label="Color scheme"
+                                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                                value={currentScheme}
+                                onChange={(e: any) => {
+                                  const scheme = e.target.value as string;
+                                  const normalized =
+                                    normalizeThemeSchemeForAccess(
+                                      scheme,
+                                      themeAccess,
+                                    );
+                                  applyColorScheme(normalized);
+                                  void updateSettings({
+                                    ...settings,
+                                    ui: {
+                                      ...settings.ui,
+                                      colorScheme: normalized,
+                                    },
+                                  });
+                                }}
+                              >
+                                {options.map((option) => (
+                                  <option
+                                    key={option.value}
+                                    value={option.value}
+                                  >
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                              {themeAccess === "basic" && (
+                                <p className="text-xs text-muted-foreground">
+                                  Upgrade to Pro for Rosé Pine and Solarized
+                                  themes, Friends Club for all premium schemes.
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })()}
+
+                        <div className="flex items-center justify-between">
+                          <div className="space-y-0.5">
+                            <Label>Keep running after close</Label>
+                            <p className="text-sm text-muted-foreground">
+                              Keep hotkeys, overlays, and background capture
+                              available when you close the main window
+                            </p>
+                          </div>
+                          <Switch
+                            checked={settings.ui.minimizeToTray}
+                            onCheckedChange={(checked) =>
+                              void updateSettings({
+                                ...settings,
+                                ui: { ...settings.ui, minimizeToTray: checked },
+                              })
+                            }
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between">
+                          <div className="space-y-0.5">
+                            <Label>Always on top</Label>
+                            <p className="text-sm text-muted-foreground">
+                              Keep the window above other applications
+                            </p>
+                          </div>
+                          <Switch
+                            checked={settings.ui.alwaysOnTop}
+                            onCheckedChange={(checked) =>
+                              void updateSettings({
+                                ...settings,
+                                ui: { ...settings.ui, alwaysOnTop: checked },
+                              })
+                            }
+                          />
+                        </div>
+
+                        <div className="pt-4 border-t space-y-4">
+                          <div className="space-y-1">
+                            <Label>Overlay windows</Label>
+                            <p className="text-sm text-muted-foreground">
+                              Keep the floating dictation and meeting recorder
+                              controls visible while you work.
+                            </p>
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                            <div className="space-y-0.5">
+                              <Label>Show dictation mini window</Label>
+                              <p className="text-sm text-muted-foreground">
+                                Show the floating recorder shell during global
+                                dictation.
+                              </p>
+                            </div>
+                            <Switch
+                              checked={settings.ui.showDictationPopup}
+                              onCheckedChange={(checked) =>
+                                void updateSettings({
+                                  ...settings,
+                                  ui: {
+                                    ...settings.ui,
+                                    showDictationPopup: checked,
+                                  },
+                                })
+                              }
+                            />
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                            <div className="space-y-0.5">
+                              <Label>Show meeting mini window</Label>
+                              <p className="text-sm text-muted-foreground">
+                                Show the floating recorder shell during meeting
+                                capture and processing.
+                              </p>
+                            </div>
+                            <Switch
+                              checked={settings.ui.showRecordingPopup}
+                              onCheckedChange={(checked) =>
+                                void updateSettings({
+                                  ...settings,
+                                  ui: {
+                                    ...settings.ui,
+                                    showRecordingPopup: checked,
+                                  },
+                                })
+                              }
+                            />
+                          </div>
+                        </div>
+
+                        {advancedTabs.general && (
+                          <div className="pt-4 border-t space-y-5">
+                            <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                              Power user
+                            </h3>
+                            <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
+                              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                                <div>
+                                  <p className="text-sm font-medium text-foreground">
+                                    Dictation defaults live in Transcription
+                                  </p>
+                                  <p className="text-sm text-muted-foreground">
+                                    Keep the recording shell clean here and
+                                    manage Smart Format, prompts, routing, and
+                                    audio behavior from the dedicated
+                                    Transcription workspace.
+                                  </p>
+                                </div>
+                                <Button
+                                  variant="secondary"
+                                  onClick={() => setActiveTab("asr")}
+                                >
+                                  Open Transcription
+                                </Button>
+                              </div>
+                            </div>
+
+                            {renderShortcutsSection()}
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {activeTab === "security" && (
+                    <Card>
+                      <CardHeader>
+                        <div className="flex items-center justify-between">
+                          <CardTitle>Privacy & Security</CardTitle>
+                          <AdvancedToggle
+                            checked={advancedTabs.security}
+                            onCheckedChange={(c) =>
+                              setAdvancedTabs((prev) => ({
+                                ...prev,
+                                security: c,
+                              }))
+                            }
+                          />
+                        </div>
+                        <CardDescription>
+                          Local-first defaults with explicit remote opt-in
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-5">
+                        <div className="flex items-center justify-between">
+                          <div className="space-y-0.5">
+                            <Label className="flex items-center gap-2">
+                              <Lock className="h-4 w-4" />
+                              Encrypt recordings at rest
+                            </Label>
+                            <p className="text-sm text-muted-foreground">
+                              Enable encrypted storage policy
+                            </p>
+                          </div>
+                          <Switch
+                            checked={settings.privacy.encryptRecordings}
+                            onCheckedChange={(checked) =>
+                              void updateSettings({
+                                ...settings,
+                                privacy: {
+                                  ...settings.privacy,
+                                  encryptRecordings: checked,
+                                },
+                              })
+                            }
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between">
+                          <div className="space-y-0.5">
+                            <Label className="flex items-center gap-2">
+                              <Cloud className="h-4 w-4" />
+                              Remote processing
+                            </Label>
+                            <p className="text-sm text-muted-foreground">
+                              Allow cloud providers for analysis
+                            </p>
+                          </div>
+                          <Switch
+                            checked={settings.privacy.remoteProcessingEnabled}
+                            onCheckedChange={(checked) =>
+                              void updateSettings({
+                                ...settings,
+                                privacy: {
+                                  ...settings.privacy,
+                                  remoteProcessingEnabled: checked,
+                                },
+                              })
+                            }
+                          />
+                        </div>
+
+                        {advancedTabs.security && (
+                          <div className="pt-4 border-t space-y-5">
+                            <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                              Power user
+                            </h3>
+                            {renderSharedDictationControls({
+                              includeCoreControls: false,
+                              includePermissions: true,
+                            })}
+
+                            <div className="space-y-2">
+                              <Label>Vault password</Label>
+                              <Input
+                                type="password"
+                                placeholder="Enter vault password"
+                                value={vaultPassword}
+                                onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                                  setVaultPassword(e.target.value)
+                                }
+                              />
+                              <div className="flex flex-wrap gap-2">
+                                <Button
+                                  variant="outline"
+                                  disabled={!vaultPassword.trim()}
+                                  onClick={async () => {
+                                    setError(null);
+                                    try {
+                                      await unlockVault(vaultPassword.trim());
+                                      setVaultPassword("");
+                                      setSecurityStatus(
+                                        await getSecurityStatus(),
+                                      );
+                                    } catch (e) {
+                                      setError(
+                                        e instanceof Error
+                                          ? e.message
+                                          : "Failed to unlock vault",
+                                      );
+                                    }
+                                  }}
+                                >
+                                  Unlock Vault
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  onClick={async () => {
+                                    setError(null);
+                                    try {
+                                      await lockVault();
+                                      setSecurityStatus(
+                                        await getSecurityStatus(),
+                                      );
+                                    } catch (e) {
+                                      setError(
+                                        e instanceof Error
+                                          ? e.message
+                                          : "Failed to lock vault",
+                                      );
+                                    }
+                                  }}
+                                >
+                                  Lock Vault
+                                </Button>
+                                <Button
+                                  disabled={!vaultPassword.trim()}
+                                  onClick={async () => {
+                                    setError(null);
+                                    try {
+                                      await migrateToEncryptedStorage(
+                                        vaultPassword.trim(),
+                                      );
+                                      setVaultPassword("");
+                                      setSecurityStatus(
+                                        await getSecurityStatus(),
+                                      );
+                                    } catch (e) {
+                                      setError(
+                                        e instanceof Error
+                                          ? e.message
+                                          : "Failed to migrate to encrypted storage",
+                                      );
+                                    }
+                                  }}
+                                >
+                                  Migrate to Encrypted Storage
+                                </Button>
+                              </div>
+                              {securityStatus ? (
+                                <div className="text-sm text-muted-foreground space-y-1 mt-2 p-3 bg-muted/20 border rounded-md">
+                                  <p>
+                                    Vault initialized:{" "}
+                                    <span className="font-medium">
+                                      {securityStatus.vaultInitialized
+                                        ? "yes"
+                                        : "no"}
+                                    </span>
+                                  </p>
+                                  <p>
+                                    Vault unlocked:{" "}
+                                    <span className="font-medium">
+                                      {securityStatus.vaultUnlocked
+                                        ? "yes"
+                                        : "no"}
+                                    </span>
+                                  </p>
+                                  <p>
+                                    Database encrypted:{" "}
+                                    <span className="font-medium">
+                                      {securityStatus.databaseEncrypted
+                                        ? "yes"
+                                        : "no"}
+                                    </span>
+                                  </p>
+                                </div>
+                              ) : null}
+                            </div>
+
+                            {renderSharedDictationControls({
+                              includeCoreControls: false,
+                              includeCloudSync: true,
+                            })}
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {activeTab === "storage" && (
+                    <Card>
+                      <CardHeader>
+                        <div className="flex items-center justify-between">
+                          <CardTitle>Storage</CardTitle>
+                          <AdvancedToggle
+                            checked={advancedTabs.storage}
+                            onCheckedChange={(c) =>
+                              setAdvancedTabs((prev) => ({
+                                ...prev,
+                                storage: c,
+                              }))
+                            }
+                          />
+                        </div>
+                        <CardDescription>
+                          Retention, backups, export paths, and cleanup tools
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-5">
+                        <div className="space-y-3">
+                          <Label>Export defaults</Label>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                              <Label className="text-sm text-muted-foreground">
+                                Default format
+                              </Label>
+                              <select
+                                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                                value={settings.export.defaultFormat}
+                                onChange={(e: any) =>
+                                  void updateSettings({
+                                    ...settings,
+                                    export: {
+                                      ...settings.export,
+                                      defaultFormat: e.target.value,
+                                    },
+                                  })
+                                }
+                              >
+                                <option value="markdown">Markdown</option>
+                                <option value="json">JSON</option>
+                                <option value="text">Plain Text</option>
+                                <option value="pdf">PDF</option>
+                              </select>
+                            </div>
+                            <div className="space-y-2">
+                              <Label className="text-sm text-muted-foreground">
+                                Export directory
+                              </Label>
+                              <Input
+                                placeholder="Same as recording location"
+                                value={settings.export.exportDirectory ?? ""}
+                                onBlur={handleSettingsTextBlur}
+                                onKeyDown={handleSettingsTextKeyDown}
+                                onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                                  void updateSettings({
+                                    ...settings,
+                                    export: {
+                                      ...settings.export,
+                                      exportDirectory:
+                                        e.target.value.trim() || null,
+                                    },
+                                  })
+                                }
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Export root limit (absolute path)</Label>
+                          <Input
+                            placeholder="/Users/you/Documents/Nautilus"
+                            value={settings.privacy.exportRoot ?? ""}
+                            onBlur={handleSettingsTextBlur}
+                            onKeyDown={handleSettingsTextKeyDown}
+                            onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                              void updateSettings({
+                                ...settings,
+                                privacy: {
+                                  ...settings.privacy,
+                                  exportRoot: e.target.value.trim()
+                                    ? e.target.value.trim()
+                                    : null,
+                                },
+                              })
+                            }
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            When set, exports are strictly restricted to this
+                            root directory or its subdirectories.
+                          </p>
+                        </div>
+
+                        <div className="flex items-center justify-between">
+                          <div className="space-y-0.5">
+                            <Label>Include timestamps in exports</Label>
+                            <p className="text-sm text-muted-foreground">
+                              Add time markers to exported transcripts
+                            </p>
+                          </div>
+                          <Switch
+                            checked={settings.export.includeTimestamps}
+                            onCheckedChange={(checked) =>
+                              void updateSettings({
+                                ...settings,
+                                export: {
+                                  ...settings.export,
+                                  includeTimestamps: checked,
+                                },
+                              })
+                            }
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between">
+                          <div className="space-y-0.5">
+                            <Label>Include speaker names</Label>
+                            <p className="text-sm text-muted-foreground">
+                              Label speakers in exported transcripts
+                            </p>
+                          </div>
+                          <Switch
+                            checked={settings.export.includeSpeakers}
+                            onCheckedChange={(checked) =>
+                              void updateSettings({
+                                ...settings,
+                                export: {
+                                  ...settings.export,
+                                  includeSpeakers: checked,
+                                },
+                              })
+                            }
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between">
+                          <div className="space-y-0.5">
+                            <Label>Open file after export</Label>
+                            <p className="text-sm text-muted-foreground">
+                              Automatically open exported files
+                            </p>
+                          </div>
+                          <Switch
+                            checked={settings.export.openAfterExport}
+                            onCheckedChange={(checked) =>
+                              void updateSettings({
+                                ...settings,
+                                export: {
+                                  ...settings.export,
+                                  openAfterExport: checked,
+                                },
+                              })
+                            }
+                          />
+                        </div>
+
+                        <div className="h-px bg-border" />
+
+                        <div className="space-y-2">
+                          <Label>Auto-delete recordings after days</Label>
+                          <Input
+                            type="number"
+                            min={0}
+                            value={settings.privacy.autoDeleteDays}
+                            onBlur={handleSettingsTextBlur}
+                            onKeyDown={handleSettingsTextKeyDown}
+                            onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                              const nextDays = Math.max(
+                                0,
+                                Number(e.target.value) || 0,
+                              );
+                              void updateSettings({
+                                ...settings,
+                                privacy: {
+                                  ...settings.privacy,
+                                  autoDeleteDays: nextDays,
                                 },
                               });
                             }}
-                          >
-                            {option.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <p className="mt-3 text-xs text-muted-foreground">
-                      {normalizeActiveLanguageSet(settings.transcription.dictationActiveLanguages)
-                        .length === 0
-                        ? "No dictation language set saved yet. Auto-detect stays fully open."
-                        : normalizeActiveLanguageSet(settings.transcription.dictationActiveLanguages)
-                            .length === 1
-                          ? `Dictation will lock to ${
-                              DICTATION_ACTIVE_LANGUAGE_OPTIONS.find(
-                                (option) =>
-                                  option.value ===
-                                  normalizeActiveLanguageSet(
-                                    settings.transcription.dictationActiveLanguages
-                                  )[0]
-                              )?.label ??
-                              normalizeActiveLanguageSet(
-                                settings.transcription.dictationActiveLanguages
-                              )[0]
-                            } when the language select stays on auto-detect.`
-                          : `Dictation auto-detect will stay inside ${
-                              normalizeActiveLanguageSet(
-                                settings.transcription.dictationActiveLanguages
-                              )
-                                .map(
-                                  (language) =>
-                                    DICTATION_ACTIVE_LANGUAGE_OPTIONS.find(
-                                      (option) => option.value === language
-                                    )?.label ?? language
-                                )
-                                .join(", ")
-                            }.`}
-                    </p>
-                  </div>
-                </div>
-
-                {advancedTabs.asr && (
-                  <div className="pt-4 border-t space-y-5">
-                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
-                    {renderSharedDictationControls({
-                      includeMeetingAutoName: true,
-                      includeAudioTuning: true,
-                    })}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
-
-                    {activeTab === "general" && (
-            <Card>
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle>General</CardTitle>
-                  <AdvancedToggle checked={advancedTabs.general} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, general: c }))} />
-                </div>
-                <CardDescription>Appearance, shortcuts, overlays, and everyday app behavior</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-5">
-                <div className="space-y-2">
-                  <Label>Theme</Label>
-                  <div className="flex gap-2">
-                    <Button
-                      variant={theme === "light" ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setTheme("light")}
-                      className="flex items-center gap-2"
-                    >
-                      <Sun className="h-4 w-4" />
-                      Light
-                    </Button>
-                    <Button
-                      variant={theme === "dark" ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setTheme("dark")}
-                      className="flex items-center gap-2"
-                    >
-                      <Moon className="h-4 w-4" />
-                      Dark
-                    </Button>
-                    <Button
-                      variant={theme === "system" ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => setTheme("system")}
-                      className="flex items-center gap-2"
-                    >
-                      <Monitor className="h-4 w-4" />
-                      System
-                    </Button>
-                  </div>
-                </div>
-
-                {(() => {
-                  const themeAccess = getThemeAccessLevel(licenseInfo);
-                  const options = themeSchemesForAccess(themeAccess);
-                  const currentScheme = normalizeThemeSchemeForAccess(
-                    settings.ui.colorScheme,
-                    themeAccess
-                  );
-                  return (
-                    <div className="space-y-2">
-                      <Label className="flex items-center gap-1.5">
-                        Color scheme
-                        {themeAccess === "basic" && (
-                          <span className="text-xs text-amber-600">Pro unlocks more</span>
-                        )}
-                      </Label>
-                      <select
-                        aria-label="Color scheme"
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                        value={currentScheme}
-                        onChange={(e: any) => {
-                          const scheme = e.target.value as string;
-                          const normalized = normalizeThemeSchemeForAccess(scheme, themeAccess);
-                          applyColorScheme(normalized);
-                          void updateSettings({
-                            ...settings,
-                            ui: {
-                              ...settings.ui,
-                              colorScheme: normalized,
-                            },
-                          });
-                        }}
-                      >
-                        {options.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      {themeAccess === "basic" && (
-                        <p className="text-xs text-muted-foreground">
-                          Upgrade to Pro for Rosé Pine and Solarized themes, Friends Club for all premium schemes.
-                        </p>
-                      )}
-                    </div>
-                  );
-                })()}
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Keep running after close</Label>
-                    <p className="text-sm text-muted-foreground">Keep hotkeys, overlays, and background capture available when you close the main window</p>
-                  </div>
-                  <Switch
-                    checked={settings.ui.minimizeToTray}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        ui: { ...settings.ui, minimizeToTray: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Always on top</Label>
-                    <p className="text-sm text-muted-foreground">Keep the window above other applications</p>
-                  </div>
-                  <Switch
-                    checked={settings.ui.alwaysOnTop}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        ui: { ...settings.ui, alwaysOnTop: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="pt-4 border-t space-y-4">
-                  <div className="space-y-1">
-                    <Label>Overlay windows</Label>
-                    <p className="text-sm text-muted-foreground">
-                      Keep the floating dictation and meeting recorder controls visible while you work.
-                    </p>
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <div className="space-y-0.5">
-                      <Label>Show dictation mini window</Label>
-                      <p className="text-sm text-muted-foreground">
-                        Show the floating recorder shell during global dictation.
-                      </p>
-                    </div>
-                    <Switch
-                      checked={settings.ui.showDictationPopup}
-                      onCheckedChange={(checked) =>
-                        void updateSettings({
-                          ...settings,
-                          ui: { ...settings.ui, showDictationPopup: checked },
-                        })
-                      }
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <div className="space-y-0.5">
-                      <Label>Show meeting mini window</Label>
-                      <p className="text-sm text-muted-foreground">
-                        Show the floating recorder shell during meeting capture and processing.
-                      </p>
-                    </div>
-                    <Switch
-                      checked={settings.ui.showRecordingPopup}
-                      onCheckedChange={(checked) =>
-                        void updateSettings({
-                          ...settings,
-                          ui: { ...settings.ui, showRecordingPopup: checked },
-                        })
-                      }
-                    />
-                  </div>
-                </div>
-
-                {advancedTabs.general && (
-                  <div className="pt-4 border-t space-y-5">
-                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
-                    <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
-                      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                        <div>
-                          <p className="text-sm font-medium text-foreground">Dictation defaults live in Transcription</p>
-                          <p className="text-sm text-muted-foreground">
-                            Keep the recording shell clean here and manage Smart Format, prompts, routing, and audio behavior from the dedicated Transcription workspace.
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            Set to 0 to keep all recordings indefinitely.
                           </p>
                         </div>
-                        <Button variant="secondary" onClick={() => setActiveTab("asr")}>
-                          Open Transcription
-                        </Button>
-                      </div>
-                    </div>
 
-                    {renderShortcutsSection()}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
-
-                    {activeTab === "security" && (
-            <Card>
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle>Privacy & Security</CardTitle>
-                  <AdvancedToggle checked={advancedTabs.security} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, security: c }))} />
-                </div>
-                <CardDescription>Local-first defaults with explicit remote opt-in</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-5">
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label className="flex items-center gap-2">
-                      <Lock className="h-4 w-4" />
-                      Encrypt recordings at rest
-                    </Label>
-                    <p className="text-sm text-muted-foreground">Enable encrypted storage policy</p>
-                  </div>
-                  <Switch
-                    checked={settings.privacy.encryptRecordings}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        privacy: { ...settings.privacy, encryptRecordings: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label className="flex items-center gap-2">
-                      <Cloud className="h-4 w-4" />
-                      Remote processing
-                    </Label>
-                    <p className="text-sm text-muted-foreground">
-                      Allow cloud providers for analysis
-                    </p>
-                  </div>
-                  <Switch
-                    checked={settings.privacy.remoteProcessingEnabled}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        privacy: { ...settings.privacy, remoteProcessingEnabled: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                {advancedTabs.security && (
-                  <div className="pt-4 border-t space-y-5">
-                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
-                    {renderSharedDictationControls({
-                      includeCoreControls: false,
-                      includePermissions: true,
-                    })}
-
-                    <div className="space-y-2">
-                      <Label>Vault password</Label>
-                      <Input
-                        type="password"
-                        placeholder="Enter vault password"
-                        value={vaultPassword}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setVaultPassword(e.target.value)}
-                      />
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          variant="outline"
-                          disabled={!vaultPassword.trim()}
-                          onClick={async () => {
-                            setError(null);
-                            try {
-                              await unlockVault(vaultPassword.trim());
-                              setVaultPassword("");
-                              setSecurityStatus(await getSecurityStatus());
-                            } catch (e) {
-                              setError(e instanceof Error ? e.message : "Failed to unlock vault");
-                            }
-                          }}
-                        >
-                          Unlock Vault
-                        </Button>
-                        <Button
-                          variant="outline"
-                          onClick={async () => {
-                            setError(null);
-                            try {
-                              await lockVault();
-                              setSecurityStatus(await getSecurityStatus());
-                            } catch (e) {
-                              setError(e instanceof Error ? e.message : "Failed to lock vault");
-                            }
-                          }}
-                        >
-                          Lock Vault
-                        </Button>
-                        <Button
-                          disabled={!vaultPassword.trim()}
-                          onClick={async () => {
-                            setError(null);
-                            try {
-                              await migrateToEncryptedStorage(vaultPassword.trim());
-                              setVaultPassword("");
-                              setSecurityStatus(await getSecurityStatus());
-                            } catch (e) {
-                              setError(
-                                e instanceof Error
-                                  ? e.message
-                                  : "Failed to migrate to encrypted storage"
-                              );
-                            }
-                          }}
-                        >
-                          Migrate to Encrypted Storage
-                        </Button>
-                      </div>
-                      {securityStatus ? (
-                        <div className="text-sm text-muted-foreground space-y-1 mt-2 p-3 bg-muted/20 border rounded-md">
-                          <p>Vault initialized: <span className="font-medium">{securityStatus.vaultInitialized ? "yes" : "no"}</span></p>
-                          <p>Vault unlocked: <span className="font-medium">{securityStatus.vaultUnlocked ? "yes" : "no"}</span></p>
-                          <p>Database encrypted: <span className="font-medium">{securityStatus.databaseEncrypted ? "yes" : "no"}</span></p>
-                        </div>
-                      ) : null}
-                    </div>
-
-                    {renderSharedDictationControls({
-                      includeCoreControls: false,
-                      includeCloudSync: true,
-                    })}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
-
-                    {activeTab === "storage" && (
-            <Card>
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle>Storage</CardTitle>
-                  <AdvancedToggle checked={advancedTabs.storage} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, storage: c }))} />
-                </div>
-                <CardDescription>Retention, backups, export paths, and cleanup tools</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-5">
-                <div className="space-y-3">
-                  <Label>Export defaults</Label>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label className="text-sm text-muted-foreground">Default format</Label>
-                      <select
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                        value={settings.export.defaultFormat}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            export: { ...settings.export, defaultFormat: e.target.value },
-                          })
-                        }
-                      >
-                        <option value="markdown">Markdown</option>
-                        <option value="json">JSON</option>
-                        <option value="text">Plain Text</option>
-                        <option value="pdf">PDF</option>
-                      </select>
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-sm text-muted-foreground">Export directory</Label>
-                      <Input
-                        placeholder="Same as recording location"
-                        value={settings.export.exportDirectory ?? ""}
-                        onBlur={handleSettingsTextBlur}
-                        onKeyDown={handleSettingsTextKeyDown}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                          void updateSettings({
-                            ...settings,
-                            export: {
-                              ...settings.export,
-                              exportDirectory: e.target.value.trim() || null,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <Label>Export root limit (absolute path)</Label>
-                  <Input
-                    placeholder="/Users/you/Documents/Nautilus"
-                    value={settings.privacy.exportRoot ?? ""}
-                    onBlur={handleSettingsTextBlur}
-                    onKeyDown={handleSettingsTextKeyDown}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                      void updateSettings({
-                        ...settings,
-                        privacy: {
-                          ...settings.privacy,
-                          exportRoot: e.target.value.trim() ? e.target.value.trim() : null,
-                        },
-                      })
-                    }
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    When set, exports are strictly restricted to this root directory or its subdirectories.
-                  </p>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Include timestamps in exports</Label>
-                    <p className="text-sm text-muted-foreground">Add time markers to exported transcripts</p>
-                  </div>
-                  <Switch
-                    checked={settings.export.includeTimestamps}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        export: { ...settings.export, includeTimestamps: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Include speaker names</Label>
-                    <p className="text-sm text-muted-foreground">Label speakers in exported transcripts</p>
-                  </div>
-                  <Switch
-                    checked={settings.export.includeSpeakers}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        export: { ...settings.export, includeSpeakers: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Open file after export</Label>
-                    <p className="text-sm text-muted-foreground">Automatically open exported files</p>
-                  </div>
-                  <Switch
-                    checked={settings.export.openAfterExport}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        export: { ...settings.export, openAfterExport: checked },
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="h-px bg-border" />
-                
-                <div className="space-y-2">
-                  <Label>Auto-delete recordings after days</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={settings.privacy.autoDeleteDays}
-                    onBlur={handleSettingsTextBlur}
-                    onKeyDown={handleSettingsTextKeyDown}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      const nextDays = Math.max(0, Number(e.target.value) || 0);
-                      void updateSettings({
-                        ...settings,
-                        privacy: { ...settings.privacy, autoDeleteDays: nextDays },
-                      });
-                    }}
-                  />
-                  <p className="text-xs text-muted-foreground">Set to 0 to keep all recordings indefinitely.</p>
-                </div>
-
-                <div className="space-y-2">
-                  <Label>Auto-delete dictation recordings</Label>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={settings.transcription.dictationRetentionPreset ?? "never"}
-                    onChange={(e: any) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          dictationRetentionPreset: e.target.value,
-                        },
-                      })
-                    }
-                  >
-                    <option value="immediate">Immediately</option>
-                    <option value="24h">After 24 hours</option>
-                    <option value="72h">After 72 hours</option>
-                    <option value="never">Never</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                  {(settings.transcription.dictationRetentionPreset ?? "never") === "custom" && (
-                    <div className="space-y-2">
-                      <Label>Custom retention hours</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        value={settings.transcription.dictationRetentionCustomHours ?? 24}
-                        onBlur={handleSettingsTextBlur}
-                        onKeyDown={handleSettingsTextKeyDown}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                          const nextHours = Math.max(1, Number(e.target.value) || 1);
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationRetentionCustomHours: nextHours,
-                            },
-                          });
-                        }}
-                      />
-                    </div>
-                  )}
-                </div>
-
-                <div className="space-y-2">
-                  <Label>Meeting audio storage</Label>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={settings.transcription.meetingAudioStorageMode ?? "always"}
-                    onChange={(e: any) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          meetingAudioStorageMode: e.target.value,
-                        },
-                      })
-                    }
-                  >
-                    <option value="always">Always keep audio</option>
-                    <option value="transcript_only">Transcript only (delete audio after transcription)</option>
-                  </select>
-                </div>
-
-                <div className="space-y-2">
-                  <Label>Auto-delete meeting data</Label>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={settings.transcription.meetingRetentionPreset ?? "never"}
-                    onChange={(e: any) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          meetingRetentionPreset: e.target.value,
-                        },
-                      })
-                    }
-                  >
-                    <option value="1m">After 1 month</option>
-                    <option value="2m">After 2 months</option>
-                    <option value="3m">After 3 months</option>
-                    <option value="never">Never</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                  {(settings.transcription.meetingRetentionPreset ?? "never") === "custom" && (
-                    <div className="space-y-2">
-                      <Label>Custom retention months</Label>
-                      <Input
-                        type="number"
-                        min={1}
-                        value={settings.transcription.meetingRetentionCustomMonths ?? 1}
-                        onBlur={handleSettingsTextBlur}
-                        onKeyDown={handleSettingsTextKeyDown}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                          const nextMonths = Math.max(1, Number(e.target.value) || 1);
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              meetingRetentionCustomMonths: nextMonths,
-                            },
-                          });
-                        }}
-                      />
-                    </div>
-                  )}
-                </div>
-
-                <div className="space-y-2">
-                  <Label>Meeting retention delete mode</Label>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={settings.transcription.meetingRetentionDeleteMode ?? "audio_only"}
-                    onChange={(e: any) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          meetingRetentionDeleteMode: e.target.value,
-                        },
-                      })
-                    }
-                  >
-                    <option value="audio_only">Delete audio only</option>
-                    <option value="audio_and_transcript">Delete audio and transcript</option>
-                  </select>
-                </div>
-
-                <div className="rounded-lg border p-4 space-y-3">
-                  <div className="space-y-1">
-                    <Label>Guided setup</Label>
-                    <p className="text-sm text-muted-foreground">
-                      Guided setup now lives in the dedicated Setup center so normal users always have one obvious place to fix permissions, models, and meetings.
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="secondary" onClick={() => requestMainView("setup")}>
-                      Open Setup
-                    </Button>
-                    <Button variant="outline" onClick={() => requestOnboarding("full")}>
-                      Rerun onboarding
-                    </Button>
-                    <Button variant="outline" onClick={() => requestOnboarding("dictation")}>
-                      Fix dictation setup
-                    </Button>
-                    <Button variant="outline" onClick={() => requestOnboarding("meetings")}>
-                      Set up meetings
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-3">
-                  <div className="space-y-1">
-                    <Label className="text-destructive">Reset App Data</Label>
-                    <p className="text-sm text-muted-foreground">
-                      Deletes recordings, transcripts, projects, audit history, benchmark history, and saved cloud keys.
-                      Downloaded local ASR model assets are kept.
-                    </p>
-                  </div>
-                  <Button
-                    variant="destructive"
-                    disabled={resettingApp}
-                    onClick={() => {
-                      setResetPhrase("");
-                      setShowResetDialog(true);
-                    }}
-                  >
-                    {resettingApp ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                    Reset Everything On This Device
-                  </Button>
-                  <p className="text-xs text-muted-foreground">
-                    After reset, onboarding runs again on next launch.
-                  </p>
-                </div>
-
-                <Dialog open={showResetDialog} onOpenChange={setShowResetDialog}>
-                  <DialogContent>
-                    <DialogHeader>
-                      <DialogTitle>Reset everything on this device?</DialogTitle>
-                      <DialogDescription>
-                        Type <span className="font-semibold">RESET</span> to confirm permanent deletion of recordings,
-                        transcripts, projects, logs, and saved provider keys.
-                      </DialogDescription>
-                    </DialogHeader>
-                    <div className="space-y-2">
-                      <Label htmlFor="reset-phrase">Confirmation</Label>
-                      <Input
-                        id="reset-phrase"
-                        value={resetPhrase}
-                        onChange={(event) => setResetPhrase(event.target.value)}
-                        placeholder="Type RESET"
-                        autoFocus
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Confirmation is case-insensitive.
-                      </p>
-                    </div>
-                    <DialogFooter>
-                      <Button
-                        variant="outline"
-                        onClick={() => {
-                          setShowResetDialog(false);
-                          setResetPhrase("");
-                        }}
-                        disabled={resettingApp}
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        disabled={resettingApp || resetPhrase.trim().toUpperCase() !== "RESET"}
-                        onClick={async () => {
-                          await performReset();
-                        }}
-                      >
-                        {resettingApp ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                        Confirm Reset
-                      </Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
-
-                {advancedTabs.storage && backupConfig && (
-                  <div className="pt-4 border-t space-y-5">
-                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
-                    <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
-                      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                        <div>
-                          <p className="text-sm font-medium text-foreground">Retention stays separate from dictation behavior</p>
-                          <p className="text-sm text-muted-foreground">
-                            Storage now focuses on exports, retention, backups, and recovery. Adjust dictation prompts, routing, and capture behavior from Transcription.
-                          </p>
-                        </div>
-                        <Button variant="secondary" onClick={() => setActiveTab("asr")}>
-                          Open Transcription
-                        </Button>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Automatic backups</Label>
-                        <p className="text-sm text-muted-foreground">Create local backups on schedule</p>
-                      </div>
-                      <Switch
-                        checked={backupConfig.enabled}
-                        onCheckedChange={(checked) =>
-                          setBackupConfig({ ...backupConfig, enabled: checked })
-                        }
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label>Backup interval (hours)</Label>
-                        <Input
-                          type="number"
-                          min={1}
-                          value={backupConfig.intervalHours}
-                          onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                            setBackupConfig({
-                              ...backupConfig,
-                              intervalHours: Math.max(1, Number(e.target.value) || 24),
-                            })
-                          }
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label>Max backups</Label>
-                        <Input
-                          type="number"
-                          min={1}
-                          value={backupConfig.maxBackups}
-                          onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                            setBackupConfig({
-                              ...backupConfig,
-                              maxBackups: Math.max(1, Number(e.target.value) || 7),
-                            })
-                          }
-                        />
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label>Personal profile sync</Label>
-                        <p className="text-sm text-muted-foreground">
-                          Sync settings, shortcuts, dictation flows, dictionary, snippets, and preferences via cloud storage
-                        </p>
-                      </div>
-                      <Switch
-                        checked={backupConfig.cloudSync}
-                        onCheckedChange={(checked) =>
-                          setBackupConfig({ ...backupConfig, cloudSync: checked })
-                        }
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label>Provider</Label>
-                        <select
-                          value={backupConfig.cloudProvider ?? ""}
-                          onChange={(e: any) =>
-                            setBackupConfig({
-                              ...backupConfig,
-                              cloudProvider: (e.target.value || null) as BackupConfig["cloudProvider"],
-                            })
-                          }
-                          className="w-full p-2 border rounded-md bg-background"
-                        >
-                          <option value="">Select provider</option>
-                          <option value="one_drive">OneDrive</option>
-                          <option value="google_drive">Google Drive</option>
-                          <option value="proton_drive">Proton Drive</option>
-                          <option value="i_cloud">iCloud</option>
-                        </select>
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label>Cloud folder</Label>
-                        <Input
-                          value={backupConfig.cloudFolder}
-                          onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                            setBackupConfig({ ...backupConfig, cloudFolder: e.target.value })
-                          }
-                          placeholder="NautilusBackups"
-                        />
-                      </div>
-                    </div>
-
-                    {backupConfig.cloudProvider === "i_cloud" ? (
-                      <div className="space-y-2">
-                        <Label>iCloud path (optional override)</Label>
-                        <Input
-                          value={backupConfig.icloudPath ?? ""}
-                          onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                            setBackupConfig({
-                              ...backupConfig,
-                              icloudPath: e.target.value.trim() ? e.target.value : null,
-                            })
-                          }
-                          placeholder="/Users/you/Library/Mobile Documents/com~apple~CloudDocs"
-                        />
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        <Label>rclone remote name</Label>
-                        <Input
-                          value={backupConfig.cloudRemoteName ?? ""}
-                          onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                            setBackupConfig({
-                              ...backupConfig,
-                              cloudRemoteName: e.target.value.trim() ? e.target.value : null,
-                            })
-                          }
-                          placeholder="onedrive / gdrive / protondrive"
-                        />
-                      </div>
-                    )}
-
-                    <div className="rounded-lg border p-3 bg-muted/10 space-y-2">
-                      <div className="flex items-start justify-between gap-4">
-                        <div>
-                          <Label className="text-sm">Personal Profile Sync</Label>
-                          <p className="text-sm text-muted-foreground">
-                            Profile snapshots save your personal setup without copying recordings or transcripts.
-                          </p>
-                        </div>
-                        <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                          Settings only
-                        </span>
-                      </div>
-                      <div className="grid gap-2 md:grid-cols-2">
-                        <div className="rounded border bg-background p-3">
-                          <p className="text-xs font-medium text-muted-foreground">Latest profile snapshot</p>
-                          <p className="mt-1 text-sm">
-                            {latestProfileSnapshot
-                              ? new Date(latestProfileSnapshot.timestamp).toLocaleString()
-                              : "No profile snapshot yet"}
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {latestProfileSnapshot
-                              ? `${latestProfileSnapshot.itemsCount} items · ${latestProfileSnapshot.id}`
-                              : "Create one before syncing to another device."}
-                          </p>
-                        </div>
-                        <div className="rounded border bg-background p-3">
-                          <p className="text-xs font-medium text-muted-foreground">Latest full backup</p>
-                          <p className="mt-1 text-sm">
-                            {latestFullBackup
-                              ? new Date(latestFullBackup.timestamp).toLocaleString()
-                              : "No full backup yet"}
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {latestFullBackup
-                              ? `${latestFullBackup.itemsCount} items · ${latestFullBackup.id}`
-                              : "Use this when you want recovery for recordings and transcripts too."}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap gap-2 mt-4">
-                      <Button
-                        variant="outline"
-                        disabled={backupBusy}
-                        onClick={async () => {
-                          setBackupBusy(true);
-                          setBackupStatus(null);
-                          setError(null);
-                          try {
-                            await saveBackupConfig(backupConfig);
-                            setBackupStatus("Backup configuration saved.");
-                          } catch (e) {
-                            setError(e instanceof Error ? e.message : "Failed to save backup config");
-                          } finally {
-                            setBackupBusy(false);
-                          }
-                        }}
-                      >
-                        Save Sync Config
-                      </Button>
-                      <Button
-                        variant="outline"
-                        disabled={backupBusy || !backupConfig.cloudSync}
-                        onClick={async () => {
-                          setBackupBusy(true);
-                          setBackupStatus(null);
-                          setError(null);
-                          try {
-                            await saveBackupConfig(backupConfig);
-                            await verifyBackupCloudConnection();
-                            setBackupStatus("Cloud connection verified.");
-                          } catch (e) {
-                            setError(e instanceof Error ? e.message : "Cloud verification failed");
-                          } finally {
-                            setBackupBusy(false);
-                          }
-                        }}
-                      >
-                        Verify Cloud Connection
-                      </Button>
-                      <Button
-                        variant="outline"
-                        disabled={backupBusy || !backupConfig.cloudSync}
-                        onClick={async () => {
-                          setBackupBusy(true);
-                          setBackupStatus(null);
-                          setError(null);
-                          try {
-                            await saveBackupConfig(backupConfig);
-                            const report = await getBackupSetupReport();
-                            setBackupSetupReport(report);
-                            setBackupStatus(
-                              report.ready
-                                ? "Cloud setup checks passed."
-                                : "Cloud setup checks found issues."
-                            );
-                          } catch (e) {
-                            setError(e instanceof Error ? e.message : "Setup checks failed");
-                          } finally {
-                            setBackupBusy(false);
-                          }
-                        }}
-                      >
-                        Run Setup Checks
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        disabled={backupBusy}
-                        onClick={async () => {
-                          setBackupBusy(true);
-                          setBackupStatus(null);
-                          setError(null);
-                          try {
-                            await saveBackupConfig(backupConfig);
-                            const info = await createSettingsBackupDefault();
-                            setBackupStatus(`Profile snapshot created: ${info.id}`);
-                            await refreshBackups();
-                          } catch (e) {
-                            setError(e instanceof Error ? e.message : "Profile snapshot failed");
-                          } finally {
-                            setBackupBusy(false);
-                          }
-                        }}
-                      >
-                        Create Profile Snapshot
-                      </Button>
-                      <Button
-                        variant="outline"
-                        disabled={backupBusy || !latestProfileSnapshot || !backupConfig.cloudSync}
-                        onClick={async () => {
-                          if (!latestProfileSnapshot) return;
-                          setBackupBusy(true);
-                          setBackupStatus(null);
-                          setError(null);
-                          try {
-                            await saveBackupConfig(backupConfig);
-                            await syncBackupToCloud(latestProfileSnapshot.id);
-                            setBackupStatus(`Synced profile snapshot ${latestProfileSnapshot.id} to cloud.`);
-                          } catch (e) {
-                            setError(e instanceof Error ? e.message : "Profile sync failed");
-                          } finally {
-                            setBackupBusy(false);
-                          }
-                        }}
-                      >
-                        Sync Latest Profile Snapshot
-                      </Button>
-                      <Button
-                        variant="outline"
-                        disabled={backupBusy || !latestProfileSnapshot || hasUnsavedChanges}
-                        onClick={async () => {
-                          if (!latestProfileSnapshot) return;
-                          setBackupBusy(true);
-                          setBackupStatus(null);
-                          setError(null);
-                          try {
-                            await restoreBackupDefault(latestProfileSnapshot.id);
-                            const restored = await getSettings();
-                            setDraftSettings(restored);
-                            setPersistedSettings(restored);
-                            setBackupStatus(
-                              `Restored profile snapshot ${latestProfileSnapshot.id}.`
-                            );
-                          } catch (e) {
-                            setError(e instanceof Error ? e.message : "Profile restore failed");
-                          } finally {
-                            setBackupBusy(false);
-                          }
-                        }}
-                      >
-                        Restore Latest Profile Snapshot
-                      </Button>
-                      <Button
-                        disabled={backupBusy}
-                        onClick={async () => {
-                          setBackupBusy(true);
-                          setBackupStatus(null);
-                          setError(null);
-                          try {
-                            await saveBackupConfig(backupConfig);
-                            const info = await createBackupDefault();
-                            setBackupStatus(`Backup created: ${info.id}`);
-                            await refreshBackups();
-                          } catch (e) {
-                            setError(e instanceof Error ? e.message : "Backup failed");
-                          } finally {
-                            setBackupBusy(false);
-                          }
-                        }}
-                      >
-                        Create Full Backup
-                      </Button>
-                      <Button
-                        variant="outline"
-                        disabled={backupBusy || backups.length === 0 || !backupConfig.cloudSync}
-                        onClick={async () => {
-                          const latest = backups[0];
-                          if (!latest) return;
-                          setBackupBusy(true);
-                          setBackupStatus(null);
-                          setError(null);
-                          try {
-                            await saveBackupConfig(backupConfig);
-                            await syncBackupToCloud(latest.id);
-                            setBackupStatus(`Synced backup ${latest.id} to cloud.`);
-                          } catch (e) {
-                            setError(e instanceof Error ? e.message : "Cloud sync failed");
-                          } finally {
-                            setBackupBusy(false);
-                          }
-                        }}
-                      >
-                        Sync Latest Full Backup
-                      </Button>
-                    </div>
-
-                    {backupStatus && <p className="text-sm text-muted-foreground">{backupStatus}</p>}
-                    {hasUnsavedChanges ? (
-                      <p className="text-xs text-amber-600">
-                        Save or discard local settings edits before restoring a profile snapshot.
-                      </p>
-                    ) : null}
-                    {backupSetupReport && (
-                      <div className="rounded-lg border p-3 space-y-2 bg-muted/10">
-                        <div className="flex items-center justify-between">
-                          <Label className="text-sm">Cloud setup readiness</Label>
-                          <span
-                            className={`text-xs font-medium ${backupSetupReport.ready ? "text-emerald-600" : "text-amber-600"
-                              }`}
-                          >
-                            {backupSetupReport.ready ? "Ready" : "Needs action"}
-                          </span>
-                        </div>
                         <div className="space-y-2">
-                          {backupSetupReport.checks.map((check) => (
-                            <div key={check.id} className="rounded border p-2 bg-background">
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="flex items-center gap-2">
-                                  {check.status === "pass" ? (
-                                    <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                                  ) : (
-                                    <XCircle className="h-4 w-4 text-amber-600" />
-                                  )}
-                                  <p className="text-sm font-medium">{check.label}</p>
+                          <Label>Auto-delete dictation recordings</Label>
+                          <select
+                            className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                            value={
+                              settings.transcription.dictationRetentionPreset ??
+                              "never"
+                            }
+                            onChange={(e: any) =>
+                              void updateSettings({
+                                ...settings,
+                                transcription: {
+                                  ...settings.transcription,
+                                  dictationRetentionPreset: e.target.value,
+                                },
+                              })
+                            }
+                          >
+                            <option value="immediate">Immediately</option>
+                            <option value="24h">After 24 hours</option>
+                            <option value="72h">After 72 hours</option>
+                            <option value="never">Never</option>
+                            <option value="custom">Custom</option>
+                          </select>
+                          {(settings.transcription.dictationRetentionPreset ??
+                            "never") === "custom" && (
+                            <div className="space-y-2">
+                              <Label>Custom retention hours</Label>
+                              <Input
+                                type="number"
+                                min={1}
+                                value={
+                                  settings.transcription
+                                    .dictationRetentionCustomHours ?? 24
+                                }
+                                onBlur={handleSettingsTextBlur}
+                                onKeyDown={handleSettingsTextKeyDown}
+                                onChange={(
+                                  e: ChangeEvent<HTMLInputElement>,
+                                ) => {
+                                  const nextHours = Math.max(
+                                    1,
+                                    Number(e.target.value) || 1,
+                                  );
+                                  void updateSettings({
+                                    ...settings,
+                                    transcription: {
+                                      ...settings.transcription,
+                                      dictationRetentionCustomHours: nextHours,
+                                    },
+                                  });
+                                }}
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Meeting audio storage</Label>
+                          <select
+                            className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                            value={
+                              settings.transcription.meetingAudioStorageMode ??
+                              "always"
+                            }
+                            onChange={(e: any) =>
+                              void updateSettings({
+                                ...settings,
+                                transcription: {
+                                  ...settings.transcription,
+                                  meetingAudioStorageMode: e.target.value,
+                                },
+                              })
+                            }
+                          >
+                            <option value="always">Always keep audio</option>
+                            <option value="transcript_only">
+                              Transcript only (delete audio after transcription)
+                            </option>
+                          </select>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Auto-delete meeting data</Label>
+                          <select
+                            className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                            value={
+                              settings.transcription.meetingRetentionPreset ??
+                              "never"
+                            }
+                            onChange={(e: any) =>
+                              void updateSettings({
+                                ...settings,
+                                transcription: {
+                                  ...settings.transcription,
+                                  meetingRetentionPreset: e.target.value,
+                                },
+                              })
+                            }
+                          >
+                            <option value="1m">After 1 month</option>
+                            <option value="2m">After 2 months</option>
+                            <option value="3m">After 3 months</option>
+                            <option value="never">Never</option>
+                            <option value="custom">Custom</option>
+                          </select>
+                          {(settings.transcription.meetingRetentionPreset ??
+                            "never") === "custom" && (
+                            <div className="space-y-2">
+                              <Label>Custom retention months</Label>
+                              <Input
+                                type="number"
+                                min={1}
+                                value={
+                                  settings.transcription
+                                    .meetingRetentionCustomMonths ?? 1
+                                }
+                                onBlur={handleSettingsTextBlur}
+                                onKeyDown={handleSettingsTextKeyDown}
+                                onChange={(
+                                  e: ChangeEvent<HTMLInputElement>,
+                                ) => {
+                                  const nextMonths = Math.max(
+                                    1,
+                                    Number(e.target.value) || 1,
+                                  );
+                                  void updateSettings({
+                                    ...settings,
+                                    transcription: {
+                                      ...settings.transcription,
+                                      meetingRetentionCustomMonths: nextMonths,
+                                    },
+                                  });
+                                }}
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>Meeting retention delete mode</Label>
+                          <select
+                            className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                            value={
+                              settings.transcription
+                                .meetingRetentionDeleteMode ?? "audio_only"
+                            }
+                            onChange={(e: any) =>
+                              void updateSettings({
+                                ...settings,
+                                transcription: {
+                                  ...settings.transcription,
+                                  meetingRetentionDeleteMode: e.target.value,
+                                },
+                              })
+                            }
+                          >
+                            <option value="audio_only">
+                              Delete audio only
+                            </option>
+                            <option value="audio_and_transcript">
+                              Delete audio and transcript
+                            </option>
+                          </select>
+                        </div>
+
+                        <div className="rounded-lg border p-4 space-y-3">
+                          <div className="space-y-1">
+                            <Label>Guided setup</Label>
+                            <p className="text-sm text-muted-foreground">
+                              Guided setup now lives in the dedicated Setup
+                              center so normal users always have one obvious
+                              place to fix permissions, models, and meetings.
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              variant="secondary"
+                              onClick={() => requestMainView("setup")}
+                            >
+                              Open Setup
+                            </Button>
+                            <Button
+                              variant="outline"
+                              onClick={() => requestOnboarding("full")}
+                            >
+                              Rerun onboarding
+                            </Button>
+                            <Button
+                              variant="outline"
+                              onClick={() => requestOnboarding("dictation")}
+                            >
+                              Fix dictation setup
+                            </Button>
+                            <Button
+                              variant="outline"
+                              onClick={() => requestOnboarding("meetings")}
+                            >
+                              Set up meetings
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-3">
+                          <div className="space-y-1">
+                            <Label className="text-destructive">
+                              Reset App Data
+                            </Label>
+                            <p className="text-sm text-muted-foreground">
+                              Deletes recordings, transcripts, projects, audit
+                              history, benchmark history, and saved cloud keys.
+                              Downloaded local ASR model assets are kept.
+                            </p>
+                          </div>
+                          <Button
+                            variant="destructive"
+                            disabled={resettingApp}
+                            onClick={() => {
+                              setResetPhrase("");
+                              setShowResetDialog(true);
+                            }}
+                          >
+                            {resettingApp ? (
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            ) : null}
+                            Reset Everything On This Device
+                          </Button>
+                          <p className="text-xs text-muted-foreground">
+                            After reset, onboarding runs again on next launch.
+                          </p>
+                        </div>
+
+                        <Dialog
+                          open={showResetDialog}
+                          onOpenChange={setShowResetDialog}
+                        >
+                          <DialogContent>
+                            <DialogHeader>
+                              <DialogTitle>
+                                Reset everything on this device?
+                              </DialogTitle>
+                              <DialogDescription>
+                                Type{" "}
+                                <span className="font-semibold">RESET</span> to
+                                confirm permanent deletion of recordings,
+                                transcripts, projects, logs, and saved provider
+                                keys.
+                              </DialogDescription>
+                            </DialogHeader>
+                            <div className="space-y-2">
+                              <Label htmlFor="reset-phrase">Confirmation</Label>
+                              <Input
+                                id="reset-phrase"
+                                value={resetPhrase}
+                                onChange={(event) =>
+                                  setResetPhrase(event.target.value)
+                                }
+                                placeholder="Type RESET"
+                                autoFocus
+                              />
+                              <p className="text-xs text-muted-foreground">
+                                Confirmation is case-insensitive.
+                              </p>
+                            </div>
+                            <DialogFooter>
+                              <Button
+                                variant="outline"
+                                onClick={() => {
+                                  setShowResetDialog(false);
+                                  setResetPhrase("");
+                                }}
+                                disabled={resettingApp}
+                              >
+                                Cancel
+                              </Button>
+                              <Button
+                                variant="destructive"
+                                disabled={
+                                  resettingApp ||
+                                  resetPhrase.trim().toUpperCase() !== "RESET"
+                                }
+                                onClick={async () => {
+                                  await performReset();
+                                }}
+                              >
+                                {resettingApp ? (
+                                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                ) : null}
+                                Confirm Reset
+                              </Button>
+                            </DialogFooter>
+                          </DialogContent>
+                        </Dialog>
+
+                        {advancedTabs.storage && backupConfig && (
+                          <div className="pt-4 border-t space-y-5">
+                            <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                              Power user
+                            </h3>
+                            <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
+                              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                                <div>
+                                  <p className="text-sm font-medium text-foreground">
+                                    Retention stays separate from dictation
+                                    behavior
+                                  </p>
+                                  <p className="text-sm text-muted-foreground">
+                                    Storage now focuses on exports, retention,
+                                    backups, and recovery. Adjust dictation
+                                    prompts, routing, and capture behavior from
+                                    Transcription.
+                                  </p>
+                                </div>
+                                <Button
+                                  variant="secondary"
+                                  onClick={() => setActiveTab("asr")}
+                                >
+                                  Open Transcription
+                                </Button>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between">
+                              <div className="space-y-0.5">
+                                <Label>Automatic backups</Label>
+                                <p className="text-sm text-muted-foreground">
+                                  Create local backups on schedule
+                                </p>
+                              </div>
+                              <Switch
+                                checked={backupConfig.enabled}
+                                onCheckedChange={(checked) =>
+                                  setBackupConfig({
+                                    ...backupConfig,
+                                    enabled: checked,
+                                  })
+                                }
+                              />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                              <div className="space-y-2">
+                                <Label>Backup interval (hours)</Label>
+                                <Input
+                                  type="number"
+                                  min={1}
+                                  value={backupConfig.intervalHours}
+                                  onChange={(
+                                    e: ChangeEvent<HTMLInputElement>,
+                                  ) =>
+                                    setBackupConfig({
+                                      ...backupConfig,
+                                      intervalHours: Math.max(
+                                        1,
+                                        Number(e.target.value) || 24,
+                                      ),
+                                    })
+                                  }
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <Label>Max backups</Label>
+                                <Input
+                                  type="number"
+                                  min={1}
+                                  value={backupConfig.maxBackups}
+                                  onChange={(
+                                    e: ChangeEvent<HTMLInputElement>,
+                                  ) =>
+                                    setBackupConfig({
+                                      ...backupConfig,
+                                      maxBackups: Math.max(
+                                        1,
+                                        Number(e.target.value) || 7,
+                                      ),
+                                    })
+                                  }
+                                />
+                              </div>
+                            </div>
+
+                            <div className="flex items-center justify-between">
+                              <div className="space-y-0.5">
+                                <Label>Personal profile sync</Label>
+                                <p className="text-sm text-muted-foreground">
+                                  Sync settings, shortcuts, dictation flows,
+                                  dictionary, snippets, and preferences via
+                                  cloud storage
+                                </p>
+                              </div>
+                              <Switch
+                                checked={backupConfig.cloudSync}
+                                onCheckedChange={(checked) =>
+                                  setBackupConfig({
+                                    ...backupConfig,
+                                    cloudSync: checked,
+                                  })
+                                }
+                              />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                              <div className="space-y-2">
+                                <Label>Provider</Label>
+                                <select
+                                  value={backupConfig.cloudProvider ?? ""}
+                                  onChange={(e: any) =>
+                                    setBackupConfig({
+                                      ...backupConfig,
+                                      cloudProvider: (e.target.value ||
+                                        null) as BackupConfig["cloudProvider"],
+                                    })
+                                  }
+                                  className="w-full p-2 border rounded-md bg-background"
+                                >
+                                  <option value="">Select provider</option>
+                                  <option value="one_drive">OneDrive</option>
+                                  <option value="google_drive">
+                                    Google Drive
+                                  </option>
+                                  <option value="proton_drive">
+                                    Proton Drive
+                                  </option>
+                                  <option value="i_cloud">iCloud</option>
+                                </select>
+                              </div>
+
+                              <div className="space-y-2">
+                                <Label>Cloud folder</Label>
+                                <Input
+                                  value={backupConfig.cloudFolder}
+                                  onChange={(
+                                    e: ChangeEvent<HTMLInputElement>,
+                                  ) =>
+                                    setBackupConfig({
+                                      ...backupConfig,
+                                      cloudFolder: e.target.value,
+                                    })
+                                  }
+                                  placeholder="NautilusBackups"
+                                />
+                              </div>
+                            </div>
+
+                            {backupConfig.cloudProvider === "i_cloud" ? (
+                              <div className="space-y-2">
+                                <Label>iCloud path (optional override)</Label>
+                                <Input
+                                  value={backupConfig.icloudPath ?? ""}
+                                  onChange={(
+                                    e: ChangeEvent<HTMLInputElement>,
+                                  ) =>
+                                    setBackupConfig({
+                                      ...backupConfig,
+                                      icloudPath: e.target.value.trim()
+                                        ? e.target.value
+                                        : null,
+                                    })
+                                  }
+                                  placeholder="/Users/you/Library/Mobile Documents/com~apple~CloudDocs"
+                                />
+                              </div>
+                            ) : (
+                              <div className="space-y-2">
+                                <Label>rclone remote name</Label>
+                                <Input
+                                  value={backupConfig.cloudRemoteName ?? ""}
+                                  onChange={(
+                                    e: ChangeEvent<HTMLInputElement>,
+                                  ) =>
+                                    setBackupConfig({
+                                      ...backupConfig,
+                                      cloudRemoteName: e.target.value.trim()
+                                        ? e.target.value
+                                        : null,
+                                    })
+                                  }
+                                  placeholder="onedrive / gdrive / protondrive"
+                                />
+                              </div>
+                            )}
+
+                            <div className="rounded-lg border p-3 bg-muted/10 space-y-2">
+                              <div className="flex items-start justify-between gap-4">
+                                <div>
+                                  <Label className="text-sm">
+                                    Personal Profile Sync
+                                  </Label>
+                                  <p className="text-sm text-muted-foreground">
+                                    Profile snapshots save your personal setup
+                                    without copying recordings or transcripts.
+                                  </p>
                                 </div>
                                 <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                                  {check.status}
+                                  Settings only
                                 </span>
                               </div>
-                              <p className="pl-6 text-xs text-muted-foreground">{check.message}</p>
+                              <div className="grid gap-2 md:grid-cols-2">
+                                <div className="rounded border bg-background p-3">
+                                  <p className="text-xs font-medium text-muted-foreground">
+                                    Latest profile snapshot
+                                  </p>
+                                  <p className="mt-1 text-sm">
+                                    {latestProfileSnapshot
+                                      ? new Date(
+                                          latestProfileSnapshot.timestamp,
+                                        ).toLocaleString()
+                                      : "No profile snapshot yet"}
+                                  </p>
+                                  <p className="mt-1 text-xs text-muted-foreground">
+                                    {latestProfileSnapshot
+                                      ? `${latestProfileSnapshot.itemsCount} items · ${latestProfileSnapshot.id}`
+                                      : "Create one before syncing to another device."}
+                                  </p>
+                                </div>
+                                <div className="rounded border bg-background p-3">
+                                  <p className="text-xs font-medium text-muted-foreground">
+                                    Latest full backup
+                                  </p>
+                                  <p className="mt-1 text-sm">
+                                    {latestFullBackup
+                                      ? new Date(
+                                          latestFullBackup.timestamp,
+                                        ).toLocaleString()
+                                      : "No full backup yet"}
+                                  </p>
+                                  <p className="mt-1 text-xs text-muted-foreground">
+                                    {latestFullBackup
+                                      ? `${latestFullBackup.itemsCount} items · ${latestFullBackup.id}`
+                                      : "Use this when you want recovery for recordings and transcripts too."}
+                                  </p>
+                                </div>
+                              </div>
                             </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {backupConfig.cloudProvider !== "i_cloud" && (
-                      <p className="text-xs text-muted-foreground">
-                        For OneDrive, Google Drive, and Proton Drive, run `rclone config` first and create the remote.
-                      </p>
-                    )}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
 
-                    {activeTab === "ai" && (
-            <Card>
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle>AI & Keys</CardTitle>
-                  <AdvancedToggle checked={advancedTabs.ai} onCheckedChange={(c) => setAdvancedTabs(prev => ({ ...prev, ai: c }))} />
-                </div>
-                <CardDescription>Choose the default analysis provider, model, and API credentials</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-5">
-                <div className="space-y-2">
-                  <Label>Default analysis provider</Label>
-                  <select
-                    value={settings.privacy.llmProvider}
-                    onChange={(event) =>
-                      void updateSettings({
-                        ...settings,
-                        privacy: { ...settings.privacy, llmProvider: event.target.value },
-                      })
-                    }
-                    className="w-full p-2 border rounded-md bg-background"
-                  >
-                    <option value="ollama">Ollama (Local)</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="gemini">Google Gemini</option>
-                    <option value="deepseek">DeepSeek</option>
-                    <option value="ollama-cloud">Ollama Cloud</option>
-                  </select>
-                  <p className="text-xs text-muted-foreground">
-                    Used by summarize, Q&A, and action-item extraction.
-                  </p>
-                  {!settings.privacy.remoteProcessingEnabled && settings.privacy.llmProvider !== "ollama" ? (
-                    <p className="text-xs text-amber-600">
-                      Remote provider selected but remote processing is disabled.
-                    </p>
-                  ) : null}
-                </div>
+                            <div className="flex flex-wrap gap-2 mt-4">
+                              <Button
+                                variant="outline"
+                                disabled={backupBusy}
+                                onClick={async () => {
+                                  setBackupBusy(true);
+                                  setBackupStatus(null);
+                                  setError(null);
+                                  try {
+                                    await saveBackupConfig(backupConfig);
+                                    setBackupStatus(
+                                      "Backup configuration saved.",
+                                    );
+                                  } catch (e) {
+                                    setError(
+                                      e instanceof Error
+                                        ? e.message
+                                        : "Failed to save backup config",
+                                    );
+                                  } finally {
+                                    setBackupBusy(false);
+                                  }
+                                }}
+                              >
+                                Save Sync Config
+                              </Button>
+                              <Button
+                                variant="outline"
+                                disabled={backupBusy || !backupConfig.cloudSync}
+                                onClick={async () => {
+                                  setBackupBusy(true);
+                                  setBackupStatus(null);
+                                  setError(null);
+                                  try {
+                                    await saveBackupConfig(backupConfig);
+                                    await verifyBackupCloudConnection();
+                                    setBackupStatus(
+                                      "Cloud connection verified.",
+                                    );
+                                  } catch (e) {
+                                    setError(
+                                      e instanceof Error
+                                        ? e.message
+                                        : "Cloud verification failed",
+                                    );
+                                  } finally {
+                                    setBackupBusy(false);
+                                  }
+                                }}
+                              >
+                                Verify Cloud Connection
+                              </Button>
+                              <Button
+                                variant="outline"
+                                disabled={backupBusy || !backupConfig.cloudSync}
+                                onClick={async () => {
+                                  setBackupBusy(true);
+                                  setBackupStatus(null);
+                                  setError(null);
+                                  try {
+                                    await saveBackupConfig(backupConfig);
+                                    const report = await getBackupSetupReport();
+                                    setBackupSetupReport(report);
+                                    setBackupStatus(
+                                      report.ready
+                                        ? "Cloud setup checks passed."
+                                        : "Cloud setup checks found issues.",
+                                    );
+                                  } catch (e) {
+                                    setError(
+                                      e instanceof Error
+                                        ? e.message
+                                        : "Setup checks failed",
+                                    );
+                                  } finally {
+                                    setBackupBusy(false);
+                                  }
+                                }}
+                              >
+                                Run Setup Checks
+                              </Button>
+                              <Button
+                                variant="secondary"
+                                disabled={backupBusy}
+                                onClick={async () => {
+                                  setBackupBusy(true);
+                                  setBackupStatus(null);
+                                  setError(null);
+                                  try {
+                                    await saveBackupConfig(backupConfig);
+                                    const info =
+                                      await createSettingsBackupDefault();
+                                    setBackupStatus(
+                                      `Profile snapshot created: ${info.id}`,
+                                    );
+                                    await refreshBackups();
+                                  } catch (e) {
+                                    setError(
+                                      e instanceof Error
+                                        ? e.message
+                                        : "Profile snapshot failed",
+                                    );
+                                  } finally {
+                                    setBackupBusy(false);
+                                  }
+                                }}
+                              >
+                                Create Profile Snapshot
+                              </Button>
+                              <Button
+                                variant="outline"
+                                disabled={
+                                  backupBusy ||
+                                  !latestProfileSnapshot ||
+                                  !backupConfig.cloudSync
+                                }
+                                onClick={async () => {
+                                  if (!latestProfileSnapshot) return;
+                                  setBackupBusy(true);
+                                  setBackupStatus(null);
+                                  setError(null);
+                                  try {
+                                    await saveBackupConfig(backupConfig);
+                                    await syncBackupToCloud(
+                                      latestProfileSnapshot.id,
+                                    );
+                                    setBackupStatus(
+                                      `Synced profile snapshot ${latestProfileSnapshot.id} to cloud.`,
+                                    );
+                                  } catch (e) {
+                                    setError(
+                                      e instanceof Error
+                                        ? e.message
+                                        : "Profile sync failed",
+                                    );
+                                  } finally {
+                                    setBackupBusy(false);
+                                  }
+                                }}
+                              >
+                                Sync Latest Profile Snapshot
+                              </Button>
+                              <Button
+                                variant="outline"
+                                disabled={
+                                  backupBusy ||
+                                  !latestProfileSnapshot ||
+                                  hasUnsavedChanges
+                                }
+                                onClick={async () => {
+                                  if (!latestProfileSnapshot) return;
+                                  setBackupBusy(true);
+                                  setBackupStatus(null);
+                                  setError(null);
+                                  try {
+                                    await restoreBackupDefault(
+                                      latestProfileSnapshot.id,
+                                    );
+                                    const restored = await getSettings();
+                                    setDraftSettings(restored);
+                                    setPersistedSettings(restored);
+                                    setBackupStatus(
+                                      `Restored profile snapshot ${latestProfileSnapshot.id}.`,
+                                    );
+                                  } catch (e) {
+                                    setError(
+                                      e instanceof Error
+                                        ? e.message
+                                        : "Profile restore failed",
+                                    );
+                                  } finally {
+                                    setBackupBusy(false);
+                                  }
+                                }}
+                              >
+                                Restore Latest Profile Snapshot
+                              </Button>
+                              <Button
+                                disabled={backupBusy}
+                                onClick={async () => {
+                                  setBackupBusy(true);
+                                  setBackupStatus(null);
+                                  setError(null);
+                                  try {
+                                    await saveBackupConfig(backupConfig);
+                                    const info = await createBackupDefault();
+                                    setBackupStatus(
+                                      `Backup created: ${info.id}`,
+                                    );
+                                    await refreshBackups();
+                                  } catch (e) {
+                                    setError(
+                                      e instanceof Error
+                                        ? e.message
+                                        : "Backup failed",
+                                    );
+                                  } finally {
+                                    setBackupBusy(false);
+                                  }
+                                }}
+                              >
+                                Create Full Backup
+                              </Button>
+                              <Button
+                                variant="outline"
+                                disabled={
+                                  backupBusy ||
+                                  backups.length === 0 ||
+                                  !backupConfig.cloudSync
+                                }
+                                onClick={async () => {
+                                  const latest = backups[0];
+                                  if (!latest) return;
+                                  setBackupBusy(true);
+                                  setBackupStatus(null);
+                                  setError(null);
+                                  try {
+                                    await saveBackupConfig(backupConfig);
+                                    await syncBackupToCloud(latest.id);
+                                    setBackupStatus(
+                                      `Synced backup ${latest.id} to cloud.`,
+                                    );
+                                  } catch (e) {
+                                    setError(
+                                      e instanceof Error
+                                        ? e.message
+                                        : "Cloud sync failed",
+                                    );
+                                  } finally {
+                                    setBackupBusy(false);
+                                  }
+                                }}
+                              >
+                                Sync Latest Full Backup
+                              </Button>
+                            </div>
 
-                <div className="space-y-2">
-                  <Label className="flex items-center gap-2">
-                    Analysis model
-                    {modelsLoading && <Loader2 className="h-3 w-3 animate-spin" />}
-                  </Label>
-
-                  {settings.privacy.llmProvider === "ollama" ? (
-                    ollamaModels.length > 0 ? (
-                      <select
-                        value={settings.privacy.llmModelId ?? ollamaModels[0] ?? ""}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            privacy: { ...settings.privacy, llmModelId: e.target.value || null },
-                          })
-                        }
-                        className="w-full p-2 border rounded-md bg-background"
-                      >
-                        {ollamaModels.map((model) => (
-                          <option key={model} value={model}>{model}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <div className="p-3 rounded border bg-muted/30 text-sm">
-                        <p className="text-muted-foreground">No Ollama models found. Run <code className="bg-muted px-1 rounded">ollama pull llama3.2</code> to download a model.</p>
-                      </div>
-                    )
-                  ) : settings.privacy.llmProvider === "openai" ? (
-                    openaiModels.length > 0 ? (
-                      <select
-                        value={settings.privacy.llmModelId ?? openaiModels[0]}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            privacy: { ...settings.privacy, llmModelId: e.target.value || null },
-                          })
-                        }
-                        className="w-full p-2 border rounded-md bg-background"
-                      >
-                        {openaiModels
-                          .filter(m => m.includes("gpt") || m.includes("o1") || m.includes("o3") || m.includes("o4"))
-                          .sort()
-                          .map((model) => (
-                            <option key={model} value={model}>{model}</option>
-                          ))}
-                      </select>
-                    ) : (
-                      <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                        <p className="text-amber-700 dark:text-amber-400">Enter your OpenAI API key in advanced settings to fetch models.</p>
-                      </div>
-                    )
-                  ) : settings.privacy.llmProvider === "anthropic" ? (
-                    anthropicModels.length > 0 ? (
-                      <select
-                        value={settings.privacy.llmModelId ?? anthropicModels[0]}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            privacy: { ...settings.privacy, llmModelId: e.target.value || null },
-                          })
-                        }
-                        className="w-full p-2 border rounded-md bg-background"
-                      >
-                        {anthropicModels.map((model) => (
-                          <option key={model} value={model}>{model}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                        <p className="text-amber-700 dark:text-amber-400">Enter your Anthropic API key in advanced settings to fetch models.</p>
-                      </div>
-                    )
-                  ) : settings.privacy.llmProvider === "gemini" ? (
-                    geminiModels.length > 0 ? (
-                      <select
-                        value={settings.privacy.llmModelId ?? geminiModels[0].replace("models/", "")}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            privacy: { ...settings.privacy, llmModelId: e.target.value || null },
-                          })
-                        }
-                        className="w-full p-2 border rounded-md bg-background"
-                      >
-                        {geminiModels
-                          .map(m => m.replace("models/", ""))
-                          .filter(m => m.includes("gemini"))
-                          .map((model) => (
-                            <option key={model} value={model}>{model}</option>
-                          ))}
-                      </select>
-                    ) : (
-                      <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                        <p className="text-amber-700 dark:text-amber-400">Enter your Google AI API key in advanced settings to fetch models.</p>
-                      </div>
-                    )
-                  ) : settings.privacy.llmProvider === "deepseek" ? (
-                    deepseekModels.length > 0 ? (
-                      <select
-                        value={settings.privacy.llmModelId ?? deepseekModels[0]}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            privacy: { ...settings.privacy, llmModelId: e.target.value || null },
-                          })
-                        }
-                        className="w-full p-2 border rounded-md bg-background"
-                      >
-                        {deepseekModels.map((model) => (
-                          <option key={model} value={model}>{model}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                        <p className="text-amber-700 dark:text-amber-400">Enter your DeepSeek API key in advanced settings to fetch models.</p>
-                      </div>
-                    )
-                  ) : settings.privacy.llmProvider === "ollama-cloud" ? (
-                    ollamaCloudModels.length > 0 ? (
-                      <select
-                        value={settings.privacy.llmModelId ?? ollamaCloudModels[0]}
-                        onChange={(e: any) =>
-                          void updateSettings({
-                            ...settings,
-                            privacy: { ...settings.privacy, llmModelId: e.target.value || null },
-                          })
-                        }
-                        className="w-full p-2 border rounded-md bg-background"
-                      >
-                        {ollamaCloudModels.map((model) => (
-                          <option key={model} value={model}>{model}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                        <p className="text-amber-700 dark:text-amber-400">Enter your Ollama Cloud API key in advanced settings to fetch models.</p>
-                      </div>
-                    )
-                  ) : (
-                    <div className="p-3 rounded border bg-muted/30 text-sm">
-                      <p className="text-muted-foreground">Select a provider to see available models.</p>
-                    </div>
+                            {backupStatus && (
+                              <p className="text-sm text-muted-foreground">
+                                {backupStatus}
+                              </p>
+                            )}
+                            {hasUnsavedChanges ? (
+                              <p className="text-xs text-amber-600">
+                                Save or discard local settings edits before
+                                restoring a profile snapshot.
+                              </p>
+                            ) : null}
+                            {backupSetupReport && (
+                              <div className="rounded-lg border p-3 space-y-2 bg-muted/10">
+                                <div className="flex items-center justify-between">
+                                  <Label className="text-sm">
+                                    Cloud setup readiness
+                                  </Label>
+                                  <span
+                                    className={`text-xs font-medium ${
+                                      backupSetupReport.ready
+                                        ? "text-emerald-600"
+                                        : "text-amber-600"
+                                    }`}
+                                  >
+                                    {backupSetupReport.ready
+                                      ? "Ready"
+                                      : "Needs action"}
+                                  </span>
+                                </div>
+                                <div className="space-y-2">
+                                  {backupSetupReport.checks.map((check) => (
+                                    <div
+                                      key={check.id}
+                                      className="rounded border p-2 bg-background"
+                                    >
+                                      <div className="flex items-center justify-between gap-2">
+                                        <div className="flex items-center gap-2">
+                                          {check.status === "pass" ? (
+                                            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                                          ) : (
+                                            <XCircle className="h-4 w-4 text-amber-600" />
+                                          )}
+                                          <p className="text-sm font-medium">
+                                            {check.label}
+                                          </p>
+                                        </div>
+                                        <span className="text-xs uppercase tracking-wide text-muted-foreground">
+                                          {check.status}
+                                        </span>
+                                      </div>
+                                      <p className="pl-6 text-xs text-muted-foreground">
+                                        {check.message}
+                                      </p>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            {backupConfig.cloudProvider !== "i_cloud" && (
+                              <p className="text-xs text-muted-foreground">
+                                For OneDrive, Google Drive, and Proton Drive,
+                                run `rclone config` first and create the remote.
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
                   )}
-                  <p className="text-xs text-muted-foreground">
-                    {settings.privacy.llmProvider === "ollama" && ollamaModels.length === 0
-                      ? "Download models via Ollama CLI or pull button below."
-                      : settings.privacy.llmProvider !== "ollama" &&
-                        ["openai", "anthropic", "gemini", "deepseek", "ollama-cloud"].includes(settings.privacy.llmProvider) &&
-                        !hasApiKey && true
-                        ? "Add your API key below to fetch available models."
-                        : "Models fetched from provider API."}
-                  </p>
-                </div>
 
-                <div className="flex items-center justify-between">
-                  <div className="space-y-0.5">
-                    <Label>Remote processing policy</Label>
-                    <p className="text-xs text-muted-foreground">
-                      Controls whether transcript text can be sent to cloud LLMs.
-                    </p>
-                  </div>
-                  <Switch
-                    checked={settings.privacy.remoteProcessingEnabled}
-                    onCheckedChange={(checked) =>
-                      void updateSettings({
-                        ...settings,
-                        privacy: { ...settings.privacy, remoteProcessingEnabled: checked },
-                      })
-                    }
-                  />
-                </div>
+                  {activeTab === "ai" && (
+                    <Card>
+                      <CardHeader>
+                        <div className="flex items-center justify-between">
+                          <CardTitle>AI & Keys</CardTitle>
+                          <AdvancedToggle
+                            checked={advancedTabs.ai}
+                            onCheckedChange={(c) =>
+                              setAdvancedTabs((prev) => ({ ...prev, ai: c }))
+                            }
+                          />
+                        </div>
+                        <CardDescription>
+                          Choose the default analysis provider, model, and API
+                          credentials
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-5">
+                        <div className="space-y-2">
+                          <Label>Default analysis provider</Label>
+                          <select
+                            value={settings.privacy.llmProvider}
+                            onChange={(event) =>
+                              void updateSettings({
+                                ...settings,
+                                privacy: {
+                                  ...settings.privacy,
+                                  llmProvider: event.target.value,
+                                },
+                              })
+                            }
+                            className="w-full p-2 border rounded-md bg-background"
+                          >
+                            <option value="ollama">Ollama (Local)</option>
+                            <option value="openai">OpenAI</option>
+                            <option value="anthropic">Anthropic</option>
+                            <option value="gemini">Google Gemini</option>
+                            <option value="deepseek">DeepSeek</option>
+                            <option value="ollama-cloud">Ollama Cloud</option>
+                          </select>
+                          <p className="text-xs text-muted-foreground">
+                            Used by summarize, Q&A, and action-item extraction.
+                          </p>
+                          {!settings.privacy.remoteProcessingEnabled &&
+                          settings.privacy.llmProvider !== "ollama" ? (
+                            <p className="text-xs text-amber-600">
+                              Remote provider selected but remote processing is
+                              disabled.
+                            </p>
+                          ) : null}
+                        </div>
 
-                {settings.privacy.llmProvider === "ollama" && (
-                  <div className="rounded-lg border p-3 space-y-2">
-                    <p className="text-sm font-medium">Local Ollama</p>
-                    <p className="text-xs text-muted-foreground">
-                      Status:{" "}
-                      {ollamaAvailable === null
-                        ? "Checking..."
-                        : ollamaAvailable
-                          ? "Available"
-                          : "Not reachable"}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      Models: {ollamaModels.length > 0 ? ollamaModels.join(", ") : "No local models detected"}
-                    </p>
-                  </div>
-                )}
+                        <div className="space-y-2">
+                          <Label className="flex items-center gap-2">
+                            Analysis model
+                            {modelsLoading && (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            )}
+                          </Label>
 
-                {advancedTabs.ai && (
-                  <div className="pt-4 border-t space-y-5">
-                    <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">Power user</h3>
-                    <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
-                      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                        <div>
-                          <p className="text-sm font-medium text-foreground">Transcription behavior is managed in one place</p>
-                          <p className="text-sm text-muted-foreground">
-                            AI settings now focus on analysis providers, credentials, and memory search. Hotkey behavior, Smart Format, and capture defaults stay in Transcription.
+                          {settings.privacy.llmProvider === "ollama" ? (
+                            ollamaModels.length > 0 ? (
+                              <select
+                                value={
+                                  settings.privacy.llmModelId ??
+                                  ollamaModels[0] ??
+                                  ""
+                                }
+                                onChange={(e: any) =>
+                                  void updateSettings({
+                                    ...settings,
+                                    privacy: {
+                                      ...settings.privacy,
+                                      llmModelId: e.target.value || null,
+                                    },
+                                  })
+                                }
+                                className="w-full p-2 border rounded-md bg-background"
+                              >
+                                {ollamaModels.map((model) => (
+                                  <option key={model} value={model}>
+                                    {model}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <div className="p-3 rounded border bg-muted/30 text-sm">
+                                <p className="text-muted-foreground">
+                                  No Ollama models found. Run{" "}
+                                  <code className="bg-muted px-1 rounded">
+                                    ollama pull llama3.2
+                                  </code>{" "}
+                                  to download a model.
+                                </p>
+                              </div>
+                            )
+                          ) : settings.privacy.llmProvider === "openai" ? (
+                            openaiModels.length > 0 ? (
+                              <select
+                                value={
+                                  settings.privacy.llmModelId ?? openaiModels[0]
+                                }
+                                onChange={(e: any) =>
+                                  void updateSettings({
+                                    ...settings,
+                                    privacy: {
+                                      ...settings.privacy,
+                                      llmModelId: e.target.value || null,
+                                    },
+                                  })
+                                }
+                                className="w-full p-2 border rounded-md bg-background"
+                              >
+                                {openaiModels
+                                  .filter(
+                                    (m) =>
+                                      m.includes("gpt") ||
+                                      m.includes("o1") ||
+                                      m.includes("o3") ||
+                                      m.includes("o4"),
+                                  )
+                                  .sort()
+                                  .map((model) => (
+                                    <option key={model} value={model}>
+                                      {model}
+                                    </option>
+                                  ))}
+                              </select>
+                            ) : (
+                              <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
+                                <p className="text-amber-700 dark:text-amber-400">
+                                  Enter your OpenAI API key in advanced settings
+                                  to fetch models.
+                                </p>
+                              </div>
+                            )
+                          ) : settings.privacy.llmProvider === "anthropic" ? (
+                            anthropicModels.length > 0 ? (
+                              <select
+                                value={
+                                  settings.privacy.llmModelId ??
+                                  anthropicModels[0]
+                                }
+                                onChange={(e: any) =>
+                                  void updateSettings({
+                                    ...settings,
+                                    privacy: {
+                                      ...settings.privacy,
+                                      llmModelId: e.target.value || null,
+                                    },
+                                  })
+                                }
+                                className="w-full p-2 border rounded-md bg-background"
+                              >
+                                {anthropicModels.map((model) => (
+                                  <option key={model} value={model}>
+                                    {model}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
+                                <p className="text-amber-700 dark:text-amber-400">
+                                  Enter your Anthropic API key in advanced
+                                  settings to fetch models.
+                                </p>
+                              </div>
+                            )
+                          ) : settings.privacy.llmProvider === "gemini" ? (
+                            geminiModels.length > 0 ? (
+                              <select
+                                value={
+                                  settings.privacy.llmModelId ??
+                                  geminiModels[0].replace("models/", "")
+                                }
+                                onChange={(e: any) =>
+                                  void updateSettings({
+                                    ...settings,
+                                    privacy: {
+                                      ...settings.privacy,
+                                      llmModelId: e.target.value || null,
+                                    },
+                                  })
+                                }
+                                className="w-full p-2 border rounded-md bg-background"
+                              >
+                                {geminiModels
+                                  .map((m) => m.replace("models/", ""))
+                                  .filter((m) => m.includes("gemini"))
+                                  .map((model) => (
+                                    <option key={model} value={model}>
+                                      {model}
+                                    </option>
+                                  ))}
+                              </select>
+                            ) : (
+                              <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
+                                <p className="text-amber-700 dark:text-amber-400">
+                                  Enter your Google AI API key in advanced
+                                  settings to fetch models.
+                                </p>
+                              </div>
+                            )
+                          ) : settings.privacy.llmProvider === "deepseek" ? (
+                            deepseekModels.length > 0 ? (
+                              <select
+                                value={
+                                  settings.privacy.llmModelId ??
+                                  deepseekModels[0]
+                                }
+                                onChange={(e: any) =>
+                                  void updateSettings({
+                                    ...settings,
+                                    privacy: {
+                                      ...settings.privacy,
+                                      llmModelId: e.target.value || null,
+                                    },
+                                  })
+                                }
+                                className="w-full p-2 border rounded-md bg-background"
+                              >
+                                {deepseekModels.map((model) => (
+                                  <option key={model} value={model}>
+                                    {model}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
+                                <p className="text-amber-700 dark:text-amber-400">
+                                  Enter your DeepSeek API key in advanced
+                                  settings to fetch models.
+                                </p>
+                              </div>
+                            )
+                          ) : settings.privacy.llmProvider ===
+                            "ollama-cloud" ? (
+                            ollamaCloudModels.length > 0 ? (
+                              <select
+                                value={
+                                  settings.privacy.llmModelId ??
+                                  ollamaCloudModels[0]
+                                }
+                                onChange={(e: any) =>
+                                  void updateSettings({
+                                    ...settings,
+                                    privacy: {
+                                      ...settings.privacy,
+                                      llmModelId: e.target.value || null,
+                                    },
+                                  })
+                                }
+                                className="w-full p-2 border rounded-md bg-background"
+                              >
+                                {ollamaCloudModels.map((model) => (
+                                  <option key={model} value={model}>
+                                    {model}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
+                                <p className="text-amber-700 dark:text-amber-400">
+                                  Enter your Ollama Cloud API key in advanced
+                                  settings to fetch models.
+                                </p>
+                              </div>
+                            )
+                          ) : (
+                            <div className="p-3 rounded border bg-muted/30 text-sm">
+                              <p className="text-muted-foreground">
+                                Select a provider to see available models.
+                              </p>
+                            </div>
+                          )}
+                          <p className="text-xs text-muted-foreground">
+                            {settings.privacy.llmProvider === "ollama" &&
+                            ollamaModels.length === 0
+                              ? "Download models via Ollama CLI or pull button below."
+                              : settings.privacy.llmProvider !== "ollama" &&
+                                  [
+                                    "openai",
+                                    "anthropic",
+                                    "gemini",
+                                    "deepseek",
+                                    "ollama-cloud",
+                                  ].includes(settings.privacy.llmProvider) &&
+                                  !hasApiKey &&
+                                  true
+                                ? "Add your API key below to fetch available models."
+                                : "Models fetched from provider API."}
                           </p>
                         </div>
-                        <Button variant="secondary" onClick={() => setActiveTab("asr")}>
-                          Open Transcription
-                        </Button>
-                      </div>
-                    </div>
 
-                    {renderSharedDictationControls({
-                      includeCoreControls: false,
-                      includeKeyManager: true,
-                      includeMemory: true,
-                    })}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
+                        <div className="flex items-center justify-between">
+                          <div className="space-y-0.5">
+                            <Label>Remote processing policy</Label>
+                            <p className="text-xs text-muted-foreground">
+                              Controls whether transcript text can be sent to
+                              cloud LLMs.
+                            </p>
+                          </div>
+                          <Switch
+                            checked={settings.privacy.remoteProcessingEnabled}
+                            onCheckedChange={(checked) =>
+                              void updateSettings({
+                                ...settings,
+                                privacy: {
+                                  ...settings.privacy,
+                                  remoteProcessingEnabled: checked,
+                                },
+                              })
+                            }
+                          />
+                        </div>
 
-          {activeTab === "updates" && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <RefreshCw className="h-5 w-5 text-blue-600" />
-                  Updates
-                </CardTitle>
-                <CardDescription>Check for and install app updates</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-6">
-                <UpdateStatusWidget />
-                <BetaChannelToggle />
-              </CardContent>
-            </Card>
-          )}
-
-          {activeTab === "license" && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Shield className="h-5 w-5 text-emerald-600" />
-                  License
-                </CardTitle>
-                <CardDescription>Lemon Squeezy license · 1 user · up to {licenseInfo?.tier === "friends_club" ? 10 : 5} computers</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {licenseInfo === null ? (
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    Checking license…
-                  </div>
-                ) : licenseInfo.valid ? (
-                  <>
-                    <div className={`rounded-lg border p-4 space-y-3 ${licenseInfo.tier === "friends_club"
-                      ? "border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800"
-                      : "border-emerald-200 bg-emerald-50 dark:bg-emerald-950/20 dark:border-emerald-800"
-                      }`}>
-                      <div className="flex items-center gap-2">
-                        {licenseInfo.tier === "friends_club" ? (
-                          <Star className="h-5 w-5 text-amber-500" />
-                        ) : (
-                          <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                        {settings.privacy.llmProvider === "ollama" && (
+                          <div className="rounded-lg border p-3 space-y-2">
+                            <p className="text-sm font-medium">Local Ollama</p>
+                            <p className="text-xs text-muted-foreground">
+                              Status:{" "}
+                              {ollamaAvailable === null
+                                ? "Checking..."
+                                : ollamaAvailable
+                                  ? "Available"
+                                  : "Not reachable"}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              Models:{" "}
+                              {ollamaModels.length > 0
+                                ? ollamaModels.join(", ")
+                                : "No local models detected"}
+                            </p>
+                          </div>
                         )}
-                        <span className={`font-semibold ${licenseInfo.tier === "friends_club"
-                          ? "text-amber-700 dark:text-amber-400"
-                          : "text-emerald-700 dark:text-emerald-400"
-                          }`}>
-                          {licenseInfo.tier === "friends_club" ? "Friends Club ⭐" : "Pro"}
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-sm">
-                        <span className="text-muted-foreground">Key</span>
-                        <span className="font-mono text-xs truncate">{licenseInfo.key.slice(0, 8)}···</span>
-                        <span className="text-muted-foreground">Devices</span>
-                        <span>{licenseInfo.activationsUsage} of {licenseInfo.activationsLimit} used</span>
-                        {licenseInfo.lastValidatedAt && (
+
+                        {advancedTabs.ai && (
+                          <div className="pt-4 border-t space-y-5">
+                            <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                              Power user
+                            </h3>
+                            <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
+                              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                                <div>
+                                  <p className="text-sm font-medium text-foreground">
+                                    Transcription behavior is managed in one
+                                    place
+                                  </p>
+                                  <p className="text-sm text-muted-foreground">
+                                    AI settings now focus on analysis providers,
+                                    credentials, and memory search. Hotkey
+                                    behavior, Smart Format, and capture defaults
+                                    stay in Transcription.
+                                  </p>
+                                </div>
+                                <Button
+                                  variant="secondary"
+                                  onClick={() => setActiveTab("asr")}
+                                >
+                                  Open Transcription
+                                </Button>
+                              </div>
+                            </div>
+
+                            {renderSharedDictationControls({
+                              includeCoreControls: false,
+                              includeKeyManager: true,
+                              includeMemory: true,
+                            })}
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {activeTab === "updates" && (
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                          <RefreshCw className="h-5 w-5 text-blue-600" />
+                          Updates
+                        </CardTitle>
+                        <CardDescription>
+                          Check for and install app updates
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-6">
+                        <UpdateStatusWidget />
+                        <BetaChannelToggle />
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {activeTab === "license" && (
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                          <Shield className="h-5 w-5 text-emerald-600" />
+                          License
+                        </CardTitle>
+                        <CardDescription>
+                          Lemon Squeezy license · 1 user · up to{" "}
+                          {licenseInfo?.tier === "friends_club" ? 10 : 5}{" "}
+                          computers
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        {licenseInfo === null ? (
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            Checking license…
+                          </div>
+                        ) : licenseInfo.valid ? (
                           <>
-                            <span className="text-muted-foreground">Last validated</span>
-                            <span>{new Date(licenseInfo.lastValidatedAt).toLocaleDateString()}</span>
+                            <div
+                              className={`rounded-lg border p-4 space-y-3 ${
+                                licenseInfo.tier === "friends_club"
+                                  ? "border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800"
+                                  : "border-emerald-200 bg-emerald-50 dark:bg-emerald-950/20 dark:border-emerald-800"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                {licenseInfo.tier === "friends_club" ? (
+                                  <Star className="h-5 w-5 text-amber-500" />
+                                ) : (
+                                  <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                                )}
+                                <span
+                                  className={`font-semibold ${
+                                    licenseInfo.tier === "friends_club"
+                                      ? "text-amber-700 dark:text-amber-400"
+                                      : "text-emerald-700 dark:text-emerald-400"
+                                  }`}
+                                >
+                                  {licenseInfo.tier === "friends_club"
+                                    ? "Friends Club ⭐"
+                                    : "Pro"}
+                                </span>
+                              </div>
+                              <div className="grid grid-cols-2 gap-2 text-sm">
+                                <span className="text-muted-foreground">
+                                  Key
+                                </span>
+                                <span className="font-mono text-xs truncate">
+                                  {licenseInfo.key.slice(0, 8)}···
+                                </span>
+                                <span className="text-muted-foreground">
+                                  Devices
+                                </span>
+                                <span>
+                                  {licenseInfo.activationsUsage} of{" "}
+                                  {licenseInfo.activationsLimit} used
+                                </span>
+                                {licenseInfo.lastValidatedAt && (
+                                  <>
+                                    <span className="text-muted-foreground">
+                                      Last validated
+                                    </span>
+                                    <span>
+                                      {new Date(
+                                        licenseInfo.lastValidatedAt,
+                                      ).toLocaleDateString()}
+                                    </span>
+                                  </>
+                                )}
+                                <span className="text-muted-foreground">
+                                  Plan
+                                </span>
+                                <span>Lifetime</span>
+                              </div>
+                            </div>
+                            <div className="flex gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  setLicenseInfo(null);
+                                }}
+                              >
+                                Re-check
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="text-destructive hover:bg-destructive/10"
+                                onClick={() => {
+                                  if (
+                                    !window.confirm(
+                                      "Deactivate Nautilus on this computer? You can reactivate later.",
+                                    )
+                                  )
+                                    return;
+                                  void deactivateLicense().then(() => {
+                                    setLicenseInfo(null);
+                                    void validateLicense().then((info) => {
+                                      setLicenseInfo(info);
+                                      onLicenseChange?.(info);
+                                    });
+                                  });
+                                }}
+                              >
+                                Deactivate this device
+                              </Button>
+                            </div>
                           </>
+                        ) : licenseInfo.trialDaysRemaining > 0 ? (
+                          <div className="space-y-4">
+                            <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-2">
+                              <div className="flex items-center gap-2 text-sm font-medium">
+                                <XCircle className="h-4 w-4 text-muted-foreground" />
+                                <span>
+                                  Free trial · {licenseInfo.trialDaysRemaining}{" "}
+                                  days remaining
+                                </span>
+                              </div>
+                              <p className="text-xs text-muted-foreground">
+                                All Pro features are available during your
+                                trial.
+                              </p>
+                            </div>
+                            <div className="space-y-2">
+                              <Label className="text-sm">
+                                Already have a key?
+                              </Label>
+                              <div className="flex gap-2">
+                                <Input
+                                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                                  value={licenseKeyInput}
+                                  onChange={(e: any) => {
+                                    setLicenseError(null);
+                                    setLicenseKeyInput(e.target.value);
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                      void (async () => {
+                                        const key = licenseKeyInput.trim();
+                                        if (!key) return;
+                                        setLicenseActivating(true);
+                                        setLicenseError(null);
+                                        try {
+                                          const info =
+                                            await activateLicense(key);
+                                          setLicenseInfo(info);
+                                          onLicenseChange?.(info);
+                                          setLicenseKeyInput("");
+                                        } catch (err) {
+                                          setLicenseError(
+                                            err instanceof Error
+                                              ? err.message
+                                              : String(err),
+                                          );
+                                        } finally {
+                                          setLicenseActivating(false);
+                                        }
+                                      })();
+                                    }
+                                  }}
+                                  className="font-mono text-sm flex-1"
+                                  spellCheck={false}
+                                  autoComplete="off"
+                                  disabled={licenseActivating}
+                                />
+                                <Button
+                                  size="sm"
+                                  disabled={
+                                    licenseActivating || !licenseKeyInput.trim()
+                                  }
+                                  onClick={() => {
+                                    void (async () => {
+                                      const key = licenseKeyInput.trim();
+                                      if (!key) return;
+                                      setLicenseActivating(true);
+                                      setLicenseError(null);
+                                      try {
+                                        const info = await activateLicense(key);
+                                        setLicenseInfo(info);
+                                        onLicenseChange?.(info);
+                                        setLicenseKeyInput("");
+                                      } catch (err) {
+                                        setLicenseError(
+                                          err instanceof Error
+                                            ? err.message
+                                            : String(err),
+                                        );
+                                      } finally {
+                                        setLicenseActivating(false);
+                                      }
+                                    })();
+                                  }}
+                                >
+                                  {licenseActivating ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    "Activate"
+                                  )}
+                                </Button>
+                              </div>
+                              {licenseError && (
+                                <div className="flex items-start gap-2 text-sm text-destructive">
+                                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                                  <span>{licenseError}</span>
+                                </div>
+                              )}
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="gap-1.5"
+                              onClick={() =>
+                                window.open(
+                                  "https://nautilusbot.lemonsqueezy.com/buy/basic",
+                                  "_blank",
+                                  "noopener,noreferrer",
+                                )
+                              }
+                            >
+                              <ExternalLink className="h-3.5 w-3.5" />
+                              Buy a license — $8 lifetime
+                            </Button>
+                          </div>
+                        ) : (
+                          <div className="space-y-4">
+                            <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800 p-4 space-y-3">
+                              <p className="text-sm text-amber-700 dark:text-amber-400 font-medium">
+                                Trial expired
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                Enter your license key below, or buy one to
+                                unlock updates and Pro features.
+                              </p>
+                            </div>
+                            <div className="space-y-2">
+                              <Label className="text-sm">License key</Label>
+                              <div className="flex gap-2">
+                                <Input
+                                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                                  value={licenseKeyInput}
+                                  onChange={(e: any) => {
+                                    setLicenseError(null);
+                                    setLicenseKeyInput(e.target.value);
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                      void (async () => {
+                                        const key = licenseKeyInput.trim();
+                                        if (!key) return;
+                                        setLicenseActivating(true);
+                                        setLicenseError(null);
+                                        try {
+                                          const info =
+                                            await activateLicense(key);
+                                          setLicenseInfo(info);
+                                          onLicenseChange?.(info);
+                                          setLicenseKeyInput("");
+                                        } catch (err) {
+                                          setLicenseError(
+                                            err instanceof Error
+                                              ? err.message
+                                              : String(err),
+                                          );
+                                        } finally {
+                                          setLicenseActivating(false);
+                                        }
+                                      })();
+                                    }
+                                  }}
+                                  className="font-mono text-sm flex-1"
+                                  spellCheck={false}
+                                  autoComplete="off"
+                                  disabled={licenseActivating}
+                                />
+                                <Button
+                                  size="sm"
+                                  disabled={
+                                    licenseActivating || !licenseKeyInput.trim()
+                                  }
+                                  onClick={() => {
+                                    void (async () => {
+                                      const key = licenseKeyInput.trim();
+                                      if (!key) return;
+                                      setLicenseActivating(true);
+                                      setLicenseError(null);
+                                      try {
+                                        const info = await activateLicense(key);
+                                        setLicenseInfo(info);
+                                        onLicenseChange?.(info);
+                                        setLicenseKeyInput("");
+                                      } catch (err) {
+                                        setLicenseError(
+                                          err instanceof Error
+                                            ? err.message
+                                            : String(err),
+                                        );
+                                      } finally {
+                                        setLicenseActivating(false);
+                                      }
+                                    })();
+                                  }}
+                                >
+                                  {licenseActivating ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    "Activate"
+                                  )}
+                                </Button>
+                              </div>
+                              {licenseError && (
+                                <div className="flex items-start gap-2 text-sm text-destructive">
+                                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                                  <span>{licenseError}</span>
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex gap-2">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() =>
+                                  window.open(
+                                    "https://nautilusbot.lemonsqueezy.com/buy/basic",
+                                    "_blank",
+                                    "noopener,noreferrer",
+                                  )
+                                }
+                              >
+                                <ExternalLink className="mr-1 h-3.5 w-3.5" />
+                                Buy Pro
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="border-amber-300/60 text-amber-700 dark:text-amber-400"
+                                onClick={() =>
+                                  window.open(
+                                    "https://nautilusbot.lemonsqueezy.com/buy/friends-club",
+                                    "_blank",
+                                    "noopener,noreferrer",
+                                  )
+                                }
+                              >
+                                <ExternalLink className="mr-1 h-3.5 w-3.5" />
+                                Friends Club ⭐
+                              </Button>
+                            </div>
+                          </div>
                         )}
-                        <span className="text-muted-foreground">Plan</span>
-                        <span>Lifetime</span>
-                      </div>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => { setLicenseInfo(null); }}
-                      >
-                        Re-check
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="text-destructive hover:bg-destructive/10"
-                        onClick={() => {
-                          if (!window.confirm("Deactivate Nautilus on this computer? You can reactivate later.")) return;
-                          void deactivateLicense().then(() => { setLicenseInfo(null); void validateLicense().then((info) => { setLicenseInfo(info); onLicenseChange?.(info); }); });
-                        }}
-                      >
-                        Deactivate this device
-                      </Button>
-                    </div>
-                  </>
-                ) : licenseInfo.trialDaysRemaining > 0 ? (
-                  <div className="space-y-4">
-                    <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-2">
-                      <div className="flex items-center gap-2 text-sm font-medium">
-                        <XCircle className="h-4 w-4 text-muted-foreground" />
-                        <span>Free trial · {licenseInfo.trialDaysRemaining} days remaining</span>
-                      </div>
-                      <p className="text-xs text-muted-foreground">All Pro features are available during your trial.</p>
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-sm">Already have a key?</Label>
-                      <div className="flex gap-2">
-                        <Input
-                          placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                          value={licenseKeyInput}
-                          onChange={(e: any) => { setLicenseError(null); setLicenseKeyInput(e.target.value); }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              void (async () => {
-                                const key = licenseKeyInput.trim();
-                                if (!key) return;
-                                setLicenseActivating(true);
-                                setLicenseError(null);
-                                try {
-                                  const info = await activateLicense(key);
-                                  setLicenseInfo(info);
-                                  onLicenseChange?.(info);
-                                  setLicenseKeyInput("");
-                                } catch (err) {
-                                  setLicenseError(err instanceof Error ? err.message : String(err));
-                                } finally {
-                                  setLicenseActivating(false);
-                                }
-                              })();
-                            }
-                          }}
-                          className="font-mono text-sm flex-1"
-                          spellCheck={false}
-                          autoComplete="off"
-                          disabled={licenseActivating}
-                        />
-                        <Button
-                          size="sm"
-                          disabled={licenseActivating || !licenseKeyInput.trim()}
-                          onClick={() => {
-                            void (async () => {
-                              const key = licenseKeyInput.trim();
-                              if (!key) return;
-                              setLicenseActivating(true);
-                              setLicenseError(null);
-                              try {
-                                const info = await activateLicense(key);
-                                setLicenseInfo(info);
-                                onLicenseChange?.(info);
-                                setLicenseKeyInput("");
-                              } catch (err) {
-                                setLicenseError(err instanceof Error ? err.message : String(err));
-                              } finally {
-                                setLicenseActivating(false);
-                              }
-                            })();
-                          }}
-                        >
-                          {licenseActivating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Activate"}
-                        </Button>
-                      </div>
-                      {licenseError && (
-                        <div className="flex items-start gap-2 text-sm text-destructive">
-                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                          <span>{licenseError}</span>
-                        </div>
-                      )}
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="gap-1.5"
-                      onClick={() => window.open("https://nautilusbot.lemonsqueezy.com/buy/basic", "_blank", "noopener,noreferrer")}
-                    >
-                      <ExternalLink className="h-3.5 w-3.5" />
-                      Buy a license — $8 lifetime
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800 p-4 space-y-3">
-                      <p className="text-sm text-amber-700 dark:text-amber-400 font-medium">Trial expired</p>
-                      <p className="text-xs text-muted-foreground">Enter your license key below, or buy one to unlock updates and Pro features.</p>
-                    </div>
-                    <div className="space-y-2">
-                      <Label className="text-sm">License key</Label>
-                      <div className="flex gap-2">
-                        <Input
-                          placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                          value={licenseKeyInput}
-                          onChange={(e: any) => { setLicenseError(null); setLicenseKeyInput(e.target.value); }}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              void (async () => {
-                                const key = licenseKeyInput.trim();
-                                if (!key) return;
-                                setLicenseActivating(true);
-                                setLicenseError(null);
-                                try {
-                                  const info = await activateLicense(key);
-                                  setLicenseInfo(info);
-                                  onLicenseChange?.(info);
-                                  setLicenseKeyInput("");
-                                } catch (err) {
-                                  setLicenseError(err instanceof Error ? err.message : String(err));
-                                } finally {
-                                  setLicenseActivating(false);
-                                }
-                              })();
-                            }
-                          }}
-                          className="font-mono text-sm flex-1"
-                          spellCheck={false}
-                          autoComplete="off"
-                          disabled={licenseActivating}
-                        />
-                        <Button
-                          size="sm"
-                          disabled={licenseActivating || !licenseKeyInput.trim()}
-                          onClick={() => {
-                            void (async () => {
-                              const key = licenseKeyInput.trim();
-                              if (!key) return;
-                              setLicenseActivating(true);
-                              setLicenseError(null);
-                              try {
-                                const info = await activateLicense(key);
-                                setLicenseInfo(info);
-                                onLicenseChange?.(info);
-                                setLicenseKeyInput("");
-                              } catch (err) {
-                                setLicenseError(err instanceof Error ? err.message : String(err));
-                              } finally {
-                                setLicenseActivating(false);
-                              }
-                            })();
-                          }}
-                        >
-                          {licenseActivating ? <Loader2 className="h-4 w-4 animate-spin" /> : "Activate"}
-                        </Button>
-                      </div>
-                      {licenseError && (
-                        <div className="flex items-start gap-2 text-sm text-destructive">
-                          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                          <span>{licenseError}</span>
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => window.open("https://nautilusbot.lemonsqueezy.com/buy/basic", "_blank", "noopener,noreferrer")}
-                      >
-                        <ExternalLink className="mr-1 h-3.5 w-3.5" />
-                        Buy Pro
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="border-amber-300/60 text-amber-700 dark:text-amber-400"
-                        onClick={() => window.open("https://nautilusbot.lemonsqueezy.com/buy/friends-club", "_blank", "noopener,noreferrer")}
-                      >
-                        <ExternalLink className="mr-1 h-3.5 w-3.5" />
-                        Friends Club ⭐
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
+                      </CardContent>
+                    </Card>
+                  )}
 
-          {isSaving && (
-            <div className="text-sm text-muted-foreground">Saving settings...</div>
-          )}
-          {!isSaving && hasUnsavedChanges && (
-            <div className="text-sm text-muted-foreground">Changes queued for save...</div>
-          )}
-              </div>
-            </section>
+                  {isSaving && (
+                    <div className="text-sm text-muted-foreground">
+                      Saving settings...
+                    </div>
+                  )}
+                  {!isSaving && hasUnsavedChanges && (
+                    <div className="text-sm text-muted-foreground">
+                      Changes queued for save...
+                    </div>
+                  )}
+                </div>
+              </section>
+            </div>
           </div>
         </div>
       </div>
