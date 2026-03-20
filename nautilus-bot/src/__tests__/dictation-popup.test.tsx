@@ -342,9 +342,9 @@ describe("DictationPopup", () => {
       });
     });
 
-    expect(await screen.findByText("Delivering result")).toBeInTheDocument();
+    expect(await screen.findByText("Inserting")).toBeInTheDocument();
     expect(screen.getByText("Delivering the rewrite to Slack now.")).toBeInTheDocument();
-    expect(screen.getByText("Ready to deliver")).toBeInTheDocument();
+    expect(screen.getByText("Latest text")).toBeInTheDocument();
   });
 
   it("resets the timer cleanly when a new session starts after idle", async () => {
@@ -440,7 +440,7 @@ describe("DictationPopup", () => {
       render(<DictationPopup />);
     });
 
-    expect(await screen.findByText("Mic primed")).toBeInTheDocument();
+    expect(await screen.findByText("Ready")).toBeInTheDocument();
     expect(screen.getByText("--:--")).toBeInTheDocument();
   });
 
@@ -548,7 +548,7 @@ describe("DictationPopup", () => {
       });
     });
 
-    expect(await screen.findByText("Dictation failed")).toBeInTheDocument();
+    expect(await screen.findByText("Problem")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start again" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open dictation" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open settings" })).toBeInTheDocument();

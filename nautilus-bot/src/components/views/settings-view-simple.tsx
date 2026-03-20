@@ -2093,30 +2093,27 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top_left,rgba(245,158,11,0.09),transparent_22%),radial-gradient(circle_at_bottom_right,rgba(59,130,246,0.08),transparent_26%),linear-gradient(180deg,rgba(15,23,42,0.04),transparent_34%)]">
+    <div className="flex h-full min-h-0 flex-col bg-background">
       <div className="border-b border-border/60 bg-background/85 backdrop-blur">
         <div className="mx-auto flex max-w-[1680px] flex-col gap-4 px-4 py-5 sm:px-6">
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
-              <p className="text-[11px] uppercase tracking-[0.28em] text-amber-600 dark:text-amber-300/80">
-                Nautilus workspace
-              </p>
-              <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">Settings</h1>
+              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Settings</h1>
               <p className="mt-1 text-sm text-muted-foreground sm:text-base">
                 Tune transcription, AI, privacy, storage, and app behavior
               </p>
             </div>
             <div className="flex flex-wrap gap-2 text-xs">
-              <div className="rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-muted-foreground shadow-sm">
+              <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
                 Save state <span className="ml-1 font-medium text-foreground">{saveStateLabel}</span>
               </div>
-              <div className="rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-muted-foreground shadow-sm">
+              <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
                 AI policy{" "}
                 <span className="ml-1 font-medium text-foreground">
                   {settings.privacy.remoteProcessingEnabled ? "Remote allowed" : "Local-first"}
                 </span>
               </div>
-              <div className="rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-muted-foreground shadow-sm">
+              <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
                 Primary mic{" "}
                 <span className="ml-1 font-medium text-foreground">
                   {settings.audio.preferredInputDevice?.deviceName ?? "System default"}
@@ -2129,11 +2126,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
       <div className="flex-1 overflow-auto">
         <div className="mx-auto grid max-w-[1680px] gap-4 p-4 sm:p-6 lg:grid-cols-[292px_minmax(0,1fr)] xl:gap-6">
-          <aside className="order-first h-fit overflow-hidden rounded-[28px] border border-slate-800/70 bg-[linear-gradient(180deg,rgba(2,6,23,0.98),rgba(15,23,42,0.95))] text-slate-50 shadow-[0_28px_80px_rgba(2,6,23,0.18)] lg:sticky lg:top-6">
-            <div className="border-b border-white/10 px-5 py-5">
-              <p className="text-[11px] uppercase tracking-[0.28em] text-amber-300/80">Settings</p>
-              <h2 className="mt-3 text-2xl font-semibold tracking-tight text-white">Overview</h2>
-              <p className="mt-2 text-sm leading-6 text-slate-300/80">
+          <aside className="order-first h-fit overflow-hidden rounded-[24px] border border-border bg-card text-card-foreground shadow-sm lg:sticky lg:top-6">
+            <div className="border-b border-border px-5 py-5">
+              <h2 className="text-xl font-semibold tracking-tight">Overview</h2>
+              <p className="mt-2 text-sm leading-6 text-muted-foreground">
                 Manage capture, privacy, AI, storage, and device status.
               </p>
             </div>
@@ -2148,19 +2144,19 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   <p className="text-current/70">Speakers</p>
                   <p className="mt-1 font-medium">{diarizationAvailable ? "Installed" : "Optional"}</p>
                 </div>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                  <p className="text-slate-400">Routing</p>
-                  <p className="mt-1 font-medium text-white">
+                <div className="rounded-2xl border border-border bg-muted/30 p-3">
+                  <p className="text-muted-foreground">Routing</p>
+                  <p className="mt-1 font-medium text-foreground">
                     {settings.transcription.useSharedAsrSelection ? "Shared" : "Split"}
                   </p>
                 </div>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                  <p className="text-slate-400">Sync</p>
-                  <p className="mt-1 font-medium text-white">{saveStateLabel}</p>
+                <div className="rounded-2xl border border-border bg-muted/30 p-3">
+                  <p className="text-muted-foreground">Sync</p>
+                  <p className="mt-1 font-medium text-foreground">{saveStateLabel}</p>
                 </div>
               </div>
 
-              <div className="rounded-[24px] border border-white/10 bg-white/[0.03] p-2">
+              <div className="rounded-[20px] border border-border bg-muted/20 p-2">
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-1">
                   {SETTINGS_TABS.map((tab) => (
                     <button
@@ -2168,11 +2164,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       onClick={() => setActiveTab(tab.id)}
                       className={`group flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-all ${
                         activeTab === tab.id
-                          ? "border-amber-300/45 bg-[linear-gradient(135deg,rgba(245,158,11,0.18),rgba(120,53,15,0.08))] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
-                          : "border-transparent bg-transparent text-slate-300 hover:border-white/10 hover:bg-white/[0.04] hover:text-white"
+                          ? "border-border bg-background text-foreground"
+                          : "border-transparent bg-transparent text-muted-foreground hover:border-border hover:bg-background/70 hover:text-foreground"
                       }`}
                     >
-                      <div className={`mt-0.5 rounded-xl p-2 ${activeTab === tab.id ? "bg-amber-300/15 text-amber-100" : "bg-white/5 text-slate-400 group-hover:text-slate-200"}`}>
+                      <div className={`mt-0.5 rounded-xl p-2 ${activeTab === tab.id ? "bg-muted text-foreground" : "bg-muted/40 text-muted-foreground group-hover:text-foreground"}`}>
                         <tab.icon className="h-4 w-4" />
                       </div>
                       <div className="min-w-0">
@@ -2184,8 +2180,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-xs text-slate-300/80">
-                <p className="font-medium text-slate-100">Current focus</p>
+              <div className="rounded-2xl border border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
+                <p className="font-medium text-foreground">Current section</p>
                 <p className="mt-1 leading-5">{activeTabConfig.summary}</p>
               </div>
             </div>
@@ -2199,28 +2195,28 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               </div>
             )}
 
-            <section className="overflow-hidden rounded-[30px] border border-slate-800/70 bg-[linear-gradient(180deg,rgba(248,250,252,0.96),rgba(241,245,249,0.94))] shadow-[0_28px_90px_rgba(15,23,42,0.10)] dark:bg-[linear-gradient(180deg,rgba(2,6,23,0.96),rgba(15,23,42,0.93))]">
+            <section className="overflow-hidden rounded-[24px] border border-border bg-card shadow-sm">
               <div className="border-b border-border/60 px-4 py-5 sm:px-6 sm:py-6">
                 <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
                   <div className="max-w-3xl">
-                    <p className="text-[11px] uppercase tracking-[0.26em] text-amber-600 dark:text-amber-300/80">
+                    <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
                       {activeTabConfig.eyebrow}
                     </p>
-                    <h2 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950 dark:text-slate-50 sm:text-4xl">
+                    <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
                       {activeTabConfig.title}
                     </h2>
-                    <p className="mt-3 text-sm leading-6 text-slate-600 dark:text-slate-300 sm:text-base">
+                    <p className="mt-3 text-sm leading-6 text-muted-foreground sm:text-base">
                       {activeTabConfig.summary}
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2 text-xs">
-                    <div className="rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-muted-foreground shadow-sm">
+                    <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
                       Primary mic <span className="ml-1 font-medium text-foreground">{settings.audio.preferredInputDevice?.deviceName ?? "System default"}</span>
                     </div>
-                    <div className="rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-muted-foreground shadow-sm">
+                    <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
                       Dictation mode <span className="ml-1 font-medium text-foreground">{dictationShortcutBehavior.replace(/_/g, " ")}</span>
                     </div>
-                    <div className="rounded-full border border-border/70 bg-background/80 px-3 py-1.5 text-muted-foreground shadow-sm">
+                    <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
                       Routes <span className="ml-1 font-medium text-foreground">{settings.transcription.useSharedAsrSelection ? "Shared" : "Split"}</span>
                     </div>
                   </div>
@@ -2244,12 +2240,12 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   <AsrProviderManager />
                 </div>
 
-                <div className="rounded-[26px] border border-amber-400/20 bg-[linear-gradient(135deg,rgba(245,158,11,0.08),rgba(15,23,42,0.18))] p-5 text-slate-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+                <div className="rounded-[24px] border border-border bg-muted/20 p-5 text-foreground">
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div>
-                      <p className="text-[11px] uppercase tracking-[0.22em] text-amber-300/80">Capture routing</p>
-                      <h3 className="mt-2 text-xl font-semibold text-white">Microphone routing</h3>
-                      <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-300/85">
+                      <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">Capture routing</p>
+                      <h3 className="mt-2 text-xl font-semibold text-foreground">Microphone routing</h3>
+                      <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
                         Pick one app-wide microphone, then override dictation or meetings when you need a dedicated input chain.
                       </p>
                     </div>
@@ -2260,14 +2256,14 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   </div>
 
                   <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                    <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <div className="space-y-3 rounded-2xl border border-border bg-background p-4">
                       <div>
-                        <p className="text-xs uppercase tracking-[0.18em] text-slate-400">App-wide default</p>
-                        <p className="mt-1 text-sm text-slate-300">Used whenever a mode-specific override is off.</p>
+                        <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">App-wide default</p>
+                        <p className="mt-1 text-sm text-muted-foreground">Used whenever a mode-specific override is off.</p>
                       </div>
                       <select
                         aria-label="App-wide microphone"
-                        className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-sm text-slate-100"
+                        className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground"
                         value={appWideDeviceId}
                         onChange={(event) => {
                           const nextDevice = resolveAudioDevicePreference(event.target.value || null);
@@ -2289,11 +2285,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </select>
                     </div>
 
-                    <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <div className="space-y-3 rounded-2xl border border-border bg-background p-4">
                       <div className="flex items-start justify-between gap-3">
                         <div>
-                          <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Dictation override</p>
-                          <p className="mt-1 text-sm text-slate-300">Use a dedicated input just for hotkey dictation.</p>
+                          <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Dictation override</p>
+                          <p className="mt-1 text-sm text-muted-foreground">Use a dedicated input just for hotkey dictation.</p>
                         </div>
                         <Switch
                           checked={settings.audio.dictationInputOverrideEnabled ?? false}
@@ -2314,7 +2310,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       <select
                         aria-label="Dictation microphone override"
                         disabled={!(settings.audio.dictationInputOverrideEnabled ?? false)}
-                        className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-sm text-slate-100 disabled:opacity-50"
+                        className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground disabled:opacity-50"
                         value={dictationDeviceId}
                         onChange={(event) => {
                           const nextDevice = resolveAudioDevicePreference(event.target.value || null);
@@ -2336,11 +2332,11 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </select>
                     </div>
 
-                    <div className="space-y-3 rounded-2xl border border-white/10 bg-black/20 p-4 md:col-span-2 xl:col-span-1">
+                    <div className="space-y-3 rounded-2xl border border-border bg-background p-4 md:col-span-2 xl:col-span-1">
                       <div className="flex items-start justify-between gap-3">
                         <div>
-                          <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Meeting override</p>
-                          <p className="mt-1 text-sm text-slate-300">Use a separate microphone for mic-only meetings and mixed capture.</p>
+                          <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Meeting override</p>
+                          <p className="mt-1 text-sm text-muted-foreground">Use a separate microphone for mic-only meetings and mixed capture.</p>
                         </div>
                         <Switch
                           checked={settings.audio.meetingInputOverrideEnabled ?? false}
@@ -2361,7 +2357,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       <select
                         aria-label="Meeting microphone override"
                         disabled={!(settings.audio.meetingInputOverrideEnabled ?? false)}
-                        className="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-sm text-slate-100 disabled:opacity-50"
+                        className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground disabled:opacity-50"
                         value={meetingDeviceId}
                         onChange={(event) => {
                           const nextDevice = resolveAudioDevicePreference(event.target.value || null);
