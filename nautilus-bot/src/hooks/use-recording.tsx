@@ -115,6 +115,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       await tauriStartDictation(options);
     } catch (error) {
       console.error("Failed to start dictation:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(message);
     }
   }, []);
 

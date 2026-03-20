@@ -54,9 +54,7 @@ const tauriMocks = vi.hoisted(() => ({
   },
   ui: {
     alwaysOnTop: false,
-    showInDock: true,
     minimizeToTray: true,
-    startMinimized: false,
     windowPosition: null,
     windowSize: null,
     fontSize: 14,
@@ -280,18 +278,19 @@ describe("DictationView modes", () => {
     render(<DictationView />);
 
     await screen.findByText("Flow Profiles");
-    expect(screen.getByRole("button", { name: /flow profile: voice/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /flow profile: messages/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /flow profile: general/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /flow profile: slack & chat/i })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /flow profile: meeting follow-up/i })
     ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /solo lane: follow-up/i })).toBeInTheDocument();
   });
 
   it("applies Messages mode defaults and persists them", async () => {
     render(<DictationView />);
 
     await screen.findByText("Flow Profiles");
-    fireEvent.click(screen.getByRole("button", { name: /flow profile: messages/i }));
+    fireEvent.click(screen.getByRole("button", { name: /flow profile: slack & chat/i }));
 
     await waitFor(() => {
       expect(tauriMocks.saveSettings).toHaveBeenCalled();
@@ -314,7 +313,7 @@ describe("DictationView modes", () => {
     render(<DictationView />);
 
     await screen.findByText("Flow Profiles");
-    fireEvent.click(screen.getByRole("button", { name: /flow profile: messages/i }));
+    fireEvent.click(screen.getByRole("button", { name: /flow profile: slack & chat/i }));
     fireEvent.click(screen.getByRole("button", { name: /flow profile: custom/i }));
 
     const nameInput = await screen.findByLabelText("Profile name");
@@ -381,6 +380,29 @@ describe("DictationView modes", () => {
     await waitFor(() => {
       expect(tauriMocks.refetchDictationHistory).toHaveBeenCalled();
     });
+  });
+
+  it("surfaces dictation lifecycle state in the capture card", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("Flow Profiles");
+    const handler = tauriMocks.eventListeners.get("dictation-state-changed");
+    expect(handler).toBeTruthy();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "transcribing",
+          message: "Turning speech into text now.",
+          preview: "draft follow-up",
+          resolvedModeLabel: "Meeting Follow-up",
+        },
+      });
+    });
+
+    expect((await screen.findAllByText("Transcribing")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("draft follow-up").length).toBeGreaterThan(0);
+    expect(screen.getByText("Runtime mode: Meeting Follow-up")).toBeInTheDocument();
   });
 
   it("surfaces auto-activated app matcher details in the latest result", async () => {
@@ -505,5 +527,19 @@ describe("DictationView modes", () => {
         })
       );
     });
+  });
+
+  it("surfaces a start failure when dictation cannot begin", async () => {
+    tauriMocks.startDictation.mockRejectedValueOnce(
+      new Error("Microphone permission is not ready.")
+    );
+
+    render(<DictationView />);
+
+    await screen.findByRole("button", { name: /start dictation/i });
+    fireEvent.click(screen.getByRole("button", { name: /start dictation/i }));
+
+    expect((await screen.findAllByText("Microphone permission is not ready.")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Capture needs attention")).toBeInTheDocument();
   });
 });

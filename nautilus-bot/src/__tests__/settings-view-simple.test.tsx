@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsView } from "@/components/views/settings-view-simple";
 import { ToastProvider } from "@/components/toast";
@@ -41,9 +41,7 @@ const baseSettings = {
   },
   ui: {
     alwaysOnTop: false,
-    showInDock: true,
     minimizeToTray: true,
-    startMinimized: false,
     windowPosition: null,
     windowSize: null,
     fontSize: 14,
@@ -375,6 +373,35 @@ describe("SettingsView performance behavior", () => {
     const calls = vi.mocked(tauri.saveSettings).mock.calls;
     const lastCall = calls[calls.length - 1];
     expect(lastCall?.[0]?.ui?.colorScheme).toBe("rose-pine");
+  });
+
+  it("persists the always-on-top toggle from desktop settings", async () => {
+    const tauri = await import("@/lib/tauri");
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    vi.useFakeTimers();
+
+    const alwaysOnTopRow = screen.getByText("Always on top").closest(".flex.items-center.justify-between");
+    expect(alwaysOnTopRow).not.toBeNull();
+    fireEvent.click(within(alwaysOnTopRow as HTMLElement).getByRole("switch"));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(tauri.saveSettings).toHaveBeenCalled();
+    const calls = vi.mocked(tauri.saveSettings).mock.calls;
+    const lastCall = calls[calls.length - 1];
+    expect(lastCall?.[0]?.ui?.alwaysOnTop).toBe(true);
   });
 
   it("reopens the modular onboarding flows from guided setup", async () => {

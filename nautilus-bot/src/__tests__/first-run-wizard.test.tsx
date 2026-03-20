@@ -78,7 +78,6 @@ const createSettings = () => ({
     speakerNamingMethod: "auto" as const,
     diarizationModelId: "ecapa_tdnn_speaker",
     silenceSkipEnabled: false,
-    dictationPasteToCursor: true,
     dictationCopyToClipboard: true,
     dictationAutoRequestPermissions: true,
     dictationPushToTalk: true,
@@ -105,9 +104,7 @@ const createSettings = () => ({
   },
   ui: {
     alwaysOnTop: false,
-    showInDock: true,
     minimizeToTray: true,
-    startMinimized: false,
     windowPosition: null,
     windowSize: null,
     fontSize: 14,

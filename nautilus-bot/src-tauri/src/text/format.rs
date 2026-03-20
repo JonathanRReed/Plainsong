@@ -483,11 +483,11 @@ fn restore_structural_break_tokens(text: &str) -> String {
 }
 
 fn capitalize_standalone_i(text: &str) -> String {
-    let Ok(re) = RegexBuilder::new(r"(^|[^A-Za-z])i(?=$|[^A-Za-z])").build() else {
+    let Ok(re) = RegexBuilder::new(r"(^|[^A-Za-z])i($|[^A-Za-z])").build() else {
         return text.to_string();
     };
     re.replace_all(text, |captures: &regex::Captures<'_>| {
-        format!("{}I", &captures[1])
+        format!("{}I{}", &captures[1], &captures[2])
     })
     .to_string()
 }

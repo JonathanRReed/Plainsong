@@ -50,7 +50,7 @@
         "https://updates.nautilusbot.com/updates/{{target}}/{{arch}}/{{current_version}}?channel={{channel}}"
       ],
       "dialog": false,
-      "pubkey": "TODO_REPLACE_WITH_OUTPUT_OF_tauri_signer_generate"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI2MzU1MEU3RTA5QkJFQzAKUldUQXZwdmc1MUExSm84VC94RW1ZQ2Y2dlJYOWdhc3JMWFd4R1BaOVc4NEtEWDZzaWllOGY2WVcK"
     }
   },
   "app": {

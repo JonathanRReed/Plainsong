@@ -14,6 +14,12 @@ impl WindowsSdkDictationProvider {
     }
 }
 
+impl Default for WindowsSdkDictationProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl AsrProvider for WindowsSdkDictationProvider {
     fn name(&self) -> &str {

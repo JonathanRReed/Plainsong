@@ -151,12 +151,10 @@ fn resolve_backtrack_command(
         });
     }
 
-    let Some(recent_inserted_text) = recent_inserted_text
+    let recent_inserted_text = recent_inserted_text
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    else {
-        return None;
-    };
+        ?;
 
     for prefix in [
         "scratch that ",

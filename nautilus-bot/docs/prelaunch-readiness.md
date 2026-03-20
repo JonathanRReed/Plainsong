@@ -50,7 +50,8 @@ Current status:
 
 - Frontend compile/test/build: ✅ PASS
 - Rust format/clippy/check/lib/tests: ✅ PASS
-- Local packaging perf gates (size + cold start): ✅ PASS (cold-start currently historical evidence)
+- Local packaging perf gates: ✅ PASS (`npm run gate:size` now passes at `33.7 MB`; cold-start remains historical evidence)
+- Local updater artifact signing path: ✅ PASS (verified with a freshly generated private key + password; production release still requires the canonical private key that matches the committed updater public key)
 - Packaged QA matrix execution: ⚠️ BLOCKED (49/49 blocked; no rows pending, no rows passed)
 - Benchmark parity artifacts (CP-13/CP-14/CP-15): ⚠️ PARTIAL (local fixture-driven `docs/evals/benchmark-run-baseline.json` and `docs/evals/benchmark-run-latest-macos.json` exist; the Windows capture helper now exists but `docs/evals/benchmark-run-latest-windows.json` is still missing; macOS gate currently fails latency-improvement because baseline and candidate are the same run)
 - Dictation parity Phase 0 artifacts: ⚠️ IN PROGRESS (`docs/evals/dictation-parity-launch-scorecard.md`, app matrix frozen, benchmark JSON still missing)
@@ -76,9 +77,17 @@ See `docs/strict-release-blocker-register.md` for blocker ownership and unblock 
 4. Windows code-signing certificate is unavailable, blocking signed installer security evidence.
 5. Packaged QA rows are marked BLOCKED, but strict release requires PASS evidence across scope.
 
+## Recent Ship-Path Fixes
+
+- The updater config no longer ships with a placeholder public key in `src-tauri/tauri.conf.json`.
+- Local `tauri build` packaging now disables updater artifact generation automatically when no private signing key is present, so app-only packaged QA builds can complete without failing on unsigned updater artifacts.
+- Local signed updater artifact generation is now verified with an explicit private key + password path, producing `Nautilus.app.tar.gz` and `.sig` successfully in the bundle output.
+- The stale `dictation-parity-benchmark` helper no longer bloats `Nautilus.app`; the benchmark workflow now runs from a Rust example target instead of a packaged binary.
+
 ## Residual Preconditions
 
 - Release signing + notarization secrets must be configured (`TAURI_SIGNING_*`, `APPLE_*`, `WINDOWS_CERTIFICATE*`) and accessible in the release environment.
+- The release environment must hold the private updater key that matches `plugins.updater.pubkey`; local proof with a temporary key only validates the tooling path, not production key continuity.
 - Gate runners must have access to required local ASR model assets if local RTF gate remains enforced in CI.
 - Benchmark baseline/candidate JSON artifacts must exist and pass schema + threshold validation.
 - Dictation Phase 0 must move from frozen assumptions to real packaged evidence before any dictation parity claim is credible.

@@ -223,7 +223,7 @@ export function DashboardView() {
                   <div>
                     <p className="text-lg font-semibold">{setupHeadline}</p>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      Launch the fastest lane for what you need right now, then keep the follow-up loop moving without leaving Nautilus.
+                      Open dictation, meetings, or setup from one place.
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -243,7 +243,7 @@ export function DashboardView() {
                 </div>
                 <div className="rounded-xl border bg-background/70 p-4 space-y-3">
                   <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Winning loop
+                    Typical workflow
                   </p>
                   <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
                     <div className="rounded-md border bg-muted/20 px-3 py-3">
@@ -251,12 +251,12 @@ export function DashboardView() {
                       <p className="mt-1 text-xs text-muted-foreground">Dictate anywhere or run a meeting with notes live.</p>
                     </div>
                     <div className="rounded-md border bg-muted/20 px-3 py-3">
-                      <p className="text-sm font-medium">2. Clarify</p>
-                      <p className="mt-1 text-xs text-muted-foreground">Use summaries, action items, memory, and edits to sharpen the result.</p>
+                      <p className="text-sm font-medium">2. Review</p>
+                      <p className="mt-1 text-xs text-muted-foreground">Use summaries, action items, memory, and edits to confirm the result.</p>
                     </div>
                     <div className="rounded-md border bg-muted/20 px-3 py-3">
-                      <p className="text-sm font-medium">3. Follow through</p>
-                      <p className="mt-1 text-xs text-muted-foreground">Send the follow-up, task list, or next agenda before context fades.</p>
+                      <p className="text-sm font-medium">3. Share</p>
+                      <p className="mt-1 text-xs text-muted-foreground">Copy the follow-up, task list, or next agenda before context fades.</p>
                     </div>
                   </div>
                 </div>

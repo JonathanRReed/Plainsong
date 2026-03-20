@@ -121,22 +121,12 @@ impl Default for AudioSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AudioInputDevicePreference {
     pub device_id: String,
     pub device_name: String,
     pub transport_type: Option<String>,
-}
-
-impl Default for AudioInputDevicePreference {
-    fn default() -> Self {
-        Self {
-            device_id: String::new(),
-            device_name: String::new(),
-            transport_type: None,
-        }
-    }
 }
 
 /// Transcription settings
@@ -184,8 +174,6 @@ pub struct TranscriptionSettings {
     pub diarization_model_id: String,
     /// Skip silence segments during transcription (Pro/Friends Club feature)
     pub silence_skip_enabled: bool,
-    /// Dictation: Paste text to cursor automatically
-    pub dictation_paste_to_cursor: bool,
     /// Dictation: Keep latest dictation result in clipboard
     pub dictation_copy_to_clipboard: bool,
     /// Dictation: auto-request runtime permissions before capture/transcription.
@@ -313,7 +301,6 @@ impl Default for TranscriptionSettings {
             speaker_naming_method: "auto".to_string(),
             diarization_model_id: "ecapa_tdnn_speaker".to_string(),
             silence_skip_enabled: false,
-            dictation_paste_to_cursor: true,
             dictation_copy_to_clipboard: true,
             dictation_auto_request_permissions: true,
             // Toggle mode is safer for new users and avoids silent hold-to-talk confusion.
@@ -418,12 +405,8 @@ pub struct WindowsPlatformOptimizationSettings {
 pub struct UiSettings {
     /// Always on top
     pub always_on_top: bool,
-    /// Show in dock/menu bar
-    pub show_in_dock: bool,
     /// Minimize to tray on close
     pub minimize_to_tray: bool,
-    /// Start minimized
-    pub start_minimized: bool,
     /// Window position (x, y)
     pub window_position: Option<(i32, i32)>,
     /// Window size (width, height)
@@ -442,9 +425,7 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             always_on_top: false,
-            show_in_dock: true,
             minimize_to_tray: true,
-            start_minimized: false,
             window_position: None,
             window_size: None,
             font_size: 14,

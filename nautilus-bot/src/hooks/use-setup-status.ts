@@ -146,7 +146,7 @@ function buildRouteStatus(
   };
 }
 
-function buildSnapshot(
+export function buildSnapshot(
   settings: Settings | null,
   providers: AsrProviderInfo[],
   permissions: PermissionDiagnostics | null,
@@ -155,6 +155,11 @@ function buildSnapshot(
 ): SetupStatusSnapshot {
   const dictationRoute = buildRouteStatus("dictation", settings, providers, permissions);
   const meetingRoute = buildRouteStatus("meeting", settings, providers, permissions);
+  const dictationInsertionMode = settings?.transcription.dictationInsertionMode ?? "auto";
+  const cursorInsertionRequired = dictationInsertionMode !== "clipboard_only";
+  const cursorInsertionReady =
+    !cursorInsertionRequired ||
+    (permissions?.cursorInsertionReady ?? permissions?.accessibilityReady ?? true);
   const dictationRoutePreference =
     settings?.transcription.dictationRoutePreference === "cloud" ? "cloud" : "local";
   const meetingRoutePolicy =
@@ -174,9 +179,7 @@ function buildSnapshot(
       providerHostingPreference(provider.providerType, provider.selectedModelId) === "cloud"
   );
   const dictationReady = Boolean(
-    permissions?.microphoneReady &&
-      dictationRoute.ready &&
-      (permissions?.accessibilityReady ?? true)
+    permissions?.microphoneReady && dictationRoute.ready && cursorInsertionReady
   );
   const meetingReady = Boolean(
     permissions?.microphoneReady &&
@@ -188,8 +191,8 @@ function buildSnapshot(
     !(permissions?.speechRecognitionReady ?? true)
       ? "Speech Recognition permission is still required for Apple Native dictation."
       : null,
-    !(permissions?.accessibilityReady ?? true)
-      ? "Accessibility is still required for reliable cursor insertion."
+    !cursorInsertionReady && cursorInsertionRequired
+      ? "Cursor insertion is still required for the current dictation mode."
       : null,
     !dictationRoute.ready ? dictationRoute.reason : null,
   ].filter((value): value is string => Boolean(value));

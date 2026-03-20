@@ -411,14 +411,14 @@ describe("RecordingsView", () => {
     fireEvent.click(screen.getByText("Weekly sync"));
     await screen.findByLabelText("Meeting summary");
 
-    fireEvent.click(screen.getByRole("button", { name: "Refresh Summary" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Refresh Summary" })[0]);
 
     await waitFor(() => {
       expect(mocks.summarizeRecordingGrounded).toHaveBeenCalledWith("r1");
     });
     expect(screen.getByDisplayValue("Fresh grounded summary")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Refresh Action Items" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Refresh Action Items" })[0]);
 
     await waitFor(() => {
       expect(mocks.extractActionItemsGrounded).toHaveBeenCalledWith("r1");
@@ -426,6 +426,34 @@ describe("RecordingsView", () => {
     expect(
       screen.getByDisplayValue("Ship launch checklist (Owner: Jon · Due: Friday)")
     ).toBeInTheDocument();
+  });
+
+  it("does not replace the visible summary when grounded refresh fails to persist", async () => {
+    mocks.getRecording.mockResolvedValue({
+      ...mocks.recordings[0],
+      summary: "Saved summary",
+      actionItems: ["Existing follow-up"],
+    });
+    mocks.updateRecordingAnalysis.mockRejectedValueOnce(new Error("Disk write failed"));
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    expect(await screen.findByDisplayValue("Saved summary")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Refresh Summary" })[0]);
+
+    await waitFor(() => {
+      expect(mocks.updateRecordingAnalysis).toHaveBeenCalledWith(
+        "r1",
+        "Fresh grounded summary",
+        ["Existing follow-up"]
+      );
+    });
+
+    expect(screen.getByDisplayValue("Saved summary")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Fresh grounded summary")).not.toBeInTheDocument();
+    expect(mocks.toast).toHaveBeenCalledWith("Disk write failed", "error");
   });
 
   it("persists template changes and can apply the matching notes outline", async () => {
@@ -454,14 +482,17 @@ describe("RecordingsView", () => {
     expect(screen.getByLabelText("Blockers notes")).toHaveValue("");
   });
 
-  it("shows prep briefing and follow-up center in meeting review", async () => {
+  it("shows review workflow and follow-up tools in meeting review", async () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
 
-    expect(await screen.findByText("Prep Briefing")).toBeInTheDocument();
+    expect(await screen.findByText("Review workflow")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy Follow-up Draft" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Copy Summary + Actions" })).toBeInTheDocument();
+    expect(await screen.findByText("Prep notes")).toBeInTheDocument();
     expect(screen.getByText("Cross-meeting Recall")).toBeInTheDocument();
-    expect(screen.getByText("Follow-up Center")).toBeInTheDocument();
+    expect(screen.getByText("Follow-up tools")).toBeInTheDocument();
     expect(screen.getByText("Jon owns the launch checklist and follow-up.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy Follow-up Email" })).toBeInTheDocument();
   });
@@ -668,11 +699,10 @@ describe("RecordingsView", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: "Regenerate" })
+        screen.getByRole("button", { name: /Enhance Notes|Regenerate/i })
       ).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "Apply to Notes" })
-      ).not.toBeDisabled();
+      expect(screen.getByText("Launch is on track with one open dependency.")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Apply to Notes" })).not.toBeDisabled();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Apply to Notes" }));

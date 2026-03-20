@@ -47,6 +47,7 @@ const popupMocks = vi.hoisted(() => {
       },
     })),
     getDictationAudioLevel: vi.fn(async () => 0.2),
+    startDictation: vi.fn(async () => {}),
     stopDictation: vi.fn(async () => {}),
     windowHandle: {
       setSize: vi.fn(async () => {}),
@@ -87,6 +88,7 @@ vi.mock("@tauri-apps/api/dpi", () => ({
 vi.mock("@/lib/tauri", () => ({
   getSettings: popupMocks.getSettings,
   getDictationAudioLevel: popupMocks.getDictationAudioLevel,
+  startDictation: popupMocks.startDictation,
   stopDictation: popupMocks.stopDictation,
 }));
 
@@ -96,11 +98,17 @@ describe("DictationPopup", () => {
     popupMocks.invoke.mockClear();
     popupMocks.getSettings.mockClear();
     popupMocks.getDictationAudioLevel.mockClear();
+    popupMocks.startDictation.mockClear();
     popupMocks.stopDictation.mockClear();
     popupMocks.windowHandle.setSize.mockClear();
     popupMocks.windowHandle.show.mockClear();
     popupMocks.windowHandle.hide.mockClear();
     popupMocks.windowHandle.startDragging.mockClear();
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: vi.fn(async () => {}),
+      },
+    });
   });
 
   afterEach(() => {
@@ -163,7 +171,7 @@ describe("DictationPopup", () => {
 
     expect(
       await screen.findByText(
-        /Messages · Using the frontmost app and window · Paste at cursor · Target Codex/i
+        /Slack & Chat · Using the frontmost app and window · Paste at cursor · Target Codex/i
       )
     ).toBeInTheDocument();
 
@@ -262,6 +270,60 @@ describe("DictationPopup", () => {
     expect(
       screen.getByText(/Speak naturally\. Nautilus stops after silence\. Press again to stop sooner\./i)
     ).toBeInTheDocument();
+  });
+
+  it("keeps preview text visible while transcribing and delivering", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+    expect(handler).toBeDefined();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "transcribing",
+          sessionId: 41,
+          message: "Turning speech into send-ready text.",
+          preview: "Draft the follow-up with clear owners.",
+          resolvedModePreset: "meeting_follow_up",
+          resolvedModeLabel: "Follow-up",
+          contextSource: "application_context",
+          insertionMode: "paste",
+          appTarget: "Slack",
+          dictationProvider: "distil_whisper",
+          dictationModelId: "distil-large-v3.5",
+        },
+      });
+    });
+
+    expect(await screen.findByText("Transcribing")).toBeInTheDocument();
+    expect(screen.getByText("Turning speech into send-ready text.")).toBeInTheDocument();
+    expect(screen.getByText("Live preview")).toBeInTheDocument();
+    expect(screen.getByText("Draft the follow-up with clear owners.")).toBeInTheDocument();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "delivering",
+          sessionId: 41,
+          message: "Delivering the rewrite to Slack now.",
+          preview: "Draft the follow-up with clear owners.",
+          resolvedModePreset: "meeting_follow_up",
+          resolvedModeLabel: "Follow-up",
+          contextSource: "application_context",
+          insertionMode: "paste",
+          appTarget: "Slack",
+          dictationProvider: "distil_whisper",
+          dictationModelId: "distil-large-v3.5",
+        },
+      });
+    });
+
+    expect(await screen.findByText("Delivering result")).toBeInTheDocument();
+    expect(screen.getByText("Delivering the rewrite to Slack now.")).toBeInTheDocument();
+    expect(screen.getByText("Ready to deliver")).toBeInTheDocument();
   });
 
   it("resets the timer cleanly when a new session starts after idle", async () => {
@@ -372,5 +434,95 @@ describe("DictationPopup", () => {
       expect(popupMocks.invoke).toHaveBeenCalledWith("dismiss_dictation_overlay");
       expect(popupMocks.windowHandle.hide).toHaveBeenCalled();
     });
+  });
+
+  it("turns done state into a real review surface with command metadata and quick actions", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    const stateHandler = popupMocks.listeners.get("dictation-state-changed");
+    const textReadyHandler = popupMocks.listeners.get("dictation-text-ready");
+    expect(stateHandler).toBeDefined();
+    expect(textReadyHandler).toBeDefined();
+
+    await act(async () => {
+      textReadyHandler?.({
+        payload: {
+          text: "Ship the launch update tomorrow morning.",
+          pasted: true,
+          commandApplied: "backtrack_replace_last_insert",
+          snippetAppliedCount: 2,
+          appTarget: "Slack",
+          actualProvider: "distil_whisper",
+          modelId: "distil-large-v3.5",
+          providerModelLabel: "Distil Whisper",
+          resolvedHosting: "local",
+        },
+      });
+      stateHandler?.({
+        payload: {
+          phase: "done",
+          sessionId: 9,
+          outcome: "pasted",
+          resolvedModePreset: "messages",
+          resolvedModeLabel: "Messages",
+          contextSource: "application_context",
+          insertionMode: "paste",
+          appTarget: "Slack",
+        },
+      });
+    });
+
+    expect(await screen.findByText("Backtrack applied")).toBeInTheDocument();
+    expect(screen.getByText("Backtrack replace last insert")).toBeInTheDocument();
+    expect(screen.getByText("2 snippets")).toBeInTheDocument();
+    expect(screen.getByText("Target Slack")).toBeInTheDocument();
+    expect(screen.getByText("Edit commands available")).toBeInTheDocument();
+    expect(screen.getByText("Try an edit command")).toBeInTheDocument();
+    expect(screen.getByText("Copy result")).toBeInTheDocument();
+    expect(screen.getByText("Start again")).toBeInTheDocument();
+    expect(screen.getByText("Open history")).toBeInTheDocument();
+    expect(screen.getByText("Open app")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy result" }));
+
+    await waitFor(() => {
+      expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
+        "Ship the launch update tomorrow morning."
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start again" }));
+
+    await waitFor(() => {
+      expect(popupMocks.startDictation).toHaveBeenCalled();
+    });
+  });
+
+  it("shows honest recovery actions when dictation fails", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    const stateHandler = popupMocks.listeners.get("dictation-state-changed");
+    expect(stateHandler).toBeDefined();
+
+    await act(async () => {
+      stateHandler?.({
+        payload: {
+          phase: "error",
+          sessionId: 11,
+          message: "Microphone permission is not ready.",
+          appTarget: "Codex",
+        },
+      });
+    });
+
+    expect(await screen.findByText("Dictation failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start again" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open dictation" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy result" })).not.toBeInTheDocument();
   });
 });

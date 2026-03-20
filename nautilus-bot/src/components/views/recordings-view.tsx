@@ -704,7 +704,10 @@ export function RecordingsView() {
   const [meetingRecallError, setMeetingRecallError] = useState<string | null>(null);
   const [isRefreshingSummary, setIsRefreshingSummary] = useState(false);
   const [isRefreshingActionItems, setIsRefreshingActionItems] = useState(false);
-  const recordingRequestGuard = useScopedRequestGuard<string | null>();
+  const meetingChatRequestGuard = useScopedRequestGuard<string | null>();
+  const meetingSummaryRequestGuard = useScopedRequestGuard<string | null>();
+  const meetingActionItemsRequestGuard = useScopedRequestGuard<string | null>();
+  const meetingEnhanceRequestGuard = useScopedRequestGuard<string | null>();
   const lastRecordingState = useRef(false);
   const lastSavedLiveMeetingNotesRef = useRef("");
   const lastSavedMeetingNotesRef = useRef("");
@@ -974,7 +977,10 @@ export function RecordingsView() {
 
   useEffect(() => {
     if (!isRecording && !showRecordingDetail) {
-      recordingRequestGuard.setScope(null);
+      meetingChatRequestGuard.setScope(null);
+      meetingSummaryRequestGuard.setScope(null);
+      meetingActionItemsRequestGuard.setScope(null);
+      meetingEnhanceRequestGuard.setScope(null);
       setMeetingNotes("");
       setMeetingNotesTargetId(null);
       setMeetingTemplateId("auto");
@@ -991,7 +997,14 @@ export function RecordingsView() {
       lastSavedMeetingActionItemsRef.current = "[]";
       lastSavedMeetingChatRef.current = "[]";
     }
-  }, [isRecording, recordingRequestGuard, showRecordingDetail]);
+  }, [
+    isRecording,
+    meetingActionItemsRequestGuard,
+    meetingChatRequestGuard,
+    meetingEnhanceRequestGuard,
+    meetingSummaryRequestGuard,
+    showRecordingDetail,
+  ]);
 
   useEffect(() => {
     if (!selectedRecording) {
@@ -1138,7 +1151,7 @@ export function RecordingsView() {
   }, [refetch]);
 
   const openMeetingWorkspace = (recording: Recording) => {
-    recordingRequestGuard.setScope(recording.id);
+    meetingChatRequestGuard.setScope(recording.id);
     setMeetingNotes(recording.meetingNotes ?? "");
     setMeetingNotesTargetId(recording.id);
     lastSavedMeetingNotesRef.current = recording.meetingNotes ?? "";
@@ -1160,17 +1173,17 @@ export function RecordingsView() {
     setIsRefreshingSummary(false);
     setIsRefreshingActionItems(false);
     void loadRecordingDetail(recording);
-    const requestToken = recordingRequestGuard.beginRequest(recording.id);
+    const requestToken = meetingChatRequestGuard.beginRequest(recording.id);
     void getMeetingChatMessages(recording.id)
       .then((messages) => {
-        if (!recordingRequestGuard.isCurrent(requestToken)) {
+        if (!meetingChatRequestGuard.isCurrent(requestToken)) {
           return;
         }
         setMeetingChatMessages(messages);
         lastSavedMeetingChatRef.current = JSON.stringify(messages);
       })
       .catch((error) => {
-        if (!recordingRequestGuard.isCurrent(requestToken)) {
+        if (!meetingChatRequestGuard.isCurrent(requestToken)) {
           return;
         }
         console.error("Failed to load meeting chat:", error);
@@ -1287,16 +1300,24 @@ export function RecordingsView() {
       return;
     }
 
-    const requestToken = recordingRequestGuard.beginRequest(selectedRecording.id);
+    const requestToken = meetingSummaryRequestGuard.beginRequest(selectedRecording.id);
     setIsRefreshingSummary(true);
     try {
       const result = await summarizeRecordingGrounded(selectedRecording.id);
-      if (!recordingRequestGuard.isCurrent(requestToken)) {
+      if (!meetingSummaryRequestGuard.isCurrent(requestToken)) {
         return;
       }
       const nextSummary = result.summary.trim();
       const currentActionItems = actionItemsFromText(meetingActionItemsText);
 
+      await updateRecordingAnalysis(
+        selectedRecording.id,
+        nextSummary || null,
+        currentActionItems
+      );
+      if (!meetingSummaryRequestGuard.isCurrent(requestToken)) {
+        return;
+      }
       setMeetingSummary(nextSummary);
       lastSavedMeetingSummaryRef.current = nextSummary;
       lastSavedMeetingActionItemsRef.current = JSON.stringify(currentActionItems);
@@ -1309,21 +1330,16 @@ export function RecordingsView() {
             }
           : current
       );
-      await updateRecordingAnalysis(
-        selectedRecording.id,
-        nextSummary || null,
-        currentActionItems
-      );
       toast("Summary refreshed from this meeting.", "success");
     } catch (error) {
-      if (!recordingRequestGuard.isCurrent(requestToken)) {
+      if (!meetingSummaryRequestGuard.isCurrent(requestToken)) {
         return;
       }
       const message =
         error instanceof Error ? error.message : "Failed to refresh the summary.";
       toast(message, "error");
     } finally {
-      if (recordingRequestGuard.isCurrent(requestToken)) {
+      if (meetingSummaryRequestGuard.isCurrent(requestToken)) {
         setIsRefreshingSummary(false);
       }
     }
@@ -1334,11 +1350,11 @@ export function RecordingsView() {
       return;
     }
 
-    const requestToken = recordingRequestGuard.beginRequest(selectedRecording.id);
+    const requestToken = meetingActionItemsRequestGuard.beginRequest(selectedRecording.id);
     setIsRefreshingActionItems(true);
     try {
       const result = await extractActionItemsGrounded(selectedRecording.id);
-      if (!recordingRequestGuard.isCurrent(requestToken)) {
+      if (!meetingActionItemsRequestGuard.isCurrent(requestToken)) {
         return;
       }
       const nextActionItems = normalizeActionItems(
@@ -1347,6 +1363,14 @@ export function RecordingsView() {
       const nextActionItemsText = actionItemsToText(nextActionItems);
       const normalizedSummary = meetingSummary.trim();
 
+      await updateRecordingAnalysis(
+        selectedRecording.id,
+        normalizedSummary || null,
+        nextActionItems
+      );
+      if (!meetingActionItemsRequestGuard.isCurrent(requestToken)) {
+        return;
+      }
       setMeetingActionItemsText(nextActionItemsText);
       lastSavedMeetingSummaryRef.current = normalizedSummary;
       lastSavedMeetingActionItemsRef.current = JSON.stringify(nextActionItems);
@@ -1359,21 +1383,16 @@ export function RecordingsView() {
             }
           : current
       );
-      await updateRecordingAnalysis(
-        selectedRecording.id,
-        normalizedSummary || null,
-        nextActionItems
-      );
       toast("Action items refreshed from this meeting.", "success");
     } catch (error) {
-      if (!recordingRequestGuard.isCurrent(requestToken)) {
+      if (!meetingActionItemsRequestGuard.isCurrent(requestToken)) {
         return;
       }
       const message =
         error instanceof Error ? error.message : "Failed to refresh action items.";
       toast(message, "error");
     } finally {
-      if (recordingRequestGuard.isCurrent(requestToken)) {
+      if (meetingActionItemsRequestGuard.isCurrent(requestToken)) {
         setIsRefreshingActionItems(false);
       }
     }
@@ -1384,14 +1403,14 @@ export function RecordingsView() {
       return;
     }
 
-    const requestToken = recordingRequestGuard.beginRequest(selectedRecording.id);
+    const requestToken = meetingEnhanceRequestGuard.beginRequest(selectedRecording.id);
     setIsEnhancingMeetingNotes(true);
     try {
       const [summaryResult, actionItemsResult] = await Promise.all([
         summarizeRecordingGrounded(selectedRecording.id),
         extractActionItemsGrounded(selectedRecording.id),
       ]);
-      if (!recordingRequestGuard.isCurrent(requestToken)) {
+      if (!meetingEnhanceRequestGuard.isCurrent(requestToken)) {
         return;
       }
 
@@ -1401,6 +1420,14 @@ export function RecordingsView() {
       );
       const nextActionItemsText = actionItemsToText(nextActionItems);
 
+      await updateRecordingAnalysis(
+        selectedRecording.id,
+        nextSummary || null,
+        nextActionItems
+      );
+      if (!meetingEnhanceRequestGuard.isCurrent(requestToken)) {
+        return;
+      }
       setMeetingSummary(nextSummary);
       setMeetingActionItemsText(nextActionItemsText);
       lastSavedMeetingSummaryRef.current = nextSummary;
@@ -1413,11 +1440,6 @@ export function RecordingsView() {
               actionItems: nextActionItems,
             }
           : current
-      );
-      await updateRecordingAnalysis(
-        selectedRecording.id,
-        nextSummary || null,
-        nextActionItems
       );
 
       const draftText = buildEnhancedMeetingNotesDraftText({
@@ -1437,14 +1459,14 @@ export function RecordingsView() {
       });
       toast("Enhanced notes draft ready.", "success");
     } catch (error) {
-      if (!recordingRequestGuard.isCurrent(requestToken)) {
+      if (!meetingEnhanceRequestGuard.isCurrent(requestToken)) {
         return;
       }
       const message =
         error instanceof Error ? error.message : "Failed to build enhanced notes.";
       toast(message, "error");
     } finally {
-      if (recordingRequestGuard.isCurrent(requestToken)) {
+      if (meetingEnhanceRequestGuard.isCurrent(requestToken)) {
         setIsEnhancingMeetingNotes(false);
       }
     }
@@ -1474,6 +1496,8 @@ export function RecordingsView() {
 
     try {
       const nextNotes = enhancedMeetingNotesDraft.text.trim();
+      await updateRecordingNotes(selectedRecording.id, nextNotes);
+      const updatedAt = new Date().toISOString();
       setMeetingNotes(nextNotes);
       lastSavedMeetingNotesRef.current = nextNotes;
       setSelectedRecording((current) =>
@@ -1481,11 +1505,10 @@ export function RecordingsView() {
           ? {
               ...current,
               meetingNotes: nextNotes,
-              notesUpdatedAt: new Date().toISOString(),
+              notesUpdatedAt: updatedAt,
             }
           : current
       );
-      await updateRecordingNotes(selectedRecording.id, nextNotes);
       setEnhancedMeetingNotesDraft(null);
       toast("Enhanced notes applied to this meeting.", "success");
     } catch (error) {
@@ -1917,6 +1940,47 @@ export function RecordingsView() {
         transcriptSegments: selectedTranscript?.segments?.length ?? 0,
       }),
     [meetingNotes, meetingSummary, selectedMeetingActionItems, selectedTranscript?.segments?.length]
+  );
+  const selectedMeetingReviewPath = useMemo(
+    () => [
+      {
+        title: "Ground transcript",
+        status: (selectedTranscript?.segments?.length ?? 0) > 0 ? "Grounded" : "Processing",
+        detail:
+          (selectedTranscript?.segments?.length ?? 0) > 0
+            ? `${selectedTranscript?.segments?.length ?? 0} transcript segments ready from ${selectedMeetingCaptureMode.toLowerCase()} capture. Consent: ${selectedMeetingConsent.label}.`
+            : "Transcript is still processing. Keep the note canvas current until grounded lines arrive.",
+      },
+      {
+        title: "Lock recap",
+        status: meetingSummary.trim() ? "Summary ready" : "Refresh summary",
+        detail: meetingSummary.trim()
+          ? "Your recap is editable. Refresh it only after notes or transcript context changes."
+          : "Refresh the summary from transcript and notes before you send anything out.",
+      },
+      {
+        title: "Send next move",
+        status:
+          meetingSummary.trim() && selectedMeetingActionItems.length > 0
+            ? "Send-ready"
+            : selectedMeetingActionItems.length > 0
+              ? "Need recap"
+              : "Need follow-ups",
+        detail:
+          meetingSummary.trim() && selectedMeetingActionItems.length > 0
+            ? "Copy a send-ready follow-up or a review bundle while context is still fresh."
+            : selectedMeetingActionItems.length > 0
+              ? "Action items are captured. Tighten the summary next so the follow-up is easy to send."
+              : "Extract owners and dates so the follow-up carries real commitments, not just recap text.",
+      },
+    ],
+    [
+      meetingSummary,
+      selectedMeetingActionItems,
+      selectedMeetingCaptureMode,
+      selectedMeetingConsent.label,
+      selectedTranscript?.segments?.length,
+    ]
   );
   const transcriptPreviewItems = useMemo(() => {
     if (selectedRecording?.id === recordingId && streamChunks.length > 0) {
@@ -2699,14 +2763,171 @@ export function RecordingsView() {
                         <div className="rounded-md border bg-background/80 p-3">
                           <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                             <Rocket className="h-3.5 w-3.5" />
-                            Send-off
+                            Follow-up
                           </div>
                           <p className="mt-2 text-sm font-medium">
                             {meetingSummary.trim() && selectedMeetingActionItems.length > 0
                               ? "Follow-up ready"
-                              : "Build recap first"}
+                              : "Summary needed"}
                           </p>
                         </div>
+                      </div>
+                      <div className="mt-4 rounded-md border bg-background/80 p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                              Review workflow
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              Review the summary, confirm the next steps, then copy the draft you need without leaving Notes.
+                            </p>
+                          </div>
+                          <Badge variant="outline" className="bg-muted/30">
+                            Reliable capture + review
+                          </Badge>
+                        </div>
+                        <div className="mt-3 grid gap-3 md:grid-cols-3">
+                          {selectedMeetingReviewPath.map((step) => (
+                            <div
+                              key={step.title}
+                              className="rounded-md border bg-muted/20 px-3 py-3"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-xs font-medium text-muted-foreground">
+                                  {step.title}
+                                </p>
+                                <span className="rounded-full border bg-background px-2 py-0.5 text-[11px] text-muted-foreground">
+                                  {step.status}
+                                </span>
+                              </div>
+                              <p className="mt-2 text-sm text-muted-foreground">{step.detail}</p>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={handleRefreshSummary}
+                            disabled={!selectedRecording || isRefreshingSummary}
+                          >
+                            {isRefreshingSummary ? (
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            ) : (
+                              <RefreshCw className="mr-2 h-4 w-4" />
+                            )}
+                            Refresh Summary
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={handleRefreshActionItems}
+                            disabled={!selectedRecording || isRefreshingActionItems}
+                          >
+                            {isRefreshingActionItems ? (
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            ) : (
+                              <RefreshCw className="mr-2 h-4 w-4" />
+                            )}
+                            Refresh Action Items
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => void handleCopyMeetingFollowUp(deterministicMeetingFollowUp)}
+                            disabled={
+                              !selectedRecording ||
+                              (!meetingSummary.trim() && selectedMeetingActionItems.length === 0)
+                            }
+                          >
+                            <Copy className="mr-2 h-4 w-4" />
+                            Copy Follow-up Draft
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={() => void handleCopyMeetingShareMarkdown()}
+                            disabled={!selectedRecording || !selectedMeetingShareMarkdown.trim()}
+                          >
+                            <Copy className="mr-2 h-4 w-4" />
+                            Copy Summary + Actions
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="mt-4 grid gap-3 xl:grid-cols-2">
+                      <div className="rounded-lg border border-active/30 bg-active/5 p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-semibold uppercase tracking-wide text-active">
+                              Summary
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              Keep the meeting recap editable. Regenerate when your notes change.
+                            </p>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={handleRefreshSummary}
+                            disabled={!selectedRecording || isRefreshingSummary}
+                          >
+                            {isRefreshingSummary ? (
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            ) : (
+                              <RefreshCw className="mr-2 h-4 w-4" />
+                            )}
+                            Refresh Summary
+                          </Button>
+                        </div>
+                        <textarea
+                          value={meetingSummary}
+                          onChange={(event) => setMeetingSummary(event.target.value)}
+                          aria-label="Meeting summary"
+                          placeholder="Summary will appear here after transcription and analysis finish."
+                          rows={8}
+                          className="w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-active"
+                        />
+                      </div>
+
+                      <div className="rounded-lg border p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                              Action Items
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              One line per follow-up. Owners and dates can stay inline.
+                            </p>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={handleRefreshActionItems}
+                            disabled={!selectedRecording || isRefreshingActionItems}
+                          >
+                            {isRefreshingActionItems ? (
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            ) : (
+                              <RefreshCw className="mr-2 h-4 w-4" />
+                            )}
+                            Refresh Action Items
+                          </Button>
+                        </div>
+                        <textarea
+                          value={meetingActionItemsText}
+                          onChange={(event) => setMeetingActionItemsText(event.target.value)}
+                          aria-label="Meeting action items"
+                          placeholder="Action items will appear here after transcription and analysis finish."
+                          rows={8}
+                          className="w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-active"
+                        />
                       </div>
                     </div>
                     <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -3005,7 +3226,7 @@ export function RecordingsView() {
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                            Prep Briefing
+                            Prep notes
                           </p>
                           <p className="mt-1 text-xs text-muted-foreground">
                             Solo prep before or after the call: playbook, relationship memory, and the questions worth answering live.
@@ -3069,7 +3290,7 @@ export function RecordingsView() {
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                            Follow-up Center
+                            Follow-up tools
                           </p>
                           <p className="mt-1 text-xs text-muted-foreground">
                             Deterministic solo outputs you can copy immediately, even before generating an AI draft.
@@ -3081,21 +3302,21 @@ export function RecordingsView() {
                       </div>
                       <div className="mt-3 grid gap-3 md:grid-cols-3">
                         <div className="rounded-md border bg-background/80 px-3 py-3">
-                          <p className="text-xs font-medium text-muted-foreground">Fastest next step</p>
+                          <p className="text-xs font-medium text-muted-foreground">Quick option</p>
                           <p className="mt-2 text-sm text-muted-foreground">
                             Copy a DM recap when you need speed, then send the longer follow-up after a quick edit.
                           </p>
                         </div>
                         <div className="rounded-md border bg-background/80 px-3 py-3">
-                          <p className="text-xs font-medium text-muted-foreground">Best planning move</p>
+                          <p className="text-xs font-medium text-muted-foreground">Planning option</p>
                           <p className="mt-2 text-sm text-muted-foreground">
                             Use Next Agenda after every important call so the next conversation starts with memory already loaded.
                           </p>
                         </div>
                         <div className="rounded-md border bg-background/80 px-3 py-3">
-                          <p className="text-xs font-medium text-muted-foreground">Solo default</p>
+                          <p className="text-xs font-medium text-muted-foreground">Default</p>
                           <p className="mt-2 text-sm text-muted-foreground">
-                            Summary + action items + one copied artifact is the minimum winning loop.
+                            Summary, action items, and one copied draft cover the default review flow.
                           </p>
                         </div>
                       </div>
@@ -3411,75 +3632,6 @@ export function RecordingsView() {
                       </div>
                     </div>
 
-                    <div className="rounded-lg border border-active/30 bg-active/5 p-4 space-y-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-wide text-active">
-                            Summary
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            Keep the meeting recap editable. Regenerate when your notes change.
-                          </p>
-                        </div>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={handleRefreshSummary}
-                          disabled={!selectedRecording || isRefreshingSummary}
-                        >
-                          {isRefreshingSummary ? (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          ) : (
-                            <RefreshCw className="mr-2 h-4 w-4" />
-                          )}
-                          Refresh Summary
-                        </Button>
-                      </div>
-                      <textarea
-                        value={meetingSummary}
-                        onChange={(event) => setMeetingSummary(event.target.value)}
-                        aria-label="Meeting summary"
-                        placeholder="Summary will appear here after transcription and analysis finish."
-                        rows={8}
-                        className="w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-active"
-                      />
-                    </div>
-
-                    <div className="rounded-lg border p-4 space-y-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                            Action Items
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            One line per follow-up. Owners and dates can stay inline.
-                          </p>
-                        </div>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={handleRefreshActionItems}
-                          disabled={!selectedRecording || isRefreshingActionItems}
-                        >
-                          {isRefreshingActionItems ? (
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          ) : (
-                            <RefreshCw className="mr-2 h-4 w-4" />
-                          )}
-                          Refresh Action Items
-                        </Button>
-                      </div>
-                      <textarea
-                        value={meetingActionItemsText}
-                        onChange={(event) => setMeetingActionItemsText(event.target.value)}
-                        aria-label="Meeting action items"
-                        placeholder="Action items will appear here after transcription and analysis finish."
-                        rows={8}
-                        className="w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-active"
-                      />
-                    </div>
                   </div>
                 </div>
               </ScrollArea>

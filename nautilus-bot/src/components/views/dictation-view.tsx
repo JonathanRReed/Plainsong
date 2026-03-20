@@ -55,6 +55,7 @@ import {
   providerRecommendation,
   type DictationRoutePreference,
 } from "@/lib/asr-capabilities";
+import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labels";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -75,6 +76,8 @@ import {
   Volume2,
   BookOpen,
   Replace,
+  CheckCircle2,
+  TriangleAlert,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
@@ -124,6 +127,27 @@ interface DictationTextReadyEvent {
   routePreference?: DictationRoutePreference | null;
   resolvedRoute?: string | null;
   resolvedHosting?: DictationRoutePreference | null;
+  providerModelLabel?: string | null;
+}
+
+interface DictationStateChangedEvent {
+  phase:
+    | "idle"
+    | "primed"
+    | "recording"
+    | "stopping"
+    | "transcribing"
+    | "delivering"
+    | "done"
+    | "error";
+  startedAtMs?: number | null;
+  message?: string | null;
+  preview?: string | null;
+  partialText?: string | null;
+  outcome?: string | null;
+  resolvedModeLabel?: string | null;
+  appTarget?: string | null;
+  activationMatcher?: string | null;
   providerModelLabel?: string | null;
 }
 
@@ -178,6 +202,16 @@ type DictationModeSummaryItem = {
   value: string;
 };
 
+type DictationRuntimePhase =
+  | "idle"
+  | "primed"
+  | "recording"
+  | "stopping"
+  | "transcribing"
+  | "delivering"
+  | "done"
+  | "error";
+
 type RecommendedAppStyle = {
   id: string;
   name: string;
@@ -215,8 +249,8 @@ type DictationCoachCard = {
   actionLabel: string;
 };
 
-const ACTIVATION_APP_SUGGESTIONS = ["Slack", "Cursor", "Messages"];
-const ACTIVATION_DOMAIN_SUGGESTIONS = ["gmail.com", "linear.app", "docs.google.com"];
+const ACTIVATION_APP_SUGGESTIONS = ["Slack", "Notion", "Cursor", "Messages"];
+const ACTIVATION_DOMAIN_SUGGESTIONS = ["gmail.com", "linear.app", "docs.google.com", "notion.so"];
 const GA_LANGUAGE_CODES = new Set(["en", "es", "fr", "de", "pt"]);
 const DICTATION_SESSION_LANGUAGE_OPTIONS = [
   { value: "auto", label: "Auto detect" },
@@ -356,7 +390,7 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
 const SOLO_LANES: SoloLane[] = [
   {
     id: "everywhere",
-    title: "Everywhere",
+    title: "General",
     description: "Fast default dictation for any app with clean inserts and light cleanup.",
     icon: Sparkles,
     modeId: "voice",
@@ -364,11 +398,11 @@ const SOLO_LANES: SoloLane[] = [
   },
   {
     id: "messages",
-    title: "Messages",
+    title: "Slack",
     description: "Short replies for Slack, chat, and quick-response work.",
     icon: Zap,
     modeId: "messages",
-    emphasis: "Keeps replies compact",
+    emphasis: "Best for compact replies",
   },
   {
     id: "writing",
@@ -377,6 +411,14 @@ const SOLO_LANES: SoloLane[] = [
     icon: BookOpen,
     modeId: "email",
     emphasis: "Best for polished language",
+  },
+  {
+    id: "follow_up",
+    title: "Follow-up",
+    description: "Turn rough notes into a polished meeting follow-up without forcing an insert.",
+    icon: Replace,
+    modeId: "meeting_follow_up",
+    emphasis: "Best for post-call writing",
   },
   {
     id: "coding",
@@ -496,7 +538,7 @@ function normalizeActiveLanguageSet(languages: string[]): string[] {
 const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
   {
     id: "voice",
-    label: "Voice",
+    label: "General",
     description: "Fast everyday dictation with reliable insert behavior.",
     profile: "normal_speed",
     insertionMode: "paste",
@@ -507,8 +549,8 @@ const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
   },
   {
     id: "messages",
-    label: "Messages",
-    description: "Quick replies that paste cleanly into the current app.",
+    label: "Slack & Chat",
+    description: "Quick replies that stay compact and paste cleanly into chat apps.",
     profile: "normal_speed",
     insertionMode: "paste",
     contextSource: "none",
@@ -518,8 +560,8 @@ const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
   },
   {
     id: "email",
-    label: "Email",
-    description: "Slower, cleaner output for polished writing and rewrites.",
+    label: "Writing",
+    description: "Cleaner output for polished drafting, rewrites, and longer-form prose.",
     profile: "power_rewrite",
     insertionMode: "paste",
     contextSource: "selected_text",
@@ -616,8 +658,69 @@ function createCustomModeDraft(
 
 function dictationModeLabel(modePreset: Exclude<DictationModePreset, "custom">): string {
   return (
-    DICTATION_MODE_DEFINITIONS.find((definition) => definition.id === modePreset)?.label ?? "Voice"
+    DICTATION_MODE_DEFINITIONS.find((definition) => definition.id === modePreset)?.label ?? "General"
   );
+}
+
+function getDictationPhaseSummary(
+  phase: DictationRuntimePhase,
+  message: string | null,
+  preview: string | null
+): { title: string; detail: string; tone: "idle" | "active" | "success" | "error" } {
+  const fallbackDetail =
+    preview?.trim() || message?.trim() || "Nautilus is ready for the next capture.";
+
+  switch (phase) {
+    case "primed":
+      return {
+        title: "Mic primed",
+        detail: message?.trim() || "The route is warm and Nautilus is getting ready to listen.",
+        tone: "active",
+      };
+    case "recording":
+      return {
+        title: "Listening",
+        detail: preview?.trim() || message?.trim() || "Capture is live and the next result is building.",
+        tone: "active",
+      };
+    case "stopping":
+      return {
+        title: "Stopping capture",
+        detail: message?.trim() || "Audio is closing cleanly so the result can be finalized.",
+        tone: "active",
+      };
+    case "transcribing":
+      return {
+        title: "Transcribing",
+        detail: preview?.trim() || message?.trim() || "Speech is turning into text now.",
+        tone: "active",
+      };
+    case "delivering":
+      return {
+        title: "Delivering",
+        detail: message?.trim() || "Nautilus is inserting or copying the final result.",
+        tone: "active",
+      };
+    case "done":
+      return {
+        title: "Ready again",
+        detail: message?.trim() || fallbackDetail,
+        tone: "success",
+      };
+    case "error":
+      return {
+        title: "Needs attention",
+        detail: message?.trim() || "Capture or delivery hit a problem. Your latest text is still available.",
+        tone: "error",
+      };
+    case "idle":
+    default:
+      return {
+        title: "Ready to launch",
+        detail: message?.trim() || "Start from the hotkey or the button below and Nautilus will take it from there.",
+        tone: "idle",
+      };
+  }
 }
 
 function coerceBaseModePreset(modePreset: string | null | undefined): DictationBaseModePreset {
@@ -816,7 +919,7 @@ function languageTrustLabel(language: string | null, activeLanguages: string[]):
 }
 
 export function DictationView() {
-  const { isRecording, formattedDuration, startDictation, stopDictation } = useRecording();
+  const { formattedDuration, startDictation, stopDictation } = useRecording();
   const { projects } = useProjects();
   const { recordings, isLoading: dictationHistoryLoading, refetch: refetchDictationHistory } = useRecordings();
   const defaultShortcut = defaultDictationShortcut();
@@ -840,6 +943,10 @@ export function DictationView() {
   const [insertionModeUsed, setInsertionModeUsed] = useState<string | null>(null);
   const [commandApplied, setCommandApplied] = useState<string | null>(null);
   const [snippetAppliedCount, setSnippetAppliedCount] = useState(0);
+  const [dictationPhase, setDictationPhase] = useState<DictationRuntimePhase>("idle");
+  const [dictationPhaseMessage, setDictationPhaseMessage] = useState<string | null>(null);
+  const [dictationPhasePreview, setDictationPhasePreview] = useState<string | null>(null);
+  const [dictationResolvedModeLabel, setDictationResolvedModeLabel] = useState<string | null>(null);
   const [appTarget, setAppTarget] = useState<string | null>(null);
   const [activationMatcher, setActivationMatcher] = useState<string | null>(null);
   const [contextChars, setContextChars] = useState<number | null>(null);
@@ -965,9 +1072,10 @@ export function DictationView() {
     switch (dictationModePreset) {
       case "messages":
         return "messages";
+      case "meeting_follow_up":
+        return "follow_up";
       case "email":
       case "notes":
-      case "meeting_follow_up":
         return "writing";
       default:
         return "everywhere";
@@ -978,6 +1086,19 @@ export function DictationView() {
     () => SOLO_LANES.find((lane) => lane.id === activeLaneId) ?? SOLO_LANES[0],
     [activeLaneId]
   );
+
+  const dictationPhaseSummary = useMemo(
+    () => getDictationPhaseSummary(dictationPhase, dictationPhaseMessage, dictationPhasePreview),
+    [dictationPhase, dictationPhaseMessage, dictationPhasePreview]
+  );
+
+  const isDictationCaptureLive = dictationPhase === "primed" || dictationPhase === "recording";
+  const isDictationBusy =
+    dictationPhase === "primed" ||
+    dictationPhase === "recording" ||
+    dictationPhase === "stopping" ||
+    dictationPhase === "transcribing" ||
+    dictationPhase === "delivering";
 
   const smartContextSummary = useMemo(
     () => describeSmartContextState(activationMatcher, appTarget, contextChars),
@@ -1876,6 +1997,34 @@ export function DictationView() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+
+    const setup = async () => {
+      unlisten = await listen<DictationStateChangedEvent>("dictation-state-changed", (event) => {
+        const payload = event.payload;
+        setDictationPhase(payload.phase);
+        setDictationPhaseMessage(payload.message ?? null);
+        setDictationPhasePreview(payload.preview ?? payload.partialText ?? null);
+        setDictationResolvedModeLabel(payload.resolvedModeLabel ?? null);
+        setAppTarget(payload.appTarget ?? null);
+        setActivationMatcher(payload.activationMatcher ?? null);
+        if (payload.providerModelLabel) {
+          setLastProviderModelLabel(payload.providerModelLabel);
+        }
+        if (payload.phase === "error") {
+          setDictationError(payload.message ?? "Dictation failed.");
+        }
+      });
+    };
+
+    void setup();
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
     const setup = async () => {
       unlisten = await listen<DictationTextReadyEvent>("dictation-text-ready", (event) => {
         const payload = event.payload;
@@ -1918,6 +2067,15 @@ export function DictationView() {
         setAppTarget(payload?.appTarget ?? null);
         setActivationMatcher(payload?.activationMatcher ?? null);
         setContextChars(payload?.contextChars ?? null);
+        setDictationPhase("done");
+        setDictationPhaseMessage(
+          payload?.pasted
+            ? "Inserted into the target app and copied to the clipboard."
+            : payload?.copied
+              ? "Copied to the clipboard and ready to paste."
+              : "Result is ready to review."
+        );
+        setDictationPhasePreview(text || null);
         if (payload?.pasted) {
           setPasteStatus("Paste command sent (also copied to clipboard)");
         } else if (payload?.copied) {
@@ -1951,6 +2109,37 @@ export function DictationView() {
         }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      setDictationError(message);
+    }
+  };
+
+  const launchDictation = async () => {
+    const routePreference =
+      dictationRouteOverrideEnabled && nextCaptureRoutePreference
+        ? nextCaptureRoutePreference
+        : dictationRoutePreference;
+    if (dictationRouteOverrideEnabled) {
+      setNextCaptureRoutePreference(null);
+    }
+    setDictationError(null);
+    try {
+      await startDictation({
+        saveToInbox,
+        projectId: defaultProjectId,
+        profile: dictationProfile,
+        contextSource: dictationContextSource,
+        routePreference,
+        languageOverride: effectiveCaptureLanguage,
+        livePreviewEnabled:
+          dictationModePreset === "custom"
+            ? customModeDraft.livePreviewEnabled
+            : dictationLivePreviewEnabled,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDictationPhase("error");
+      setDictationPhaseMessage(message);
+      setDictationPhasePreview(null);
       setDictationError(message);
     }
   };
@@ -2586,7 +2775,7 @@ export function DictationView() {
                 <p className="text-xs text-muted-foreground">
                   Pick the lane that matches what you are doing right now. Nautilus keeps the deep controls below, but these presets are the fastest way to feel dialed in.
                 </p>
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                   {SOLO_LANES.map((lane) => {
                     const Icon = lane.icon;
                     const isActive = activeLane.id === lane.id;
@@ -2904,7 +3093,7 @@ export function DictationView() {
                   ? selectedCustomMode
                     ? `${selectedCustomMode.name} is active. Update it when you want the current lower controls to become the new default profile.`
                     : "Unsaved custom setup is active. Save it as a reusable flow profile when it feels right."
-                  : `${modeDefinitionById[dictationModePreset]?.label ?? "Voice"} profile is active. Lower controls stay editable if you want to fine-tune them.`}
+                  : `${modeDefinitionById[dictationModePreset]?.label ?? "General"} profile is active. Lower controls stay editable if you want to fine-tune them.`}
               </div>
               {dictationModePreset === "custom" && (
                 <div className="rounded-xl border border-border/70 bg-background/70 p-4 space-y-3">
@@ -3157,7 +3346,7 @@ export function DictationView() {
           {/* Quick Capture Card */}
           <Card className={cn(
             "border-2 transition-all duration-300",
-            isRecording ? "border-active" : "border-muted"
+            isDictationBusy ? "border-active" : "border-muted"
           )}>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -3180,6 +3369,11 @@ export function DictationView() {
                     </p>
                     <p className="mt-1 text-sm font-semibold">{activeLane.title}</p>
                     <p className="mt-1 text-xs text-muted-foreground">{activeLane.description}</p>
+                    {dictationResolvedModeLabel ? (
+                      <p className="mt-2 text-[11px] font-medium text-primary">
+                        Runtime mode: {dictationResolvedModeLabel}
+                      </p>
+                    ) : null}
                   </div>
                   <div className="rounded-xl border bg-background/70 p-3">
                     <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -3193,6 +3387,47 @@ export function DictationView() {
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">{dictionaryCoverageSummary}</p>
                   </div>
+                </div>
+                <div
+                  className={cn(
+                    "rounded-xl border p-4",
+                    dictationPhaseSummary.tone === "active"
+                      ? "border-active/40 bg-active/10"
+                      : dictationPhaseSummary.tone === "success"
+                        ? "border-emerald-500/30 bg-emerald-500/10"
+                        : dictationPhaseSummary.tone === "error"
+                          ? "border-destructive/30 bg-destructive/10"
+                          : "border-border bg-background/70"
+                  )}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                        Capture state
+                      </p>
+                      <p className="text-sm font-semibold">{dictationPhaseSummary.title}</p>
+                      <p className="text-sm text-muted-foreground">{dictationPhaseSummary.detail}</p>
+                    </div>
+                    <div
+                      className={cn(
+                        "rounded-full border px-2.5 py-1 text-[11px] font-semibold",
+                        dictationPhaseSummary.tone === "active"
+                          ? "border-active/40 bg-active/10 text-active"
+                          : dictationPhaseSummary.tone === "success"
+                            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                            : dictationPhaseSummary.tone === "error"
+                              ? "border-destructive/30 bg-destructive/10 text-destructive"
+                              : "border-border bg-background text-muted-foreground"
+                      )}
+                    >
+                      {dictationPhase}
+                    </div>
+                  </div>
+                  {dictationPhasePreview ? (
+                    <div className="mt-3 rounded-md border bg-background/80 px-3 py-2 text-sm text-muted-foreground">
+                      {dictationPhasePreview}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="rounded-xl border border-border bg-muted/20 p-3">
                   <div className="flex flex-wrap gap-2 text-xs">
@@ -3211,18 +3446,74 @@ export function DictationView() {
                   </div>
                 </div>
               <div className="flex flex-col items-center gap-6 py-8">
-                {isRecording ? (
+                {isDictationCaptureLive ? (
                   <div className="flex flex-col items-center gap-4">
                     <div className="h-24 w-24 rounded-full bg-active flex items-center justify-center animate-pulse shadow-lg shadow-active/50">
                       <Mic className="h-12 w-12 text-active-foreground" />
                     </div>
                     <div className="text-center">
-                      <p className="text-lg font-medium">Dictating...</p>
-                      <p className="text-3xl font-mono mt-2 font-bold text-active">{formattedDuration}</p>
+                      <p className="text-lg font-medium">
+                        {dictationPhase === "primed" ? "Warming up..." : "Dictating..."}
+                      </p>
+                      <p className="text-3xl font-mono mt-2 font-bold text-active">
+                        {dictationPhase === "recording" ? formattedDuration : "--:--"}
+                      </p>
                     </div>
                     <Button variant="destructive" size="lg" onClick={handleStopDictation} className="mt-4">
                       <Square className="h-4 w-4 mr-2 fill-current" />
                       Stop Dictation
+                    </Button>
+                  </div>
+                ) : isDictationBusy ? (
+                  <div className="flex flex-col items-center gap-4">
+                    <div className="h-24 w-24 rounded-full bg-muted flex items-center justify-center">
+                      <RefreshCw className="h-12 w-12 animate-spin text-primary" />
+                    </div>
+                    <div className="text-center">
+                      <p className="text-lg font-medium">{dictationPhaseSummary.title}</p>
+                      <p className="mt-1 text-muted-foreground">{dictationPhaseSummary.detail}</p>
+                    </div>
+                    <Button variant="outline" size="lg" disabled className="mt-4">
+                      <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                      {dictationPhase === "delivering" ? "Delivering..." : "Working..."}
+                    </Button>
+                  </div>
+                ) : dictationPhase === "done" ? (
+                  <div className="flex flex-col items-center gap-4">
+                    <div className="h-24 w-24 rounded-full bg-emerald-500/10 flex items-center justify-center">
+                      <CheckCircle2 className="h-12 w-12 text-emerald-600 dark:text-emerald-300" />
+                    </div>
+                    <div className="text-center">
+                      <p className="text-lg font-medium">Result ready</p>
+                      <p className="text-muted-foreground mt-1">{dictationPhaseSummary.detail}</p>
+                    </div>
+                    <Button
+                      variant="active"
+                      size="lg"
+                      onClick={launchDictation}
+                      className="mt-4"
+                    >
+                      <Mic className="h-4 w-4 mr-2" />
+                      Start Next Dictation
+                    </Button>
+                  </div>
+                ) : dictationPhase === "error" ? (
+                  <div className="flex flex-col items-center gap-4">
+                    <div className="h-24 w-24 rounded-full bg-destructive/10 flex items-center justify-center">
+                      <TriangleAlert className="h-12 w-12 text-destructive" />
+                    </div>
+                    <div className="text-center">
+                      <p className="text-lg font-medium">Capture needs attention</p>
+                      <p className="text-muted-foreground mt-1">{dictationPhaseSummary.detail}</p>
+                    </div>
+                    <Button 
+                      variant="active" 
+                      size="lg" 
+                      onClick={launchDictation}
+                      className="mt-4"
+                    >
+                      <Mic className="h-4 w-4 mr-2" />
+                      Retry Dictation
                     </Button>
                   </div>
                 ) : (
@@ -3237,7 +3528,7 @@ export function DictationView() {
                       )} />
                     </div>
                     <div className="text-center">
-                      <p className="text-lg font-medium">Ready to capture</p>
+                      <p className="text-lg font-medium">{dictationPhaseSummary.title}</p>
                       <p className="text-muted-foreground mt-1">
                         {dictationHandsFreeEnabled
                           ? `Press ${hotkeyLabel} to start. It stops after silence or when you press again`
@@ -3249,29 +3540,9 @@ export function DictationView() {
                     <Button 
                       variant="active" 
                       size="lg" 
-                      onClick={() => {
-                        const routePreference =
-                          dictationRouteOverrideEnabled && nextCaptureRoutePreference
-                            ? nextCaptureRoutePreference
-                            : dictationRoutePreference;
-                        if (dictationRouteOverrideEnabled) {
-                          setNextCaptureRoutePreference(null);
-                        }
-                        void startDictation({
-                          saveToInbox,
-                          projectId: defaultProjectId,
-                          profile: dictationProfile,
-                          contextSource: dictationContextSource,
-                          routePreference,
-                          languageOverride:
-                            effectiveCaptureLanguage,
-                          livePreviewEnabled:
-                            dictationModePreset === "custom"
-                              ? customModeDraft.livePreviewEnabled
-                              : dictationLivePreviewEnabled,
-                        });
-                      }}
+                      onClick={launchDictation}
                       className="mt-4"
+                      disabled={isDictationBusy}
                     >
                       <Mic className="h-4 w-4 mr-2" />
                       Start Dictation
@@ -3771,7 +4042,11 @@ export function DictationView() {
                     {lastProvider && <span>Engine: {lastProvider}</span>}
                     {lastModelId && <span>Model: {lastModelId}</span>}
                     {insertionModeUsed && <span>Inserted via: {insertionModeUsed}</span>}
-                    {commandApplied && <span>Command: {commandApplied}</span>}
+                    {commandApplied && (
+                      <span>
+                        Command: {formatAppliedDictationCommandLabel(commandApplied) ?? commandApplied}
+                      </span>
+                    )}
                     {snippetAppliedCount > 0 && <span>Snippets: {snippetAppliedCount}</span>}
                     {appTarget && <span>Target app: {appTarget}</span>}
                     {activationMatcher && <span>Auto mode: {activationMatcher}</span>}
@@ -3787,7 +4062,7 @@ export function DictationView() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <div>
-                <CardTitle>Voice Profile</CardTitle>
+                <CardTitle>Flow Profile</CardTitle>
                 <CardDescription>
                   Private local usage stats across your saved dictations.
                 </CardDescription>
@@ -3871,7 +4146,7 @@ export function DictationView() {
                 </div>
               ) : (
                 <p className="text-sm text-muted-foreground">
-                  No saved dictation stats yet. Voice Profile starts filling in once dictations are
+                  No saved dictation stats yet. Flow Profile starts filling in once dictations are
                   retained in history.
                 </p>
               )}

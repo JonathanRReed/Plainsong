@@ -87,7 +87,6 @@ export interface TranscriptionSettings {
   speakerNamingMethod: "auto" | "numbered" | "manual";
   diarizationModelId?: string;
   silenceSkipEnabled: boolean;
-  dictationPasteToCursor: boolean;
   dictationCopyToClipboard?: boolean;
   dictationAutoRequestPermissions?: boolean;
   dictationPushToTalk: boolean;
@@ -150,9 +149,7 @@ export interface PlatformOptimizationSettings {
 
 export interface UiSettings {
   alwaysOnTop: boolean;
-  showInDock: boolean;
   minimizeToTray: boolean;
-  startMinimized: boolean;
   windowPosition: [number, number] | null;
   windowSize: [number, number] | null;
   fontSize: number;

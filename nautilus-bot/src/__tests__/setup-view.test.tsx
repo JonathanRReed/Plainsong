@@ -6,10 +6,16 @@ const setupStatusMock = vi.hoisted(() => ({
   loading: false,
   error: null as string | null,
   refresh: vi.fn(async () => {}),
+  settings: {
+    transcription: {
+      dictationInsertionMode: "auto",
+    },
+  },
   permissions: {
     microphoneReady: true,
     speechRecognitionReady: true,
     accessibilityReady: true,
+    cursorInsertionReady: true,
     automationReady: true,
     notes: [],
   },
@@ -149,6 +155,19 @@ describe("SetupView", () => {
     vi.clearAllMocks();
     setupStatusMock.loading = false;
     setupStatusMock.error = null;
+    setupStatusMock.settings = {
+      transcription: {
+        dictationInsertionMode: "auto",
+      },
+    };
+    setupStatusMock.permissions = {
+      microphoneReady: true,
+      speechRecognitionReady: true,
+      accessibilityReady: true,
+      cursorInsertionReady: true,
+      automationReady: true,
+      notes: [],
+    };
     setupStatusMock.systemAudioAvailable = false;
     setupStatusMock.loopbackDevice = null;
     setupStatusMock.meetingCaptureMode = "mic_only";
@@ -230,5 +249,41 @@ describe("SetupView", () => {
         screen.getByText(/Insert permissions test: Sent a test insert to Notes/i)
       ).toBeInTheDocument();
     });
+  });
+
+  it("shows cursor insert as not needed in clipboard-only mode", () => {
+    setupStatusMock.settings = {
+      transcription: {
+        dictationInsertionMode: "clipboard_only",
+      },
+    };
+    setupStatusMock.permissions = {
+      microphoneReady: true,
+      speechRecognitionReady: true,
+      accessibilityReady: false,
+      cursorInsertionReady: false,
+      automationReady: false,
+      notes: [],
+    };
+
+    render(<SetupView />);
+
+    expect(screen.getByText("Cursor insert")).toBeInTheDocument();
+    expect(screen.getByText("Not needed")).toBeInTheDocument();
+  });
+
+  it("shows keyboard fallback when direct accessibility is unavailable", () => {
+    setupStatusMock.permissions = {
+      microphoneReady: true,
+      speechRecognitionReady: true,
+      accessibilityReady: false,
+      cursorInsertionReady: true,
+      automationReady: false,
+      notes: [],
+    };
+
+    render(<SetupView />);
+
+    expect(screen.getByText("Keyboard fallback")).toBeInTheDocument();
   });
 });
