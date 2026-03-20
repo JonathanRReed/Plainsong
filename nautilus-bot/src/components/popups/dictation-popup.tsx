@@ -8,15 +8,19 @@ import {
   CheckCircle2,
   Clipboard,
   GripHorizontal,
+  History,
   Loader2,
   Mail,
   Mic,
   Minimize2,
   PanelsTopLeft,
+  RotateCcw,
+  Settings2,
   Square,
   StickyNote,
   TextCursorInput,
   TriangleAlert,
+  Volume2,
   Wand2,
   X,
 } from "lucide-react";
@@ -34,6 +38,11 @@ import {
   formatAppliedDictationCommandLabel,
   isBacktrackDictationCommand,
 } from "@/lib/dictation-command-labels";
+import {
+  canSpeakTextAloud,
+  speakTextAloud,
+  stopSpeakingText,
+} from "@/lib/text-to-speech";
 import { cn } from "@/lib/utils";
 import type { AsrProviderType } from "@/types";
 import type { DictationCustomMode } from "@/types/settings";
@@ -317,6 +326,46 @@ function formatDoneMessage(
   return "The result is ready for a quick spoken edit or another pass.";
 }
 
+function PopupActionButton({
+  icon: Icon,
+  label,
+  detail,
+  onClick,
+  tone = "default",
+}: {
+  icon: typeof Clipboard;
+  label: string;
+  detail: string;
+  onClick: () => void;
+  tone?: "default" | "primary";
+}) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "group flex items-start gap-3 rounded-2xl border px-3 py-3 text-left transition-colors",
+        tone === "primary"
+          ? "border-emerald-400/25 bg-emerald-400/10 hover:bg-emerald-400/15"
+          : "border-white/10 bg-white/5 hover:bg-white/10"
+      )}
+      onClick={onClick}
+    >
+      <div
+        className={cn(
+          "mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-xl",
+          tone === "primary" ? "bg-emerald-300/15 text-emerald-100" : "bg-white/10 text-slate-100"
+        )}
+      >
+        <Icon className="h-4 w-4" />
+      </div>
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-white">{label}</p>
+        <p className="mt-1 text-xs leading-relaxed text-slate-300">{detail}</p>
+      </div>
+    </button>
+  );
+}
+
 export function DictationPopup() {
   const window = getCurrentWindow();
   const [phase, setPhase] = useState<DictationPhase>("idle");
@@ -354,7 +403,8 @@ export function DictationPopup() {
   const [finalText, setFinalText] = useState<string | null>(null);
   const [finalCommandApplied, setFinalCommandApplied] = useState<string | null>(null);
   const [finalSnippetAppliedCount, setFinalSnippetAppliedCount] = useState(0);
-  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [isSpeakingAloud, setIsSpeakingAloud] = useState(false);
   const lastSessionIdRef = useRef<number | null>(null);
   const lastActiveStartedAtRef = useRef<number | null>(null);
   const sessionClockStartedAtRef = useRef<number | null>(null);
@@ -396,7 +446,9 @@ export function DictationPopup() {
     setFinalText(null);
     setFinalCommandApplied(null);
     setFinalSnippetAppliedCount(0);
-    setCopyFeedback(null);
+    setActionFeedback(null);
+    setIsSpeakingAloud(false);
+    stopSpeakingText();
   };
 
   const applyRuntimeMetadata = (payload: DictationStateChangedEvent) => {
@@ -534,7 +586,7 @@ export function DictationPopup() {
         setFinalText(payload.text ?? null);
         setFinalCommandApplied(payload.commandApplied ?? null);
         setFinalSnippetAppliedCount(payload.snippetAppliedCount ?? 0);
-        setCopyFeedback(null);
+        setActionFeedback(null);
         if (typeof payload.appTarget !== "undefined") {
           setRuntimeAppTarget(payload.appTarget ?? null);
         }
@@ -574,6 +626,7 @@ export function DictationPopup() {
 
     void setup();
     return () => {
+      stopSpeakingText();
       unlistenState?.();
       unlistenTextReady?.();
     };
@@ -710,7 +763,9 @@ export function DictationPopup() {
 
   const handleStartAgain = async () => {
     try {
-      setCopyFeedback(null);
+      setActionFeedback(null);
+      setIsSpeakingAloud(false);
+      stopSpeakingText();
       await startDictation();
     } catch (error) {
       console.error("Failed to restart dictation from popup:", error);
@@ -724,10 +779,38 @@ export function DictationPopup() {
 
     try {
       await navigator.clipboard.writeText(finalText);
-      setCopyFeedback("Copied result");
+      setActionFeedback("Copied result");
     } catch (error) {
       console.error("Failed to copy dictation result from popup:", error);
-      setCopyFeedback("Copy failed");
+      setActionFeedback("Copy failed");
+    }
+  };
+
+  const handleToggleReadAloud = async () => {
+    const text = (finalText ?? preview ?? "").trim();
+    if (!text) {
+      return;
+    }
+
+    if (isSpeakingAloud) {
+      stopSpeakingText();
+      setIsSpeakingAloud(false);
+      setActionFeedback("Stopped read aloud");
+      return;
+    }
+
+    setActionFeedback(null);
+    setIsSpeakingAloud(true);
+    const started = speakTextAloud(text, {
+      onEnd: () => setIsSpeakingAloud(false),
+      onError: () => setActionFeedback("Read aloud unavailable"),
+    });
+
+    if (!started) {
+      setIsSpeakingAloud(false);
+      setActionFeedback(
+        canSpeakTextAloud() ? "Read aloud unavailable" : "Read aloud not supported here"
+      );
     }
   };
 
@@ -808,7 +891,7 @@ export function DictationPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="max-h-[calc(100vh-24px)] overflow-y-auto rounded-[24px] border border-cyan-400/35 bg-linear-to-br from-slate-950/95 via-slate-900/92 to-cyan-950/55 px-4 py-3 backdrop-blur-xl shadow-[0_18px_80px_rgba(8,15,28,0.55)]">
+      <div className="max-h-[calc(100vh-24px)] overflow-y-auto rounded-[22px] border border-white/10 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.08),_transparent_38%),linear-gradient(180deg,rgba(15,23,42,0.98),rgba(2,6,23,0.96))] px-4 py-3 backdrop-blur-2xl shadow-[0_18px_60px_rgba(2,6,23,0.55)]">
         <div
           data-tauri-drag-region
           className="mb-2 flex cursor-grab select-none items-center justify-between text-slate-300 active:cursor-grabbing"
@@ -1077,40 +1160,47 @@ export function DictationPopup() {
               )}
               {!compact && (
                 <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-300">
-                  {finalText?.trim() && (
-                    <button
-                      type="button"
-                      className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
-                      onClick={() => void handleCopyResult()}
-                    >
-                      Copy result
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="rounded-lg border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1.5 hover:bg-emerald-400/15"
-                    onClick={() => void handleStartAgain()}
-                  >
-                    Start again
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
-                    onClick={() => void openMainApp("dictation")}
-                  >
-                    Open history
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
-                    onClick={() => void openMainApp()}
-                  >
-                    Open app
-                  </button>
+                  <div className="grid w-full gap-2 sm:grid-cols-2">
+                    {finalText?.trim() && (
+                      <PopupActionButton
+                        icon={Clipboard}
+                        label="Copy result"
+                        detail="Put the latest text on your clipboard again."
+                        onClick={() => void handleCopyResult()}
+                      />
+                    )}
+                    <PopupActionButton
+                      icon={RotateCcw}
+                      label="Start again"
+                      detail="Jump straight into another dictation."
+                      onClick={() => void handleStartAgain()}
+                      tone="primary"
+                    />
+                    {finalText?.trim() && (
+                      <PopupActionButton
+                        icon={Volume2}
+                        label={isSpeakingAloud ? "Stop reading" : "Read aloud"}
+                        detail="Play the latest result back without leaving the popup."
+                        onClick={() => void handleToggleReadAloud()}
+                      />
+                    )}
+                    <PopupActionButton
+                      icon={History}
+                      label="Open history"
+                      detail="Review recent dictations and reprocess a result."
+                      onClick={() => void openMainApp("dictation")}
+                    />
+                    <PopupActionButton
+                      icon={AppWindow}
+                      label="Open app"
+                      detail="Return to the full workspace for meetings and settings."
+                      onClick={() => void openMainApp()}
+                    />
+                  </div>
                 </div>
               )}
-              {!compact && copyFeedback && (
-                <p className="mt-2 text-xs text-cyan-200">{copyFeedback}</p>
+              {!compact && actionFeedback && (
+                <p className="mt-2 text-xs text-cyan-200">{actionFeedback}</p>
               )}
             </div>
           </div>
@@ -1150,6 +1240,7 @@ export function DictationPopup() {
                     className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
                     onClick={() => void openMainApp("settings")}
                   >
+                    <Settings2 className="mr-1 inline h-3.5 w-3.5" />
                     Open settings
                   </button>
                 </div>

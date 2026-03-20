@@ -14,6 +14,17 @@ export interface AsrProviderInfo {
   engineDiagnostics?: AsrEngineDiagnostics;
 }
 
+export interface AsrProviderInventory {
+  providerType: AsrProviderType;
+  name: string;
+  description: string;
+  isAvailable: boolean;
+  inferenceEnabled: boolean;
+  selectedModelId: string;
+  modelOptions: AsrModelOption[];
+  downloadStatus: DownloadStatus;
+}
+
 export interface AsrModelOption {
   id: string;
   label: string;

@@ -1767,6 +1767,25 @@ async fn smoke_test_cursor_insert(
 }
 
 #[tauri::command]
+async fn capture_selected_text_for_playback() -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    let target = sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
+
+    #[cfg(target_os = "windows")]
+    let target = (get_frontmost_app_name(), None);
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        capture_selected_text_via_clipboard(target.0.as_deref())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Err("Selected text playback is only supported on macOS and Windows.".to_string())
+    }
+}
+
+#[tauri::command]
 async fn verify_dictation_setup(
     state: tauri::State<'_, AppState>,
 ) -> Result<SetupVerificationResult, String> {
@@ -5600,6 +5619,13 @@ async fn get_asr_providers(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<asr::ProviderInfo>, String> {
     state.asr_manager.get_all_providers_info().await
+}
+
+#[tauri::command]
+async fn get_asr_provider_inventory(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<asr::ProviderInventory>, String> {
+    state.asr_manager.get_provider_inventory().await
 }
 
 #[tauri::command]
@@ -14145,6 +14171,7 @@ pub fn run() {
             stop_dictation,
             force_stop_dictation,
             smoke_test_cursor_insert,
+            capture_selected_text_for_playback,
             verify_dictation_setup,
             verify_meeting_setup,
             verify_system_audio_setup,
@@ -14212,6 +14239,7 @@ pub fn run() {
             retry_meeting_auto_name,
             delete_project,
             get_asr_providers,
+            get_asr_provider_inventory,
             get_asr_runtime_diagnostics,
             refresh_asr_runtime_probes,
             repair_local_model_cache,

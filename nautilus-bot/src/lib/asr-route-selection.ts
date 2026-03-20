@@ -5,7 +5,12 @@ import {
   modelSupportsMlxAcceleration,
   visibleRouteForMlxModel,
 } from "@/lib/asr-capabilities";
-import type { AsrProviderInfo, AsrProviderType, TranscriptionSettings } from "@/types";
+import type {
+  AsrProviderInfo,
+  AsrProviderInventory,
+  AsrProviderType,
+  TranscriptionSettings,
+} from "@/types";
 
 export interface AsrRouteSelectionState {
   defaultProvider: AsrProviderType;
@@ -19,6 +24,9 @@ export interface AsrRouteSelectionState {
   meetingMlxEnabled: boolean;
   meetingRoutePolicy: "prefer_local" | "best_available";
 }
+
+type RouteSelectableProvider = Pick<AsrProviderInfo, "providerType" | "modelOptions">;
+type RouteSelectableInventory = RouteSelectableProvider | AsrProviderInventory;
 
 export type AsrRouteSelectionUpdate = Partial<AsrRouteSelectionState>;
 
@@ -43,21 +51,21 @@ function normalizeMeetingRoutePolicy(
 }
 
 function modelOptionsForProvider(
-  providerList: AsrProviderInfo[],
+  providerList: RouteSelectableInventory[],
   providerType: AsrProviderType
 ) {
   return providerList.find((provider) => provider.providerType === providerType)?.modelOptions ?? [];
 }
 
 function firstModelIdForProvider(
-  providerList: AsrProviderInfo[],
+  providerList: RouteSelectableInventory[],
   providerType: AsrProviderType
 ) {
   return modelOptionsForProvider(providerList, providerType)[0]?.id ?? providerType;
 }
 
 function knownModelForProvider(
-  providerList: AsrProviderInfo[],
+  providerList: RouteSelectableInventory[],
   providerType: AsrProviderType,
   modelId: string
 ) {
@@ -72,7 +80,7 @@ function knownModelForProvider(
 }
 
 function isMeetingEligibleModel(
-  providerList: AsrProviderInfo[],
+  providerList: RouteSelectableInventory[],
   providerType: AsrProviderType,
   modelId: string
 ) {
@@ -83,7 +91,7 @@ function isMeetingEligibleModel(
 }
 
 function isListBackedSharedMeetingCompatible(
-  providerList: AsrProviderInfo[],
+  providerList: RouteSelectableInventory[],
   providerType: AsrProviderType,
   modelId: string
 ) {
@@ -94,7 +102,7 @@ function isListBackedSharedMeetingCompatible(
 }
 
 function normalizeProviderModelSelection(
-  providerList: AsrProviderInfo[],
+  providerList: RouteSelectableInventory[],
   providerType: AsrProviderType,
   modelId: string
 ) {
@@ -162,7 +170,7 @@ function preferredMeetingProviderCandidates(
 }
 
 function fallbackMeetingProvider(
-  providerList: AsrProviderInfo[],
+  providerList: RouteSelectableInventory[],
   meetingRoutePolicy: "prefer_local" | "best_available",
   defaultProvider: AsrProviderType,
   dictationProvider: AsrProviderType,
@@ -180,7 +188,7 @@ function fallbackMeetingProvider(
 }
 
 function fallbackMeetingModel(
-  providerList: AsrProviderInfo[],
+  providerList: RouteSelectableInventory[],
   providerType: AsrProviderType,
   preferredModelId?: string
 ) {
@@ -204,7 +212,7 @@ function sanitizeMlxFlag(
 }
 
 export function selectionStateFromSettings(
-  providerList: AsrProviderInfo[],
+  providerList: RouteSelectableInventory[],
   transcription: TranscriptionSettings
 ): AsrRouteSelectionState {
   const migratedDefault = migrateLegacyMlxSelection(
@@ -303,7 +311,7 @@ export function selectionStateFromSettings(
 }
 
 export function mergeSelectionStateUpdate(
-  providerList: AsrProviderInfo[],
+  providerList: RouteSelectableInventory[],
   currentSelection: AsrRouteSelectionState,
   updates: AsrRouteSelectionUpdate
 ): AsrRouteSelectionState {

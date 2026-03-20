@@ -343,4 +343,4 @@ impl AsrProviderFactory {
 }
 
 // Re-export manager types
-pub use manager::{AsrManager, BenchmarkResult, ProviderInfo, RuntimeDiagnostics};
+pub use manager::{AsrManager, BenchmarkResult, ProviderInfo, ProviderInventory, RuntimeDiagnostics};

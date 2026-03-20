@@ -1,11 +1,18 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
 
 const invokeMock = vi.fn();
 const getSettingsMock = vi.fn();
 const saveSettingsMock = vi.fn();
 const getPermissionDiagnosticsMock = vi.fn();
+
+const buttonWithText = (scope: ReturnType<typeof within> | typeof screen, text: string) => {
+  const button = (scope.getAllByRole("button") as HTMLButtonElement[])
+    .find((candidate) => candidate.textContent?.includes(text));
+  expect(button).not.toBeNull();
+  return button as HTMLButtonElement;
+};
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
@@ -18,10 +25,12 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@/lib/tauri", () => ({
   refreshAsrRuntimeProbes: vi.fn(async () => {}),
   repairLocalModelCache: vi.fn(async () => ({ repairedCount: 0, removedPaths: [], notes: [] })),
+  getAsrProviderInventory: vi.fn(async () => invokeMock("get_asr_provider_inventory")),
   getSettings: (...args: unknown[]) => getSettingsMock(...args),
   saveSettings: (...args: unknown[]) => saveSettingsMock(...args),
   getPermissionDiagnostics: (...args: unknown[]) => getPermissionDiagnosticsMock(...args),
   openPermissionSettings: vi.fn(async () => {}),
+  openInstalledNautilusApp: vi.fn(async () => {}),
   requestDictationPermissions: vi.fn(async () => ({})),
   repairCursorInsertPermissions: vi.fn(async () => ({})),
 }));
@@ -179,7 +188,7 @@ describe("Platform optimization settings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_asr_providers") return providerFixture;
+      if (cmd === "get_asr_providers" || cmd === "get_asr_provider_inventory") return providerFixture;
       if (cmd === "get_default_asr_provider") return "distil_whisper";
       if (cmd === "list_asr_benchmarks") return [];
       return null;
@@ -289,6 +298,15 @@ describe("Platform optimization settings", () => {
       },
     };
     getSettingsMock.mockResolvedValue(appleSettings);
+    getPermissionDiagnosticsMock.mockResolvedValue({
+      microphoneReady: true,
+      speechRecognitionReady: true,
+      accessibilityReady: true,
+      accessibilityTrusted: true,
+      postEventReady: true,
+      automationReady: false,
+      notes: [],
+    });
 
     render(<AsrProviderManager />);
 
@@ -304,24 +322,20 @@ describe("Platform optimization settings", () => {
   it("surfaces recommended solo local model lanes", async () => {
     render(<AsrProviderManager />);
 
-    expect(await screen.findByText("Recommended local model lanes")).toBeInTheDocument();
-    expect(screen.getByText("Fast local dictation")).toBeInTheDocument();
+    expect(await screen.findByText("Model Routes")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Split dictation + meetings" }));
+    expect(await screen.findByText("Dictation")).toBeInTheDocument();
+    expect(screen.getByText("Recommended")).toBeInTheDocument();
     expect(screen.getAllByText("UsefulSensors Moonshine").length).toBeGreaterThan(0);
-    expect(screen.getByText("Higher-quality local")).toBeInTheDocument();
-    expect(screen.getByText("Apple Silicon acceleration")).toBeInTheDocument();
-    expect(screen.getByText("Current solo routes")).toBeInTheDocument();
+    expect(screen.getByText("Current routing")).toBeInTheDocument();
   });
 
   it("treats Apple Native as dictation-only when persisting transcription route settings", async () => {
     render(<AsrProviderManager />);
 
-    const sharedProviderSelect = (await screen.findByText("Shared provider"))
-      .parentElement?.querySelector("select");
-    expect(sharedProviderSelect).toBeTruthy();
-
-    fireEvent.change(sharedProviderSelect as HTMLSelectElement, {
-      target: { value: "macos_apple_speech" },
-    });
+    fireEvent.click(await screen.findByRole("button", { name: "Split dictation + meetings" }));
+    const dictationPanel = await screen.findByRole("tabpanel", { name: "Dictation" });
+    fireEvent.click(buttonWithText(within(dictationPanel), "Apple Native Speech"));
 
     await waitFor(() => {
       expect(saveSettingsMock).toHaveBeenCalled();
@@ -329,7 +343,7 @@ describe("Platform optimization settings", () => {
 
     const savedPayload =
       saveSettingsMock.mock.calls[saveSettingsMock.mock.calls.length - 1]?.[0];
-    expect(savedPayload.transcription.defaultProvider).toBe("macos_apple_speech");
+    expect(savedPayload.transcription.defaultProvider).toBe("distil_whisper");
     expect(savedPayload.transcription.dictationProvider).toBe("macos_apple_speech");
     expect(savedPayload.transcription.useSharedAsrSelection).toBe(false);
     expect(savedPayload.transcription.meetingProvider).toBe("distil_whisper");
@@ -389,7 +403,7 @@ describe("Platform optimization settings", () => {
 
   it("prefers live permission diagnostics over stale Apple Native provider status", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === "get_asr_providers") {
+      if (cmd === "get_asr_providers" || cmd === "get_asr_provider_inventory") {
         return providerFixture.map((provider) =>
           provider.providerType === "macos_apple_speech"
             ? {
@@ -445,11 +459,7 @@ describe("Platform optimization settings", () => {
     expect(
       screen.queryByText(/Shared route: Apple native speech permission has not been granted yet\./)
     ).not.toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "Meetings use meeting-grade ASR only. Apple Native Speech, Windows Native Speech, Moonshine, Whisper Candle, and standard Whisper are dictation-only, so meetings will use a separate stronger model instead."
-      )
-    ).toBeInTheDocument();
+    expect(screen.getByText("Ready for transcription")).toBeInTheDocument();
   });
 
   it("keeps Whisper out of the meeting provider choices", async () => {
@@ -475,16 +485,9 @@ describe("Platform optimization settings", () => {
 
     render(<AsrProviderManager />);
 
-    expect(await screen.findByText("Meeting provider")).toBeInTheDocument();
-    const meetingProviderSelect = screen
-      .getByText("Meeting provider")
-      .parentElement?.querySelector("select");
-    expect(meetingProviderSelect).toBeTruthy();
-    const optionValues = Array.from(
-      (meetingProviderSelect as HTMLSelectElement).querySelectorAll("option")
-    ).map((option) => option.getAttribute("value") ?? "");
-    expect(optionValues).not.toContain("whisper");
-    expect(optionValues).toContain("distil_whisper");
+    expect(await screen.findByText("Current routing")).toBeInTheDocument();
+    expect(screen.getByText("Split")).toBeInTheDocument();
+    expect(screen.getAllByText("Distil-Whisper").length).toBeGreaterThan(0);
   });
 
   it("keeps Whisper Candle out of shared meeting-compatible routes", async () => {
@@ -510,28 +513,9 @@ describe("Platform optimization settings", () => {
 
     render(<AsrProviderManager />);
 
-    expect(await screen.findByText("Meeting provider")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "Meetings use meeting-grade ASR only. Apple Native Speech, Windows Native Speech, Moonshine, Whisper Candle, and standard Whisper are dictation-only, so meetings will use a separate stronger model instead."
-      )
-    ).toBeInTheDocument();
-
-    const sharedProviderSelect = screen
-      .getByText("Dictation provider")
-      .parentElement?.querySelector("select");
-    expect(sharedProviderSelect).toBeTruthy();
-    expect((sharedProviderSelect as HTMLSelectElement).value).toBe("whisper_candle");
-
-    const meetingProviderSelect = screen
-      .getByText("Meeting provider")
-      .parentElement?.querySelector("select");
-    expect(meetingProviderSelect).toBeTruthy();
-    const optionValues = Array.from(
-      (meetingProviderSelect as HTMLSelectElement).querySelectorAll("option")
-    ).map((option) => option.getAttribute("value") ?? "");
-    expect(optionValues).not.toContain("whisper_candle");
-    expect(optionValues).toContain("distil_whisper");
+    expect(await screen.findByText("Current routing")).toBeInTheDocument();
+    expect(screen.getByText("Split")).toBeInTheDocument();
+    expect(screen.getAllByText("Distil-Whisper").length).toBeGreaterThan(0);
   });
 
   it("persists meeting route policy changes", async () => {

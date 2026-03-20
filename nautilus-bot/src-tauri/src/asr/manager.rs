@@ -40,6 +40,7 @@ pub struct AsrManager {
     silence_skip_enabled: RwLock<bool>,
     platform_optimization: RwLock<crate::settings::PlatformOptimizationSettings>,
     last_runtime_errors: RwLock<HashMap<AsrProviderType, String>>,
+    provider_inventory_cache: RwLock<Option<Vec<ProviderInventory>>>,
     provider_info_cache: RwLock<Option<Vec<ProviderInfo>>>,
     models_dir: PathBuf,
 }
@@ -86,6 +87,7 @@ impl AsrManager {
             dictation_mlx_enabled: RwLock::new(false),
             meeting_mlx_enabled: RwLock::new(false),
             last_runtime_errors: RwLock::new(HashMap::new()),
+            provider_inventory_cache: RwLock::new(None),
             provider_info_cache: RwLock::new(None),
             models_dir,
         }
@@ -358,7 +360,55 @@ impl AsrManager {
     }
 
     pub async fn invalidate_provider_info_cache(&self) {
+        *self.provider_inventory_cache.write().await = None;
         *self.provider_info_cache.write().await = None;
+    }
+
+    pub async fn get_provider_inventory(&self) -> Result<Vec<ProviderInventory>, String> {
+        if let Some(cached) = self.provider_inventory_cache.read().await.clone() {
+            return Ok(cached);
+        }
+
+        let provider_models = self.provider_model_map().await;
+
+        let futures = AsrProviderType::all().into_iter().map(|provider_type| {
+            let selected_model = provider_models
+                .get(&provider_type)
+                .cloned()
+                .unwrap_or_else(|| provider_type.default_model_id().to_string());
+
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let provider =
+                        Self::provider_with_model(provider_type, Some(selected_model.as_str()));
+                    ProviderInventory {
+                        provider_type,
+                        name: provider.name().to_string(),
+                        description: provider.description().to_string(),
+                        is_available: provider.is_available(),
+                        inference_enabled: Self::is_provider_transcription_enabled(provider_type),
+                        selected_model_id: selected_model,
+                        model_options: provider_type.model_options(),
+                        download_status: provider.download_status(),
+                    }
+                })
+                .await
+                .map_err(|e| format!("Task join error: {}", e))
+            }
+        });
+
+        let results = futures_util::future::join_all(futures).await;
+
+        let mut inventory = Vec::new();
+        for res in results {
+            match res {
+                Ok(item) => inventory.push(item),
+                Err(e) => return Err(e),
+            }
+        }
+
+        *self.provider_inventory_cache.write().await = Some(inventory.clone());
+        Ok(inventory)
     }
 
     /// Get a provider by type - creates fresh instance each time
@@ -1078,6 +1128,19 @@ pub struct ProviderInfo {
     pub runtime_details: RuntimeDetails,
     #[serde(default)]
     pub engine_diagnostics: EngineDiagnostics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderInventory {
+    pub provider_type: AsrProviderType,
+    pub name: String,
+    pub description: String,
+    pub is_available: bool,
+    pub inference_enabled: bool,
+    pub selected_model_id: String,
+    pub model_options: Vec<super::ModelOption>,
+    pub download_status: DownloadStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

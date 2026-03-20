@@ -55,6 +55,10 @@ const popupMocks = vi.hoisted(() => {
       hide: vi.fn(async () => {}),
       startDragging: vi.fn(async () => {}),
     },
+    speechSynthesis: {
+      speak: vi.fn(),
+      cancel: vi.fn(),
+    },
   };
 });
 
@@ -104,9 +108,26 @@ describe("DictationPopup", () => {
     popupMocks.windowHandle.show.mockClear();
     popupMocks.windowHandle.hide.mockClear();
     popupMocks.windowHandle.startDragging.mockClear();
+    popupMocks.speechSynthesis.speak.mockClear();
+    popupMocks.speechSynthesis.cancel.mockClear();
     Object.assign(navigator, {
       clipboard: {
         writeText: vi.fn(async () => {}),
+      },
+    });
+    Object.assign(window, {
+      speechSynthesis: popupMocks.speechSynthesis,
+      SpeechSynthesisUtterance: class SpeechSynthesisUtterance {
+        text: string;
+        rate = 1;
+        pitch = 1;
+        lang = "";
+        onend: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+
+        constructor(text = "") {
+          this.text = text;
+        }
       },
     });
   });
@@ -484,8 +505,9 @@ describe("DictationPopup", () => {
     expect(screen.getByText("Start again")).toBeInTheDocument();
     expect(screen.getByText("Open history")).toBeInTheDocument();
     expect(screen.getByText("Open app")).toBeInTheDocument();
+    expect(screen.getByText("Read aloud")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Copy result" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Copy result/i }));
 
     await waitFor(() => {
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
@@ -493,10 +515,17 @@ describe("DictationPopup", () => {
       );
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Start again" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Start again/i }));
 
     await waitFor(() => {
       expect(popupMocks.startDictation).toHaveBeenCalled();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Read aloud/i }));
+
+    await waitFor(() => {
+      expect(popupMocks.speechSynthesis.cancel).toHaveBeenCalled();
+      expect(popupMocks.speechSynthesis.speak).toHaveBeenCalled();
     });
   });
 

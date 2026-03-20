@@ -3,12 +3,12 @@ import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
 import {
-  isDictationOnlyProvider as sharedIsDictationOnlyProvider,
   isMeetingEligibleModel as sharedIsMeetingEligibleModel,
-  isMeetingEligibleProvider as sharedIsMeetingEligibleProvider,
   isSharedMeetingCompatible as sharedIsSharedMeetingCompatible,
   isVisibleAsrProvider,
   modelSupportsMlxAcceleration,
+  providerCapabilityLabel,
+  providerHostingLabel,
 } from "@/lib/asr-capabilities";
 import {
   mergeSelectionStateUpdate,
@@ -17,6 +17,7 @@ import {
 import {
   refreshAsrRuntimeProbes,
   repairLocalModelCache,
+  getAsrProviderInventory,
   getSettings,
   saveSettings,
   getPermissionDiagnostics,
@@ -38,6 +39,7 @@ import type {
   AsrBenchmarkEntry,
   PlatformOptimizationSettings,
   AsrProviderInfo,
+  AsrProviderInventory,
   AsrProviderType,
   BenchmarkResult,
 } from "@/types";
@@ -66,6 +68,7 @@ export function AsrProviderManager({
   const [meetingRoutePolicy, setMeetingRoutePolicy] = useState<"prefer_local" | "best_available">(
     "prefer_local"
   );
+  const [inventory, setInventory] = useState<AsrProviderInventory[]>([]);
   const [providers, setProviders] = useState<AsrProviderInfo[]>([]);
   const [defaultProvider, setDefaultProvider] = useState<AsrProviderType>("whisper");
   const [defaultModelId, setDefaultModelId] = useState("distil-large-v3.5");
@@ -89,6 +92,7 @@ export function AsrProviderManager({
   const [platformSaveBusy, setPlatformSaveBusy] = useState(false);
   const [platformSaveError, setPlatformSaveError] = useState<string | null>(null);
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
+  const [routeTab, setRouteTab] = useState<"shared" | "dictation" | "meeting">("shared");
   const [permissionActionBusy, setPermissionActionBusy] = useState(false);
   const [permissionDiagnostics, setPermissionDiagnostics] = useState<PermissionDiagnostics | null>(null);
   const benchmarkFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -100,9 +104,9 @@ export function AsrProviderManager({
     { value: "windows_foundry_local", label: "Windows Foundry Local" },
   ] as const;
 
-  const isMeetingEligibleProvider = (providerType: AsrProviderType) =>
-    !sharedIsDictationOnlyProvider(providerType) &&
-    sharedIsMeetingEligibleProvider(providerType);
+  type SelectionProvider = AsrProviderInfo | AsrProviderInventory;
+
+  type WorkflowLane = "dictation" | "meeting" | "shared";
 
   const isMeetingEligibleModel = (providerType: AsrProviderType, modelId: string) => {
     if (!sharedIsMeetingEligibleModel(providerType, modelId)) {
@@ -120,11 +124,6 @@ export function AsrProviderManager({
   const isSharedMeetingCompatible = (providerType: AsrProviderType, modelId: string) =>
     sharedIsSharedMeetingCompatible(providerType, modelId) &&
     isMeetingEligibleModel(providerType, modelId);
-
-  const meetingModelOptionsForProvider = (providerType: AsrProviderType) =>
-    modelOptionsForProvider(providerType).filter((option) =>
-      isMeetingEligibleModel(providerType, option.id)
-    );
 
   const defaultPlatformSettings = (): PlatformOptimizationSettings => ({
     mode: "auto",
@@ -248,8 +247,8 @@ export function AsrProviderManager({
 
   useEffect(() => {
     const bootstrap = async () => {
-      const loadedProviders = await loadProviders();
-      await loadSelectionSettings(loadedProviders);
+      const loadedInventory = await loadInventory();
+      await loadSelectionSettings(loadedInventory);
       await loadBenchmarkHistory();
       await loadPlatformSettings();
       await refreshPermissionDiagnostics();
@@ -270,6 +269,14 @@ export function AsrProviderManager({
     });
   }, []);
 
+  useEffect(() => {
+    if (!showAdvancedTools || providers.length > 0) {
+      return;
+    }
+
+    void loadProviders();
+  }, [providers.length, showAdvancedTools]);
+
   const refreshPermissionDiagnostics = async () => {
     try {
       const diagnostics = await getPermissionDiagnostics();
@@ -283,8 +290,8 @@ export function AsrProviderManager({
 
   const refreshAppleNativeReadiness = async () => {
     const diagnostics = await refreshPermissionDiagnostics();
-    const loadedProviders = await loadProviders();
-    await loadSelectionSettings(loadedProviders);
+    const loadedInventory = await loadInventory();
+    await loadSelectionSettings(loadedInventory);
     return diagnostics;
   };
 
@@ -338,10 +345,37 @@ export function AsrProviderManager({
     }
   };
 
+  const toInventory = (providerList: AsrProviderInfo[]): AsrProviderInventory[] =>
+    providerList.map((provider) => ({
+      providerType: provider.providerType,
+      name: provider.name,
+      description: provider.description,
+      isAvailable: provider.isAvailable,
+      inferenceEnabled: provider.inferenceEnabled,
+      selectedModelId: provider.selectedModelId,
+      modelOptions: provider.modelOptions,
+      downloadStatus: provider.downloadStatus,
+    }));
+
+  const loadInventory = async () => {
+    try {
+      setIsLoading(true);
+      const data = await getAsrProviderInventory();
+      setInventory(data);
+      return data;
+    } catch (error) {
+      console.error("Failed to load ASR inventory:", error);
+      setInventory([]);
+      return [];
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const loadProviders = async () => {
     try {
       const data = await invoke<AsrProviderInfo[]>("get_asr_providers");
-      // Model options are already included in provider info - no need for extra API calls
+      setInventory(toInventory(data));
       setProviders(data);
       return data;
     } catch (error) {
@@ -350,9 +384,9 @@ export function AsrProviderManager({
     }
   };
 
-  const loadSelectionSettings = async (providerListOverride?: AsrProviderInfo[]) => {
+  const loadSelectionSettings = async (providerListOverride?: SelectionProvider[]) => {
     try {
-      const providerList = providerListOverride ?? providers;
+      const providerList = providerListOverride ?? inventory;
       const settings = await getSettings();
       const selection = selectionStateFromSettings(providerList, settings.transcription);
 
@@ -385,7 +419,7 @@ export function AsrProviderManager({
   }) => {
     const settings = await getSettings();
     const selection = mergeSelectionStateUpdate(
-      providers,
+      selectionProviders,
       {
         defaultProvider,
         defaultModelId,
@@ -439,14 +473,19 @@ export function AsrProviderManager({
     setDictationMlxEnabled(selection.dictationMlxEnabled);
     setMeetingMlxEnabled(selection.meetingMlxEnabled);
     setMeetingRoutePolicy(selection.meetingRoutePolicy);
-    await loadProviders();
+    await loadInventory();
   };
+
+  const selectionProviders = inventory.length > 0 ? inventory : providers;
 
   const providerByType = (providerType: AsrProviderType) =>
     providers.find((provider) => provider.providerType === providerType);
 
+  const selectionProviderByType = (providerType: AsrProviderType) =>
+    selectionProviders.find((provider) => provider.providerType === providerType);
+
   const modelOptionsForProvider = (providerType: AsrProviderType) =>
-    providerByType(providerType)?.modelOptions ?? [];
+    selectionProviderByType(providerType)?.modelOptions ?? [];
 
   const providerHasMlxAcceleration = (providerType: AsrProviderType, modelId: string) =>
     modelSupportsMlxAcceleration(providerType, modelId);
@@ -460,11 +499,6 @@ export function AsrProviderManager({
     return mlxEnabled && providerHasMlxAcceleration(providerType, modelId);
   };
 
-  const readyLocalProvider = (...providerTypes: AsrProviderType[]) =>
-    providerTypes
-      .map((providerType) => providerByType(providerType))
-      .find((provider) => provider?.runtimeStatus === "ready" && provider.inferenceEnabled) ?? null;
-
   const providerDisplayName = (
     providerType: AsrProviderType,
     modelId: string,
@@ -477,47 +511,121 @@ export function AsrProviderManager({
       : baseLabel;
   };
 
-  const fastLocalDictationProvider =
-    readyLocalProvider("moonshine", "macos_apple_speech", "distil_whisper", "whisper") ??
-    providerByType(dictationProvider) ??
-    null;
-  const higherAccuracyLocalProvider =
-    readyLocalProvider("distil_whisper", "whisper", "parakeet") ??
-    providerByType(defaultProvider) ??
-    null;
-  const meetingGradeLocalProvider =
-    readyLocalProvider("distil_whisper", "parakeet", "voxtral") ??
-    providerByType(meetingProvider) ??
-    null;
-  const currentDictationRouteProvider =
-    providerByType(useSharedAsrSelection ? defaultProvider : dictationProvider) ?? null;
-  const currentMeetingRouteProvider =
-    providerByType(useSharedAsrSelection ? defaultProvider : meetingProvider) ?? null;
-  const mlxAccelerationLabel = platformSettings?.macos.mlxEnabled
-    ? "Enabled"
-    : "Disabled";
-  const mlxAccelerationDetail = platformSettings?.macos.mlxEnabled
-    ? "Apple Silicon MLX acceleration is allowed for compatible local models and advanced runtime experiments."
-    : "MLX acceleration is off, so Nautilus will stay on the standard local runtime lane.";
-
-  const meetingProviders = providers.filter((provider) =>
-    (isVisibleAsrProvider(provider.providerType) || provider.providerType === "mlx_audio") &&
-    isMeetingEligibleProvider(provider.providerType)
-  );
   const visibleProviders = providers.filter((provider) =>
     isVisibleAsrProvider(provider.providerType)
   );
-  const routeSelectableProviders = providers.filter(
+  const routeSelectableProviders = selectionProviders.filter(
     (provider) =>
       isVisibleAsrProvider(provider.providerType) || provider.providerType === "mlx_audio"
   );
   const advancedMlxProvider =
     providers.find((provider) => provider.providerType === "mlx_audio") ?? null;
 
-  const providerUiName = (provider: AsrProviderInfo) =>
+  const inventoryReadiness = (provider: SelectionProvider) => {
+    const status = normalizeDownloadStatus(provider.downloadStatus);
+    if (!provider.inferenceEnabled) {
+      return {
+        tone: "muted" as const,
+        label: "Unavailable in this build",
+      };
+    }
+    if (status.kind === "not_downloaded") {
+      return {
+        tone: "warning" as const,
+        label: "Needs download",
+      };
+    }
+    if (!provider.isAvailable) {
+      return {
+        tone: "warning" as const,
+        label: "Needs setup",
+      };
+    }
+    return {
+      tone: "success" as const,
+      label: "Ready",
+    };
+  };
+
+  const lanePriority = (
+    lane: WorkflowLane,
+    providerType: AsrProviderType,
+    policy: "prefer_local" | "best_available"
+  ) => {
+    if (lane === "dictation") {
+      const ordered: AsrProviderType[] = [
+        "moonshine",
+        "macos_apple_speech",
+        "distil_whisper",
+        "whisper",
+        "windows_sdk_dictation",
+        "whisper_candle",
+        "openai_cloud",
+        "elevenlabs_scribe",
+        "groq",
+        "parakeet",
+        "voxtral",
+      ];
+      return ordered.indexOf(providerType);
+    }
+
+    const ordered =
+      policy === "best_available"
+        ? ([
+            "openai_cloud",
+            "elevenlabs_scribe",
+            "groq",
+            "distil_whisper",
+            "parakeet",
+            "voxtral",
+          ] as AsrProviderType[])
+        : ([
+            "distil_whisper",
+            "parakeet",
+            "voxtral",
+            "openai_cloud",
+            "elevenlabs_scribe",
+            "groq",
+          ] as AsrProviderType[]);
+    return ordered.indexOf(providerType);
+  };
+
+  const laneProviders = (lane: WorkflowLane) =>
+    routeSelectableProviders
+      .filter((provider) => {
+        if (provider.providerType === "mlx_audio") {
+          return false;
+        }
+        if (lane === "dictation") {
+          return true;
+        }
+
+        const eligibleModels = modelOptionsForProvider(provider.providerType).filter((option) =>
+          lane === "meeting"
+            ? isMeetingEligibleModel(provider.providerType, option.id)
+            : isSharedMeetingCompatible(provider.providerType, option.id)
+        );
+
+        return eligibleModels.length > 0;
+      })
+      .sort((left, right) => {
+        const leftReadiness = inventoryReadiness(left);
+        const rightReadiness = inventoryReadiness(right);
+        if (leftReadiness.label === "Ready" && rightReadiness.label !== "Ready") return -1;
+        if (leftReadiness.label !== "Ready" && rightReadiness.label === "Ready") return 1;
+
+        return (
+          lanePriority(lane, left.providerType, meetingRoutePolicy) -
+          lanePriority(lane, right.providerType, meetingRoutePolicy)
+        );
+      });
+
+  const recommendedLaneProvider = (lane: WorkflowLane) => laneProviders(lane)[0] ?? null;
+
+  const providerUiName = (provider: SelectionProvider) =>
     provider.providerType === "mlx_audio" ? "Additional MLX models" : provider.name;
 
-  const providerUiDescription = (provider: AsrProviderInfo) =>
+  const providerUiDescription = (provider: SelectionProvider) =>
     provider.providerType === "mlx_audio"
       ? "Extra Apple Silicon MLX routes that do not map cleanly to another Nautilus provider family. Use the MLX toggle on Whisper, Moonshine, Parakeet, and Voxtral when you want the same family through mlx-audio."
       : provider.description;
@@ -800,8 +908,19 @@ export function AsrProviderManager({
     slot: "dictation" | "meeting" = "dictation"
   ) => {
     const provider = providerByType(providerType);
-    if (!provider) return null;
+    const lightweightProvider = selectionProviderByType(providerType);
+    if (!provider && !lightweightProvider) return null;
     const routeLabel = providerDisplayName(providerType, modelId, slot);
+    if (!provider && lightweightProvider) {
+      return (
+        <p className="text-xs text-muted-foreground">
+          {label}: {routeLabel} is {inventoryReadiness(lightweightProvider).label.toLowerCase()}.
+        </p>
+      );
+    }
+    if (!provider) {
+      return null;
+    }
     if (providerType === "macos_apple_speech" && permissionDiagnostics?.speechRecognitionReady) {
       return (
         <p className="text-xs text-muted-foreground">
@@ -873,6 +992,10 @@ export function AsrProviderManager({
   const appleNativeUsedForDictation = useSharedAsrSelection
     ? defaultProvider === "macos_apple_speech"
     : dictationProvider === "macos_apple_speech";
+
+  useEffect(() => {
+    setRouteTab(useSharedAsrSelection ? "shared" : "dictation");
+  }, [useSharedAsrSelection]);
 
   useEffect(() => {
     if (!selectedRouteUsesAppleNative || permissionActionBusy) {
@@ -988,6 +1111,186 @@ export function AsrProviderManager({
           }}
         />
       </label>
+    );
+  };
+
+  const activeProviderForLane = (lane: WorkflowLane) =>
+    lane === "shared"
+      ? selectionProviderByType(defaultProvider)
+      : lane === "meeting"
+        ? selectionProviderByType(meetingProvider)
+        : selectionProviderByType(dictationProvider);
+
+  const activeModelIdForLane = (lane: WorkflowLane) =>
+    lane === "shared" ? defaultModelId : lane === "meeting" ? meetingModelId : dictationModelId;
+
+  const laneModelOptions = (lane: WorkflowLane, providerType: AsrProviderType) => {
+    const options = modelOptionsForProvider(providerType);
+    if (lane === "dictation") {
+      return options;
+    }
+    return options.filter((option) =>
+      lane === "meeting"
+        ? isMeetingEligibleModel(providerType, option.id)
+        : isSharedMeetingCompatible(providerType, option.id)
+    );
+  };
+
+  const applyLaneProviderSelection = async (lane: WorkflowLane, providerType: AsrProviderType) => {
+    const nextModelId = laneModelOptions(lane, providerType)[0]?.id ?? modelOptionsForProvider(providerType)[0]?.id ?? providerType;
+    const updates =
+      lane === "shared"
+        ? { defaultProvider: providerType, selectedModelId: nextModelId }
+        : lane === "meeting"
+          ? { meetingProvider: providerType, meetingModelId: nextModelId }
+          : { dictationProvider: providerType, dictationModelId: nextModelId };
+
+    await persistSelectionSettings(updates);
+
+    if (providerType === "macos_apple_speech") {
+      await requestDictationPermissions();
+      const updatedInventory = await loadInventory();
+      await loadSelectionSettings(updatedInventory);
+    } else {
+      const updatedInventory = await loadInventory();
+      await loadSelectionSettings(updatedInventory);
+    }
+  };
+
+  const applyLaneModelSelection = async (lane: WorkflowLane, modelId: string) => {
+    const updates =
+      lane === "shared"
+        ? { selectedModelId: modelId }
+        : lane === "meeting"
+          ? { meetingModelId: modelId }
+          : { dictationModelId: modelId };
+    await persistSelectionSettings(updates);
+    const updatedInventory = await loadInventory();
+    await loadSelectionSettings(updatedInventory);
+  };
+
+  const renderWorkflowLane = (lane: WorkflowLane) => {
+    const providersForLane = laneProviders(lane);
+    const activeProvider = activeProviderForLane(lane);
+    const recommendedProvider = recommendedLaneProvider(lane);
+    const activeProviderType =
+      lane === "shared" ? defaultProvider : lane === "meeting" ? meetingProvider : dictationProvider;
+    const activeModelId = activeModelIdForLane(lane);
+    const modelOptions = laneModelOptions(lane, activeProviderType);
+    const laneTitle =
+      lane === "shared" ? "Shared route" : lane === "meeting" ? "Meetings" : "Dictation";
+    const laneDescription =
+      lane === "shared"
+        ? "One route that stays good enough for both dictation and meetings."
+        : lane === "meeting"
+          ? "Only meeting-capable routes appear here."
+          : "Fast everyday dictation and editing routes.";
+
+    return (
+      <div className="space-y-4">
+        <div className="rounded-xl border bg-muted/10 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold">{laneTitle}</p>
+              <p className="mt-1 text-sm text-muted-foreground">{laneDescription}</p>
+            </div>
+            {activeProvider ? (
+              <Badge variant="outline" className="bg-background/70">
+                Current: {providerUiName(activeProvider)}
+              </Badge>
+            ) : null}
+          </div>
+          {recommendedProvider ? (
+            <div className="mt-4 rounded-lg border border-trusted/30 bg-background/80 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-medium">{providerUiName(recommendedProvider)}</p>
+                    <Badge variant="outline">Recommended</Badge>
+                    <Badge variant="outline">{providerHostingLabel(recommendedProvider.providerType)}</Badge>
+                    <Badge variant="outline">{inventoryReadiness(recommendedProvider).label}</Badge>
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {providerUiDescription(recommendedProvider)}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant={activeProviderType === recommendedProvider.providerType ? "default" : "outline"}
+                  onClick={() => void applyLaneProviderSelection(lane, recommendedProvider.providerType)}
+                >
+                  {activeProviderType === recommendedProvider.providerType ? "Selected" : "Use recommended"}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+          <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {providersForLane.map((provider) => (
+              <button
+                key={`${lane}-${provider.providerType}`}
+                type="button"
+                className={cn(
+                  "rounded-lg border px-4 py-3 text-left transition-colors",
+                  activeProviderType === provider.providerType
+                    ? "border-trusted bg-trusted/5"
+                    : "bg-background hover:bg-muted/20"
+                )}
+                onClick={() => void applyLaneProviderSelection(lane, provider.providerType)}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-medium">{providerUiName(provider)}</p>
+                  <Badge variant="outline">{inventoryReadiness(provider).label}</Badge>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {providerHostingLabel(provider.providerType)} ·{" "}
+                  {providerCapabilityLabel(provider.providerType)}
+                </p>
+                <p className="mt-2 text-xs text-muted-foreground">{providerUiDescription(provider)}</p>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_280px]">
+          <div className="rounded-xl border bg-background/70 p-4">
+            {renderModelControl(
+              `${laneTitle} model`,
+              activeProviderType,
+              activeModelId,
+              (modelId) => {
+                void applyLaneModelSelection(lane, modelId).catch((error) => {
+                  console.error("Failed to update ASR model selection:", error);
+                });
+              },
+              modelOptions
+            )}
+            <div className="mt-3">
+              {renderMlxAccelerationToggle(activeProviderType, activeModelId, lane)}
+            </div>
+          </div>
+
+          <div className="rounded-xl border bg-muted/10 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Route notes
+            </p>
+            <p className="mt-2 text-sm font-medium">
+              {activeProvider ? providerUiName(activeProvider) : "No route selected"}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {activeProvider
+                ? `${providerHostingLabel(activeProvider.providerType)} · ${providerCapabilityLabel(activeProvider.providerType)}`
+                : "Choose a route for this workflow."}
+            </p>
+            <p className="mt-3 text-xs text-muted-foreground">
+              {lane === "dictation"
+                ? "Pick the fastest route that stays accurate enough for your everyday writing."
+                : lane === "meeting"
+                  ? "Pick the strongest route you trust for longer recordings and summary quality."
+                  : "Shared is best when you want one model family and minimal setup complexity."}
+            </p>
+          </div>
+        </div>
+      </div>
     );
   };
 
@@ -1581,277 +1884,139 @@ export function AsrProviderManager({
         <TabsContent value="providers" className="space-y-4">
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Transcription Route</CardTitle>
+              <CardTitle className="text-base">Model Routes</CardTitle>
               <CardDescription>
-                Choose one ASR for everything, or split dictation and meeting transcription.
+                Choose by workflow first. Downloads, runtime repair, and raw provider details live below.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
-                <span>Use the same ASR for dictation and meetings</span>
-                <input
-                  type="checkbox"
-                  checked={useSharedAsrSelection}
-                  onChange={(event) => {
-                    void persistSelectionSettings({
-                      useSharedAsrSelection: event.target.checked,
-                    }).catch((error) => {
-                      console.error("Failed to update shared ASR selection:", error);
-                    });
-                  }}
-                />
-              </label>
-              {!isSharedMeetingCompatible(defaultProvider, defaultModelId) ? (
-                <p className="text-xs text-amber-300">
-                  Meetings use meeting-grade ASR only. Apple Native Speech, Windows Native Speech,
-                  Moonshine, Whisper Candle, and standard Whisper are dictation-only, so meetings
-                  will use a separate stronger model instead.
-                </p>
-              ) : null}
-              <label className="space-y-1 text-sm">
-                <span className="text-muted-foreground">Meeting quality policy</span>
-                <select
-                  className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                  value={meetingRoutePolicy}
-                  onChange={(event) => {
-                    void persistSelectionSettings({
-                      meetingRoutePolicy: event.target.value as "prefer_local" | "best_available",
-                    }).catch((error) => {
-                      console.error("Failed to update meeting route policy:", error);
-                    });
-                  }}
-                >
-                  <option value="prefer_local">Prefer local</option>
-                  <option value="best_available">Best available</option>
-                </select>
-                <p className="text-xs text-muted-foreground">
-                  Prefer local keeps meetings on-device when a meeting-grade model is ready. Best
-                  available prefers the strongest configured meeting route, including cloud.
-                </p>
-              </label>
-
-              <div className={cn("grid gap-4", useSharedAsrSelection ? "md:grid-cols-2" : "md:grid-cols-4")}>
-                <label className="space-y-1 text-sm">
-                  <span className="text-muted-foreground">
-                    {useSharedAsrSelection ? "Shared provider" : "Dictation provider"}
-                  </span>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={useSharedAsrSelection ? defaultProvider : dictationProvider}
-                    onChange={(event) => {
-                      const providerType = event.target.value as AsrProviderType;
-                      const nextModelId =
-                        modelOptionsForProvider(providerType)[0]?.id ?? providerType;
-                      const update = useSharedAsrSelection
-                        ? {
-                            defaultProvider: providerType,
-                            selectedModelId: nextModelId,
-                          }
-                        : {
-                            dictationProvider: providerType,
-                            dictationModelId: nextModelId,
-                          };
-                      void (async () => {
-                        try {
-                          await persistSelectionSettings(update);
-                          if (providerType === "macos_apple_speech") {
-                            await requestDictationPermissions();
-                            await loadProviders();
-                            await loadSelectionSettings();
-                          }
-                        } catch (error) {
-                          console.error("Failed to update ASR provider selection:", error);
-                        }
-                      })();
-                    }}
-                  >
-                    {routeSelectableProviders.map((provider) => (
-                      <option key={`shared-${provider.providerType}`} value={provider.providerType}>
-                        {providerUiName(provider)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {renderModelControl(
-                  useSharedAsrSelection ? "Shared model" : "Dictation model",
-                  useSharedAsrSelection ? defaultProvider : dictationProvider,
-                  useSharedAsrSelection ? defaultModelId : dictationModelId,
-                  (modelId) => {
-                    const update = useSharedAsrSelection
-                      ? {
-                          selectedModelId: modelId,
-                        }
-                      : {
-                          dictationModelId: modelId,
-                        };
-                    void persistSelectionSettings(update).catch((error) => {
-                      console.error("Failed to update ASR model selection:", error);
-                    });
-                  }
-                )}
-                {renderMlxAccelerationToggle(
-                  useSharedAsrSelection ? defaultProvider : dictationProvider,
-                  useSharedAsrSelection ? defaultModelId : dictationModelId,
-                  useSharedAsrSelection ? "shared" : "dictation"
-                )}
-                {!useSharedAsrSelection && dictationProvider !== meetingProvider ? (
-                  <p className="text-xs text-amber-500">
-                    Dictation is using{" "}
-                    {providerByType(dictationProvider)?.name ?? dictationProvider}, not{" "}
-                    {providerByType(meetingProvider)?.name ?? meetingProvider}.
-                  </p>
-                ) : null}
-                {!useSharedAsrSelection ? (
-                  <label className="space-y-1 text-sm">
-                    <span className="text-muted-foreground">Meeting provider</span>
-                    <select
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                      value={meetingProvider}
-                      onChange={(event) => {
-                      const providerType = event.target.value as AsrProviderType;
-                      const nextModelId =
-                        meetingModelOptionsForProvider(providerType)[0]?.id ?? providerType;
-                      void (async () => {
-                        try {
-                          await persistSelectionSettings({
-                            meetingProvider: providerType,
-                            meetingModelId: nextModelId,
-                          });
-                        } catch (error) {
-                          console.error("Failed to update meeting ASR provider:", error);
-                        }
-                      })();
+              <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
+                <div className="rounded-xl border bg-muted/10 p-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      variant={useSharedAsrSelection ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => {
+                        void persistSelectionSettings({ useSharedAsrSelection: true }).catch((error) => {
+                          console.error("Failed to enable shared ASR selection:", error);
+                        });
                       }}
                     >
-                      {meetingProviders.map((provider) => (
-                        <option key={`meeting-${provider.providerType}`} value={provider.providerType}>
-                          {providerUiName(provider)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-                {!useSharedAsrSelection
-                  ? renderModelControl("Meeting model", meetingProvider, meetingModelId, (modelId) => {
-                      void persistSelectionSettings({
-                        meetingModelId: modelId,
-                      }).catch((error) => {
-                        console.error("Failed to update meeting ASR model:", error);
-                      });
-                    }, meetingModelOptionsForProvider(meetingProvider))
-                  : null}
-                {!useSharedAsrSelection
-                  ? renderMlxAccelerationToggle(meetingProvider, meetingModelId, "meeting")
-                  : null}
-                {!useSharedAsrSelection && meetingProvider !== dictationProvider ? (
-                  <p className="text-xs text-amber-500">
-                    Meeting is using{" "}
-                    {providerByType(meetingProvider)?.name ?? meetingProvider}, not{" "}
-                    {providerByType(dictationProvider)?.name ?? dictationProvider}.
+                      Shared route
+                    </Button>
+                    <Button
+                      variant={!useSharedAsrSelection ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => {
+                        void persistSelectionSettings({ useSharedAsrSelection: false }).catch((error) => {
+                          console.error("Failed to split ASR routes:", error);
+                        });
+                      }}
+                    >
+                      Split dictation + meetings
+                    </Button>
+                  </div>
+                  <p className="mt-3 text-sm text-muted-foreground">
+                    Shared is simpler. Split gives you a faster dictation route and a stronger meeting route.
                   </p>
-                ) : null}
+                </div>
+
+                <label className="space-y-1 rounded-xl border bg-background/70 p-4 text-sm">
+                  <span className="text-muted-foreground">Meeting quality policy</span>
+                  <select
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={meetingRoutePolicy}
+                    onChange={(event) => {
+                      void persistSelectionSettings({
+                        meetingRoutePolicy: event.target.value as "prefer_local" | "best_available",
+                      }).catch((error) => {
+                        console.error("Failed to update meeting route policy:", error);
+                      });
+                    }}
+                  >
+                    <option value="prefer_local">Prefer local</option>
+                    <option value="best_available">Best available</option>
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Controls how aggressively meetings favor cloud routes over strong local ones.
+                  </p>
+                </label>
               </div>
 
-              <div className="rounded-lg border border-border bg-muted/10 p-4 space-y-3">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline">Solo local lanes</Badge>
-                    <span className="text-sm font-medium">Recommended local model lanes</span>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    A simpler view of the local stack for fast dictation, higher-quality local transcription, and Apple Silicon acceleration.
+              {inventory.length === 0 && isLoading ? (
+                <div className="rounded-xl border bg-muted/10 p-6 text-center">
+                  <p className="text-sm text-muted-foreground">Loading model routes…</p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    The first inventory load is now lightweight. Runtime diagnostics load only in Advanced.
                   </p>
                 </div>
-                <div className="grid gap-3 md:grid-cols-3">
-                  <div className="rounded-md border bg-background/60 p-3 space-y-1">
-                    <p className="text-xs font-medium text-muted-foreground">Fast local dictation</p>
-                    <p className="text-sm font-medium">
-                      {fastLocalDictationProvider?.name ?? "No ready local dictation provider"}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {fastLocalDictationProvider?.runtimeStatus === "ready"
-                        ? "Best lane for low-friction solo dictation."
-                        : "Download or enable a local dictation model to unlock the fast lane."}
-                    </p>
-                  </div>
-                  <div className="rounded-md border bg-background/60 p-3 space-y-1">
-                    <p className="text-xs font-medium text-muted-foreground">Higher-quality local</p>
-                    <p className="text-sm font-medium">
-                      {higherAccuracyLocalProvider?.name ?? "No ready high-accuracy local provider"}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {higherAccuracyLocalProvider?.runtimeStatus === "ready"
-                        ? "Use this when you want cleaner local transcription at the cost of some speed."
-                        : "Keep a stronger local model ready for longer dictations and rewrites."}
-                    </p>
-                  </div>
-                  <div className="rounded-md border bg-background/60 p-3 space-y-1">
-                    <p className="text-xs font-medium text-muted-foreground">Meeting-grade local</p>
-                    <p className="text-sm font-medium">
-                      {meetingGradeLocalProvider?.name ?? "No ready local meeting model"}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {meetingGradeLocalProvider?.runtimeStatus === "ready"
-                        ? "Stronger local route for recordings, summaries, and follow-up grounded in meetings."
-                        : "Meetings may fall back to another route until a meeting-grade local model is ready."}
+              ) : null}
+
+              {useSharedAsrSelection ? (
+                renderWorkflowLane("shared")
+              ) : (
+                <Tabs value={routeTab} onValueChange={(value) => setRouteTab(value as "dictation" | "meeting" | "shared")}>
+                  <TabsList className="grid w-full grid-cols-2">
+                    <TabsTrigger value="dictation">Dictation</TabsTrigger>
+                    <TabsTrigger value="meeting">Meetings</TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="dictation" className="mt-4">
+                    {renderWorkflowLane("dictation")}
+                  </TabsContent>
+                  <TabsContent value="meeting" className="mt-4">
+                    {renderWorkflowLane("meeting")}
+                  </TabsContent>
+                </Tabs>
+              )}
+
+              <div className="rounded-xl border bg-muted/10 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium">Current routing</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      A quick summary of what Nautilus will use right now.
                     </p>
                   </div>
+                  <Badge variant="outline">{useSharedAsrSelection ? "Shared" : "Split"}</Badge>
                 </div>
-                <div className="rounded-md border bg-background/60 p-3 space-y-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs font-medium text-muted-foreground">Apple Silicon acceleration</p>
-                    <Badge variant={platformSettings?.macos.mlxEnabled ? "default" : "secondary"} className={platformSettings?.macos.mlxEnabled ? "bg-green-600" : ""}>
-                      {mlxAccelerationLabel}
-                    </Badge>
+                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  <div className="rounded-lg border bg-background/70 p-3">
+                    <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                      Dictation
+                    </p>
+                    <p className="mt-1 text-sm font-medium">
+                      {selectionProviderByType(useSharedAsrSelection ? defaultProvider : dictationProvider)
+                        ? providerUiName(
+                            selectionProviderByType(useSharedAsrSelection ? defaultProvider : dictationProvider)!
+                          )
+                        : "No route selected"}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {selectionProviderByType(useSharedAsrSelection ? defaultProvider : dictationProvider)
+                        ? inventoryReadiness(
+                            selectionProviderByType(useSharedAsrSelection ? defaultProvider : dictationProvider)!
+                          ).label
+                        : "Choose a dictation route"}
+                    </p>
                   </div>
-                  <p className="text-xs text-muted-foreground">{mlxAccelerationDetail}</p>
-                </div>
-                <div className="rounded-md border bg-background/60 p-3 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs font-medium text-muted-foreground">Current solo routes</p>
-                    <Badge variant="outline">{useSharedAsrSelection ? "Shared route" : "Split routes"}</Badge>
-                  </div>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="rounded-md border bg-muted/20 p-3 space-y-1">
-                      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                        Dictation
-                      </p>
-                      <p className="text-sm font-medium">
-                        {currentDictationRouteProvider
-                          ? providerDisplayName(
-                              currentDictationRouteProvider.providerType,
-                              useSharedAsrSelection ? defaultModelId : dictationModelId,
-                              "dictation"
-                            )
-                          : "No dictation route selected"}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {currentDictationRouteProvider?.providerType ===
-                        fastLocalDictationProvider?.providerType
-                          ? "Aligned with the fast solo dictation lane."
-                          : "Keep the fast lane ready if you want lower-friction everyday dictation."}
-                      </p>
-                    </div>
-                    <div className="rounded-md border bg-muted/20 p-3 space-y-1">
-                      <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                        Meetings
-                      </p>
-                      <p className="text-sm font-medium">
-                        {currentMeetingRouteProvider
-                          ? providerDisplayName(
-                              currentMeetingRouteProvider.providerType,
-                              useSharedAsrSelection ? defaultModelId : meetingModelId,
-                              "meeting"
-                            )
-                          : "No meeting route selected"}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {currentMeetingRouteProvider?.providerType ===
-                        meetingGradeLocalProvider?.providerType
-                          ? "Aligned with the stronger meeting lane."
-                          : "Use a stronger route here when summaries and follow-up quality matter more than speed."}
-                      </p>
-                    </div>
+                  <div className="rounded-lg border bg-background/70 p-3">
+                    <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                      Meetings
+                    </p>
+                    <p className="mt-1 text-sm font-medium">
+                      {selectionProviderByType(useSharedAsrSelection ? defaultProvider : meetingProvider)
+                        ? providerUiName(
+                            selectionProviderByType(useSharedAsrSelection ? defaultProvider : meetingProvider)!
+                          )
+                        : "No route selected"}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {selectionProviderByType(useSharedAsrSelection ? defaultProvider : meetingProvider)
+                        ? inventoryReadiness(
+                            selectionProviderByType(useSharedAsrSelection ? defaultProvider : meetingProvider)!
+                          ).label
+                        : "Choose a meeting route"}
+                    </p>
                   </div>
                 </div>
               </div>
