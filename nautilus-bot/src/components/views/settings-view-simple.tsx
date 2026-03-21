@@ -331,13 +331,7 @@ function resolveDictationHotkeyBehavior(
 export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const { theme, setTheme } = useTheme();
   const [activeTab, setActiveTab] = useState<TabId>("general");
-  const [useDesktopSettingsRail, setUseDesktopSettingsRail] = useState(() => {
-    if (typeof window === "undefined") {
-      return true;
-    }
-
-    return window.innerWidth >= 1280;
-  });
+  const useDesktopSettingsRail = false;
   const [draftSettings, setDraftSettings] = useState<Settings | null>(null);
   const [persistedSettings, setPersistedSettings] = useState<Settings | null>(
     null,
@@ -441,20 +435,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     : settings?.transcription.dictationPushToTalk
       ? "Hold shortcut to record, release to stop"
       : "Press shortcut once to start, then press again to stop";
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const updateLayoutMode = () => {
-      setUseDesktopSettingsRail(window.innerWidth >= 1280);
-    };
-
-    updateLayoutMode();
-    window.addEventListener("resize", updateLayoutMode);
-    return () => window.removeEventListener("resize", updateLayoutMode);
-  }, []);
 
   const applySecurityStatusFromSettings = useCallback((next: Settings) => {
     setSecurityStatus((current) =>
@@ -2420,7 +2400,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden">
         <div className="mx-auto max-w-[1680px] p-4 sm:p-6">
-          <div className="xl:grid xl:grid-cols-[280px_minmax(0,1fr)] xl:gap-6">
+          <div className="min-w-0">
             {useDesktopSettingsRail && (
               <aside className="h-fit self-start overflow-hidden rounded-[24px] border border-border bg-card text-card-foreground shadow-sm xl:sticky xl:top-6">
                 <div className="border-b border-border px-5 py-5">
@@ -2508,8 +2488,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               {!useDesktopSettingsRail && (
                 <div className="space-y-3">
                   <div className="rounded-[20px] border border-border bg-card px-4 py-4 shadow-sm sm:px-5">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
+                    <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                      <div className="min-w-0 max-w-3xl">
                         <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
                           {activeTabConfig.eyebrow}
                         </p>
@@ -2520,7 +2500,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           {activeTabConfig.summary}
                         </p>
                       </div>
-                      <div className="grid grid-cols-2 gap-2 text-xs sm:w-[320px]">
+                      <div className="grid grid-cols-2 gap-2 text-xs lg:w-[280px]">
                         <div
                           className={`rounded-2xl border p-3 ${readyChipTone(microphonePermissionReady)}`}
                         >
@@ -2558,7 +2538,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   </div>
 
                   <div className="rounded-[20px] border border-border bg-card p-2 shadow-sm">
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
                       {SETTINGS_TABS.map((tab) => (
                         <button
                           key={`compact-${tab.id}`}
@@ -2597,9 +2577,15 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 <div className="border-b border-border/60 px-4 py-5 sm:px-6 sm:py-6">
                   <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
                     {!useDesktopSettingsRail && (
-                      <div>
-                        <p className="text-sm font-medium text-foreground">
-                          {activeTabConfig.label}
+                      <div className="max-w-3xl">
+                        <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                          {activeTabConfig.eyebrow}
+                        </p>
+                        <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
+                          {activeTabConfig.title}
+                        </h2>
+                        <p className="mt-3 text-sm leading-6 text-muted-foreground sm:text-base">
+                          {activeTabConfig.summary}
                         </p>
                       </div>
                     )}

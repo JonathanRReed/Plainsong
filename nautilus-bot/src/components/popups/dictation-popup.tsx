@@ -44,6 +44,7 @@ import {
   stopSpeakingText,
 } from "@/lib/text-to-speech";
 import { playDictationEarcon } from "@/lib/dictation-earcons";
+import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
 import { cn } from "@/lib/utils";
 import type { AsrProviderType } from "@/types";
 import type { DictationCustomMode } from "@/types/settings";
@@ -250,42 +251,42 @@ function getPopupSize(
   preview: string | null,
 ) {
   if (displayMode === "minimal") {
-    return { width: 180, height: 48 };
+    return { width: 196, height: 52 };
   }
 
   if (displayMode === "compact") {
     const compactMessageLines = estimatePopupTextLines(message, 32);
     const compactPreviewLines = estimatePopupTextLines(preview, 32);
     return {
-      width: 360,
+      width: 336,
       height:
         phase === "idle"
-          ? 212
+          ? 204
           : phase === "error"
-            ? Math.max(212, 168 + compactMessageLines * 20)
+            ? Math.max(188, 144 + compactMessageLines * 18)
             : phase === "done"
               ? Math.max(
-                  196,
-                  154 + Math.max(compactMessageLines, compactPreviewLines) * 18,
+                  188,
+                  146 + Math.max(compactMessageLines, compactPreviewLines) * 16,
                 )
               : phase === "recording"
-                ? Math.max(182, 148 + compactPreviewLines * 16)
-                : 164,
+                ? Math.max(164, 136 + compactPreviewLines * 15)
+                : 152,
     };
   }
 
   if (phase === "idle") {
-    return { width: 480, height: 336 };
+    return { width: 432, height: 308 };
   }
 
   if (phase === "error") {
     const messageLines = estimatePopupTextLines(message, 48);
-    return { width: 480, height: Math.max(320, 248 + messageLines * 22) };
+    return { width: 432, height: Math.max(252, 212 + messageLines * 18) };
   }
 
   if (phase === "recording") {
     const previewLines = estimatePopupTextLines(preview, 48);
-    return { width: 480, height: Math.max(248, 202 + previewLines * 18) };
+    return { width: 432, height: Math.max(232, 184 + previewLines * 16) };
   }
 
   if (phase === "done") {
@@ -293,14 +294,14 @@ function getPopupSize(
       estimatePopupTextLines(message, 48),
       estimatePopupTextLines(preview, 48),
     );
-    return { width: 480, height: Math.max(264, 214 + contentLines * 20) };
+    return { width: 432, height: Math.max(248, 198 + contentLines * 18) };
   }
 
   const previewLines = estimatePopupTextLines(preview, 48);
   const messageLines = estimatePopupTextLines(message, 48);
   return {
-    width: 480,
-    height: Math.max(236, 194 + Math.max(previewLines, messageLines) * 18),
+    width: 432,
+    height: Math.max(220, 182 + Math.max(previewLines, messageLines) * 16),
   };
 }
 
@@ -424,41 +425,50 @@ function DictationWaveStrip({
   level,
   active,
   compact = false,
+  frame = 0,
 }: {
   level: number;
   active: boolean;
   compact?: boolean;
+  frame?: number;
 }) {
   const bars = compact
-    ? [0.28, 0.52, 0.82, 1, 0.82, 0.52, 0.28]
-    : [0.16, 0.28, 0.44, 0.66, 0.88, 1, 0.88, 0.66, 0.44, 0.28, 0.16];
-  const baseHeight = compact ? 4 : 5;
-  const maxExtraHeight = compact ? 12 : 17;
+    ? [0.12, 0.24, 0.38, 0.56, 0.82, 1, 0.82, 0.56, 0.38, 0.24, 0.12]
+    : [
+        0.08, 0.14, 0.2, 0.3, 0.42, 0.58, 0.76, 0.92, 1, 0.92, 0.76, 0.58, 0.42,
+        0.3, 0.2, 0.14, 0.08,
+      ];
+  const baseHeight = compact ? 5 : 7;
+  const maxExtraHeight = compact ? 9 : 15;
 
   return (
     <div
       className={cn(
-        "relative flex items-center gap-1",
-        compact ? "h-[18px]" : "h-6",
+        "relative flex items-center gap-[3px]",
+        compact ? "h-[16px]" : "h-7",
       )}
       aria-hidden="true"
     >
-      <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-white/10" />
+      <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-white/8" />
       {bars.map((weight, index) => {
+        const drift = (Math.sin(frame * 0.55 + index * 0.72) + 1) / 2;
         const intensity = active
-          ? Math.max(0.16, Math.min(1, level * (0.72 + weight * 0.72) + 0.08))
-          : 0.16;
+          ? Math.max(
+              0.18,
+              Math.min(1, level * (0.68 + weight * 0.78) + drift * 0.22),
+            )
+          : 0.14 + drift * 0.04;
         return (
           <div key={`meter-bar-${index}`} className="flex h-full items-center">
             <span
               className={cn(
-                "rounded-full bg-white/85 transition-[height,opacity,transform] duration-150",
-                compact ? "w-1" : "w-1.5",
+                "rounded-full bg-white/80 transition-[height,opacity,transform] duration-100",
+                compact ? "w-[2px]" : "w-[3px]",
               )}
               style={{
                 height: `${baseHeight + intensity * maxExtraHeight * weight}px`,
-                opacity: active ? 0.24 + intensity * 0.76 : 0.24,
-                transform: `scaleY(${0.94 + intensity * 0.06})`,
+                opacity: active ? 0.3 + intensity * 0.7 : 0.22,
+                transform: `scaleY(${0.96 + intensity * 0.04})`,
                 transformOrigin: "center center",
               }}
             />
@@ -481,6 +491,7 @@ export function DictationPopup() {
   const [pushToTalk, setPushToTalk] = useState(true);
   const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
   const [displayAudioLevel, setDisplayAudioLevel] = useState(0);
+  const [waveFrame, setWaveFrame] = useState(0);
   const [modePreset, setModePreset] = useState<DictationModePreset>("voice");
   const [contextSource, setContextSource] =
     useState<DictationContextSource>("none");
@@ -492,8 +503,7 @@ export function DictationPopup() {
     null,
   );
   const [dictationModelId, setDictationModelId] = useState<string | null>(null);
-  const [requestedRoute, setRequestedRoute] =
-    useState<DictationRoutePreference | null>(null);
+  const [, setRequestedRoute] = useState<DictationRoutePreference | null>(null);
   const [resolvedRoute, setResolvedRoute] = useState<string | null>(null);
   const [providerModelLabel, setProviderModelLabel] = useState<string | null>(
     null,
@@ -504,9 +514,9 @@ export function DictationPopup() {
     useState<DictationRoutePreference | null>(null);
   const [dictationInsertionMode, setDictationInsertionMode] =
     useState<DictationInsertionMode>("paste");
-  const [useSharedAsrSelection, setUseSharedAsrSelection] = useState(true);
-  const [meetingProvider, setMeetingProvider] = useState<string | null>(null);
-  const [meetingModelId, setMeetingModelId] = useState<string | null>(null);
+  const [, setUseSharedAsrSelection] = useState(true);
+  const [, setMeetingProvider] = useState<string | null>(null);
+  const [, setMeetingModelId] = useState<string | null>(null);
   const [dictationCommandPrefix, setDictationCommandPrefix] =
     useState("command");
   const [resolvedModeLabel, setResolvedModeLabel] = useState<string | null>(
@@ -626,6 +636,18 @@ export function DictationPopup() {
 
   const applyOverlaySnapshot = (payload: DictationStateChangedEvent) => {
     applyRuntimeMetadata(payload);
+    const sanitizedMessage = sanitizeUserFacingDictationMessage(
+      payload.message,
+      {
+        phase:
+          payload.phase === "transcribing" ||
+          payload.phase === "delivering" ||
+          payload.phase === "done" ||
+          payload.phase === "error"
+            ? payload.phase
+            : "recording",
+      },
+    );
 
     const nextSessionId =
       typeof payload.sessionId === "number" ? payload.sessionId : null;
@@ -635,7 +657,7 @@ export function DictationPopup() {
       payload.phase === "primed" || payload.phase === "recording";
 
     setPhase(payload.phase);
-    setMessage(payload.message ?? null);
+    setMessage(sanitizedMessage);
     setPreview(payload.partialText ?? payload.preview ?? null);
     setOutcome(payload.outcome ?? null);
     if (payload.phase === "idle") {
@@ -841,6 +863,19 @@ export function DictationPopup() {
   }, [phase]);
 
   useEffect(() => {
+    if (phase !== "recording") {
+      setWaveFrame(0);
+      return;
+    }
+
+    const id = globalThis.setInterval(() => {
+      setWaveFrame((current) => (current + 1) % 1000);
+    }, 90);
+
+    return () => globalThis.clearInterval(id);
+  }, [phase]);
+
+  useEffect(() => {
     const previousPhase = previousPhaseRef.current;
 
     if (phase !== previousPhase) {
@@ -887,12 +922,6 @@ export function DictationPopup() {
           dictationModelId,
         )
       : dictationRoutePreference);
-  const meetingHostingLabel = meetingProvider
-    ? providerHostingPreference(
-        meetingProvider as AsrProviderType,
-        meetingModelId,
-      )
-    : "local";
   const targetDetail = runtimeAppTarget ? ` for ${runtimeAppTarget}` : "";
   const autoActivationDetail =
     activationMatcher && runtimeAppTarget
@@ -1042,26 +1071,27 @@ export function DictationPopup() {
         onDoubleClick={() => void cycleDisplayMode()}
         title="Double-click to expand"
       >
-        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/88 px-3 py-[9px] shadow-lg backdrop-blur-md">
-          <div className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/[0.08] text-slate-100">
-            <Mic className="h-3.5 w-3.5" />
+        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/92 px-3 py-2 shadow-[0_10px_30px_rgba(2,6,23,0.4)] backdrop-blur-xl">
+          <div className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/[0.06] text-slate-100">
+            <Mic className="h-3 w-3" />
           </div>
           <DictationWaveStrip
             level={displayAudioLevel}
             active={phase === "recording"}
             compact
+            frame={waveFrame}
           />
-          <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-slate-200">
+          <span className="text-[11px] font-medium tracking-[0.08em] text-slate-200">
             {statusLabel}
           </span>
           <button
             type="button"
-            className="inline-flex h-6 w-6 items-center justify-center rounded-full text-slate-300 hover:bg-white/8 hover:text-white"
+            className="inline-flex h-6 w-6 items-center justify-center rounded-full text-slate-400 hover:bg-white/8 hover:text-white"
             onMouseDown={(event) => event.stopPropagation()}
             onClick={() => void hidePopup()}
             aria-label="Hide popup"
           >
-            <X className="h-3.5 w-3.5" />
+            <X className="h-3 w-3" />
           </button>
         </div>
       </div>
@@ -1069,6 +1099,20 @@ export function DictationPopup() {
   }
 
   const compact = displayMode === "compact";
+  const phaseLabel =
+    phase === "primed"
+      ? "Ready"
+      : phase === "recording"
+        ? "Listening"
+        : phase === "transcribing"
+          ? "Transcribing"
+          : phase === "delivering"
+            ? "Inserting"
+            : phase === "done"
+              ? "Ready"
+              : phase === "error"
+                ? "Problem"
+                : "Working";
   const doneTitle = formatDoneTitle(
     outcome,
     finalCommandApplied,
@@ -1096,17 +1140,17 @@ export function DictationPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="max-h-[calc(100vh-24px)] overflow-y-auto rounded-[22px] border border-white/10 bg-slate-950/92 px-4 py-3 backdrop-blur-2xl shadow-[0_18px_60px_rgba(2,6,23,0.55)]">
+      <div className="overflow-hidden rounded-[24px] border border-white/10 bg-slate-950/94 px-4 py-3 backdrop-blur-2xl shadow-[0_24px_80px_rgba(2,6,23,0.48)]">
         <div
           data-tauri-drag-region
-          className="mb-2 flex cursor-grab select-none items-center justify-between text-slate-300 active:cursor-grabbing"
+          className="mb-3 flex cursor-grab select-none items-center justify-between text-slate-300 active:cursor-grabbing"
           onMouseDownCapture={(event) => {
             if (event.button !== 0) return;
             event.preventDefault();
             void window.startDragging();
           }}
         >
-          <div className="inline-flex h-6 items-center gap-1 rounded-full border border-white/8 bg-white/[0.03] px-2 text-slate-400">
+          <div className="inline-flex h-6 items-center gap-1 rounded-full border border-white/8 bg-white/[0.03] px-2 text-slate-500">
             <GripHorizontal className="h-3 w-3" />
           </div>
           <div className="inline-flex items-center gap-1">
@@ -1144,121 +1188,98 @@ export function DictationPopup() {
           </div>
         </div>
 
-        {!compact && (
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium text-slate-100">
-              <modeMeta.icon className="h-3.5 w-3.5" />
-              {selectedModeLabel}
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-[11px] font-medium tracking-[0.14em] text-slate-400">
+              <span>{phaseLabel}</span>
+              <span className="text-slate-600">•</span>
+              <span>{selectedModeLabel}</span>
             </div>
-            {useSharedAsrSelection ? (
-              <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium text-slate-200">
-                {hostingLabel === "cloud" ? "Cloud route" : "Local route"}
-              </div>
-            ) : (
-              <>
-                <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium text-slate-200">
-                  Dictation: {hostingLabel === "cloud" ? "Cloud" : "Local"}
-                </div>
-                <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium text-slate-200">
-                  Meeting: {meetingHostingLabel === "cloud" ? "Cloud" : "Local"}
-                </div>
-              </>
-            )}
-            {requestedRoute && (
-              <div className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300">
-                Requested {requestedRoute === "cloud" ? "cloud" : "local"}
-              </div>
-            )}
-            <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-slate-200">
-              <Clipboard className="h-3.5 w-3.5 text-slate-300" />
-              {contextMeta.label}
-            </div>
-            <div className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300">
-              {handsFreeEnabled
-                ? "Hands-free"
-                : pushToTalk
-                  ? "Hold to talk"
-                  : "Toggle capture"}
-            </div>
+            <p className="mt-1 truncate text-sm text-slate-300">
+              {runtimeAppTarget
+                ? `Targeting ${runtimeAppTarget}`
+                : `${hostingLabel === "cloud" ? "Cloud" : "Local"} route`}
+              {!compact ? ` · ${contextMeta.label}` : ""}
+            </p>
           </div>
-        )}
+          <div className="shrink-0 rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] text-slate-300">
+            {routeLabel}
+          </div>
+        </div>
 
         {isCapturePhase && (
-          <div className="flex items-center gap-3 text-white">
-            <div className="inline-flex h-11 items-center gap-2 rounded-full border border-white/10 bg-white/[0.045] px-3">
-              <div className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/[0.08]">
-                <Mic
-                  className={cn(
-                    "h-4 w-4 text-slate-100 transition-opacity",
-                    phase === "recording" ? "opacity-100" : "opacity-85",
-                  )}
-                />
-              </div>
-              <DictationWaveStrip
-                level={displayAudioLevel}
-                active={phase === "recording"}
-              />
-            </div>
-            <div className="flex-1">
-              <p className="text-sm font-semibold">
-                {phase === "primed" ? "Ready" : "Listening"}
-              </p>
-              {!compact ? (
-                <>
-                  <p className="mt-1 text-xs text-slate-300">
-                    {selectedModeLabel} · {contextMeta.detail} ·{" "}
-                    {insertionMeta.label}
-                    {runtimeAppTarget ? ` · Target ${runtimeAppTarget}` : ""}
+          <div className="space-y-4 text-white">
+            <div className="rounded-[22px] border border-white/10 bg-white/[0.04] px-4 py-4">
+              <div className="flex items-center gap-3">
+                <div className="inline-flex h-10 items-center gap-3 rounded-full border border-white/10 bg-slate-900/80 px-3">
+                  <div className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/[0.08]">
+                    <Mic
+                      className={cn(
+                        "h-3.5 w-3.5 text-slate-100 transition-opacity",
+                        phase === "recording" ? "opacity-100" : "opacity-80",
+                      )}
+                    />
+                  </div>
+                  <DictationWaveStrip
+                    level={displayAudioLevel}
+                    active={phase === "recording"}
+                    frame={waveFrame}
+                  />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[15px] font-semibold tracking-tight">
+                    {phase === "primed" ? "Ready to dictate" : "Listening"}
                   </p>
-                  {autoActivationDetail && (
-                    <p className="mt-1 text-xs text-slate-400">
-                      {autoActivationDetail}
-                    </p>
-                  )}
-                  {phase === "recording" ? (
-                    <>
-                      <p className="mt-1.5 text-xs text-slate-300">
-                        {handsFreeEnabled
-                          ? `Speak naturally. Nautilus stops after silence${dictationInsertionMode === "clipboard_only" ? " and copies to clipboard" : ""}. Press again to stop sooner.`
-                          : pushToTalk
-                            ? `Release hotkey to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`
-                            : `Press the hotkey again to ${dictationInsertionMode === "clipboard_only" ? "finish to clipboard" : "finish dictation"}`}
-                      </p>
-                    </>
-                  ) : (
-                    <p className="mt-1.5 text-xs text-slate-300">
-                      Preparing the capture path now. Start speaking
-                      immediately.
-                    </p>
-                  )}
-                </>
-              ) : (
-                <p className="mt-1 text-xs text-slate-300">
-                  {phase === "primed"
-                    ? "Getting ready."
-                    : `${routeLabel} ready${targetDetail}.`}
-                </p>
-              )}
+                  <p className="mt-1 text-sm leading-5 text-slate-300">
+                    {runtimeAppTarget
+                      ? `Text will go to ${runtimeAppTarget}`
+                      : contextMeta.detail}
+                  </p>
+                </div>
+                <span className="shrink-0 font-mono text-sm text-slate-300">
+                  {phase === "recording" ? elapsedText : "--:--"}
+                </span>
+                <button
+                  type="button"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/12 bg-white/8 text-white hover:bg-white/12"
+                  onClick={() => void handleStopFromPopup()}
+                  aria-label="Stop dictation"
+                >
+                  <Square className="h-4 w-4 fill-current" />
+                </button>
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
+                <span>{selectedModeLabel}</span>
+                <span className="text-slate-600">•</span>
+                <span>{insertionMeta.label}</span>
+                {activationMatcher ? (
+                  <>
+                    <span className="text-slate-600">•</span>
+                    <span>Auto for {activationMatcher}</span>
+                  </>
+                ) : null}
+              </div>
+
+              <p className="mt-2 text-xs leading-5 text-slate-400">
+                {phase === "recording"
+                  ? handsFreeEnabled
+                    ? `Pause speaking to stop automatically${dictationInsertionMode === "clipboard_only" ? " and copy to the clipboard" : ""}.`
+                    : pushToTalk
+                      ? `Release the hotkey to ${dictationInsertionMode === "clipboard_only" ? "copy the result" : "finish dictation"}.`
+                      : `Press the hotkey again to ${dictationInsertionMode === "clipboard_only" ? "copy the result" : "finish dictation"}.`
+                  : "Start speaking as soon as the overlay is ready."}
+              </p>
             </div>
-            <span className="font-mono text-sm text-slate-300">
-              {phase === "recording" ? elapsedText : "--:--"}
-            </span>
-            <button
-              type="button"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/12 bg-white/10 text-white hover:bg-white/15"
-              onClick={() => void handleStopFromPopup()}
-              aria-label="Stop dictation"
-            >
-              <Square className="h-4 w-4 fill-current" />
-            </button>
-            {!compact && elapsed >= 10 && (
-              <button
-                type="button"
-                className="text-xs text-slate-300 underline underline-offset-2"
-                onClick={() => void handleStopFromPopup()}
-              >
-                Stop now
-              </button>
+            {!compact && preview && (
+              <div className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3">
+                <p className="text-[11px] font-medium tracking-[0.16em] text-slate-500">
+                  Live text
+                </p>
+                <p className="mt-2 text-sm leading-6 text-slate-200 line-clamp-4">
+                  {preview}
+                </p>
+              </div>
             )}
           </div>
         )}
@@ -1375,7 +1396,7 @@ export function DictationPopup() {
               {!compact && (
                 <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.045] px-3 py-2">
                   <p className="text-[11px] uppercase tracking-wide text-slate-400">
-                    Try an edit command
+                    Voice edits
                   </p>
                   <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-200">
                     {spokenEditHints.map((hint) => (
