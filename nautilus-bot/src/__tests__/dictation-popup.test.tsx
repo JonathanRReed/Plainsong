@@ -1,4 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DictationPopup } from "@/components/popups/dictation-popup";
 
@@ -67,10 +73,12 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async (eventName: string, handler: (event: { payload: any }) => void) => {
-    popupMocks.listeners.set(eventName, handler);
-    return () => popupMocks.listeners.delete(eventName);
-  }),
+  listen: vi.fn(
+    async (eventName: string, handler: (event: { payload: any }) => void) => {
+      popupMocks.listeners.set(eventName, handler);
+      return () => popupMocks.listeners.delete(eventName);
+    },
+  ),
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({
@@ -166,8 +174,12 @@ describe("DictationPopup", () => {
       });
     });
 
-    expect(await screen.findByText(/Slack Replies · Fresh dictation · Paste at cursor · Target Slack/i)).toBeInTheDocument();
-    expect(screen.getByText(/Auto for Slack via "slack"/i)).toBeInTheDocument();
+    expect(
+      (await screen.findAllByText("Slack Replies")).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText(/Targeting Slack/i)).toBeInTheDocument();
+    expect(screen.getByText(/Paste at cursor/i)).toBeInTheDocument();
+    expect(screen.getByText(/Auto for slack/i)).toBeInTheDocument();
   });
 
   it("renders the popup immediately without waiting for settings to load", async () => {
@@ -190,11 +202,11 @@ describe("DictationPopup", () => {
       render(<DictationPopup />);
     });
 
-    expect(
-      await screen.findByText(
-        /Slack & Chat · Using the frontmost app and window · Paste at cursor · Target Codex/i
-      )
-    ).toBeInTheDocument();
+    expect((await screen.findAllByText("Slack & Chat")).length).toBeGreaterThan(
+      0,
+    );
+    expect(screen.getByText(/Targeting Codex/i)).toBeInTheDocument();
+    expect(screen.getByText(/App context/i)).toBeInTheDocument();
 
     await act(async () => {
       pendingSettings.resolve({
@@ -203,7 +215,9 @@ describe("DictationPopup", () => {
           dictationHandsFreeEnabled: false,
           dictationModePreset: "voice",
           dictationSelectedCustomModeId: null,
-          dictationCustomModes: [{ id: "slack-replies", name: "Slack Replies" }],
+          dictationCustomModes: [
+            { id: "slack-replies", name: "Slack Replies" },
+          ],
           dictationContextSource: "none",
           dictationProvider: "distil_whisper",
           dictationModelId: "distil-large-v3.5",
@@ -287,9 +301,8 @@ describe("DictationPopup", () => {
       render(<DictationPopup />);
     });
 
-    expect(await screen.findByText("Hands-free")).toBeInTheDocument();
     expect(
-      screen.getByText(/Speak naturally\. Nautilus stops after silence\. Press again to stop sooner\./i)
+      await screen.findByText(/Pause speaking to stop automatically\./i),
     ).toBeInTheDocument();
   });
 
@@ -319,10 +332,13 @@ describe("DictationPopup", () => {
       });
     });
 
-    expect(await screen.findByText("Transcribing")).toBeInTheDocument();
-    expect(screen.getByText("Turning speech into send-ready text.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Turning speech into send-ready text."),
+    ).toBeInTheDocument();
     expect(screen.getByText("Live preview")).toBeInTheDocument();
-    expect(screen.getByText("Draft the follow-up with clear owners.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Draft the follow-up with clear owners."),
+    ).toBeInTheDocument();
 
     await act(async () => {
       handler?.({
@@ -342,8 +358,9 @@ describe("DictationPopup", () => {
       });
     });
 
-    expect(await screen.findByText("Inserting")).toBeInTheDocument();
-    expect(screen.getByText("Delivering the rewrite to Slack now.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Delivering the rewrite to Slack now."),
+    ).toBeInTheDocument();
     expect(screen.getByText("Latest text")).toBeInTheDocument();
   });
 
@@ -452,7 +469,9 @@ describe("DictationPopup", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Hide popup" }));
 
     await waitFor(() => {
-      expect(popupMocks.invoke).toHaveBeenCalledWith("dismiss_dictation_overlay");
+      expect(popupMocks.invoke).toHaveBeenCalledWith(
+        "dismiss_dictation_overlay",
+      );
       expect(popupMocks.windowHandle.hide).toHaveBeenCalled();
     });
   });
@@ -496,11 +515,13 @@ describe("DictationPopup", () => {
     });
 
     expect(await screen.findByText("Backtrack applied")).toBeInTheDocument();
-    expect(screen.getByText("Backtrack replace last insert")).toBeInTheDocument();
+    expect(
+      screen.getByText("Backtrack replace last insert"),
+    ).toBeInTheDocument();
     expect(screen.getByText("2 snippets")).toBeInTheDocument();
     expect(screen.getByText("Target Slack")).toBeInTheDocument();
     expect(screen.getByText("Edit commands available")).toBeInTheDocument();
-    expect(screen.getByText("Try an edit command")).toBeInTheDocument();
+    expect(screen.getByText("Voice edits")).toBeInTheDocument();
     expect(screen.getByText("Copy result")).toBeInTheDocument();
     expect(screen.getByText("Start again")).toBeInTheDocument();
     expect(screen.getByText("Open history")).toBeInTheDocument();
@@ -511,7 +532,7 @@ describe("DictationPopup", () => {
 
     await waitFor(() => {
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
-        "Ship the launch update tomorrow morning."
+        "Ship the launch update tomorrow morning.",
       );
     });
 
@@ -548,10 +569,20 @@ describe("DictationPopup", () => {
       });
     });
 
-    expect(await screen.findByText("Problem")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Start again" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open dictation" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open settings" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Copy result" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByText("Microphone permission is not ready."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Start again" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open dictation" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Open settings" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Copy result" }),
+    ).not.toBeInTheDocument();
   });
 });

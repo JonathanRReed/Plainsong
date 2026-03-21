@@ -57,9 +57,16 @@ import {
   type DictationRoutePreference,
 } from "@/lib/asr-capabilities";
 import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labels";
+import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Keyboard,
@@ -81,9 +88,19 @@ import {
   CheckCircle2,
   TriangleAlert,
 } from "lucide-react";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
-import type { AsrProviderInfo, AsrProviderType, Recording, Transcript } from "@/types";
+import type {
+  AsrProviderInfo,
+  AsrProviderType,
+  Recording,
+  Transcript,
+} from "@/types";
 import type { DictationCustomMode } from "@/types/settings";
 
 function getSafeLocalStorage(): Pick<Storage, "getItem" | "setItem"> | null {
@@ -119,7 +136,13 @@ interface DictationTextReadyEvent {
   latencyMs?: number;
   insertLatencyMs?: number;
   endToEndMs?: number;
-  insertionModeUsed?: "auto" | "paste" | "inline" | "clipboard_only" | "command_only" | "none";
+  insertionModeUsed?:
+    | "auto"
+    | "paste"
+    | "inline"
+    | "clipboard_only"
+    | "command_only"
+    | "none";
   commandApplied?: string | null;
   snippetAppliedCount?: number;
   appTarget?: string | null;
@@ -163,7 +186,11 @@ type DictationModePreset =
 type DictationBaseModePreset = Exclude<DictationModePreset, "custom">;
 
 type DictationInsertionMode = "auto" | "paste" | "inline" | "clipboard_only";
-type DictationContextSource = "none" | "clipboard" | "selected_text" | "application_context";
+type DictationContextSource =
+  | "none"
+  | "clipboard"
+  | "selected_text"
+  | "application_context";
 type CorrectionSuggestionGroup = {
   key: string;
   suggestionIds: string[];
@@ -242,7 +269,11 @@ type SoloLane = {
   emphasis: string;
 };
 
-type DictationCoachStep = "backtrack" | "dictionary" | "command_mode" | "profiles";
+type DictationCoachStep =
+  | "backtrack"
+  | "dictionary"
+  | "command_mode"
+  | "profiles";
 
 type DictationCoachCard = {
   id: DictationCoachStep;
@@ -252,7 +283,12 @@ type DictationCoachCard = {
 };
 
 const ACTIVATION_APP_SUGGESTIONS = ["Slack", "Notion", "Cursor", "Messages"];
-const ACTIVATION_DOMAIN_SUGGESTIONS = ["gmail.com", "linear.app", "docs.google.com", "notion.so"];
+const ACTIVATION_DOMAIN_SUGGESTIONS = [
+  "gmail.com",
+  "linear.app",
+  "docs.google.com",
+  "notion.so",
+];
 const GA_LANGUAGE_CODES = new Set(["en", "es", "fr", "de", "pt"]);
 const DICTATION_SESSION_LANGUAGE_OPTIONS = [
   { value: "auto", label: "Auto detect" },
@@ -264,15 +300,17 @@ const DICTATION_SESSION_LANGUAGE_OPTIONS = [
   { value: "ja", label: "Japanese" },
   { value: "zh", label: "Chinese" },
 ];
-const DICTATION_ACTIVE_LANGUAGE_OPTIONS = DICTATION_SESSION_LANGUAGE_OPTIONS.filter(
-  (option) => option.value !== "auto"
-);
+const DICTATION_ACTIVE_LANGUAGE_OPTIONS =
+  DICTATION_SESSION_LANGUAGE_OPTIONS.filter(
+    (option) => option.value !== "auto",
+  );
 
 const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
   {
     id: "builtin-slack-replies",
     name: "Slack Replies",
-    description: "Short, clean replies that auto-activate in Slack and keep command edits ready.",
+    description:
+      "Short, clean replies that auto-activate in Slack and keep command edits ready.",
     baseModePreset: "messages",
     customPrompt:
       "Rewrite the user's dictation as a concise Slack reply. Keep it direct, natural, and easy to scan. Avoid email-style greetings or sign-offs unless the user explicitly says them. Return only the final reply.",
@@ -289,7 +327,8 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
   {
     id: "builtin-gmail-drafts",
     name: "Gmail Drafts",
-    description: "Polished email drafting with selected-text context and auto-activation on Gmail.",
+    description:
+      "Polished email drafting with selected-text context and auto-activation on Gmail.",
     baseModePreset: "email",
     customPrompt:
       "Rewrite the user's dictation into polished email-ready prose. Preserve intent, improve structure, and keep tone professional. Return only the final email body with no subject line unless the user dictates one.",
@@ -306,7 +345,8 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
   {
     id: "builtin-google-docs-writing",
     name: "Google Docs Writing",
-    description: "Long-form drafting with browser context and clean insert behavior for Docs.",
+    description:
+      "Long-form drafting with browser context and clean insert behavior for Docs.",
     baseModePreset: "voice",
     customPrompt:
       "Rewrite the user's dictation into clean long-form prose for a document. Improve flow and clarity, but keep the original meaning. Use paragraphs rather than bullets unless the user explicitly asks for bullets.",
@@ -323,7 +363,8 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
   {
     id: "builtin-notion-notes",
     name: "Notion Notes",
-    description: "Fast notes and structured edits for Notion pages with live preview on.",
+    description:
+      "Fast notes and structured edits for Notion pages with live preview on.",
     baseModePreset: "notes",
     customPrompt:
       "Rewrite the user's dictation as crisp structured notes. Prefer short sections and bullets when they make the notes clearer. Keep action items and open questions explicit. Return only the final note text.",
@@ -340,7 +381,8 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
   {
     id: "builtin-linear-updates",
     name: "Linear Updates",
-    description: "Issue updates with concise drafting and selected-text editing on linear.app.",
+    description:
+      "Issue updates with concise drafting and selected-text editing on linear.app.",
     baseModePreset: "meeting_follow_up",
     customPrompt:
       "Rewrite the user's dictation as a concise project or issue update. Make status, blockers, and next steps explicit. Keep the language short, precise, and suitable for a work-tracking tool.",
@@ -357,7 +399,8 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
   {
     id: "builtin-coding-copilot",
     name: "Coding Copilot",
-    description: "Code-aware dictation for prompts, commits, terminal commands, and editor rewrites.",
+    description:
+      "Code-aware dictation for prompts, commits, terminal commands, and editor rewrites.",
     baseModePreset: "messages",
     customPrompt:
       "Rewrite the user's dictation for a software development workflow. Preserve code terms, filenames, CLI commands, markdown, and developer jargon exactly when possible. Prefer concise technical phrasing and keep variable names, casing, and product names intact.",
@@ -374,7 +417,8 @@ const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
   {
     id: "builtin-quiet-focus",
     name: "Quiet Focus",
-    description: "Low-friction dictation for whispering, private work, and fewer interruptions.",
+    description:
+      "Low-friction dictation for whispering, private work, and fewer interruptions.",
     baseModePreset: "voice",
     customPrompt:
       "Rewrite the user's dictation with minimal cleanup. Preserve quiet speech intent, keep corrections natural, and avoid over-formatting. Return only the final text.",
@@ -393,7 +437,8 @@ const SOLO_LANES: SoloLane[] = [
   {
     id: "everywhere",
     title: "General",
-    description: "Fast default dictation for any app with clean inserts and light cleanup.",
+    description:
+      "Fast default dictation for any app with clean inserts and light cleanup.",
     icon: Sparkles,
     modeId: "voice",
     emphasis: "Best all-around starting point",
@@ -417,7 +462,8 @@ const SOLO_LANES: SoloLane[] = [
   {
     id: "follow_up",
     title: "Follow-up",
-    description: "Turn rough notes into a polished meeting follow-up without forcing an insert.",
+    description:
+      "Turn rough notes into a polished meeting follow-up without forcing an insert.",
     icon: Replace,
     modeId: "meeting_follow_up",
     emphasis: "Best for post-call writing",
@@ -425,7 +471,8 @@ const SOLO_LANES: SoloLane[] = [
   {
     id: "coding",
     title: "Coding",
-    description: "Developer-first dictation for prompts, issue updates, markdown, and commands.",
+    description:
+      "Developer-first dictation for prompts, issue updates, markdown, and commands.",
     icon: Terminal,
     styleId: "builtin-coding-copilot",
     emphasis: "Optimized for software work",
@@ -433,7 +480,8 @@ const SOLO_LANES: SoloLane[] = [
   {
     id: "quiet",
     title: "Quiet",
-    description: "Low-noise dictation when you want whisper-friendly capture and fewer distractions.",
+    description:
+      "Low-noise dictation when you want whisper-friendly capture and fewer distractions.",
     icon: Volume2,
     styleId: "builtin-quiet-focus",
     emphasis: "Best for low-volume speaking",
@@ -525,7 +573,9 @@ function normalizeDictationSilenceTimeoutSeconds(value: number): number {
 }
 
 function normalizeActiveLanguageSet(languages: string[]): string[] {
-  const allowed = new Set(DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => option.value));
+  const allowed = new Set(
+    DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => option.value),
+  );
   const normalized: string[] = [];
   for (const language of languages) {
     const value = language.trim().toLowerCase();
@@ -552,7 +602,8 @@ const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
   {
     id: "messages",
     label: "Slack & Chat",
-    description: "Quick replies that stay compact and paste cleanly into chat apps.",
+    description:
+      "Quick replies that stay compact and paste cleanly into chat apps.",
     profile: "normal_speed",
     insertionMode: "paste",
     contextSource: "none",
@@ -563,7 +614,8 @@ const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
   {
     id: "email",
     label: "Writing",
-    description: "Cleaner output for polished drafting, rewrites, and longer-form prose.",
+    description:
+      "Cleaner output for polished drafting, rewrites, and longer-form prose.",
     profile: "power_rewrite",
     insertionMode: "paste",
     contextSource: "selected_text",
@@ -602,7 +654,7 @@ const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
 
 function describeActivationRules(
   appMatcher: string | null | undefined,
-  domainMatcher: string | null | undefined
+  domainMatcher: string | null | undefined,
 ): string {
   const normalizedAppMatcher = appMatcher?.trim();
   const normalizedDomainMatcher = domainMatcher?.trim();
@@ -625,7 +677,7 @@ function describeActivationRules(
 function describeSmartContextState(
   activationMatcher: string | null,
   appTarget: string | null,
-  contextChars: number | null
+  contextChars: number | null,
 ): string {
   if (activationMatcher && appTarget) {
     return `${activationMatcher} matched, and Nautilus captured context from ${appTarget}.`;
@@ -643,7 +695,7 @@ function describeSmartContextState(
 }
 
 function createCustomModeDraft(
-  overrides?: Partial<DictationCustomModeDraft>
+  overrides?: Partial<DictationCustomModeDraft>,
 ): DictationCustomModeDraft {
   return {
     name: "Custom Mode",
@@ -658,49 +710,71 @@ function createCustomModeDraft(
   };
 }
 
-function dictationModeLabel(modePreset: Exclude<DictationModePreset, "custom">): string {
+function dictationModeLabel(
+  modePreset: Exclude<DictationModePreset, "custom">,
+): string {
   return (
-    DICTATION_MODE_DEFINITIONS.find((definition) => definition.id === modePreset)?.label ?? "General"
+    DICTATION_MODE_DEFINITIONS.find(
+      (definition) => definition.id === modePreset,
+    )?.label ?? "General"
   );
 }
 
 function getDictationPhaseSummary(
   phase: DictationRuntimePhase,
   message: string | null,
-  preview: string | null
-): { title: string; detail: string; tone: "idle" | "active" | "success" | "error" } {
+  preview: string | null,
+): {
+  title: string;
+  detail: string;
+  tone: "idle" | "active" | "success" | "error";
+} {
   const fallbackDetail =
-    preview?.trim() || message?.trim() || "Nautilus is ready for the next capture.";
+    preview?.trim() ||
+    message?.trim() ||
+    "Nautilus is ready for the next capture.";
 
   switch (phase) {
     case "primed":
       return {
         title: "Mic primed",
-        detail: message?.trim() || "The route is warm and Nautilus is getting ready to listen.",
+        detail:
+          message?.trim() ||
+          "The route is warm and Nautilus is getting ready to listen.",
         tone: "active",
       };
     case "recording":
       return {
         title: "Listening",
-        detail: preview?.trim() || message?.trim() || "Capture is live and the next result is building.",
+        detail:
+          preview?.trim() ||
+          message?.trim() ||
+          "Capture is live and the next result is building.",
         tone: "active",
       };
     case "stopping":
       return {
         title: "Stopping capture",
-        detail: message?.trim() || "Audio is closing cleanly so the result can be finalized.",
+        detail:
+          message?.trim() ||
+          "Audio is closing cleanly so the result can be finalized.",
         tone: "active",
       };
     case "transcribing":
       return {
         title: "Transcribing",
-        detail: preview?.trim() || message?.trim() || "Speech is turning into text now.",
+        detail:
+          preview?.trim() ||
+          message?.trim() ||
+          "Speech is turning into text now.",
         tone: "active",
       };
     case "delivering":
       return {
         title: "Delivering",
-        detail: message?.trim() || "Nautilus is inserting or copying the final result.",
+        detail:
+          message?.trim() ||
+          "Nautilus is inserting or copying the final result.",
         tone: "active",
       };
     case "done":
@@ -712,20 +786,26 @@ function getDictationPhaseSummary(
     case "error":
       return {
         title: "Needs attention",
-        detail: message?.trim() || "Capture or delivery hit a problem. Your latest text is still available.",
+        detail:
+          message?.trim() ||
+          "Capture or delivery hit a problem. Your latest text is still available.",
         tone: "error",
       };
     case "idle":
     default:
       return {
         title: "Ready to launch",
-        detail: message?.trim() || "Start from the hotkey or the button below and Nautilus will take it from there.",
+        detail:
+          message?.trim() ||
+          "Start from the hotkey or the button below and Nautilus will take it from there.",
         tone: "idle",
       };
   }
 }
 
-function coerceBaseModePreset(modePreset: string | null | undefined): DictationBaseModePreset {
+function coerceBaseModePreset(
+  modePreset: string | null | undefined,
+): DictationBaseModePreset {
   switch (modePreset) {
     case "messages":
     case "email":
@@ -746,7 +826,8 @@ function historyModeLabel(details: DictationHistoryDetails | null): string {
   }
   if (details.modePreset) {
     return (
-      modeDefinitionByIdStatic[details.modePreset as DictationModePreset]?.label ?? details.modePreset
+      modeDefinitionByIdStatic[details.modePreset as DictationModePreset]
+        ?.label ?? details.modePreset
     );
   }
   return "Unavailable";
@@ -754,12 +835,17 @@ function historyModeLabel(details: DictationHistoryDetails | null): string {
 
 const modeDefinitionByIdStatic = DICTATION_MODE_DEFINITIONS.reduce<
   Record<DictationModePreset, DictationModeDefinition>
->((accumulator, definition) => {
-  accumulator[definition.id] = definition;
-  return accumulator;
-}, {} as Record<DictationModePreset, DictationModeDefinition>);
+>(
+  (accumulator, definition) => {
+    accumulator[definition.id] = definition;
+    return accumulator;
+  },
+  {} as Record<DictationModePreset, DictationModeDefinition>,
+);
 
-function historyPromptSourceLabel(promptSource: string | null | undefined): string {
+function historyPromptSourceLabel(
+  promptSource: string | null | undefined,
+): string {
   if (!promptSource) {
     return "Direct transcript";
   }
@@ -829,9 +915,18 @@ function summarizeMode(mode: {
     },
     { label: "Result", value: INSERTION_MODE_LABELS[mode.insertionMode] },
     { label: "Context", value: CONTEXT_SOURCE_LABELS[mode.contextSource] },
-    { label: "History", value: mode.saveToInbox ? "Save to Inbox" : "Do not save" },
-    { label: "Clipboard", value: mode.copyToClipboard ? "Copy enabled" : "Copy off" },
-    { label: "Commands", value: mode.commandModeEnabled ? "Command mode on" : "Command mode off" },
+    {
+      label: "History",
+      value: mode.saveToInbox ? "Save to Inbox" : "Do not save",
+    },
+    {
+      label: "Clipboard",
+      value: mode.copyToClipboard ? "Copy enabled" : "Copy off",
+    },
+    {
+      label: "Commands",
+      value: mode.commandModeEnabled ? "Command mode on" : "Command mode off",
+    },
     {
       label: "Transcription",
       value: mode.dictationProvider
@@ -882,13 +977,15 @@ function normalizeProviderLanguageTag(language: string): string {
 
 function providerSupportsCaptureLanguage(
   provider: AsrProviderInfo,
-  language: string | null
+  language: string | null,
 ): boolean {
   if (!language) {
     return true;
   }
 
-  const supported = provider.modelInfo.languages.map(normalizeProviderLanguageTag);
+  const supported = provider.modelInfo.languages.map(
+    normalizeProviderLanguageTag,
+  );
   const normalizedLanguage = normalizeProviderLanguageTag(language);
   const baseLanguage = normalizedLanguage.split("-")[0] ?? normalizedLanguage;
 
@@ -902,17 +999,24 @@ function providerSupportsCaptureLanguage(
 
 function providerSupportsActiveLanguageSet(
   provider: AsrProviderInfo,
-  languages: string[]
+  languages: string[],
 ): boolean {
   if (languages.length === 0) {
     return true;
   }
-  return languages.some((language) => providerSupportsCaptureLanguage(provider, language));
+  return languages.some((language) =>
+    providerSupportsCaptureLanguage(provider, language),
+  );
 }
 
-function languageTrustLabel(language: string | null, activeLanguages: string[]): string {
+function languageTrustLabel(
+  language: string | null,
+  activeLanguages: string[],
+): string {
   if (language) {
-    return GA_LANGUAGE_CODES.has(language.toLowerCase()) ? "GA" : "Experimental";
+    return GA_LANGUAGE_CODES.has(language.toLowerCase())
+      ? "GA"
+      : "Experimental";
   }
   if (activeLanguages.length > 1) {
     return "Active set";
@@ -923,17 +1027,27 @@ function languageTrustLabel(language: string | null, activeLanguages: string[]):
 export function DictationView() {
   const { formattedDuration, startDictation, stopDictation } = useRecording();
   const { projects } = useProjects();
-  const { recordings, isLoading: dictationHistoryLoading, refetch: refetchDictationHistory } = useRecordings();
+  const {
+    recordings,
+    isLoading: dictationHistoryLoading,
+    refetch: refetchDictationHistory,
+  } = useRecordings();
   const defaultShortcut = defaultDictationShortcut();
-  const [hotkeyLabel, setHotkeyLabel] = useState(formatShortcutForDisplay(defaultShortcut));
+  const [hotkeyLabel, setHotkeyLabel] = useState(
+    formatShortcutForDisplay(defaultShortcut),
+  );
   const [hotkeyShortcut, setHotkeyShortcut] = useState(defaultShortcut);
   const [transcribedText, setTranscribedText] = useState("");
   const [lastProvider, setLastProvider] = useState<string | null>(null);
   const [lastModelId, setLastModelId] = useState<string | null>(null);
   const [lastRoutePreference, setLastRoutePreference] =
     useState<DictationRoutePreference | null>(null);
-  const [lastResolvedRoute, setLastResolvedRoute] = useState<string | null>(null);
-  const [lastProviderModelLabel, setLastProviderModelLabel] = useState<string | null>(null);
+  const [lastResolvedRoute, setLastResolvedRoute] = useState<string | null>(
+    null,
+  );
+  const [lastProviderModelLabel, setLastProviderModelLabel] = useState<
+    string | null
+  >(null);
   const [lastResolvedHosting, setLastResolvedHosting] =
     useState<DictationRoutePreference | null>(null);
   const [fallbackStatus, setFallbackStatus] = useState<string | null>(null);
@@ -942,70 +1056,103 @@ export function DictationView() {
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
   const [insertLatencyMs, setInsertLatencyMs] = useState<number | null>(null);
   const [endToEndMs, setEndToEndMs] = useState<number | null>(null);
-  const [insertionModeUsed, setInsertionModeUsed] = useState<string | null>(null);
+  const [insertionModeUsed, setInsertionModeUsed] = useState<string | null>(
+    null,
+  );
   const [commandApplied, setCommandApplied] = useState<string | null>(null);
   const [snippetAppliedCount, setSnippetAppliedCount] = useState(0);
-  const [dictationPhase, setDictationPhase] = useState<DictationRuntimePhase>("idle");
-  const [dictationPhaseMessage, setDictationPhaseMessage] = useState<string | null>(null);
-  const [dictationPhasePreview, setDictationPhasePreview] = useState<string | null>(null);
-  const [dictationResolvedModeLabel, setDictationResolvedModeLabel] = useState<string | null>(null);
+  const [dictationPhase, setDictationPhase] =
+    useState<DictationRuntimePhase>("idle");
+  const [dictationPhaseMessage, setDictationPhaseMessage] = useState<
+    string | null
+  >(null);
+  const [dictationPhasePreview, setDictationPhasePreview] = useState<
+    string | null
+  >(null);
+  const [dictationResolvedModeLabel, setDictationResolvedModeLabel] = useState<
+    string | null
+  >(null);
   const [appTarget, setAppTarget] = useState<string | null>(null);
-  const [activationMatcher, setActivationMatcher] = useState<string | null>(null);
+  const [activationMatcher, setActivationMatcher] = useState<string | null>(
+    null,
+  );
   const [contextChars, setContextChars] = useState<number | null>(null);
   const [dictationError, setDictationError] = useState<string | null>(null);
   const [saveToInbox, setSaveToInbox] = useState(true);
-  const [dictationProfile, setDictationProfile] = useState<"normal_speed" | "power_rewrite">(
-    "normal_speed"
-  );
+  const [dictationProfile, setDictationProfile] = useState<
+    "normal_speed" | "power_rewrite"
+  >("normal_speed");
   const [dictationModePreset, setDictationModePreset] =
     useState<DictationModePreset>(DEFAULT_DICTATION_MODE);
-  const [dictationCustomModes, setDictationCustomModes] = useState<DictationCustomMode[]>([]);
-  const [selectedCustomModeId, setSelectedCustomModeId] = useState<string | null>(null);
-  const [customModeDraft, setCustomModeDraft] = useState<DictationCustomModeDraft>(
-    createCustomModeDraft()
-  );
+  const [dictationCustomModes, setDictationCustomModes] = useState<
+    DictationCustomMode[]
+  >([]);
+  const [selectedCustomModeId, setSelectedCustomModeId] = useState<
+    string | null
+  >(null);
+  const [customModeDraft, setCustomModeDraft] =
+    useState<DictationCustomModeDraft>(createCustomModeDraft());
   const [defaultProjectId, setDefaultProjectId] = useState("inbox");
   const [dictationPushToTalk, setDictationPushToTalk] = useState(true);
-  const [dictationHandsFreeEnabled, setDictationHandsFreeEnabled] = useState(false);
+  const [dictationHandsFreeEnabled, setDictationHandsFreeEnabled] =
+    useState(false);
   const [dictationRoutePreference, setDictationRoutePreference] =
     useState<DictationRoutePreference>("local");
-  const [dictationRouteOverrideEnabled, setDictationRouteOverrideEnabled] = useState(true);
-  const [dictationKeepWarm, setDictationKeepWarm] = useState<"off" | "short" | "long">("short");
-  const [dictationLivePreviewEnabled, setDictationLivePreviewEnabled] = useState(true);
-  const [nextCaptureRoutePreference, setNextCaptureRoutePreference] = useState<
-    DictationRoutePreference | null
-  >(null);
+  const [dictationRouteOverrideEnabled, setDictationRouteOverrideEnabled] =
+    useState(true);
+  const [dictationKeepWarm, setDictationKeepWarm] = useState<
+    "off" | "short" | "long"
+  >("short");
+  const [dictationLivePreviewEnabled, setDictationLivePreviewEnabled] =
+    useState(true);
+  const [nextCaptureRoutePreference, setNextCaptureRoutePreference] =
+    useState<DictationRoutePreference | null>(null);
   const [dictationContextSource, setDictationContextSource] =
     useState<DictationContextSource>("none");
-  const [dictationCopyToClipboard, setDictationCopyToClipboard] = useState(true);
-  const [dictationCommandModeEnabled, setDictationCommandModeEnabled] = useState(true);
-  const [dictationCommandPrefix, setDictationCommandPrefix] = useState("command");
+  const [dictationCopyToClipboard, setDictationCopyToClipboard] =
+    useState(true);
+  const [dictationCommandModeEnabled, setDictationCommandModeEnabled] =
+    useState(true);
+  const [dictationCommandPrefix, setDictationCommandPrefix] =
+    useState("command");
   const [dictationInsertionMode, setDictationInsertionMode] =
     useState<DictationInsertionMode>("auto");
-  const [dictationSessionLanguage, setDictationSessionLanguage] = useState("auto");
-  const [dictationActiveLanguages, setDictationActiveLanguages] = useState<string[]>([]);
-  const [dictationSnippetsEnabled, setDictationSnippetsEnabled] = useState(true);
-  const [dictationAutoLearnCorrections, setDictationAutoLearnCorrections] = useState(true);
-  const [dictationSilenceTimeoutSeconds, setDictationSilenceTimeoutSeconds] = useState(0);
+  const [dictationSessionLanguage, setDictationSessionLanguage] =
+    useState("auto");
+  const [dictationActiveLanguages, setDictationActiveLanguages] = useState<
+    string[]
+  >([]);
+  const [dictationSnippetsEnabled, setDictationSnippetsEnabled] =
+    useState(true);
+  const [dictationAutoLearnCorrections, setDictationAutoLearnCorrections] =
+    useState(true);
+  const [dictationSilenceTimeoutSeconds, setDictationSilenceTimeoutSeconds] =
+    useState(0);
   const [dictationDictionaryEntries, setDictationDictionaryEntries] = useState<
     DictationDictionaryEntry[]
   >([]);
-  const [dictationCorrectionSuggestions, setDictationCorrectionSuggestions] = useState<
-    DictationCorrectionSuggestion[]
-  >([]);
+  const [dictationCorrectionSuggestions, setDictationCorrectionSuggestions] =
+    useState<DictationCorrectionSuggestion[]>([]);
   const [correctionInboxBusy, setCorrectionInboxBusy] = useState(false);
-  const [dictationSnippets, setDictationSnippets] = useState<DictationSnippet[]>([]);
+  const [dictationSnippets, setDictationSnippets] = useState<
+    DictationSnippet[]
+  >([]);
   const [dictationCommandPresets, setDictationCommandPresets] = useState<
     DictationCommandPreset[]
   >([]);
   const [newDictionarySpokenForm, setNewDictionarySpokenForm] = useState("");
   const [newDictionaryReplacement, setNewDictionaryReplacement] = useState("");
   const [newDictionaryAppScope, setNewDictionaryAppScope] = useState("");
-  const [newDictionaryCaseSensitive, setNewDictionaryCaseSensitive] = useState(false);
+  const [newDictionaryCaseSensitive, setNewDictionaryCaseSensitive] =
+    useState(false);
   const [dictionaryCsvDialogOpen, setDictionaryCsvDialogOpen] = useState(false);
-  const [dictionaryCsvMode, setDictionaryCsvMode] = useState<"import" | "export">("import");
+  const [dictionaryCsvMode, setDictionaryCsvMode] = useState<
+    "import" | "export"
+  >("import");
   const [dictionaryCsvText, setDictionaryCsvText] = useState("");
-  const [dictionaryCsvStatus, setDictionaryCsvStatus] = useState<string | null>(null);
+  const [dictionaryCsvStatus, setDictionaryCsvStatus] = useState<string | null>(
+    null,
+  );
   const [dictionaryCsvImportResult, setDictionaryCsvImportResult] =
     useState<DictationDictionaryCsvImportResult | null>(null);
   const [dictionaryCsvBusy, setDictionaryCsvBusy] = useState(false);
@@ -1016,45 +1163,73 @@ export function DictationView() {
   const [dictationRetentionPreset, setDictationRetentionPreset] = useState<
     "immediate" | "24h" | "72h" | "never" | "custom"
   >("never");
-  const [dictationRetentionCustomHours, setDictationRetentionCustomHours] = useState(24);
+  const [dictationRetentionCustomHours, setDictationRetentionCustomHours] =
+    useState(24);
   const [hotkeyPressed, setHotkeyPressed] = useState(false);
-  const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null);
-  const [selectedTranscript, setSelectedTranscript] = useState<Transcript | null>(null);
-  const [selectedHistoryDetails, setSelectedHistoryDetails] = useState<DictationHistoryDetails | null>(null);
-  const [dictationInsights, setDictationInsights] = useState<DictationInsights | null>(null);
-  const [dictationProviders, setDictationProviders] = useState<AsrProviderInfo[]>([]);
+  const [selectedRecording, setSelectedRecording] = useState<Recording | null>(
+    null,
+  );
+  const [selectedTranscript, setSelectedTranscript] =
+    useState<Transcript | null>(null);
+  const [selectedHistoryDetails, setSelectedHistoryDetails] =
+    useState<DictationHistoryDetails | null>(null);
+  const [dictationInsights, setDictationInsights] =
+    useState<DictationInsights | null>(null);
+  const [dictationProviders, setDictationProviders] = useState<
+    AsrProviderInfo[]
+  >([]);
   const [latestCorrectionBaseline, setLatestCorrectionBaseline] = useState("");
-  const [latestLearnStatus, setLatestLearnStatus] = useState<string | null>(null);
+  const [latestLearnStatus, setLatestLearnStatus] = useState<string | null>(
+    null,
+  );
   const [historyCorrectionText, setHistoryCorrectionText] = useState("");
-  const [historyCorrectionBaseline, setHistoryCorrectionBaseline] = useState("");
-  const [historyLearnStatus, setHistoryLearnStatus] = useState<string | null>(null);
-  const [activeSpeechTarget, setActiveSpeechTarget] = useState<string | null>(null);
-  const [dismissedCoachSteps, setDismissedCoachSteps] = useState<DictationCoachStep[]>([]);
+  const [historyCorrectionBaseline, setHistoryCorrectionBaseline] =
+    useState("");
+  const [historyLearnStatus, setHistoryLearnStatus] = useState<string | null>(
+    null,
+  );
+  const [activeSpeechTarget, setActiveSpeechTarget] = useState<string | null>(
+    null,
+  );
+  const [dismissedCoachSteps, setDismissedCoachSteps] = useState<
+    DictationCoachStep[]
+  >([]);
   const [isLoadingTranscript, setIsLoadingTranscript] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [reprocessModePreset, setReprocessModePreset] =
     useState<DictationModePreset>(DEFAULT_DICTATION_MODE);
-  const [reprocessedResult, setReprocessedResult] = useState<DictationReprocessResult | null>(null);
+  const [reprocessedResult, setReprocessedResult] =
+    useState<DictationReprocessResult | null>(null);
   const [isReprocessing, setIsReprocessing] = useState(false);
   const [reprocessError, setReprocessError] = useState<string | null>(null);
-  const [currentDictationProvider, setCurrentDictationProvider] = useState<string | null>(null);
-  const [currentDictationModelId, setCurrentDictationModelId] = useState<string | null>(null);
-  const [currentMeetingProvider, setCurrentMeetingProvider] = useState<string | null>(null);
+  const [currentDictationProvider, setCurrentDictationProvider] = useState<
+    string | null
+  >(null);
+  const [currentDictationModelId, setCurrentDictationModelId] = useState<
+    string | null
+  >(null);
+  const [currentMeetingProvider, setCurrentMeetingProvider] = useState<
+    string | null
+  >(null);
   const [useSharedAsrSelection, setUseSharedAsrSelection] = useState(true);
-  const [currentAiProvider, setCurrentAiProvider] = useState<string | null>(null);
+  const [currentAiProvider, setCurrentAiProvider] = useState<string | null>(
+    null,
+  );
   const [currentAiModelId, setCurrentAiModelId] = useState<string | null>(null);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const modeDefinitionById = useMemo(
     () =>
-      DICTATION_MODE_DEFINITIONS.reduce<Record<DictationModePreset, DictationModeDefinition>>(
+      DICTATION_MODE_DEFINITIONS.reduce<
+        Record<DictationModePreset, DictationModeDefinition>
+      >(
         (acc, definition) => {
           acc[definition.id] = definition;
           return acc;
         },
-        {} as Record<DictationModePreset, DictationModeDefinition>
+        {} as Record<DictationModePreset, DictationModeDefinition>,
       ),
-    []
+    [],
   );
 
   useEffect(() => {
@@ -1079,7 +1254,10 @@ export function DictationView() {
     setPasteStatus(null);
     setActiveSpeechTarget(target);
     const started = speakTextAloud(trimmed, {
-      onEnd: () => setActiveSpeechTarget((current) => (current === target ? null : current)),
+      onEnd: () =>
+        setActiveSpeechTarget((current) =>
+          current === target ? null : current,
+        ),
       onError: () => setPasteStatus("Read aloud unavailable"),
     });
 
@@ -1109,23 +1287,35 @@ export function DictationView() {
 
       toggleReadAloudPlayback(trimmed, "selected-text");
     } catch (error) {
-      setPasteStatus(error instanceof Error ? error.message : "Couldn't read the selected text");
+      setPasteStatus(
+        error instanceof Error
+          ? error.message
+          : "Couldn't read the selected text",
+      );
     }
   };
 
   const selectedCustomMode = useMemo(
     () =>
       selectedCustomModeId
-        ? dictationCustomModes.find((mode) => mode.id === selectedCustomModeId) ?? null
+        ? (dictationCustomModes.find(
+            (mode) => mode.id === selectedCustomModeId,
+          ) ?? null)
         : null,
-    [dictationCustomModes, selectedCustomModeId]
+    [dictationCustomModes, selectedCustomModeId],
   );
 
   const activeLaneId = useMemo(() => {
-    if (dictationModePreset === "custom" && selectedCustomModeId === "builtin-coding-copilot") {
+    if (
+      dictationModePreset === "custom" &&
+      selectedCustomModeId === "builtin-coding-copilot"
+    ) {
       return "coding";
     }
-    if (dictationModePreset === "custom" && selectedCustomModeId === "builtin-quiet-focus") {
+    if (
+      dictationModePreset === "custom" &&
+      selectedCustomModeId === "builtin-quiet-focus"
+    ) {
       return "quiet";
     }
     switch (dictationModePreset) {
@@ -1143,15 +1333,21 @@ export function DictationView() {
 
   const activeLane = useMemo(
     () => SOLO_LANES.find((lane) => lane.id === activeLaneId) ?? SOLO_LANES[0],
-    [activeLaneId]
+    [activeLaneId],
   );
 
   const dictationPhaseSummary = useMemo(
-    () => getDictationPhaseSummary(dictationPhase, dictationPhaseMessage, dictationPhasePreview),
-    [dictationPhase, dictationPhaseMessage, dictationPhasePreview]
+    () =>
+      getDictationPhaseSummary(
+        dictationPhase,
+        dictationPhaseMessage,
+        dictationPhasePreview,
+      ),
+    [dictationPhase, dictationPhaseMessage, dictationPhasePreview],
   );
 
-  const isDictationCaptureLive = dictationPhase === "primed" || dictationPhase === "recording";
+  const isDictationCaptureLive =
+    dictationPhase === "primed" || dictationPhase === "recording";
   const isDictationBusy =
     dictationPhase === "primed" ||
     dictationPhase === "recording" ||
@@ -1161,13 +1357,15 @@ export function DictationView() {
 
   const smartContextSummary = useMemo(
     () => describeSmartContextState(activationMatcher, appTarget, contextChars),
-    [activationMatcher, appTarget, contextChars]
+    [activationMatcher, appTarget, contextChars],
   );
 
   const dictionaryCoverageSummary = useMemo(() => {
-    const enabledEntries = dictationDictionaryEntries.filter((entry) => entry.enabled).length;
+    const enabledEntries = dictationDictionaryEntries.filter(
+      (entry) => entry.enabled,
+    ).length;
     const scopedEntries = dictationDictionaryEntries.filter(
-      (entry) => entry.enabled && entry.appScope?.trim()
+      (entry) => entry.enabled && entry.appScope?.trim(),
     ).length;
     if (enabledEntries === 0) {
       return "No custom words yet. Add names, brands, and recurring terms Nautilus should always get right.";
@@ -1215,10 +1413,13 @@ export function DictationView() {
         aiProvider: currentAiProvider,
         aiModelId: currentAiModelId,
         activationAppMatcher: selectedCustomMode?.activationAppMatcher ?? null,
-        activationDomainMatcher: selectedCustomMode?.activationDomainMatcher ?? null,
+        activationDomainMatcher:
+          selectedCustomMode?.activationDomainMatcher ?? null,
         languageOverride:
           selectedCustomMode?.languageOverride ??
-          (dictationSessionLanguage !== "auto" ? dictationSessionLanguage : null),
+          (dictationSessionLanguage !== "auto"
+            ? dictationSessionLanguage
+            : null),
         livePreviewEnabled: dictationLivePreviewEnabled,
       }),
     [
@@ -1238,7 +1439,7 @@ export function DictationView() {
       selectedCustomMode?.activationDomainMatcher,
       selectedCustomMode?.languageOverride,
       dictationSessionLanguage,
-    ]
+    ],
   );
   const effectiveCaptureLanguage = useMemo(() => {
     const profileLanguage = customModeDraft.languageOverride.trim();
@@ -1248,7 +1449,9 @@ export function DictationView() {
     if (dictationSessionLanguage !== "auto") {
       return dictationSessionLanguage;
     }
-    return dictationActiveLanguages.length === 1 ? dictationActiveLanguages[0] : null;
+    return dictationActiveLanguages.length === 1
+      ? dictationActiveLanguages[0]
+      : null;
   }, [
     customModeDraft.languageOverride,
     dictationActiveLanguages,
@@ -1260,22 +1463,36 @@ export function DictationView() {
       [...dictationProviders]
         .filter((provider) =>
           effectiveCaptureLanguage
-            ? providerSupportsCaptureLanguage(provider, effectiveCaptureLanguage)
-            : providerSupportsActiveLanguageSet(provider, dictationActiveLanguages)
+            ? providerSupportsCaptureLanguage(
+                provider,
+                effectiveCaptureLanguage,
+              )
+            : providerSupportsActiveLanguageSet(
+                provider,
+                dictationActiveLanguages,
+              ),
         )
         .sort((left, right) => {
-          if (left.runtimeStatus === "ready" && right.runtimeStatus !== "ready") {
+          if (
+            left.runtimeStatus === "ready" &&
+            right.runtimeStatus !== "ready"
+          ) {
             return -1;
           }
-          if (left.runtimeStatus !== "ready" && right.runtimeStatus === "ready") {
+          if (
+            left.runtimeStatus !== "ready" &&
+            right.runtimeStatus === "ready"
+          ) {
             return 1;
           }
           return left.name.localeCompare(right.name);
         })
         .slice(0, 4),
-    [dictationActiveLanguages, dictationProviders, effectiveCaptureLanguage]
+    [dictationActiveLanguages, dictationProviders, effectiveCaptureLanguage],
   );
-  const groupedCorrectionSuggestions = useMemo<CorrectionSuggestionGroup[]>(() => {
+  const groupedCorrectionSuggestions = useMemo<
+    CorrectionSuggestionGroup[]
+  >(() => {
     const groups = new Map<string, CorrectionSuggestionGroup>();
     for (const suggestion of dictationCorrectionSuggestions) {
       const key = [
@@ -1286,7 +1503,10 @@ export function DictationView() {
       const existing = groups.get(key);
       if (existing) {
         existing.suggestionIds.push(suggestion.id);
-        if (new Date(suggestion.updatedAt).getTime() > new Date(existing.updatedAt).getTime()) {
+        if (
+          new Date(suggestion.updatedAt).getTime() >
+          new Date(existing.updatedAt).getTime()
+        ) {
           existing.updatedAt = suggestion.updatedAt;
           existing.sampleOriginalText = suggestion.originalText;
           existing.sampleCorrectedText = suggestion.correctedText;
@@ -1306,7 +1526,9 @@ export function DictationView() {
     }
 
     return Array.from(groups.values()).sort(
-      (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+      (left, right) =>
+        new Date(right.updatedAt).getTime() -
+        new Date(left.updatedAt).getTime(),
     );
   }, [dictationCorrectionSuggestions]);
 
@@ -1347,8 +1569,10 @@ export function DictationView() {
       if (Array.isArray(parsed)) {
         setDismissedCoachSteps(
           parsed.filter((value): value is DictationCoachStep =>
-            ["backtrack", "dictionary", "command_mode", "profiles"].includes(String(value))
-          )
+            ["backtrack", "dictionary", "command_mode", "profiles"].includes(
+              String(value),
+            ),
+          ),
         );
       }
     } catch (error) {
@@ -1364,7 +1588,7 @@ export function DictationView() {
       }
       storage.setItem(
         "nautilus-dictation-coach-dismissed",
-        JSON.stringify(dismissedCoachSteps)
+        JSON.stringify(dismissedCoachSteps),
       );
     } catch (error) {
       console.warn("Failed to persist dictation coach state:", error);
@@ -1387,8 +1611,8 @@ export function DictationView() {
     setReprocessError(null);
     setReprocessModePreset(
       dictationModePreset === "custom"
-        ? selectedCustomMode?.baseModePreset ?? DEFAULT_BASE_MODE
-        : dictationModePreset
+        ? (selectedCustomMode?.baseModePreset ?? DEFAULT_BASE_MODE)
+        : dictationModePreset,
     );
     const fetchTranscript = async () => {
       try {
@@ -1403,9 +1627,13 @@ export function DictationView() {
         setHistoryCorrectionBaseline(transcriptText);
         setHistoryLearnStatus(null);
         if (historyDetails?.baseModePreset) {
-          setReprocessModePreset(coerceBaseModePreset(historyDetails.baseModePreset));
+          setReprocessModePreset(
+            coerceBaseModePreset(historyDetails.baseModePreset),
+          );
         } else if (historyDetails?.modePreset) {
-          setReprocessModePreset(coerceBaseModePreset(historyDetails.modePreset));
+          setReprocessModePreset(
+            coerceBaseModePreset(historyDetails.modePreset),
+          );
         }
       } catch (error) {
         console.error("Failed to fetch transcript:", error);
@@ -1416,14 +1644,22 @@ export function DictationView() {
       }
     };
     void fetchTranscript();
-  }, [dictationModePreset, isDialogOpen, selectedCustomMode?.baseModePreset, selectedRecording]);
+  }, [
+    dictationModePreset,
+    isDialogOpen,
+    selectedCustomMode?.baseModePreset,
+    selectedRecording,
+  ]);
 
   const dictationHistory = useMemo(
     () =>
       recordings
         .filter((recording) => recording.sourceType === "dictation")
-        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
-    [recordings]
+        .sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+        ),
+    [recordings],
   );
   const pasteNeedsAttention = useMemo(() => {
     if (!pasteStatus) return false;
@@ -1455,17 +1691,22 @@ export function DictationView() {
         if (!mounted) return;
         const nextSaveToInbox = settings.transcription.dictationSaveToInbox;
         const nextProfile = settings.transcription.dictationProfile;
-        const nextCopyToClipboard = settings.transcription.dictationCopyToClipboard ?? true;
+        const nextCopyToClipboard =
+          settings.transcription.dictationCopyToClipboard ?? true;
         const nextCommandModeEnabled =
           settings.transcription.dictationCommandModeEnabled ?? true;
         const nextRoutePreference =
-          settings.transcription.dictationRoutePreference === "cloud" ? "cloud" : "local";
+          settings.transcription.dictationRoutePreference === "cloud"
+            ? "cloud"
+            : "local";
         const nextContextSource =
-          (settings.transcription.dictationContextSource as DictationContextSource | undefined) ??
-          "none";
+          (settings.transcription.dictationContextSource as
+            | DictationContextSource
+            | undefined) ?? "none";
         const nextInsertionMode =
-          (settings.transcription.dictationInsertionMode as DictationInsertionMode | undefined) ??
-          "auto";
+          (settings.transcription.dictationInsertionMode as
+            | DictationInsertionMode
+            | undefined) ?? "auto";
         const nextModePreset =
           settings.transcription.dictationModePreset ??
           inferModePreset({
@@ -1479,43 +1720,71 @@ export function DictationView() {
         setSaveToInbox(nextSaveToInbox);
         setDictationProfile(nextProfile);
         setDictationModePreset(nextModePreset);
-        setDictationCustomModes(settings.transcription.dictationCustomModes ?? []);
-        setSelectedCustomModeId(settings.transcription.dictationSelectedCustomModeId ?? null);
-        setCurrentDictationProvider(settings.transcription.dictationProvider ?? null);
-        setCurrentDictationModelId(settings.transcription.dictationModelId ?? null);
-        setCurrentMeetingProvider(settings.transcription.meetingProvider ?? null);
-        setUseSharedAsrSelection(settings.transcription.useSharedAsrSelection ?? true);
+        setDictationCustomModes(
+          settings.transcription.dictationCustomModes ?? [],
+        );
+        setSelectedCustomModeId(
+          settings.transcription.dictationSelectedCustomModeId ?? null,
+        );
+        setCurrentDictationProvider(
+          settings.transcription.dictationProvider ?? null,
+        );
+        setCurrentDictationModelId(
+          settings.transcription.dictationModelId ?? null,
+        );
+        setCurrentMeetingProvider(
+          settings.transcription.meetingProvider ?? null,
+        );
+        setUseSharedAsrSelection(
+          settings.transcription.useSharedAsrSelection ?? true,
+        );
         setCurrentAiProvider(settings.privacy.llmProvider ?? null);
         setCurrentAiModelId(settings.privacy.llmModelId ?? null);
-        setDefaultProjectId(settings.transcription.dictationProjectId || "inbox");
+        setDefaultProjectId(
+          settings.transcription.dictationProjectId || "inbox",
+        );
         setDictationPushToTalk(settings.transcription.dictationPushToTalk);
-        setDictationHandsFreeEnabled(settings.transcription.dictationHandsFreeEnabled ?? false);
+        setDictationHandsFreeEnabled(
+          settings.transcription.dictationHandsFreeEnabled ?? false,
+        );
         setDictationRoutePreference(nextRoutePreference);
         setDictationRouteOverrideEnabled(
-          settings.transcription.dictationRouteOverrideEnabled ?? true
+          settings.transcription.dictationRouteOverrideEnabled ?? true,
         );
-        setDictationKeepWarm(settings.transcription.dictationKeepWarm ?? "short");
+        setDictationKeepWarm(
+          settings.transcription.dictationKeepWarm ?? "short",
+        );
         setDictationLivePreviewEnabled(
-          settings.transcription.dictationLivePreviewEnabled ?? true
+          settings.transcription.dictationLivePreviewEnabled ?? true,
         );
         setDictationContextSource(nextContextSource);
         setDictationCopyToClipboard(nextCopyToClipboard);
         setDictationCommandModeEnabled(nextCommandModeEnabled);
-        setDictationCommandPrefix(settings.transcription.dictationCommandPrefix ?? "command");
+        setDictationCommandPrefix(
+          settings.transcription.dictationCommandPrefix ?? "command",
+        );
         setDictationInsertionMode(nextInsertionMode);
         setDictationSessionLanguage(settings.transcription.language ?? "auto");
         setDictationActiveLanguages(
-          normalizeActiveLanguageSet(settings.transcription.dictationActiveLanguages ?? [])
+          normalizeActiveLanguageSet(
+            settings.transcription.dictationActiveLanguages ?? [],
+          ),
         );
-        setDictationSnippetsEnabled(settings.transcription.dictationSnippetsEnabled ?? true);
+        setDictationSnippetsEnabled(
+          settings.transcription.dictationSnippetsEnabled ?? true,
+        );
         setDictationAutoLearnCorrections(
-          settings.transcription.dictationAutoLearnCorrections ?? true
+          settings.transcription.dictationAutoLearnCorrections ?? true,
         );
         setDictationSilenceTimeoutSeconds(
-          settings.transcription.dictationSilenceTimeoutSeconds ?? 0
+          settings.transcription.dictationSilenceTimeoutSeconds ?? 0,
         );
-        setDictationRetentionPreset(settings.transcription.dictationRetentionPreset ?? "never");
-        setDictationRetentionCustomHours(settings.transcription.dictationRetentionCustomHours ?? 24);
+        setDictationRetentionPreset(
+          settings.transcription.dictationRetentionPreset ?? "never",
+        );
+        setDictationRetentionCustomHours(
+          settings.transcription.dictationRetentionCustomHours ?? 24,
+        );
         const shortcut = settings.shortcuts.toggleDictation || defaultShortcut;
         setHotkeyLabel(formatShortcutForDisplay(shortcut));
         setHotkeyShortcut(shortcut);
@@ -1637,7 +1906,7 @@ export function DictationView() {
       silenceTimeoutSeconds: number;
       retentionPreset: "immediate" | "24h" | "72h" | "never" | "custom";
       retentionCustomHours: number;
-    }>
+    }>,
   ) => {
     try {
       const settings = await getSettings();
@@ -1645,14 +1914,17 @@ export function DictationView() {
       const nextProfile = updates.profile ?? dictationProfile;
       const nextCustomModes = updates.customModes ?? dictationCustomModes;
       const nextContextSource = updates.contextSource ?? dictationContextSource;
-      const nextRoutePreference = updates.routePreference ?? dictationRoutePreference;
+      const nextRoutePreference =
+        updates.routePreference ?? dictationRoutePreference;
       const nextRouteOverrideEnabled =
         updates.routeOverrideEnabled ?? dictationRouteOverrideEnabled;
-      const nextHandsFreeEnabled = updates.handsFreeEnabled ?? dictationHandsFreeEnabled;
+      const nextHandsFreeEnabled =
+        updates.handsFreeEnabled ?? dictationHandsFreeEnabled;
       const nextKeepWarm = updates.keepWarm ?? dictationKeepWarm;
       const nextLivePreviewEnabled =
         updates.livePreviewEnabled ?? dictationLivePreviewEnabled;
-      const nextCopyToClipboard = updates.copyToClipboard ?? dictationCopyToClipboard;
+      const nextCopyToClipboard =
+        updates.copyToClipboard ?? dictationCopyToClipboard;
       const nextCommandModeEnabled =
         updates.commandModeEnabled ?? dictationCommandModeEnabled;
       const nextInsertionMode = updates.insertionMode ?? dictationInsertionMode;
@@ -1669,7 +1941,7 @@ export function DictationView() {
       const nextAutoLearnCorrections =
         updates.autoLearnCorrections ?? dictationAutoLearnCorrections;
       const nextSilenceTimeoutSeconds = normalizeDictationSilenceTimeoutSeconds(
-        updates.silenceTimeoutSeconds ?? dictationSilenceTimeoutSeconds
+        updates.silenceTimeoutSeconds ?? dictationSilenceTimeoutSeconds,
       );
       const nextModePreset =
         updates.modePreset ??
@@ -1690,14 +1962,19 @@ export function DictationView() {
       settings.transcription.dictationCustomModes = nextCustomModes;
       settings.transcription.dictationContextSource = nextContextSource;
       settings.transcription.dictationRoutePreference = nextRoutePreference;
-      settings.transcription.dictationRouteOverrideEnabled = nextRouteOverrideEnabled;
+      settings.transcription.dictationRouteOverrideEnabled =
+        nextRouteOverrideEnabled;
       settings.transcription.dictationKeepWarm = nextKeepWarm;
-      settings.transcription.dictationLivePreviewEnabled = nextLivePreviewEnabled;
-      settings.transcription.dictationProjectId = updates.projectId ?? defaultProjectId;
-      settings.transcription.dictationPushToTalk = updates.pushToTalk ?? dictationPushToTalk;
+      settings.transcription.dictationLivePreviewEnabled =
+        nextLivePreviewEnabled;
+      settings.transcription.dictationProjectId =
+        updates.projectId ?? defaultProjectId;
+      settings.transcription.dictationPushToTalk =
+        updates.pushToTalk ?? dictationPushToTalk;
       settings.transcription.dictationHandsFreeEnabled = nextHandsFreeEnabled;
       settings.transcription.dictationCopyToClipboard = nextCopyToClipboard;
-      settings.transcription.dictationCommandModeEnabled = nextCommandModeEnabled;
+      settings.transcription.dictationCommandModeEnabled =
+        nextCommandModeEnabled;
       settings.transcription.dictationCommandPrefix =
         updates.commandPrefix ?? dictationCommandPrefix;
       settings.transcription.dictationInsertionMode = nextInsertionMode;
@@ -1705,8 +1982,10 @@ export function DictationView() {
       settings.transcription.dictationActiveLanguages = nextActiveLanguages;
       settings.transcription.dictationSnippetsEnabled =
         updates.snippetsEnabled ?? dictationSnippetsEnabled;
-      settings.transcription.dictationAutoLearnCorrections = nextAutoLearnCorrections;
-      settings.transcription.dictationSilenceTimeoutSeconds = nextSilenceTimeoutSeconds;
+      settings.transcription.dictationAutoLearnCorrections =
+        nextAutoLearnCorrections;
+      settings.transcription.dictationSilenceTimeoutSeconds =
+        nextSilenceTimeoutSeconds;
       settings.transcription.dictationRetentionPreset =
         updates.retentionPreset ?? dictationRetentionPreset;
       settings.transcription.dictationRetentionCustomHours =
@@ -1729,13 +2008,18 @@ export function DictationView() {
             ? current.baseModePreset
             : coerceBaseModePreset(dictationModePreset),
       }));
-      void persistDictationPreferences({ modePreset: modeId, selectedCustomModeId: null });
+      void persistDictationPreferences({
+        modePreset: modeId,
+        selectedCustomModeId: null,
+      });
       return;
     }
 
     const nextProfile = definition.profile ?? dictationProfile;
-    const nextInsertionMode = definition.insertionMode ?? dictationInsertionMode;
-    const nextContextSource = definition.contextSource ?? dictationContextSource;
+    const nextInsertionMode =
+      definition.insertionMode ?? dictationInsertionMode;
+    const nextContextSource =
+      definition.contextSource ?? dictationContextSource;
     const nextSaveToInbox = definition.saveToInbox ?? saveToInbox;
     const nextCopyToClipboard =
       definition.copyToClipboard ?? dictationCopyToClipboard;
@@ -1761,21 +2045,24 @@ export function DictationView() {
     });
   };
 
-  const syncModePreset = (overrides: Partial<{
-    profile: "normal_speed" | "power_rewrite";
-    insertionMode: DictationInsertionMode;
-    contextSource: DictationContextSource;
-    saveToInbox: boolean;
-    copyToClipboard: boolean;
-    commandModeEnabled: boolean;
-  }> = {}) => {
+  const syncModePreset = (
+    overrides: Partial<{
+      profile: "normal_speed" | "power_rewrite";
+      insertionMode: DictationInsertionMode;
+      contextSource: DictationContextSource;
+      saveToInbox: boolean;
+      copyToClipboard: boolean;
+      commandModeEnabled: boolean;
+    }> = {},
+  ) => {
     const nextModePreset = inferModePreset({
       profile: overrides.profile ?? dictationProfile,
       insertionMode: overrides.insertionMode ?? dictationInsertionMode,
       contextSource: overrides.contextSource ?? dictationContextSource,
       saveToInbox: overrides.saveToInbox ?? saveToInbox,
       copyToClipboard: overrides.copyToClipboard ?? dictationCopyToClipboard,
-      commandModeEnabled: overrides.commandModeEnabled ?? dictationCommandModeEnabled,
+      commandModeEnabled:
+        overrides.commandModeEnabled ?? dictationCommandModeEnabled,
     });
     setDictationModePreset(nextModePreset);
     if (nextModePreset === "custom") {
@@ -1786,7 +2073,9 @@ export function DictationView() {
     return nextModePreset;
   };
 
-  const buildCurrentCustomMode = (overrides?: Partial<DictationCustomMode>): DictationCustomMode => ({
+  const buildCurrentCustomMode = (
+    overrides?: Partial<DictationCustomMode>,
+  ): DictationCustomMode => ({
     id:
       overrides?.id ??
       selectedCustomModeId ??
@@ -1796,19 +2085,23 @@ export function DictationView() {
     baseModePreset:
       overrides?.baseModePreset ??
       (dictationModePreset === "custom"
-        ? selectedCustomMode?.baseModePreset ?? customModeDraft.baseModePreset
+        ? (selectedCustomMode?.baseModePreset ?? customModeDraft.baseModePreset)
         : coerceBaseModePreset(dictationModePreset)),
-    customPrompt: overrides?.customPrompt ?? (customModeDraft.customPrompt.trim() || null),
+    customPrompt:
+      overrides?.customPrompt ?? (customModeDraft.customPrompt.trim() || null),
     profile: overrides?.profile ?? dictationProfile,
     routePreference: overrides?.routePreference ?? dictationRoutePreference,
     languageOverride:
-      overrides?.languageOverride ?? (customModeDraft.languageOverride.trim() || null),
-    livePreviewEnabled: overrides?.livePreviewEnabled ?? customModeDraft.livePreviewEnabled,
+      overrides?.languageOverride ??
+      (customModeDraft.languageOverride.trim() || null),
+    livePreviewEnabled:
+      overrides?.livePreviewEnabled ?? customModeDraft.livePreviewEnabled,
     insertionMode: overrides?.insertionMode ?? dictationInsertionMode,
     contextSource: overrides?.contextSource ?? dictationContextSource,
     saveToInbox: overrides?.saveToInbox ?? saveToInbox,
     copyToClipboard: overrides?.copyToClipboard ?? dictationCopyToClipboard,
-    commandModeEnabled: overrides?.commandModeEnabled ?? dictationCommandModeEnabled,
+    commandModeEnabled:
+      overrides?.commandModeEnabled ?? dictationCommandModeEnabled,
     dictationProvider: overrides?.dictationProvider ?? currentDictationProvider,
     dictationModelId: overrides?.dictationModelId ?? currentDictationModelId,
     aiProvider: overrides?.aiProvider ?? currentAiProvider,
@@ -1833,19 +2126,28 @@ export function DictationView() {
         activationAppMatcher: mode.activationAppMatcher ?? "",
         activationDomainMatcher: mode.activationDomainMatcher ?? "",
         languageOverride: mode.languageOverride ?? "",
-        livePreviewEnabled: mode.livePreviewEnabled ?? dictationLivePreviewEnabled,
-      })
+        livePreviewEnabled:
+          mode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+      }),
     );
     setDictationProfile(mode.profile);
-    setDictationRoutePreference(mode.routePreference ?? dictationRoutePreference);
+    setDictationRoutePreference(
+      mode.routePreference ?? dictationRoutePreference,
+    );
     setDictationInsertionMode(mode.insertionMode);
     setDictationContextSource(mode.contextSource);
-    setDictationLivePreviewEnabled(mode.livePreviewEnabled ?? dictationLivePreviewEnabled);
+    setDictationLivePreviewEnabled(
+      mode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+    );
     setSaveToInbox(mode.saveToInbox);
     setDictationCopyToClipboard(mode.copyToClipboard);
     setDictationCommandModeEnabled(mode.commandModeEnabled);
-    setCurrentDictationProvider(mode.dictationProvider ?? currentDictationProvider);
-    setCurrentDictationModelId(mode.dictationModelId ?? currentDictationModelId);
+    setCurrentDictationProvider(
+      mode.dictationProvider ?? currentDictationProvider,
+    );
+    setCurrentDictationModelId(
+      mode.dictationModelId ?? currentDictationModelId,
+    );
     setCurrentAiProvider(mode.aiProvider ?? currentAiProvider);
     setCurrentAiModelId(mode.aiModelId ?? currentAiModelId);
     void persistDictationPreferences({
@@ -1853,7 +2155,8 @@ export function DictationView() {
       selectedCustomModeId: mode.id,
       profile: mode.profile,
       routePreference: mode.routePreference ?? dictationRoutePreference,
-      livePreviewEnabled: mode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+      livePreviewEnabled:
+        mode.livePreviewEnabled ?? dictationLivePreviewEnabled,
       insertionMode: mode.insertionMode,
       contextSource: mode.contextSource,
       saveToInbox: mode.saveToInbox,
@@ -1863,14 +2166,20 @@ export function DictationView() {
     void (async () => {
       try {
         const settings = await getSettings();
-        if (mode.dictationProvider) settings.transcription.dictationProvider = mode.dictationProvider;
-        if (mode.dictationModelId) settings.transcription.dictationModelId = mode.dictationModelId;
+        if (mode.dictationProvider)
+          settings.transcription.dictationProvider = mode.dictationProvider;
+        if (mode.dictationModelId)
+          settings.transcription.dictationModelId = mode.dictationModelId;
         settings.transcription.dictationRoutePreference =
-          mode.routePreference ?? settings.transcription.dictationRoutePreference ?? "local";
+          mode.routePreference ??
+          settings.transcription.dictationRoutePreference ??
+          "local";
         settings.transcription.dictationLivePreviewEnabled =
-          mode.livePreviewEnabled ?? settings.transcription.dictationLivePreviewEnabled;
+          mode.livePreviewEnabled ??
+          settings.transcription.dictationLivePreviewEnabled;
         if (mode.aiProvider) settings.privacy.llmProvider = mode.aiProvider;
-        settings.privacy.llmModelId = mode.aiModelId ?? settings.privacy.llmModelId ?? null;
+        settings.privacy.llmModelId =
+          mode.aiModelId ?? settings.privacy.llmModelId ?? null;
         await saveSettings(settings);
       } catch (error) {
         console.warn("Failed to apply custom mode engine settings:", error);
@@ -1880,12 +2189,14 @@ export function DictationView() {
 
   const handleSaveCustomMode = async (saveAsNew = false) => {
     const nextMode = buildCurrentCustomMode({
-      id: saveAsNew ? undefined : selectedCustomModeId ?? undefined,
+      id: saveAsNew ? undefined : (selectedCustomModeId ?? undefined),
     });
     const nextModes = saveAsNew
       ? [...dictationCustomModes, nextMode]
       : dictationCustomModes.some((mode) => mode.id === nextMode.id)
-        ? dictationCustomModes.map((mode) => (mode.id === nextMode.id ? nextMode : mode))
+        ? dictationCustomModes.map((mode) =>
+            mode.id === nextMode.id ? nextMode : mode,
+          )
         : [...dictationCustomModes, nextMode];
     setDictationCustomModes(nextModes);
     setDictationModePreset("custom");
@@ -1899,28 +2210,37 @@ export function DictationView() {
         activationAppMatcher: nextMode.activationAppMatcher ?? "",
         activationDomainMatcher: nextMode.activationDomainMatcher ?? "",
         languageOverride: nextMode.languageOverride ?? "",
-        livePreviewEnabled: nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
-      })
+        livePreviewEnabled:
+          nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+      }),
     );
     await persistDictationPreferences({
       modePreset: "custom",
       selectedCustomModeId: nextMode.id,
       customModes: nextModes,
-      livePreviewEnabled: nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+      livePreviewEnabled:
+        nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
     });
     try {
       const settings = await getSettings();
       settings.transcription.dictationModePreset = "custom";
       settings.transcription.dictationSelectedCustomModeId = nextMode.id;
       settings.transcription.dictationCustomModes = nextModes;
-      settings.transcription.dictationProvider = nextMode.dictationProvider ?? settings.transcription.dictationProvider;
-      settings.transcription.dictationModelId = nextMode.dictationModelId ?? settings.transcription.dictationModelId;
+      settings.transcription.dictationProvider =
+        nextMode.dictationProvider ?? settings.transcription.dictationProvider;
+      settings.transcription.dictationModelId =
+        nextMode.dictationModelId ?? settings.transcription.dictationModelId;
       settings.transcription.dictationRoutePreference =
-        nextMode.routePreference ?? settings.transcription.dictationRoutePreference ?? "local";
+        nextMode.routePreference ??
+        settings.transcription.dictationRoutePreference ??
+        "local";
       settings.transcription.dictationLivePreviewEnabled =
-        nextMode.livePreviewEnabled ?? settings.transcription.dictationLivePreviewEnabled;
-      settings.privacy.llmProvider = nextMode.aiProvider ?? settings.privacy.llmProvider;
-      settings.privacy.llmModelId = nextMode.aiModelId ?? settings.privacy.llmModelId ?? null;
+        nextMode.livePreviewEnabled ??
+        settings.transcription.dictationLivePreviewEnabled;
+      settings.privacy.llmProvider =
+        nextMode.aiProvider ?? settings.privacy.llmProvider;
+      settings.privacy.llmModelId =
+        nextMode.aiModelId ?? settings.privacy.llmModelId ?? null;
       await saveSettings(settings);
     } catch (error) {
       console.warn("Failed to persist custom mode engine snapshot:", error);
@@ -1943,10 +2263,15 @@ export function DictationView() {
       commandModeEnabled: style.commandModeEnabled,
       activationAppMatcher: style.activationAppMatcher ?? null,
       activationDomainMatcher: style.activationDomainMatcher ?? null,
-      livePreviewEnabled: style.livePreviewEnabled ?? dictationLivePreviewEnabled,
+      livePreviewEnabled:
+        style.livePreviewEnabled ?? dictationLivePreviewEnabled,
     });
-    const nextModes = dictationCustomModes.some((mode) => mode.id === nextMode.id)
-      ? dictationCustomModes.map((mode) => (mode.id === nextMode.id ? nextMode : mode))
+    const nextModes = dictationCustomModes.some(
+      (mode) => mode.id === nextMode.id,
+    )
+      ? dictationCustomModes.map((mode) =>
+          mode.id === nextMode.id ? nextMode : mode,
+        )
       : [...dictationCustomModes, nextMode];
 
     setDictationCustomModes(nextModes);
@@ -1961,14 +2286,19 @@ export function DictationView() {
         activationAppMatcher: nextMode.activationAppMatcher ?? "",
         activationDomainMatcher: nextMode.activationDomainMatcher ?? "",
         languageOverride: nextMode.languageOverride ?? "",
-        livePreviewEnabled: nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
-      })
+        livePreviewEnabled:
+          nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+      }),
     );
     setDictationProfile(nextMode.profile);
-    setDictationRoutePreference(nextMode.routePreference ?? dictationRoutePreference);
+    setDictationRoutePreference(
+      nextMode.routePreference ?? dictationRoutePreference,
+    );
     setDictationInsertionMode(nextMode.insertionMode);
     setDictationContextSource(nextMode.contextSource);
-    setDictationLivePreviewEnabled(nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled);
+    setDictationLivePreviewEnabled(
+      nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+    );
     setSaveToInbox(nextMode.saveToInbox);
     setDictationCopyToClipboard(nextMode.copyToClipboard);
     setDictationCommandModeEnabled(nextMode.commandModeEnabled);
@@ -1979,7 +2309,8 @@ export function DictationView() {
       customModes: nextModes,
       profile: nextMode.profile,
       routePreference: nextMode.routePreference ?? dictationRoutePreference,
-      livePreviewEnabled: nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+      livePreviewEnabled:
+        nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
       insertionMode: nextMode.insertionMode,
       contextSource: nextMode.contextSource,
       saveToInbox: nextMode.saveToInbox,
@@ -1995,7 +2326,9 @@ export function DictationView() {
     if (shouldClearSelection) {
       setSelectedCustomModeId(null);
       setCustomModeDraft(
-        createCustomModeDraft({ livePreviewEnabled: dictationLivePreviewEnabled })
+        createCustomModeDraft({
+          livePreviewEnabled: dictationLivePreviewEnabled,
+        }),
       );
     }
     await persistDictationPreferences({
@@ -2010,14 +2343,17 @@ export function DictationView() {
         createCustomModeDraft({
           name: selectedCustomMode.name,
           description: selectedCustomMode.description,
-          baseModePreset: selectedCustomMode.baseModePreset ?? DEFAULT_BASE_MODE,
+          baseModePreset:
+            selectedCustomMode.baseModePreset ?? DEFAULT_BASE_MODE,
           customPrompt: selectedCustomMode.customPrompt ?? "",
           activationAppMatcher: selectedCustomMode.activationAppMatcher ?? "",
-          activationDomainMatcher: selectedCustomMode.activationDomainMatcher ?? "",
+          activationDomainMatcher:
+            selectedCustomMode.activationDomainMatcher ?? "",
           languageOverride: selectedCustomMode.languageOverride ?? "",
           livePreviewEnabled:
-            selectedCustomMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
-        })
+            selectedCustomMode.livePreviewEnabled ??
+            dictationLivePreviewEnabled,
+        }),
       );
       return;
     }
@@ -2034,12 +2370,12 @@ export function DictationView() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (matchesShortcut(e, hotkeyShortcut)) {
         setHotkeyPressed(true);
-        
+
         // Clear any existing timeout
         if (timeoutRef.current) {
           clearTimeout(timeoutRef.current);
         }
-        
+
         // Set new timeout
         timeoutRef.current = setTimeout(() => setHotkeyPressed(false), 200);
       }
@@ -2058,21 +2394,38 @@ export function DictationView() {
     let unlisten: (() => void) | undefined;
 
     const setup = async () => {
-      unlisten = await listen<DictationStateChangedEvent>("dictation-state-changed", (event) => {
-        const payload = event.payload;
-        setDictationPhase(payload.phase);
-        setDictationPhaseMessage(payload.message ?? null);
-        setDictationPhasePreview(payload.preview ?? payload.partialText ?? null);
-        setDictationResolvedModeLabel(payload.resolvedModeLabel ?? null);
-        setAppTarget(payload.appTarget ?? null);
-        setActivationMatcher(payload.activationMatcher ?? null);
-        if (payload.providerModelLabel) {
-          setLastProviderModelLabel(payload.providerModelLabel);
-        }
-        if (payload.phase === "error") {
-          setDictationError(payload.message ?? "Dictation failed.");
-        }
-      });
+      unlisten = await listen<DictationStateChangedEvent>(
+        "dictation-state-changed",
+        (event) => {
+          const payload = event.payload;
+          const sanitizedMessage = sanitizeUserFacingDictationMessage(
+            payload.message,
+            {
+              phase:
+                payload.phase === "transcribing" ||
+                payload.phase === "delivering" ||
+                payload.phase === "done" ||
+                payload.phase === "error"
+                  ? payload.phase
+                  : "recording",
+            },
+          );
+          setDictationPhase(payload.phase);
+          setDictationPhaseMessage(sanitizedMessage);
+          setDictationPhasePreview(
+            payload.preview ?? payload.partialText ?? null,
+          );
+          setDictationResolvedModeLabel(payload.resolvedModeLabel ?? null);
+          setAppTarget(payload.appTarget ?? null);
+          setActivationMatcher(payload.activationMatcher ?? null);
+          if (payload.providerModelLabel) {
+            setLastProviderModelLabel(payload.providerModelLabel);
+          }
+          if (payload.phase === "error") {
+            setDictationError(sanitizedMessage ?? "Dictation failed.");
+          }
+        },
+      );
     };
 
     void setup();
@@ -2085,68 +2438,71 @@ export function DictationView() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     const setup = async () => {
-      unlisten = await listen<DictationTextReadyEvent>("dictation-text-ready", (event) => {
-        const payload = event.payload;
-        const text = payload?.text ?? "";
-        if (text) {
-          setTranscribedText(text);
-          setLatestCorrectionBaseline(text);
-          setLatestLearnStatus(null);
-          setDictationError(null);
-        }
-        if (payload?.actualProvider) {
-          setLastProvider(payload.actualProvider);
-        }
-        if (payload?.fallbackMessage) {
-          setFallbackStatus(payload.fallbackMessage);
-        } else if (payload?.isFallback === true) {
-          const reason =
-            payload?.fallbackReason?.trim() ||
-            "Requested provider could not complete transcription.";
-          setFallbackStatus(
-            `ASR fallback: requested '${payload.requestedProvider}' but used '${payload.actualProvider}'. ${reason}`
+      unlisten = await listen<DictationTextReadyEvent>(
+        "dictation-text-ready",
+        (event) => {
+          const payload = event.payload;
+          const text = payload?.text ?? "";
+          if (text) {
+            setTranscribedText(text);
+            setLatestCorrectionBaseline(text);
+            setLatestLearnStatus(null);
+            setDictationError(null);
+          }
+          if (payload?.actualProvider) {
+            setLastProvider(payload.actualProvider);
+          }
+          if (payload?.fallbackMessage) {
+            setFallbackStatus(payload.fallbackMessage);
+          } else if (payload?.isFallback === true) {
+            const reason =
+              payload?.fallbackReason?.trim() ||
+              "Requested provider could not complete transcription.";
+            setFallbackStatus(
+              `ASR fallback: requested '${payload.requestedProvider}' but used '${payload.actualProvider}'. ${reason}`,
+            );
+          } else {
+            setFallbackStatus(null);
+          }
+          if (payload?.modelId) {
+            setLastModelId(payload.modelId);
+          }
+          setLastRoutePreference(payload?.routePreference ?? null);
+          setLastResolvedRoute(payload?.resolvedRoute ?? null);
+          setLastProviderModelLabel(payload?.providerModelLabel ?? null);
+          setLastResolvedHosting(payload?.resolvedHosting ?? null);
+          setStartupLatencyMs(payload?.startupLatencyMs ?? null);
+          setLatencyMs(payload?.latencyMs ?? null);
+          setInsertLatencyMs(payload?.insertLatencyMs ?? null);
+          setEndToEndMs(payload?.endToEndMs ?? null);
+          setInsertionModeUsed(payload?.insertionModeUsed ?? null);
+          setCommandApplied(payload?.commandApplied ?? null);
+          setSnippetAppliedCount(payload?.snippetAppliedCount ?? 0);
+          setAppTarget(payload?.appTarget ?? null);
+          setActivationMatcher(payload?.activationMatcher ?? null);
+          setContextChars(payload?.contextChars ?? null);
+          setDictationPhase("done");
+          setDictationPhaseMessage(
+            payload?.pasted
+              ? "Inserted into the target app and copied to the clipboard."
+              : payload?.copied
+                ? "Copied to the clipboard and ready to paste."
+                : "Result is ready to review.",
           );
-        } else {
-          setFallbackStatus(null);
-        }
-        if (payload?.modelId) {
-          setLastModelId(payload.modelId);
-        }
-        setLastRoutePreference(payload?.routePreference ?? null);
-        setLastResolvedRoute(payload?.resolvedRoute ?? null);
-        setLastProviderModelLabel(payload?.providerModelLabel ?? null);
-        setLastResolvedHosting(payload?.resolvedHosting ?? null);
-        setStartupLatencyMs(payload?.startupLatencyMs ?? null);
-        setLatencyMs(payload?.latencyMs ?? null);
-        setInsertLatencyMs(payload?.insertLatencyMs ?? null);
-        setEndToEndMs(payload?.endToEndMs ?? null);
-        setInsertionModeUsed(payload?.insertionModeUsed ?? null);
-        setCommandApplied(payload?.commandApplied ?? null);
-        setSnippetAppliedCount(payload?.snippetAppliedCount ?? 0);
-        setAppTarget(payload?.appTarget ?? null);
-        setActivationMatcher(payload?.activationMatcher ?? null);
-        setContextChars(payload?.contextChars ?? null);
-        setDictationPhase("done");
-        setDictationPhaseMessage(
-          payload?.pasted
-            ? "Inserted into the target app and copied to the clipboard."
-            : payload?.copied
-              ? "Copied to the clipboard and ready to paste."
-              : "Result is ready to review."
-        );
-        setDictationPhasePreview(text || null);
-        if (payload?.pasted) {
-          setPasteStatus("Paste command sent (also copied to clipboard)");
-        } else if (payload?.copied) {
-          setPasteStatus(payload?.pasteError ?? "Copied to clipboard");
-        } else if (payload?.pasteError) {
-          setPasteStatus(payload.pasteError);
-        } else {
-          setPasteStatus(null);
-        }
-        void refetchDictationHistory();
-        void refreshDictationInsights();
-      });
+          setDictationPhasePreview(text || null);
+          if (payload?.pasted) {
+            setPasteStatus("Paste command sent (also copied to clipboard)");
+          } else if (payload?.copied) {
+            setPasteStatus(payload?.pasteError ?? "Copied to clipboard");
+          } else if (payload?.pasteError) {
+            setPasteStatus(payload.pasteError);
+          } else {
+            setPasteStatus(null);
+          }
+          void refetchDictationHistory();
+          void refreshDictationInsights();
+        },
+      );
     };
     void setup();
     return () => {
@@ -2157,17 +2513,21 @@ export function DictationView() {
   const handleStopDictation = async () => {
     try {
       const text = await stopDictation();
-        if (text?.trim()) {
-          setTranscribedText(text);
-          setLatestCorrectionBaseline(text);
-          setLatestLearnStatus(null);
-          setDictationError(null);
-          void refetchDictationHistory();
-        } else {
-          setDictationError(null);
-        }
+      if (text?.trim()) {
+        setTranscribedText(text);
+        setLatestCorrectionBaseline(text);
+        setLatestLearnStatus(null);
+        setDictationError(null);
+        void refetchDictationHistory();
+      } else {
+        setDictationError(null);
+      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message =
+        sanitizeUserFacingDictationMessage(
+          error instanceof Error ? error.message : String(error),
+          { phase: "error" },
+        ) ?? "Dictation failed.";
       setDictationError(message);
     }
   };
@@ -2195,7 +2555,11 @@ export function DictationView() {
             : dictationLivePreviewEnabled,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message =
+        sanitizeUserFacingDictationMessage(
+          error instanceof Error ? error.message : String(error),
+          { phase: "error" },
+        ) ?? "Dictation failed.";
       setDictationPhase("error");
       setDictationPhaseMessage(message);
       setDictationPhasePreview(null);
@@ -2204,7 +2568,9 @@ export function DictationView() {
   };
 
   const dismissCoachCard = (step: DictationCoachStep) => {
-    setDismissedCoachSteps((current) => (current.includes(step) ? current : [...current, step]));
+    setDismissedCoachSteps((current) =>
+      current.includes(step) ? current : [...current, step],
+    );
   };
 
   const formatRecordingDuration = (seconds: number) => {
@@ -2264,7 +2630,9 @@ export function DictationView() {
   const handleDeleteDictionaryEntry = async (entryId: string) => {
     try {
       await deleteDictationDictionaryEntry(entryId);
-      setDictationDictionaryEntries((prev) => prev.filter((entry) => entry.id !== entryId));
+      setDictationDictionaryEntries((prev) =>
+        prev.filter((entry) => entry.id !== entryId),
+      );
     } catch (error) {
       console.warn("Failed to delete dictation dictionary entry:", error);
     }
@@ -2273,7 +2641,7 @@ export function DictationView() {
   const openDictionaryImportDialog = () => {
     setDictionaryCsvMode("import");
     setDictionaryCsvText(
-      "spoken_form,replacement,app_scope,case_sensitive,enabled\nopen ai,OpenAI,,false,true"
+      "spoken_form,replacement,app_scope,case_sensitive,enabled\nopen ai,OpenAI,,false,true",
     );
     setDictionaryCsvStatus(null);
     setDictionaryCsvImportResult(null);
@@ -2315,7 +2683,9 @@ export function DictationView() {
         result.skippedCount > 0 ? `${result.skippedCount} skipped` : null,
       ].filter(Boolean);
       setDictionaryCsvStatus(
-        parts.length > 0 ? `Import complete: ${parts.join(", ")}.` : "Import complete."
+        parts.length > 0
+          ? `Import complete: ${parts.join(", ")}.`
+          : "Import complete.",
       );
       const nextEntries = await listDictationDictionaryEntries();
       setDictationDictionaryEntries(nextEntries);
@@ -2341,16 +2711,21 @@ export function DictationView() {
   const handleDeleteSnippet = async (snippetId: string) => {
     try {
       await deleteDictationSnippet(snippetId);
-      setDictationSnippets((prev) => prev.filter((snippet) => snippet.id !== snippetId));
+      setDictationSnippets((prev) =>
+        prev.filter((snippet) => snippet.id !== snippetId),
+      );
     } catch (error) {
       console.warn("Failed to delete dictation snippet:", error);
     }
   };
 
   const upsertCommandPreset = async (
-    commandKey: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection",
+    commandKey:
+      | "rewrite_shorter"
+      | "rewrite_professional"
+      | "bulletize_selection",
     systemPrompt: string,
-    enabled: boolean
+    enabled: boolean,
   ) => {
     try {
       const updated = await upsertDictationCommandPreset({
@@ -2361,7 +2736,9 @@ export function DictationView() {
       setDictationCommandPresets((prev) => {
         const exists = prev.some((preset) => preset.commandKey === commandKey);
         if (exists) {
-          return prev.map((preset) => (preset.commandKey === commandKey ? updated : preset));
+          return prev.map((preset) =>
+            preset.commandKey === commandKey ? updated : preset,
+          );
         }
         return [...prev, updated];
       });
@@ -2371,12 +2748,15 @@ export function DictationView() {
   };
 
   const resetCommandPreset = async (
-    commandKey: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection"
+    commandKey:
+      | "rewrite_shorter"
+      | "rewrite_professional"
+      | "bulletize_selection",
   ) => {
     try {
       await deleteDictationCommandPreset(commandKey);
       setDictationCommandPresets((prev) =>
-        prev.filter((preset) => preset.commandKey !== commandKey)
+        prev.filter((preset) => preset.commandKey !== commandKey),
       );
     } catch (error) {
       console.warn("Failed to reset command preset:", error);
@@ -2384,18 +2764,21 @@ export function DictationView() {
   };
 
   const getCommandPreset = (
-    key: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection"
+    key: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection",
   ) => dictationCommandPresets.find((preset) => preset.commandKey === key);
 
   const setCommandPresetDraft = (
-    commandKey: "rewrite_shorter" | "rewrite_professional" | "bulletize_selection",
-    updates: Partial<Pick<DictationCommandPreset, "systemPrompt" | "enabled">>
+    commandKey:
+      | "rewrite_shorter"
+      | "rewrite_professional"
+      | "bulletize_selection",
+    updates: Partial<Pick<DictationCommandPreset, "systemPrompt" | "enabled">>,
   ) => {
     setDictationCommandPresets((prev) => {
       const existing = prev.find((preset) => preset.commandKey === commandKey);
       if (existing) {
         return prev.map((preset) =>
-          preset.commandKey === commandKey ? { ...preset, ...updates } : preset
+          preset.commandKey === commandKey ? { ...preset, ...updates } : preset,
         );
       }
 
@@ -2421,15 +2804,17 @@ export function DictationView() {
       appScope: string | null;
       caseSensitive: boolean;
       enabled: boolean;
-    }>
+    }>,
   ) => {
     setDictationSnippets((prev) =>
-      prev.map((snippet) => (snippet.id === snippetId ? { ...snippet, ...updates } : snippet))
+      prev.map((snippet) =>
+        snippet.id === snippetId ? { ...snippet, ...updates } : snippet,
+      ),
     );
     try {
       const updated = await updateDictationSnippet(snippetId, updates);
       setDictationSnippets((prev) =>
-        prev.map((snippet) => (snippet.id === snippetId ? updated : snippet))
+        prev.map((snippet) => (snippet.id === snippetId ? updated : snippet)),
       );
     } catch (error) {
       console.warn("Failed to update dictation snippet:", error);
@@ -2449,15 +2834,17 @@ export function DictationView() {
       appScope: string | null;
       caseSensitive: boolean;
       enabled: boolean;
-    }>
+    }>,
   ) => {
     setDictationDictionaryEntries((prev) =>
-      prev.map((entry) => (entry.id === entryId ? { ...entry, ...updates } : entry))
+      prev.map((entry) =>
+        entry.id === entryId ? { ...entry, ...updates } : entry,
+      ),
     );
     try {
       const updated = await updateDictationDictionaryEntry(entryId, updates);
       setDictationDictionaryEntries((prev) =>
-        prev.map((entry) => (entry.id === entryId ? updated : entry))
+        prev.map((entry) => (entry.id === entryId ? updated : entry)),
       );
     } catch (error) {
       console.warn("Failed to update dictation dictionary entry:", error);
@@ -2469,19 +2856,25 @@ export function DictationView() {
     }
   };
 
-  const syncLearnedDictionaryEntry = (result: LearnDictationCorrectionResult) => {
+  const syncLearnedDictionaryEntry = (
+    result: LearnDictationCorrectionResult,
+  ) => {
     const learnedEntry = result.entry;
     if (!learnedEntry) {
       return;
     }
 
     setDictationDictionaryEntries((prev) => {
-      const existingIndex = prev.findIndex((entry) => entry.id === learnedEntry.id);
+      const existingIndex = prev.findIndex(
+        (entry) => entry.id === learnedEntry.id,
+      );
       if (existingIndex >= 0) {
-        return prev.map((entry, index) => (index === existingIndex ? learnedEntry : entry));
+        return prev.map((entry, index) =>
+          index === existingIndex ? learnedEntry : entry,
+        );
       }
       return [...prev, learnedEntry].sort((left, right) =>
-        left.spokenForm.localeCompare(right.spokenForm)
+        left.spokenForm.localeCompare(right.spokenForm),
       );
     });
   };
@@ -2491,13 +2884,16 @@ export function DictationView() {
       const suggestions = await listDictationCorrectionSuggestions();
       setDictationCorrectionSuggestions(suggestions);
     } catch (error) {
-      console.warn("Failed to refresh dictation correction suggestions:", error);
+      console.warn(
+        "Failed to refresh dictation correction suggestions:",
+        error,
+      );
     }
   };
 
   const syncQueuedCorrectionSuggestion = (
     result: QueueDictationCorrectionSuggestionResult,
-    setStatus: (value: string | null) => void
+    setStatus: (value: string | null) => void,
   ) => {
     if (!result.queued || !result.suggestion) {
       setStatus(result.reason ?? "No safe correction detected");
@@ -2505,16 +2901,18 @@ export function DictationView() {
     }
 
     setDictationCorrectionSuggestions((prev) => {
-      const existingIndex = prev.findIndex((suggestion) => suggestion.id === result.suggestion?.id);
+      const existingIndex = prev.findIndex(
+        (suggestion) => suggestion.id === result.suggestion?.id,
+      );
       if (existingIndex >= 0) {
         return prev.map((suggestion, index) =>
-          index === existingIndex ? result.suggestion! : suggestion
+          index === existingIndex ? result.suggestion! : suggestion,
         );
       }
       return [result.suggestion!, ...prev];
     });
     setStatus(
-      `${result.action === "updated" ? "Updated" : "Queued"} for review: ${result.spokenForm} -> ${result.replacement}`
+      `${result.action === "updated" ? "Updated" : "Queued"} for review: ${result.spokenForm} -> ${result.replacement}`,
     );
     return true;
   };
@@ -2527,7 +2925,7 @@ export function DictationView() {
       appTarget?: string | null;
       onSuccess?: () => void;
       setStatus?: (value: string | null) => void;
-    }
+    },
   ) => {
     const setStatus = options?.setStatus ?? (() => {});
     try {
@@ -2550,11 +2948,11 @@ export function DictationView() {
             !(
               suggestion.spokenForm === result.spokenForm &&
               suggestion.replacement === result.replacement
-            )
-        )
+            ),
+        ),
       );
       setStatus(
-        `${result.action === "updated" ? "Updated" : "Learned"}: ${result.spokenForm} -> ${result.replacement}`
+        `${result.action === "updated" ? "Updated" : "Learned"}: ${result.spokenForm} -> ${result.replacement}`,
       );
       options?.onSuccess?.();
       return true;
@@ -2572,7 +2970,7 @@ export function DictationView() {
       appTarget?: string | null;
       onSuccess?: () => void;
       setStatus?: (value: string | null) => void;
-    }
+    },
   ) => {
     const setStatus = options?.setStatus ?? (() => {});
     try {
@@ -2595,7 +2993,9 @@ export function DictationView() {
     }
   };
 
-  const handleApproveCorrectionSuggestionGroup = async (suggestionIds: string[]) => {
+  const handleApproveCorrectionSuggestionGroup = async (
+    suggestionIds: string[],
+  ) => {
     if (suggestionIds.length === 0) {
       return;
     }
@@ -2603,18 +3003,21 @@ export function DictationView() {
     setCorrectionInboxBusy(true);
     try {
       const [firstSuggestionId, ...duplicateSuggestionIds] = suggestionIds;
-      const result = await approveDictationCorrectionSuggestion(firstSuggestionId);
+      const result =
+        await approveDictationCorrectionSuggestion(firstSuggestionId);
       for (const suggestionId of duplicateSuggestionIds) {
         await rejectDictationCorrectionSuggestion(suggestionId);
       }
       syncLearnedDictionaryEntry(result);
       setDictationCorrectionSuggestions((prev) =>
-        prev.filter((suggestion) => !suggestionIds.includes(suggestion.id))
+        prev.filter((suggestion) => !suggestionIds.includes(suggestion.id)),
       );
       setDictionaryCsvStatus(
         `${result.action === "updated" ? "Updated" : "Learned"}: ${result.spokenForm} -> ${result.replacement}${
-          duplicateSuggestionIds.length > 0 ? ` · cleared ${duplicateSuggestionIds.length} duplicates` : ""
-        }`
+          duplicateSuggestionIds.length > 0
+            ? ` · cleared ${duplicateSuggestionIds.length} duplicates`
+            : ""
+        }`,
       );
     } catch (error) {
       console.warn("Failed to approve dictation correction suggestion:", error);
@@ -2625,7 +3028,9 @@ export function DictationView() {
     }
   };
 
-  const handleRejectCorrectionSuggestionGroup = async (suggestionIds: string[]) => {
+  const handleRejectCorrectionSuggestionGroup = async (
+    suggestionIds: string[],
+  ) => {
     if (suggestionIds.length === 0) {
       return;
     }
@@ -2636,12 +3041,12 @@ export function DictationView() {
         await rejectDictationCorrectionSuggestion(suggestionId);
       }
       setDictationCorrectionSuggestions((prev) =>
-        prev.filter((suggestion) => !suggestionIds.includes(suggestion.id))
+        prev.filter((suggestion) => !suggestionIds.includes(suggestion.id)),
       );
       setDictionaryCsvStatus(
         suggestionIds.length === 1
           ? "Removed correction suggestion."
-          : `Removed ${suggestionIds.length} correction suggestions.`
+          : `Removed ${suggestionIds.length} correction suggestions.`,
       );
     } catch (error) {
       console.warn("Failed to reject dictation correction suggestion:", error);
@@ -2655,7 +3060,12 @@ export function DictationView() {
   const maybeAutoLearnLatestCorrection = async () => {
     const original = latestCorrectionBaseline.trim();
     const corrected = transcribedText.trim();
-    if (!dictationAutoLearnCorrections || !original || !corrected || original === corrected) {
+    if (
+      !dictationAutoLearnCorrections ||
+      !original ||
+      !corrected ||
+      original === corrected
+    ) {
       return;
     }
 
@@ -2669,7 +3079,12 @@ export function DictationView() {
   const maybeAutoLearnHistoryCorrection = async () => {
     const original = historyCorrectionBaseline.trim();
     const corrected = historyCorrectionText.trim();
-    if (!dictationAutoLearnCorrections || !original || !corrected || original === corrected) {
+    if (
+      !dictationAutoLearnCorrections ||
+      !original ||
+      !corrected ||
+      original === corrected
+    ) {
       return;
     }
 
@@ -2698,7 +3113,7 @@ export function DictationView() {
         selectedHistoryDetails?.activationMatcher ??
           selectedHistoryDetails?.appTarget ??
           selectedHistoryDetails?.contextAppName ??
-          null
+          null,
       );
       setReprocessedResult(result);
     } catch (error) {
@@ -2747,13 +3162,17 @@ export function DictationView() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Dictation</h1>
-            <p className="text-muted-foreground">Fast voice capture that inserts text where you work</p>
+            <p className="text-muted-foreground">
+              Fast voice capture that inserts text where you work
+            </p>
           </div>
           <div className="flex items-center gap-4">
-            <div 
+            <div
               className={cn(
                 "flex items-center gap-2 text-sm px-4 py-2 rounded-lg border transition-all",
-                hotkeyPressed ? "bg-active text-active-foreground border-active scale-105" : "bg-muted"
+                hotkeyPressed
+                  ? "bg-active text-active-foreground border-active scale-105"
+                  : "bg-muted",
               )}
             >
               <Keyboard className="h-4 w-4" />
@@ -2775,11 +3194,17 @@ export function DictationView() {
                   const next = e.target.checked;
                   setSaveToInbox(next);
                   const nextModePreset = syncModePreset({ saveToInbox: next });
-                  void persistDictationPreferences({ saveToInbox: next, modePreset: nextModePreset });
+                  void persistDictationPreferences({
+                    saveToInbox: next,
+                    modePreset: nextModePreset,
+                  });
                 }}
                 className="h-4 w-4"
               />
-              <label htmlFor="saveToInbox" className="text-sm text-muted-foreground">
+              <label
+                htmlFor="saveToInbox"
+                className="text-sm text-muted-foreground"
+              >
                 Save to Inbox
               </label>
             </div>
@@ -2791,7 +3216,9 @@ export function DictationView() {
                 onChange={(e) => {
                   const next = e.target.checked;
                   setDictationCopyToClipboard(next);
-                  const nextModePreset = syncModePreset({ copyToClipboard: next });
+                  const nextModePreset = syncModePreset({
+                    copyToClipboard: next,
+                  });
                   void persistDictationPreferences({
                     copyToClipboard: next,
                     modePreset: nextModePreset,
@@ -2799,14 +3226,17 @@ export function DictationView() {
                 }}
                 className="h-4 w-4"
               />
-              <label htmlFor="copyToClipboard" className="text-sm text-muted-foreground">
+              <label
+                htmlFor="copyToClipboard"
+                className="text-sm text-muted-foreground"
+              >
                 Copy result to clipboard
               </label>
             </div>
           </div>
         </div>
       </div>
-      
+
       <ScrollArea className="flex-1">
         <div className="p-6 max-w-4xl mx-auto space-y-6">
           {dictationError && (
@@ -2821,8 +3251,8 @@ export function DictationView() {
             <CardHeader>
               <CardTitle>Flow Profiles</CardTitle>
               <CardDescription>
-                Start with a profile tuned for your workflow, then save private app-aware flows
-                when you want Nautilus to switch styles for you.
+                Start with a profile tuned for your workflow, then save private
+                app-aware flows when you want Nautilus to switch styles for you.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -2832,7 +3262,9 @@ export function DictationView() {
                   <p className="text-sm font-medium">Solo lanes</p>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Pick the lane that matches what you are doing right now. Nautilus keeps the deep controls below, but these presets are the fastest way to feel dialed in.
+                  Pick the lane that matches what you are doing right now.
+                  Nautilus keeps the deep controls below, but these presets are
+                  the fastest way to feel dialed in.
                 </p>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                   {SOLO_LANES.map((lane) => {
@@ -2845,7 +3277,9 @@ export function DictationView() {
                         aria-label={`Solo lane: ${lane.title}`}
                         onClick={() => {
                           if (lane.styleId) {
-                            const style = RECOMMENDED_APP_STYLES.find((candidate) => candidate.id === lane.styleId);
+                            const style = RECOMMENDED_APP_STYLES.find(
+                              (candidate) => candidate.id === lane.styleId,
+                            );
                             if (style) {
                               void handleInstallRecommendedStyle(style);
                             }
@@ -2859,7 +3293,7 @@ export function DictationView() {
                           "rounded-xl border p-4 text-left transition-colors",
                           isActive
                             ? "border-active bg-active/10 shadow-sm"
-                            : "border-border bg-background hover:border-active/40 hover:bg-muted/40"
+                            : "border-border bg-background hover:border-active/40 hover:bg-muted/40",
                         )}
                       >
                         <div className="flex items-center justify-between gap-3">
@@ -2871,8 +3305,12 @@ export function DictationView() {
                           ) : null}
                         </div>
                         <p className="mt-3 font-medium">{lane.title}</p>
-                        <p className="mt-2 text-sm text-muted-foreground">{lane.description}</p>
-                        <p className="mt-3 text-[11px] font-medium text-primary">{lane.emphasis}</p>
+                        <p className="mt-2 text-sm text-muted-foreground">
+                          {lane.description}
+                        </p>
+                        <p className="mt-3 text-[11px] font-medium text-primary">
+                          {lane.emphasis}
+                        </p>
                       </button>
                     );
                   })}
@@ -2891,7 +3329,7 @@ export function DictationView() {
                         "rounded-xl border p-4 text-left transition-colors",
                         isActive
                           ? "border-active bg-active/10 shadow-sm"
-                          : "border-border hover:border-active/50 hover:bg-muted/40"
+                          : "border-border hover:border-active/50 hover:bg-muted/40",
                       )}
                     >
                       <div className="flex items-center justify-between gap-3">
@@ -2902,21 +3340,28 @@ export function DictationView() {
                           </span>
                         )}
                       </div>
-                      <p className="mt-2 text-sm text-muted-foreground">{mode.description}</p>
+                      <p className="mt-2 text-sm text-muted-foreground">
+                        {mode.description}
+                      </p>
                     </button>
                   );
                 })}
               </div>
               <div className="space-y-3 border-t pt-4">
                 <div>
-                  <p className="text-sm font-medium">Recommended flow profiles</p>
+                  <p className="text-sm font-medium">
+                    Recommended flow profiles
+                  </p>
                   <p className="text-xs text-muted-foreground">
-                    Install ready-made auto-switch profiles for the apps you use most.
+                    Install ready-made auto-switch profiles for the apps you use
+                    most.
                   </p>
                 </div>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                   {RECOMMENDED_APP_STYLES.map((style) => {
-                    const installedMode = dictationCustomModes.find((mode) => mode.id === style.id);
+                    const installedMode = dictationCustomModes.find(
+                      (mode) => mode.id === style.id,
+                    );
                     return (
                       <div
                         key={style.id}
@@ -2925,7 +3370,9 @@ export function DictationView() {
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <p className="font-medium">{style.name}</p>
-                            <p className="mt-2 text-sm text-muted-foreground">{style.description}</p>
+                            <p className="mt-2 text-sm text-muted-foreground">
+                              {style.description}
+                            </p>
                             <p className="mt-2 text-xs text-muted-foreground">
                               {style.activationDomainMatcher
                                 ? `Domain ${style.activationDomainMatcher}`
@@ -2946,9 +3393,13 @@ export function DictationView() {
                           <Button
                             variant={installedMode ? "outline" : "default"}
                             size="sm"
-                            onClick={() => void handleInstallRecommendedStyle(style)}
+                            onClick={() =>
+                              void handleInstallRecommendedStyle(style)
+                            }
                           >
-                            {installedMode ? "Update and use" : "Install and use"}
+                            {installedMode
+                              ? "Update and use"
+                              : "Install and use"}
                           </Button>
                         </div>
                       </div>
@@ -2961,13 +3412,15 @@ export function DictationView() {
                   <div>
                     <p className="text-sm font-medium">Saved flow profiles</p>
                     <p className="text-xs text-muted-foreground">
-                      Reuse your own dictation setups without rebuilding them from scratch.
+                      Reuse your own dictation setups without rebuilding them
+                      from scratch.
                     </p>
                   </div>
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                     {dictationCustomModes.map((mode) => {
                       const isActive =
-                        dictationModePreset === "custom" && selectedCustomModeId === mode.id;
+                        dictationModePreset === "custom" &&
+                        selectedCustomModeId === mode.id;
                       return (
                         <div
                           key={mode.id}
@@ -2975,7 +3428,7 @@ export function DictationView() {
                             "rounded-xl border p-4",
                             isActive
                               ? "border-active bg-active/10 shadow-sm"
-                              : "border-border bg-muted/20"
+                              : "border-border bg-muted/20",
                           )}
                         >
                           <div className="flex items-start justify-between gap-3">
@@ -2985,8 +3438,9 @@ export function DictationView() {
                                 {mode.description || "Private flow profile"}
                               </p>
                               <p className="mt-2 text-xs text-muted-foreground">
-                                {mode.dictationProvider || "Current transcription"} ·{" "}
-                                {mode.dictationModelId || "Current model"}
+                                {mode.dictationProvider ||
+                                  "Current transcription"}{" "}
+                                · {mode.dictationModelId || "Current model"}
                                 {mode.activationAppMatcher
                                   ? ` · Auto for ${mode.activationAppMatcher}`
                                   : ""}
@@ -3012,7 +3466,9 @@ export function DictationView() {
                             <Button
                               variant="ghost"
                               size="sm"
-                              onClick={() => void handleDeleteCustomMode(mode.id)}
+                              onClick={() =>
+                                void handleDeleteCustomMode(mode.id)
+                              }
                             >
                               Delete profile
                             </Button>
@@ -3023,7 +3479,9 @@ export function DictationView() {
                                 key={`${mode.id}-${item.label}`}
                                 className="rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground"
                               >
-                                <span className="font-medium text-foreground">{item.label}:</span>{" "}
+                                <span className="font-medium text-foreground">
+                                  {item.label}:
+                                </span>{" "}
                                 {item.value}
                               </span>
                             ))}
@@ -3035,11 +3493,14 @@ export function DictationView() {
                 </div>
               )}
               <div className="rounded-xl border bg-muted/20 p-4 space-y-3">
-                  <div>
-                  <p className="text-sm font-medium">What this profile changes</p>
+                <div>
+                  <p className="text-sm font-medium">
+                    What this profile changes
+                  </p>
                   <p className="text-xs text-muted-foreground">
-                    The active profile controls insertion, context, saved history, command behavior,
-                    and the transcription/AI routes captured below.
+                    The active profile controls insertion, context, saved
+                    history, command behavior, and the transcription/AI routes
+                    captured below.
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -3048,7 +3509,9 @@ export function DictationView() {
                       key={item.label}
                       className="rounded-full border bg-background px-2.5 py-1 text-[11px] text-muted-foreground"
                     >
-                      <span className="font-medium text-foreground">{item.label}:</span>{" "}
+                      <span className="font-medium text-foreground">
+                        {item.label}:
+                      </span>{" "}
                       {item.value}
                     </span>
                   ))}
@@ -3059,7 +3522,8 @@ export function DictationView() {
                   <div className="space-y-2">
                     <p className="text-sm font-medium">Default route</p>
                     <p className="text-xs text-muted-foreground">
-                      This mode prefers one hosting path by default, including hotkey dictation.
+                      This mode prefers one hosting path by default, including
+                      hotkey dictation.
                     </p>
                     <div className="flex gap-2">
                       {(["local", "cloud"] as const).map((route) => (
@@ -3067,10 +3531,16 @@ export function DictationView() {
                           key={route}
                           type="button"
                           size="sm"
-                          variant={dictationRoutePreference === route ? "default" : "outline"}
+                          variant={
+                            dictationRoutePreference === route
+                              ? "default"
+                              : "outline"
+                          }
                           onClick={() => {
                             setDictationRoutePreference(route);
-                            void persistDictationPreferences({ routePreference: route });
+                            void persistDictationPreferences({
+                              routePreference: route,
+                            });
                           }}
                         >
                           {route === "local" ? "Local first" : "Cloud first"}
@@ -3082,7 +3552,7 @@ export function DictationView() {
                       {currentDictationProvider
                         ? providerHostingPreference(
                             currentDictationProvider as AsrProviderType,
-                            currentDictationModelId
+                            currentDictationModelId,
                           ) === "cloud"
                           ? "Cloud"
                           : "Local"
@@ -3093,14 +3563,18 @@ export function DictationView() {
                     currentMeetingProvider &&
                     currentDictationProvider !== currentMeetingProvider ? (
                       <p className="text-xs text-amber-500">
-                        Dictation uses {currentDictationProvider} while meetings use {currentMeetingProvider}.
+                        Dictation uses {currentDictationProvider} while meetings
+                        use {currentMeetingProvider}.
                       </p>
                     ) : null}
                   </div>
                   <div className="space-y-2">
-                    <p className="text-sm font-medium">Next button capture override</p>
+                    <p className="text-sm font-medium">
+                      Next button capture override
+                    </p>
                     <p className="text-xs text-muted-foreground">
-                      Use this when you want one manual capture to ignore the mode default.
+                      Use this when you want one manual capture to ignore the
+                      mode default.
                     </p>
                     <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
                       <input
@@ -3112,7 +3586,9 @@ export function DictationView() {
                           if (!next) {
                             setNextCaptureRoutePreference(null);
                           }
-                          void persistDictationPreferences({ routeOverrideEnabled: next });
+                          void persistDictationPreferences({
+                            routeOverrideEnabled: next,
+                          });
                         }}
                       />
                       Allow next-capture override
@@ -3122,7 +3598,11 @@ export function DictationView() {
                         <Button
                           type="button"
                           size="sm"
-                          variant={nextCaptureRoutePreference === null ? "default" : "outline"}
+                          variant={
+                            nextCaptureRoutePreference === null
+                              ? "default"
+                              : "outline"
+                          }
                           onClick={() => setNextCaptureRoutePreference(null)}
                         >
                           Use default
@@ -3132,7 +3612,11 @@ export function DictationView() {
                             key={`next-${route}`}
                             type="button"
                             size="sm"
-                            variant={nextCaptureRoutePreference === route ? "default" : "outline"}
+                            variant={
+                              nextCaptureRoutePreference === route
+                                ? "default"
+                                : "outline"
+                            }
                             onClick={() => setNextCaptureRoutePreference(route)}
                           >
                             Next {route}
@@ -3141,7 +3625,8 @@ export function DictationView() {
                       </div>
                     ) : (
                       <p className="text-xs text-muted-foreground">
-                        Manual captures follow the active mode route until you re-enable overrides.
+                        Manual captures follow the active mode route until you
+                        re-enable overrides.
                       </p>
                     )}
                   </div>
@@ -3158,20 +3643,27 @@ export function DictationView() {
                 <div className="rounded-xl border border-border/70 bg-background/70 p-4 space-y-3">
                   <div className="grid gap-3 md:grid-cols-2">
                     <div className="space-y-2">
-                      <label className="text-sm font-medium">Profile name</label>
+                      <label className="text-sm font-medium">
+                        Profile name
+                      </label>
                       <input
                         type="text"
                         aria-label="Profile name"
                         className="w-full rounded-md border bg-background p-2 text-sm"
                         value={customModeDraft.name}
                         onChange={(event) =>
-                          setCustomModeDraft((current) => ({ ...current, name: event.target.value }))
+                          setCustomModeDraft((current) => ({
+                            ...current,
+                            name: event.target.value,
+                          }))
                         }
                         placeholder="Custom Flow Profile"
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-sm font-medium">Short description</label>
+                      <label className="text-sm font-medium">
+                        Short description
+                      </label>
                       <input
                         type="text"
                         aria-label="Short description"
@@ -3195,25 +3687,29 @@ export function DictationView() {
                         onChange={(event) =>
                           setCustomModeDraft((current) => ({
                             ...current,
-                            baseModePreset: event.target.value as DictationBaseModePreset,
+                            baseModePreset: event.target
+                              .value as DictationBaseModePreset,
                           }))
                         }
                       >
-                        {DICTATION_MODE_DEFINITIONS.filter((mode) => mode.id !== "custom").map(
-                          (mode) => (
-                            <option key={mode.id} value={mode.id}>
-                              {mode.label}
-                            </option>
-                          )
-                        )}
+                        {DICTATION_MODE_DEFINITIONS.filter(
+                          (mode) => mode.id !== "custom",
+                        ).map((mode) => (
+                          <option key={mode.id} value={mode.id}>
+                            {mode.label}
+                          </option>
+                        ))}
                       </select>
                       <p className="text-xs text-muted-foreground">
-                        Sets the deterministic formatting and reprocess behavior this flow profile
-                        should inherit before any profile-specific prompt runs.
+                        Sets the deterministic formatting and reprocess behavior
+                        this flow profile should inherit before any
+                        profile-specific prompt runs.
                       </p>
                     </div>
                     <div className="space-y-2 md:col-span-2">
-                      <label className="text-sm font-medium">Style prompt</label>
+                      <label className="text-sm font-medium">
+                        Style prompt
+                      </label>
                       <textarea
                         aria-label="Style prompt"
                         className="min-h-24 w-full rounded-md border bg-background p-2 text-sm"
@@ -3227,7 +3723,8 @@ export function DictationView() {
                         placeholder="Optional. Tell Nautilus how this mode should rewrite dictation for this app or workflow."
                       />
                       <p className="text-xs text-muted-foreground">
-                        Optional. Overrides the global Smart Format prompt only when this profile is active.
+                        Optional. Overrides the global Smart Format prompt only
+                        when this profile is active.
                       </p>
                     </div>
                   </div>
@@ -3236,7 +3733,8 @@ export function DictationView() {
                       <div>
                         <p className="text-sm font-medium">Activation rules</p>
                         <p className="text-xs text-muted-foreground">
-                          Hotkey and tray dictation can switch into this flow profile automatically before capture starts.
+                          Hotkey and tray dictation can switch into this flow
+                          profile automatically before capture starts.
                         </p>
                       </div>
                       <span className="rounded-full border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground">
@@ -3247,90 +3745,97 @@ export function DictationView() {
                       </span>
                     </div>
                     <div className="mt-3 grid gap-3 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">Auto-activate for app</label>
-                      <input
-                        type="text"
-                        aria-label="Auto-activate for app"
-                        className="w-full rounded-md border bg-background p-2 text-sm"
-                        value={customModeDraft.activationAppMatcher}
-                        onChange={(event) =>
-                          setCustomModeDraft((current) => ({
-                            ...current,
-                            activationAppMatcher: event.target.value,
-                          }))
-                        }
-                        placeholder="Slack, Gmail, Cursor"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Optional. When the frontmost app name matches, Nautilus can switch to this
-                        profile automatically for hotkey and tray dictation.
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {ACTIVATION_APP_SUGGESTIONS.map((suggestion) => (
-                          <button
-                            key={suggestion}
-                            type="button"
-                            className="rounded-full border bg-background px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted"
-                            onClick={() =>
-                              setCustomModeDraft((current) => ({
-                                ...current,
-                                activationAppMatcher: suggestion,
-                              }))
-                            }
-                          >
-                            {suggestion}
-                          </button>
-                        ))}
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">
+                          Auto-activate for app
+                        </label>
+                        <input
+                          type="text"
+                          aria-label="Auto-activate for app"
+                          className="w-full rounded-md border bg-background p-2 text-sm"
+                          value={customModeDraft.activationAppMatcher}
+                          onChange={(event) =>
+                            setCustomModeDraft((current) => ({
+                              ...current,
+                              activationAppMatcher: event.target.value,
+                            }))
+                          }
+                          placeholder="Slack, Gmail, Cursor"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Optional. When the frontmost app name matches,
+                          Nautilus can switch to this profile automatically for
+                          hotkey and tray dictation.
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {ACTIVATION_APP_SUGGESTIONS.map((suggestion) => (
+                            <button
+                              key={suggestion}
+                              type="button"
+                              className="rounded-full border bg-background px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted"
+                              onClick={() =>
+                                setCustomModeDraft((current) => ({
+                                  ...current,
+                                  activationAppMatcher: suggestion,
+                                }))
+                              }
+                            >
+                              {suggestion}
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-sm font-medium">Auto-activate for domain</label>
-                      <input
-                        type="text"
-                        aria-label="Auto-activate for domain"
-                        className="w-full rounded-md border bg-background p-2 text-sm"
-                        value={customModeDraft.activationDomainMatcher}
-                        onChange={(event) =>
-                          setCustomModeDraft((current) => ({
-                            ...current,
-                            activationDomainMatcher: event.target.value,
-                          }))
-                        }
-                        placeholder="docs.google.com, linear.app"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Optional. Browser-focused dictation can switch when the active tab URL
-                        host matches this domain.
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {ACTIVATION_DOMAIN_SUGGESTIONS.map((suggestion) => (
-                          <button
-                            key={suggestion}
-                            type="button"
-                            className="rounded-full border bg-background px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted"
-                            onClick={() =>
-                              setCustomModeDraft((current) => ({
-                                ...current,
-                                activationDomainMatcher: suggestion,
-                              }))
-                            }
-                          >
-                            {suggestion}
-                          </button>
-                        ))}
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">
+                          Auto-activate for domain
+                        </label>
+                        <input
+                          type="text"
+                          aria-label="Auto-activate for domain"
+                          className="w-full rounded-md border bg-background p-2 text-sm"
+                          value={customModeDraft.activationDomainMatcher}
+                          onChange={(event) =>
+                            setCustomModeDraft((current) => ({
+                              ...current,
+                              activationDomainMatcher: event.target.value,
+                            }))
+                          }
+                          placeholder="docs.google.com, linear.app"
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Optional. Browser-focused dictation can switch when
+                          the active tab URL host matches this domain.
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {ACTIVATION_DOMAIN_SUGGESTIONS.map((suggestion) => (
+                            <button
+                              key={suggestion}
+                              type="button"
+                              className="rounded-full border bg-background px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted"
+                              onClick={() =>
+                                setCustomModeDraft((current) => ({
+                                  ...current,
+                                  activationDomainMatcher: suggestion,
+                                }))
+                              }
+                            >
+                              {suggestion}
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                    </div>
                     </div>
                     <div className="mt-3 rounded-md border bg-background/80 px-3 py-2 text-xs text-muted-foreground">
                       {describeActivationRules(
                         customModeDraft.activationAppMatcher,
-                        customModeDraft.activationDomainMatcher
+                        customModeDraft.activationDomainMatcher,
                       )}
                     </div>
                     <div className="mt-3 grid gap-3 md:grid-cols-2">
                       <div className="space-y-2">
-                        <label className="text-sm font-medium">Language override</label>
+                        <label className="text-sm font-medium">
+                          Language override
+                        </label>
                         <input
                           type="text"
                           aria-label="Language override"
@@ -3351,7 +3856,9 @@ export function DictationView() {
                         </p>
                       </div>
                       <div className="space-y-2">
-                        <label className="text-sm font-medium">Live preview</label>
+                        <label className="text-sm font-medium">
+                          Live preview
+                        </label>
                         <label className="inline-flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
                           <input
                             type="checkbox"
@@ -3366,32 +3873,44 @@ export function DictationView() {
                           Show live partial text in the popup for this mode
                         </label>
                         <p className="text-xs text-muted-foreground">
-                          Turn this off for cleaner captures when partial text is distracting.
+                          Turn this off for cleaner captures when partial text
+                          is distracting.
                         </p>
                       </div>
                     </div>
                     <p className="mt-2 text-xs text-muted-foreground">
-                      Domain rules are checked first. If both are empty, this profile stays available
-                      for manual capture only.
+                      Domain rules are checked first. If both are empty, this
+                      profile stays available for manual capture only.
                     </p>
                   </div>
                   <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-                    Saving a flow profile snapshots the current dictation style, result behavior,
-                    context source, transcription route, AI route, and optional app or domain
-                    auto-activation rules.
+                    Saving a flow profile snapshots the current dictation style,
+                    result behavior, context source, transcription route, AI
+                    route, and optional app or domain auto-activation rules.
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <Button size="sm" onClick={() => void handleSaveCustomMode(false)}>
-                      {selectedCustomModeId ? "Update profile" : "Save current setup"}
+                    <Button
+                      size="sm"
+                      onClick={() => void handleSaveCustomMode(false)}
+                    >
+                      {selectedCustomModeId
+                        ? "Update profile"
+                        : "Save current setup"}
                     </Button>
-                    <Button size="sm" variant="outline" onClick={() => void handleSaveCustomMode(true)}>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void handleSaveCustomMode(true)}
+                    >
                       Save as new profile
                     </Button>
                     {selectedCustomModeId && (
                       <Button
                         size="sm"
                         variant="ghost"
-                        onClick={() => void handleDeleteCustomMode(selectedCustomModeId)}
+                        onClick={() =>
+                          void handleDeleteCustomMode(selectedCustomModeId)
+                        }
                       >
                         Delete profile
                       </Button>
@@ -3403,10 +3922,12 @@ export function DictationView() {
           </Card>
 
           {/* Quick Capture Card */}
-          <Card className={cn(
-            "border transition-colors duration-200 shadow-sm",
-            isDictationBusy ? "border-active" : "border-muted"
-          )}>
+          <Card
+            className={cn(
+              "border transition-colors duration-200 shadow-sm",
+              isDictationBusy ? "border-active" : "border-muted",
+            )}
+          >
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Zap className="h-5 w-5" />
@@ -3415,7 +3936,7 @@ export function DictationView() {
               <CardDescription>
                 {dictationInstruction(
                   hotkeyShortcut,
-                  shortcutMode(dictationPushToTalk, dictationHandsFreeEnabled)
+                  shortcutMode(dictationPushToTalk, dictationHandsFreeEnabled),
                 )}
               </CardDescription>
             </CardHeader>
@@ -3426,8 +3947,12 @@ export function DictationView() {
                     <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                       Active lane
                     </p>
-                    <p className="mt-1 text-sm font-semibold">{activeLane.title}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">{activeLane.description}</p>
+                    <p className="mt-1 text-sm font-semibold">
+                      {activeLane.title}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {activeLane.description}
+                    </p>
                     {dictationResolvedModeLabel ? (
                       <p className="mt-2 text-[11px] font-medium text-primary">
                         Runtime mode: {dictationResolvedModeLabel}
@@ -3438,13 +3963,17 @@ export function DictationView() {
                     <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                       Smart context
                     </p>
-                    <p className="mt-1 text-xs text-muted-foreground">{smartContextSummary}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {smartContextSummary}
+                    </p>
                   </div>
                   <div className="rounded-xl border bg-background p-3">
                     <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                       Teaching Nautilus
                     </p>
-                    <p className="mt-1 text-xs text-muted-foreground">{dictionaryCoverageSummary}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {dictionaryCoverageSummary}
+                    </p>
                   </div>
                 </div>
                 <div
@@ -3456,7 +3985,7 @@ export function DictationView() {
                         ? "border-emerald-500/20 bg-emerald-500/5"
                         : dictationPhaseSummary.tone === "error"
                           ? "border-destructive/20 bg-destructive/5"
-                          : "border-border bg-background"
+                          : "border-border bg-background",
                   )}
                 >
                   <div className="flex items-start justify-between gap-3">
@@ -3464,8 +3993,12 @@ export function DictationView() {
                       <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                         Capture state
                       </p>
-                      <p className="text-sm font-semibold">{dictationPhaseSummary.title}</p>
-                      <p className="text-sm text-muted-foreground">{dictationPhaseSummary.detail}</p>
+                      <p className="text-sm font-semibold">
+                        {dictationPhaseSummary.title}
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        {dictationPhaseSummary.detail}
+                      </p>
                     </div>
                     <div
                       className={cn(
@@ -3476,7 +4009,7 @@ export function DictationView() {
                             ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300"
                             : dictationPhaseSummary.tone === "error"
                               ? "border-destructive/20 bg-destructive/5 text-destructive"
-                              : "border-border bg-background text-muted-foreground"
+                              : "border-border bg-background text-muted-foreground",
                       )}
                     >
                       {dictationPhase}
@@ -3491,142 +4024,194 @@ export function DictationView() {
                 <div className="rounded-xl border border-border bg-muted/10 p-3">
                   <div className="flex flex-wrap gap-2 text-xs">
                     <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
-                      Backtrack: <span className="font-medium text-foreground">scratch that</span>
+                      Backtrack:{" "}
+                      <span className="font-medium text-foreground">
+                        scratch that
+                      </span>
                     </span>
                     <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
-                      Replace: <span className="font-medium text-foreground">replace X with Y</span>
+                      Replace:{" "}
+                      <span className="font-medium text-foreground">
+                        replace X with Y
+                      </span>
                     </span>
                     <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
-                      Quick fix: <span className="font-medium text-foreground">actually ...</span>
+                      Quick fix:{" "}
+                      <span className="font-medium text-foreground">
+                        actually ...
+                      </span>
                     </span>
                     <span className="rounded-full border bg-background px-2.5 py-1 text-muted-foreground">
-                      Teach words: <span className="font-medium text-foreground">edit result to Learn correction</span>
+                      Teach words:{" "}
+                      <span className="font-medium text-foreground">
+                        edit result to Learn correction
+                      </span>
                     </span>
                   </div>
                 </div>
-              <div className="rounded-[20px] border border-border bg-background px-5 py-8">
-                <div className="flex flex-col items-center gap-6">
-                {isDictationCaptureLive ? (
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="relative flex h-24 w-24 items-center justify-center rounded-full border border-active/20 bg-active/5">
-                      <span className="absolute inset-0 rounded-full border border-active/20 animate-ping opacity-40" />
-                      <span className="absolute inset-[10px] rounded-full border border-active/20 opacity-60" />
-                      <Mic className="relative h-10 w-10 text-active" />
-                    </div>
-                    <div className="text-center">
-                      <p className="text-lg font-medium">
-                        {dictationPhase === "primed" ? "Ready" : "Listening"}
-                      </p>
-                      <p className="mt-2 text-3xl font-mono font-semibold text-foreground">
-                        {dictationPhase === "recording" ? formattedDuration : "--:--"}
-                      </p>
-                    </div>
-                    <Button variant="outline" size="lg" onClick={handleStopDictation} className="mt-2">
-                      <Square className="h-4 w-4 mr-2 fill-current" />
-                      Stop Dictation
-                    </Button>
+                <div className="rounded-[20px] border border-border bg-background px-5 py-8">
+                  <div className="flex flex-col items-center gap-6">
+                    {isDictationCaptureLive ? (
+                      <div className="flex flex-col items-center gap-4">
+                        <div className="relative flex h-24 w-24 items-center justify-center rounded-full border border-active/20 bg-active/5">
+                          <span className="absolute inset-0 rounded-full border border-active/20 animate-ping opacity-40" />
+                          <span className="absolute inset-[10px] rounded-full border border-active/20 opacity-60" />
+                          <Mic className="relative h-10 w-10 text-active" />
+                        </div>
+                        <div className="text-center">
+                          <p className="text-lg font-medium">
+                            {dictationPhase === "primed"
+                              ? "Ready"
+                              : "Listening"}
+                          </p>
+                          <p className="mt-2 text-3xl font-mono font-semibold text-foreground">
+                            {dictationPhase === "recording"
+                              ? formattedDuration
+                              : "--:--"}
+                          </p>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="lg"
+                          onClick={handleStopDictation}
+                          className="mt-2"
+                        >
+                          <Square className="h-4 w-4 mr-2 fill-current" />
+                          Stop Dictation
+                        </Button>
+                      </div>
+                    ) : isDictationBusy ? (
+                      <div className="flex flex-col items-center gap-4">
+                        <div className="flex h-24 w-24 items-center justify-center rounded-full border border-border bg-muted/20">
+                          <RefreshCw className="h-10 w-10 animate-spin text-foreground" />
+                        </div>
+                        <div className="text-center">
+                          <p className="text-lg font-medium">
+                            {dictationPhaseSummary.title}
+                          </p>
+                          <p className="mt-1 text-muted-foreground">
+                            {dictationPhaseSummary.detail}
+                          </p>
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="lg"
+                          disabled
+                          className="mt-4"
+                        >
+                          <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                          {dictationPhase === "delivering"
+                            ? "Delivering..."
+                            : "Working..."}
+                        </Button>
+                      </div>
+                    ) : dictationPhase === "done" ? (
+                      <div className="flex flex-col items-center gap-4">
+                        <div className="flex h-24 w-24 items-center justify-center rounded-full border border-emerald-500/20 bg-emerald-500/5">
+                          <CheckCircle2 className="h-10 w-10 text-emerald-600 dark:text-emerald-300" />
+                        </div>
+                        <div className="text-center">
+                          <p className="text-lg font-medium">Result ready</p>
+                          <p className="text-muted-foreground mt-1">
+                            {dictationPhaseSummary.detail}
+                          </p>
+                        </div>
+                        <Button
+                          variant="active"
+                          size="lg"
+                          onClick={launchDictation}
+                          className="mt-4"
+                        >
+                          <Mic className="h-4 w-4 mr-2" />
+                          Start Next Dictation
+                        </Button>
+                      </div>
+                    ) : dictationPhase === "error" ? (
+                      <div className="flex flex-col items-center gap-4">
+                        <div className="flex h-24 w-24 items-center justify-center rounded-full border border-destructive/20 bg-destructive/5">
+                          <TriangleAlert className="h-10 w-10 text-destructive" />
+                        </div>
+                        <div className="text-center">
+                          <p className="text-lg font-medium">
+                            Capture needs attention
+                          </p>
+                          <p className="text-muted-foreground mt-1">
+                            {dictationPhaseSummary.detail}
+                          </p>
+                        </div>
+                        <Button
+                          variant="active"
+                          size="lg"
+                          onClick={launchDictation}
+                          className="mt-4"
+                        >
+                          <Mic className="h-4 w-4 mr-2" />
+                          Retry Dictation
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center gap-4">
+                        <div
+                          className={cn(
+                            "relative flex h-24 w-24 items-center justify-center rounded-full border transition-transform duration-150",
+                            hotkeyPressed
+                              ? "scale-[1.03] border-active/30 bg-active/5"
+                              : "border-border bg-muted/20",
+                          )}
+                        >
+                          <span
+                            aria-hidden="true"
+                            className={cn(
+                              "absolute inset-0 rounded-full border transition-all duration-150",
+                              hotkeyPressed
+                                ? "border-active/30 opacity-100"
+                                : "border-border/60 opacity-70",
+                            )}
+                          />
+                          <span
+                            aria-hidden="true"
+                            className={cn(
+                              "absolute inset-[10px] rounded-full border transition-all duration-150",
+                              hotkeyPressed
+                                ? "border-active/25 opacity-100"
+                                : "border-border/50 opacity-70",
+                            )}
+                          />
+                          <Mic
+                            className={cn(
+                              "relative h-10 w-10 transition-colors",
+                              hotkeyPressed
+                                ? "text-active"
+                                : "text-muted-foreground",
+                            )}
+                          />
+                        </div>
+                        <div className="text-center">
+                          <p className="text-lg font-medium">
+                            {dictationPhaseSummary.title}
+                          </p>
+                          <p className="text-muted-foreground mt-1">
+                            {dictationHandsFreeEnabled
+                              ? `Press ${hotkeyLabel} to start. It stops after silence or when you press again`
+                              : dictationPushToTalk
+                                ? `Hold ${hotkeyLabel} to record and release to transcribe`
+                                : `Press ${hotkeyLabel} to start, press again to transcribe`}
+                          </p>
+                        </div>
+                        <Button
+                          variant="active"
+                          size="lg"
+                          onClick={launchDictation}
+                          className="mt-4"
+                          disabled={isDictationBusy}
+                        >
+                          <Mic className="h-4 w-4 mr-2" />
+                          Start Dictation
+                        </Button>
+                      </div>
+                    )}
                   </div>
-                ) : isDictationBusy ? (
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="flex h-24 w-24 items-center justify-center rounded-full border border-border bg-muted/20">
-                      <RefreshCw className="h-10 w-10 animate-spin text-foreground" />
-                    </div>
-                    <div className="text-center">
-                      <p className="text-lg font-medium">{dictationPhaseSummary.title}</p>
-                      <p className="mt-1 text-muted-foreground">{dictationPhaseSummary.detail}</p>
-                    </div>
-                    <Button variant="outline" size="lg" disabled className="mt-4">
-                      <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                      {dictationPhase === "delivering" ? "Delivering..." : "Working..."}
-                    </Button>
-                  </div>
-                ) : dictationPhase === "done" ? (
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="flex h-24 w-24 items-center justify-center rounded-full border border-emerald-500/20 bg-emerald-500/5">
-                      <CheckCircle2 className="h-10 w-10 text-emerald-600 dark:text-emerald-300" />
-                    </div>
-                    <div className="text-center">
-                      <p className="text-lg font-medium">Result ready</p>
-                      <p className="text-muted-foreground mt-1">{dictationPhaseSummary.detail}</p>
-                    </div>
-                    <Button
-                      variant="active"
-                      size="lg"
-                      onClick={launchDictation}
-                      className="mt-4"
-                    >
-                      <Mic className="h-4 w-4 mr-2" />
-                      Start Next Dictation
-                    </Button>
-                  </div>
-                ) : dictationPhase === "error" ? (
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="flex h-24 w-24 items-center justify-center rounded-full border border-destructive/20 bg-destructive/5">
-                      <TriangleAlert className="h-10 w-10 text-destructive" />
-                    </div>
-                    <div className="text-center">
-                      <p className="text-lg font-medium">Capture needs attention</p>
-                      <p className="text-muted-foreground mt-1">{dictationPhaseSummary.detail}</p>
-                    </div>
-                    <Button 
-                      variant="active" 
-                      size="lg" 
-                      onClick={launchDictation}
-                      className="mt-4"
-                    >
-                      <Mic className="h-4 w-4 mr-2" />
-                      Retry Dictation
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center gap-4">
-                    <div className={cn(
-                      "relative flex h-24 w-24 items-center justify-center rounded-full border transition-transform duration-150",
-                      hotkeyPressed ? "scale-[1.03] border-active/30 bg-active/5" : "border-border bg-muted/20"
-                    )}>
-                      <span
-                        aria-hidden="true"
-                        className={cn(
-                          "absolute inset-0 rounded-full border transition-all duration-150",
-                          hotkeyPressed ? "border-active/30 opacity-100" : "border-border/60 opacity-70"
-                        )}
-                      />
-                      <span
-                        aria-hidden="true"
-                        className={cn(
-                          "absolute inset-[10px] rounded-full border transition-all duration-150",
-                          hotkeyPressed ? "border-active/25 opacity-100" : "border-border/50 opacity-70"
-                        )}
-                      />
-                      <Mic className={cn(
-                        "relative h-10 w-10 transition-colors",
-                        hotkeyPressed ? "text-active" : "text-muted-foreground"
-                      )} />
-                    </div>
-                    <div className="text-center">
-                      <p className="text-lg font-medium">{dictationPhaseSummary.title}</p>
-                      <p className="text-muted-foreground mt-1">
-                        {dictationHandsFreeEnabled
-                          ? `Press ${hotkeyLabel} to start. It stops after silence or when you press again`
-                          : dictationPushToTalk
-                          ? `Hold ${hotkeyLabel} to record and release to transcribe`
-                          : `Press ${hotkeyLabel} to start, press again to transcribe`}
-                      </p>
-                    </div>
-                    <Button 
-                      variant="active" 
-                      size="lg" 
-                      onClick={launchDictation}
-                      className="mt-4"
-                      disabled={isDictationBusy}
-                    >
-                      <Mic className="h-4 w-4 mr-2" />
-                      Start Dictation
-                    </Button>
-                  </div>
-                )}
                 </div>
-              </div>
                 {!isDictationCaptureLive && !isDictationBusy ? (
                   <div className="flex flex-wrap items-center justify-center gap-2 border-t border-border/60 pt-4">
                     <Button
@@ -3635,14 +4220,16 @@ export function DictationView() {
                       onClick={() => void handleReadSelectedText()}
                     >
                       <Volume2 className="mr-2 h-4 w-4" />
-                      {activeSpeechTarget === "selected-text" ? "Stop reading" : "Read selected text"}
+                      {activeSpeechTarget === "selected-text"
+                        ? "Stop reading"
+                        : "Read selected text"}
                     </Button>
                   </div>
                 ) : null}
               </div>
             </CardContent>
           </Card>
-          
+
           {/* Instructions */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <Card>
@@ -3654,11 +4241,12 @@ export function DictationView() {
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground">
-                  Works from anywhere on your computer. No need to switch to the Nautilus window.
+                  Works from anywhere on your computer. No need to switch to the
+                  Nautilus window.
                 </p>
               </CardContent>
             </Card>
-            
+
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm flex items-center gap-2">
@@ -3668,11 +4256,12 @@ export function DictationView() {
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground">
-                    Your final text is inserted after capture finishes, and live preview can stay visible while you speak.
+                  Your final text is inserted after capture finishes, and live
+                  preview can stay visible while you speak.
                 </p>
               </CardContent>
             </Card>
-            
+
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm flex items-center gap-2">
@@ -3681,9 +4270,9 @@ export function DictationView() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                  <p className="text-sm text-muted-foreground">
-                    Keep dictations in Inbox so they are searchable later.
-                  </p>
+                <p className="text-sm text-muted-foreground">
+                  Keep dictations in Inbox so they are searchable later.
+                </p>
               </CardContent>
             </Card>
           </div>
@@ -3698,7 +4287,8 @@ export function DictationView() {
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground">
-                  Say <code>scratch that</code>, <code>actually ...</code>, or <code>replace X with Y</code> right after an insert.
+                  Say <code>scratch that</code>, <code>actually ...</code>, or{" "}
+                  <code>replace X with Y</code> right after an insert.
                 </p>
               </CardContent>
             </Card>
@@ -3712,7 +4302,8 @@ export function DictationView() {
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground">
-                  Teach names, brands, and recurring terms once so Nautilus remembers them everywhere.
+                  Teach names, brands, and recurring terms once so Nautilus
+                  remembers them everywhere.
                 </p>
               </CardContent>
             </Card>
@@ -3726,7 +4317,8 @@ export function DictationView() {
               </CardHeader>
               <CardContent>
                 <p className="text-sm text-muted-foreground">
-                  App/domain-aware profiles, selected text, and clipboard context help match how you actually write.
+                  App/domain-aware profiles, selected text, and clipboard
+                  context help match how you actually write.
                 </p>
               </CardContent>
             </Card>
@@ -3740,16 +4332,22 @@ export function DictationView() {
                   Dictation Coach
                 </CardTitle>
                 <CardDescription>
-                  Learn the highest-leverage moves that make Nautilus feel faster than typing.
+                  Learn the highest-leverage moves that make Nautilus feel
+                  faster than typing.
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="grid gap-3 xl:grid-cols-2">
                   {activeCoachCards.map((card) => (
-                    <div key={card.id} className="rounded-xl border bg-muted/20 p-4 space-y-3">
+                    <div
+                      key={card.id}
+                      className="rounded-xl border bg-muted/20 p-4 space-y-3"
+                    >
                       <div>
                         <p className="text-sm font-medium">{card.title}</p>
-                        <p className="mt-2 text-xs text-muted-foreground">{card.body}</p>
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          {card.body}
+                        </p>
                       </div>
                       <div className="flex flex-wrap gap-2">
                         {card.id === "command_mode" ? (
@@ -3757,7 +4355,9 @@ export function DictationView() {
                             size="sm"
                             onClick={() => {
                               setDictationCommandModeEnabled(true);
-                              const nextModePreset = syncModePreset({ commandModeEnabled: true });
+                              const nextModePreset = syncModePreset({
+                                commandModeEnabled: true,
+                              });
                               void persistDictationPreferences({
                                 commandModeEnabled: true,
                                 modePreset: nextModePreset,
@@ -3771,7 +4371,10 @@ export function DictationView() {
                           <Button
                             size="sm"
                             onClick={() => {
-                              const style = RECOMMENDED_APP_STYLES.find((candidate) => candidate.id === "builtin-coding-copilot");
+                              const style = RECOMMENDED_APP_STYLES.find(
+                                (candidate) =>
+                                  candidate.id === "builtin-coding-copilot",
+                              );
                               if (style) {
                                 void handleInstallRecommendedStyle(style);
                               }
@@ -3781,11 +4384,18 @@ export function DictationView() {
                             Install a flow
                           </Button>
                         ) : (
-                          <Button size="sm" onClick={() => dismissCoachCard(card.id)}>
+                          <Button
+                            size="sm"
+                            onClick={() => dismissCoachCard(card.id)}
+                          >
                             {card.actionLabel}
                           </Button>
                         )}
-                        <Button size="sm" variant="outline" onClick={() => dismissCoachCard(card.id)}>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => dismissCoachCard(card.id)}
+                        >
                           Dismiss
                         </Button>
                       </div>
@@ -3804,7 +4414,8 @@ export function DictationView() {
                   Developer Dictation
                 </CardTitle>
                 <CardDescription>
-                  A tighter lane for Cursor, terminals, commit messages, markdown, and prompt-heavy work.
+                  A tighter lane for Cursor, terminals, commit messages,
+                  markdown, and prompt-heavy work.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -3818,38 +4429,61 @@ export function DictationView() {
                       : "Use a fast local provider with live preview"}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Coding benefits from low-latency local capture, selected-text context, and command mode staying on.
+                    Coding benefits from low-latency local capture,
+                    selected-text context, and command mode staying on.
                   </p>
                 </div>
                 <div className="grid gap-2 md:grid-cols-2">
                   <div className="rounded-md border bg-background px-3 py-3">
-                    <p className="text-xs font-medium text-muted-foreground">Good spoken patterns</p>
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Good spoken patterns
+                    </p>
                     <p className="mt-2 text-xs text-muted-foreground">
-                      “open paren”, “close brace”, “snake case”, “camel case”, file names, CLI commands, and bulletized status updates.
+                      “open paren”, “close brace”, “snake case”, “camel case”,
+                      file names, CLI commands, and bulletized status updates.
                     </p>
                   </div>
                   <div className="rounded-md border bg-background px-3 py-3">
-                    <p className="text-xs font-medium text-muted-foreground">Best commands</p>
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Best commands
+                    </p>
                     <p className="mt-2 text-xs text-muted-foreground">
-                      Keep <code>{dictationCommandPrefix}</code> mode ready for rewrite, bulletize, and professional cleanup on selected text.
+                      Keep <code>{dictationCommandPrefix}</code> mode ready for
+                      rewrite, bulletize, and professional cleanup on selected
+                      text.
                     </p>
                   </div>
                 </div>
                 <div className="rounded-md border bg-background px-3 py-3">
-                  <p className="text-xs font-medium text-muted-foreground">Developer quick starts</p>
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Developer quick starts
+                  </p>
                   <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                    <span className="rounded-full border px-2 py-1">commit messages</span>
-                    <span className="rounded-full border px-2 py-1">PR summaries</span>
-                    <span className="rounded-full border px-2 py-1">terminal commands</span>
-                    <span className="rounded-full border px-2 py-1">issue updates</span>
-                    <span className="rounded-full border px-2 py-1">Cursor prompts</span>
+                    <span className="rounded-full border px-2 py-1">
+                      commit messages
+                    </span>
+                    <span className="rounded-full border px-2 py-1">
+                      PR summaries
+                    </span>
+                    <span className="rounded-full border px-2 py-1">
+                      terminal commands
+                    </span>
+                    <span className="rounded-full border px-2 py-1">
+                      issue updates
+                    </span>
+                    <span className="rounded-full border px-2 py-1">
+                      Cursor prompts
+                    </span>
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <Button
                     size="sm"
                     onClick={() => {
-                      const style = RECOMMENDED_APP_STYLES.find((candidate) => candidate.id === "builtin-coding-copilot");
+                      const style = RECOMMENDED_APP_STYLES.find(
+                        (candidate) =>
+                          candidate.id === "builtin-coding-copilot",
+                      );
                       if (style) {
                         void handleInstallRecommendedStyle(style);
                       }
@@ -3889,7 +4523,8 @@ export function DictationView() {
                   Quiet Dictation
                 </CardTitle>
                 <CardDescription>
-                  Better defaults for low-volume speaking, focus sessions, and fewer distracting UI changes.
+                  Better defaults for low-volume speaking, focus sessions, and
+                  fewer distracting UI changes.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -3898,40 +4533,63 @@ export function DictationView() {
                     Quiet-friendly defaults
                   </p>
                   <p className="mt-1 text-sm font-medium">
-                    Silence auto-stop {dictationSilenceTimeoutSeconds > 0 ? `${dictationSilenceTimeoutSeconds}s` : "off"} · Keep warm {dictationKeepWarm}
+                    Silence auto-stop{" "}
+                    {dictationSilenceTimeoutSeconds > 0
+                      ? `${dictationSilenceTimeoutSeconds}s`
+                      : "off"}{" "}
+                    · Keep warm {dictationKeepWarm}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    For whispering, a warmed local model and a slightly longer stop window reduce awkward cutoffs.
+                    For whispering, a warmed local model and a slightly longer
+                    stop window reduce awkward cutoffs.
                   </p>
                 </div>
                 <div className="grid gap-2 md:grid-cols-2">
                   <div className="rounded-md border bg-background px-3 py-3">
-                    <p className="text-xs font-medium text-muted-foreground">Recommended route</p>
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Recommended route
+                    </p>
                     <p className="mt-2 text-xs text-muted-foreground">
-                      Prefer local capture so quiet speech does not depend on network latency or upload timing.
+                      Prefer local capture so quiet speech does not depend on
+                      network latency or upload timing.
                     </p>
                   </div>
                   <div className="rounded-md border bg-background px-3 py-3">
-                    <p className="text-xs font-medium text-muted-foreground">Preview behavior</p>
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Preview behavior
+                    </p>
                     <p className="mt-2 text-xs text-muted-foreground">
-                      Leave live preview on when you want reassurance, or turn it off for less visual churn during deep work.
+                      Leave live preview on when you want reassurance, or turn
+                      it off for less visual churn during deep work.
                     </p>
                   </div>
                 </div>
                 <div className="rounded-md border bg-background px-3 py-3">
-                  <p className="text-xs font-medium text-muted-foreground">Quiet quick starts</p>
+                  <p className="text-xs font-medium text-muted-foreground">
+                    Quiet quick starts
+                  </p>
                   <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                    <span className="rounded-full border px-2 py-1">late-night writing</span>
-                    <span className="rounded-full border px-2 py-1">shared spaces</span>
-                    <span className="rounded-full border px-2 py-1">focus sessions</span>
-                    <span className="rounded-full border px-2 py-1">private drafting</span>
+                    <span className="rounded-full border px-2 py-1">
+                      late-night writing
+                    </span>
+                    <span className="rounded-full border px-2 py-1">
+                      shared spaces
+                    </span>
+                    <span className="rounded-full border px-2 py-1">
+                      focus sessions
+                    </span>
+                    <span className="rounded-full border px-2 py-1">
+                      private drafting
+                    </span>
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <Button
                     size="sm"
                     onClick={() => {
-                      const style = RECOMMENDED_APP_STYLES.find((candidate) => candidate.id === "builtin-quiet-focus");
+                      const style = RECOMMENDED_APP_STYLES.find(
+                        (candidate) => candidate.id === "builtin-quiet-focus",
+                      );
                       if (style) {
                         void handleInstallRecommendedStyle(style);
                       }
@@ -3961,7 +4619,7 @@ export function DictationView() {
               </CardContent>
             </Card>
           </div>
-          
+
           {/* Last Transcription */}
           {transcribedText && (
             <Card>
@@ -3976,15 +4634,24 @@ export function DictationView() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => void toggleReadAloudPlayback(transcribedText, "latest-result")}
+                    onClick={() =>
+                      void toggleReadAloudPlayback(
+                        transcribedText,
+                        "latest-result",
+                      )
+                    }
                   >
                     <Volume2 className="h-4 w-4 mr-2" />
-                    {activeSpeechTarget === "latest-result" ? "Stop reading" : "Read aloud"}
+                    {activeSpeechTarget === "latest-result"
+                      ? "Stop reading"
+                      : "Read aloud"}
                   </Button>
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant="outline"
                     size="sm"
-                    onClick={() => navigator.clipboard.writeText(transcribedText)}
+                    onClick={() =>
+                      navigator.clipboard.writeText(transcribedText)
+                    }
                   >
                     <Save className="h-4 w-4 mr-2" />
                     Copy Again
@@ -3998,33 +4665,45 @@ export function DictationView() {
                       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                         Backtrack ready
                       </p>
-                      <p className="mt-1 text-sm font-medium">Say “scratch that” after the next insert</p>
+                      <p className="mt-1 text-sm font-medium">
+                        Say “scratch that” after the next insert
+                      </p>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        Nautilus can undo the last insert or replace it with a corrected phrase.
+                        Nautilus can undo the last insert or replace it with a
+                        corrected phrase.
                       </p>
                     </div>
                     <div className="rounded-md border bg-muted/20 px-3 py-3">
                       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                         Personal dictionary
                       </p>
-                      <p className="mt-1 text-sm font-medium">Fix a word once, then teach it</p>
+                      <p className="mt-1 text-sm font-medium">
+                        Fix a word once, then teach it
+                      </p>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        Edit the result here and use Learn correction so your names and jargon stick.
+                        Edit the result here and use Learn correction so your
+                        names and jargon stick.
                       </p>
                     </div>
                     <div className="rounded-md border bg-muted/20 px-3 py-3">
                       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                         Smart context
                       </p>
-                      <p className="mt-1 text-sm font-medium">{activationMatcher ?? appTarget ?? "General dictation"}</p>
-                      <p className="mt-1 text-xs text-muted-foreground">{smartContextSummary}</p>
+                      <p className="mt-1 text-sm font-medium">
+                        {activationMatcher ?? appTarget ?? "General dictation"}
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {smartContextSummary}
+                      </p>
                     </div>
                   </div>
                   <div className="rounded-lg bg-muted p-4">
                     <textarea
                       className="min-h-[120px] w-full resize-y bg-transparent text-sm outline-none"
                       value={transcribedText}
-                      onChange={(event) => setTranscribedText(event.target.value)}
+                      onChange={(event) =>
+                        setTranscribedText(event.target.value)
+                      }
                       onBlur={() => {
                         void maybeAutoLearnLatestCorrection();
                       }}
@@ -4034,14 +4713,24 @@ export function DictationView() {
                     <Button
                       variant="outline"
                       size="sm"
-                      disabled={latestCorrectionBaseline.trim() === transcribedText.trim()}
+                      disabled={
+                        latestCorrectionBaseline.trim() ===
+                        transcribedText.trim()
+                      }
                       onClick={() =>
-                        void learnCorrection(latestCorrectionBaseline, transcribedText, {
-                          force: true,
-                          appTarget,
-                          setStatus: setLatestLearnStatus,
-                          onSuccess: () => setLatestCorrectionBaseline(transcribedText.trim()),
-                        })
+                        void learnCorrection(
+                          latestCorrectionBaseline,
+                          transcribedText,
+                          {
+                            force: true,
+                            appTarget,
+                            setStatus: setLatestLearnStatus,
+                            onSuccess: () =>
+                              setLatestCorrectionBaseline(
+                                transcribedText.trim(),
+                              ),
+                          },
+                        )
                       }
                     >
                       Learn correction
@@ -4056,13 +4745,16 @@ export function DictationView() {
                         }
                         setNewDictionarySpokenForm(trimmed);
                         setNewDictionaryReplacement(trimmed);
-                        setDictionaryCsvStatus("Loaded current result into the dictionary editor below.");
+                        setDictionaryCsvStatus(
+                          "Loaded current result into the dictionary editor below.",
+                        );
                       }}
                     >
                       Quick add to dictionary
                     </Button>
                     <p className="text-xs text-muted-foreground">
-                      Edit a mistaken word here and Nautilus can remember it for next time.
+                      Edit a mistaken word here and Nautilus can remember it for
+                      next time.
                     </p>
                   </div>
                   {latestLearnStatus && (
@@ -4129,26 +4821,42 @@ export function DictationView() {
                       </span>
                     )}
                     {lastResolvedHosting && (
-                      <span>Route: {lastResolvedHosting === "cloud" ? "Cloud" : "Local"}</span>
+                      <span>
+                        Route:{" "}
+                        {lastResolvedHosting === "cloud" ? "Cloud" : "Local"}
+                      </span>
                     )}
                     {lastRoutePreference && (
                       <span>
-                        Requested: {lastRoutePreference === "cloud" ? "Cloud" : "Local"}
+                        Requested:{" "}
+                        {lastRoutePreference === "cloud" ? "Cloud" : "Local"}
                       </span>
                     )}
-                    {lastResolvedRoute && <span>Resolved: {lastResolvedRoute}</span>}
-                    {lastProviderModelLabel && <span>Route label: {lastProviderModelLabel}</span>}
+                    {lastResolvedRoute && (
+                      <span>Resolved: {lastResolvedRoute}</span>
+                    )}
+                    {lastProviderModelLabel && (
+                      <span>Route label: {lastProviderModelLabel}</span>
+                    )}
                     {lastProvider && <span>Engine: {lastProvider}</span>}
                     {lastModelId && <span>Model: {lastModelId}</span>}
-                    {insertionModeUsed && <span>Inserted via: {insertionModeUsed}</span>}
+                    {insertionModeUsed && (
+                      <span>Inserted via: {insertionModeUsed}</span>
+                    )}
                     {commandApplied && (
                       <span>
-                        Command: {formatAppliedDictationCommandLabel(commandApplied) ?? commandApplied}
+                        Command:{" "}
+                        {formatAppliedDictationCommandLabel(commandApplied) ??
+                          commandApplied}
                       </span>
                     )}
-                    {snippetAppliedCount > 0 && <span>Snippets: {snippetAppliedCount}</span>}
+                    {snippetAppliedCount > 0 && (
+                      <span>Snippets: {snippetAppliedCount}</span>
+                    )}
                     {appTarget && <span>Target app: {appTarget}</span>}
-                    {activationMatcher && <span>Auto mode: {activationMatcher}</span>}
+                    {activationMatcher && (
+                      <span>Auto mode: {activationMatcher}</span>
+                    )}
                     {contextChars !== null && contextChars > 0 && (
                       <span>Context: {contextChars} chars</span>
                     )}
@@ -4166,7 +4874,11 @@ export function DictationView() {
                   Private local usage stats across your saved dictations.
                 </CardDescription>
               </div>
-              <Button variant="outline" size="sm" onClick={() => void refreshDictationInsights()}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void refreshDictationInsights()}
+              >
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Refresh
               </Button>
@@ -4179,13 +4891,17 @@ export function DictationView() {
                       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                         Total dictations
                       </p>
-                      <p className="mt-1 text-lg font-semibold">{dictationInsights.totalDictations}</p>
+                      <p className="mt-1 text-lg font-semibold">
+                        {dictationInsights.totalDictations}
+                      </p>
                     </div>
                     <div className="rounded-md border bg-muted/30 px-3 py-3">
                       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                         Words dictated
                       </p>
-                      <p className="mt-1 text-lg font-semibold">{dictationInsights.dictatedWords}</p>
+                      <p className="mt-1 text-lg font-semibold">
+                        {dictationInsights.dictatedWords}
+                      </p>
                     </div>
                     <div className="rounded-md border bg-muted/30 px-3 py-3">
                       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -4199,7 +4915,9 @@ export function DictationView() {
                       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                         Active days
                       </p>
-                      <p className="mt-1 text-lg font-semibold">{dictationInsights.activeDays}</p>
+                      <p className="mt-1 text-lg font-semibold">
+                        {dictationInsights.activeDays}
+                      </p>
                     </div>
                     <div className="rounded-md border bg-muted/30 px-3 py-3">
                       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -4215,13 +4933,17 @@ export function DictationView() {
                       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                         Commands used
                       </p>
-                      <p className="mt-1 text-sm font-medium">{dictationInsights.commandsUsed}</p>
+                      <p className="mt-1 text-sm font-medium">
+                        {dictationInsights.commandsUsed}
+                      </p>
                     </div>
                     <div className="rounded-md border px-3 py-3">
                       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                         Backtracks
                       </p>
-                      <p className="mt-1 text-sm font-medium">{dictationInsights.backtracksUsed}</p>
+                      <p className="mt-1 text-sm font-medium">
+                        {dictationInsights.backtracksUsed}
+                      </p>
                     </div>
                     <div className="rounded-md border px-3 py-3">
                       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -4245,8 +4967,8 @@ export function DictationView() {
                 </div>
               ) : (
                 <p className="text-sm text-muted-foreground">
-                  No saved dictation stats yet. Flow Profile starts filling in once dictations are
-                  retained in history.
+                  No saved dictation stats yet. Flow Profile starts filling in
+                  once dictations are retained in history.
                 </p>
               )}
             </CardContent>
@@ -4258,20 +4980,28 @@ export function DictationView() {
               <div>
                 <CardTitle>Recent Dictations</CardTitle>
                 <CardDescription>
-                  Dictation recordings retained by your current auto-delete policy.
+                  Dictation recordings retained by your current auto-delete
+                  policy.
                 </CardDescription>
               </div>
-              <Button variant="outline" size="sm" onClick={() => void refetchDictationHistory()}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void refetchDictationHistory()}
+              >
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Refresh
               </Button>
             </CardHeader>
             <CardContent>
               {dictationHistoryLoading ? (
-                <p className="text-sm text-muted-foreground">Loading dictation history...</p>
+                <p className="text-sm text-muted-foreground">
+                  Loading dictation history...
+                </p>
               ) : dictationHistory.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
-                  No saved dictations yet. If auto-delete is set to Immediate, history is intentionally not retained.
+                  No saved dictations yet. If auto-delete is set to Immediate,
+                  history is intentionally not retained.
                 </p>
               ) : (
                 <div className="space-y-2">
@@ -4287,7 +5017,8 @@ export function DictationView() {
                       <div>
                         <p className="font-medium">{recording.title}</p>
                         <p className="text-xs text-muted-foreground">
-                          {new Date(recording.createdAt).toLocaleString()} · {recording.status}
+                          {new Date(recording.createdAt).toLocaleString()} ·{" "}
+                          {recording.status}
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
@@ -4315,44 +5046,52 @@ export function DictationView() {
                           Delete
                         </Button>
                       </div>
-                     </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {/* Settings */}
           <Card>
             <CardHeader>
               <CardTitle className="text-sm">Capture and Insert</CardTitle>
               <CardDescription>
-                Modes handle the recommended defaults. These controls are here when you want to
-                tune the details.
+                Modes handle the recommended defaults. These controls are here
+                when you want to tune the details.
               </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Dictation profile</label>
+                  <label className="text-sm font-medium">
+                    Dictation profile
+                  </label>
                   <select
                     className="w-full p-2 border rounded-md bg-background"
                     value={dictationProfile}
                     onChange={(event) => {
-                      const profile = event.target.value as "normal_speed" | "power_rewrite";
+                      const profile = event.target.value as
+                        | "normal_speed"
+                        | "power_rewrite";
                       setDictationProfile(profile);
                       const nextModePreset = syncModePreset({ profile });
-                      void persistDictationPreferences({ profile, modePreset: nextModePreset });
+                      void persistDictationPreferences({
+                        profile,
+                        modePreset: nextModePreset,
+                      });
                     }}
                   >
                     <option value="normal_speed">Normal Speed</option>
                     <option value="power_rewrite">Power Rewrite</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Uses the transcription route selected in Settings → Transcription.
+                    Uses the transcription route selected in Settings →
+                    Transcription.
                   </p>
                 </div>
-                
+
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Default Project</label>
                   <select
@@ -4361,7 +5100,9 @@ export function DictationView() {
                     onChange={(event) => {
                       const nextProjectId = event.target.value;
                       setDefaultProjectId(nextProjectId);
-                      void persistDictationPreferences({ projectId: nextProjectId });
+                      void persistDictationPreferences({
+                        projectId: nextProjectId,
+                      });
                     }}
                   >
                     <option value="inbox">Inbox</option>
@@ -4377,14 +5118,23 @@ export function DictationView() {
                   <label className="text-sm font-medium">Hotkey behavior</label>
                   <select
                     className="w-full p-2 border rounded-md bg-background"
-                    value={shortcutMode(dictationPushToTalk, dictationHandsFreeEnabled)}
+                    value={shortcutMode(
+                      dictationPushToTalk,
+                      dictationHandsFreeEnabled,
+                    )}
                     onChange={(event) => {
-                      const nextMode = event.target.value as "hold_to_talk" | "toggle" | "hands_free";
+                      const nextMode = event.target.value as
+                        | "hold_to_talk"
+                        | "toggle"
+                        | "hands_free";
                       const pushToTalk = nextMode === "hold_to_talk";
                       const handsFreeEnabled = nextMode === "hands_free";
                       setDictationPushToTalk(pushToTalk);
                       setDictationHandsFreeEnabled(handsFreeEnabled);
-                      void persistDictationPreferences({ pushToTalk, handsFreeEnabled });
+                      void persistDictationPreferences({
+                        pushToTalk,
+                        handsFreeEnabled,
+                      });
                     }}
                   >
                     <option value="hold_to_talk">Hold-to-talk</option>
@@ -4392,12 +5142,15 @@ export function DictationView() {
                     <option value="hands_free">Hands-free</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Hands-free starts on press and stops after silence or a second press.
+                    Hands-free starts on press and stops after silence or a
+                    second press.
                   </p>
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Session language</label>
+                  <label className="text-sm font-medium">
+                    Session language
+                  </label>
                   <select
                     aria-label="Session language"
                     className="w-full p-2 border rounded-md bg-background"
@@ -4417,18 +5170,22 @@ export function DictationView() {
                     ))}
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Fixed session languages always win. When this stays on auto, the active set
-                    below narrows what you expect in the session and locks capture if you keep only
-                    one language enabled.
+                    Fixed session languages always win. When this stays on auto,
+                    the active set below narrows what you expect in the session
+                    and locks capture if you keep only one language enabled.
                   </p>
                   <div className="rounded-md border bg-muted/20 px-3 py-3">
-                    <p className="text-xs font-medium text-foreground">Active language set</p>
+                    <p className="text-xs font-medium text-foreground">
+                      Active language set
+                    </p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       Used only while Session language stays on auto detect.
                     </p>
                     <div className="mt-3 flex flex-wrap gap-2">
                       {DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => {
-                        const selected = dictationActiveLanguages.includes(option.value);
+                        const selected = dictationActiveLanguages.includes(
+                          option.value,
+                        );
                         return (
                           <button
                             key={option.value}
@@ -4439,15 +5196,16 @@ export function DictationView() {
                               "rounded-full border px-3 py-1 text-xs transition-colors",
                               selected
                                 ? "border-foreground bg-foreground text-background"
-                                : "border-border bg-background text-muted-foreground hover:text-foreground"
+                                : "border-border bg-background text-muted-foreground hover:text-foreground",
                             )}
                             onClick={() => {
                               const nextActiveLanguages = selected
                                 ? dictationActiveLanguages.filter(
-                                    (language) => language !== option.value
+                                    (language) => language !== option.value,
                                   )
                                 : [...dictationActiveLanguages, option.value];
-                              const normalized = normalizeActiveLanguageSet(nextActiveLanguages);
+                              const normalized =
+                                normalizeActiveLanguageSet(nextActiveLanguages);
                               setDictationActiveLanguages(normalized);
                               void persistDictationPreferences({
                                 activeLanguages: normalized,
@@ -4468,8 +5226,8 @@ export function DictationView() {
                               .map(
                                 (language) =>
                                   DICTATION_ACTIVE_LANGUAGE_OPTIONS.find(
-                                    (option) => option.value === language
-                                  )?.label ?? language
+                                    (option) => option.value === language,
+                                  )?.label ?? language,
                               )
                               .join(", ")}.`}
                     </p>
@@ -4484,29 +5242,40 @@ export function DictationView() {
                     onChange={(event) => {
                       const next = event.target.value === "on";
                       setDictationLivePreviewEnabled(next);
-                      void persistDictationPreferences({ livePreviewEnabled: next });
+                      void persistDictationPreferences({
+                        livePreviewEnabled: next,
+                      });
                     }}
                   >
                     <option value="on">Show live partials</option>
                     <option value="off">Hide live partials</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Controls whether popup and inline flows show partial dictation text while you speak.
+                    Controls whether popup and inline flows show partial
+                    dictation text while you speak.
                   </p>
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Command mode prefix</label>
+                  <label className="text-sm font-medium">
+                    Command mode prefix
+                  </label>
                   <div className="rounded-md border bg-muted/20 px-3 py-3 space-y-2">
-                    <p className="text-sm font-medium">{dictationCommandPrefix}</p>
+                    <p className="text-sm font-medium">
+                      {dictationCommandPrefix}
+                    </p>
                     <p className="text-xs text-muted-foreground">
-                      Use this before voice editing commands when command mode is enabled. Great for rewrite, bulletize, summarize, and coding cleanup flows.
+                      Use this before voice editing commands when command mode
+                      is enabled. Great for rewrite, bulletize, summarize, and
+                      coding cleanup flows.
                     </p>
                   </div>
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Silence auto-stop</label>
+                  <label className="text-sm font-medium">
+                    Silence auto-stop
+                  </label>
                   <div className="flex items-center gap-2">
                     <input
                       type="number"
@@ -4514,7 +5283,11 @@ export function DictationView() {
                       max={30}
                       step={0.1}
                       className="w-28 p-2 border rounded-md bg-background"
-                      value={dictationSilenceTimeoutSeconds <= 0 ? 0 : dictationSilenceTimeoutSeconds}
+                      value={
+                        dictationSilenceTimeoutSeconds <= 0
+                          ? 0
+                          : dictationSilenceTimeoutSeconds
+                      }
                       onChange={(event) => {
                         const rawValue = Number.parseFloat(event.target.value);
                         const next = Number.isFinite(rawValue) ? rawValue : 0;
@@ -4523,39 +5296,55 @@ export function DictationView() {
                       onBlur={(event) => {
                         const rawValue = Number.parseFloat(event.target.value);
                         const next = normalizeDictationSilenceTimeoutSeconds(
-                          Number.isFinite(rawValue) ? rawValue : 0
+                          Number.isFinite(rawValue) ? rawValue : 0,
                         );
                         setDictationSilenceTimeoutSeconds(next);
-                        void persistDictationPreferences({ silenceTimeoutSeconds: next });
+                        void persistDictationPreferences({
+                          silenceTimeoutSeconds: next,
+                        });
                       }}
                     />
-                    <span className="text-sm text-muted-foreground">seconds</span>
+                    <span className="text-sm text-muted-foreground">
+                      seconds
+                    </span>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    `0` disables silence auto-stop. Hands-free falls back to 1.8 seconds if this is off.
+                    `0` disables silence auto-stop. Hands-free falls back to 1.8
+                    seconds if this is off.
                   </p>
                 </div>
 
                 <div className="space-y-2 md:col-span-2">
-                  <label className="text-sm font-medium">Provider fit for this session</label>
+                  <label className="text-sm font-medium">
+                    Provider fit for this session
+                  </label>
                   <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
                     {activeLanguageProviders.length > 0 ? (
                       activeLanguageProviders.map((provider) => (
-                        <div key={provider.providerType} className="rounded-md border bg-muted/20 px-3 py-3">
+                        <div
+                          key={provider.providerType}
+                          className="rounded-md border bg-muted/20 px-3 py-3"
+                        >
                           <div className="flex items-center justify-between gap-2">
-                            <p className="text-sm font-medium">{provider.name}</p>
+                            <p className="text-sm font-medium">
+                              {provider.name}
+                            </p>
                             <span className="text-[11px] text-muted-foreground">
-                              {provider.runtimeStatus === "ready" ? "Ready" : provider.runtimeStatus}
+                              {provider.runtimeStatus === "ready"
+                                ? "Ready"
+                                : provider.runtimeStatus}
                             </span>
                           </div>
                           <p className="mt-1 text-xs text-muted-foreground">
-                            {providerCapabilityLabel(provider.providerType)} · {providerRecommendation(provider)}
+                            {providerCapabilityLabel(provider.providerType)} ·{" "}
+                            {providerRecommendation(provider)}
                           </p>
                         </div>
                       ))
                     ) : (
                       <div className="rounded-md border bg-muted/20 px-3 py-3 text-xs text-muted-foreground md:col-span-2 xl:col-span-4">
-                        No ready providers matched the current language/session filters yet.
+                        No ready providers matched the current language/session
+                        filters yet.
                       </div>
                     )}
                   </div>
@@ -4567,7 +5356,10 @@ export function DictationView() {
                     className="w-full p-2 border rounded-md bg-background"
                     value={dictationKeepWarm}
                     onChange={(event) => {
-                      const next = event.target.value as "off" | "short" | "long";
+                      const next = event.target.value as
+                        | "off"
+                        | "short"
+                        | "long";
                       setDictationKeepWarm(next);
                       void persistDictationPreferences({ keepWarm: next });
                     }}
@@ -4577,23 +5369,28 @@ export function DictationView() {
                     <option value="long">Long</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Keeps the active dictation route warmer between captures to reduce startup latency.
+                    Keeps the active dictation route warmer between captures to
+                    reduce startup latency.
                   </p>
                 </div>
 
                 <div className="rounded-md border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
-                  <p className="font-medium text-foreground">Hands-free guide</p>
+                  <p className="font-medium text-foreground">
+                    Hands-free guide
+                  </p>
                   <p className="mt-2">
-                    First press starts capture. A second press stops immediately. If silence auto-stop
-                    is set to <span className="font-mono">0</span>, hands-free still uses a 1.8 second
-                    fallback so sessions do not hang open.
+                    First press starts capture. A second press stops
+                    immediately. If silence auto-stop is set to{" "}
+                    <span className="font-mono">0</span>, hands-free still uses
+                    a 1.8 second fallback so sessions do not hang open.
                   </p>
                   <p className="mt-2">
                     Active capture language:{" "}
                     <span className="font-mono">
                       {effectiveCaptureLanguage ?? "auto"}
                     </span>
-                    {dictationModePreset === "custom" && customModeDraft.languageOverride.trim()
+                    {dictationModePreset === "custom" &&
+                    customModeDraft.languageOverride.trim()
                       ? " via flow profile override."
                       : dictationSessionLanguage !== "auto"
                         ? " from the fixed session setting."
@@ -4608,11 +5405,15 @@ export function DictationView() {
                     <div>
                       <p className="text-sm font-medium">Language routing</p>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        Provider guidance for the current capture language or active auto-detect set.
+                        Provider guidance for the current capture language or
+                        active auto-detect set.
                       </p>
                     </div>
                     <span className="rounded-full border px-2 py-1 text-[11px] text-muted-foreground">
-                      {languageTrustLabel(effectiveCaptureLanguage, dictationActiveLanguages)}
+                      {languageTrustLabel(
+                        effectiveCaptureLanguage,
+                        dictationActiveLanguages,
+                      )}
                     </span>
                   </div>
                   <div className="mt-3 space-y-2">
@@ -4623,12 +5424,20 @@ export function DictationView() {
                           className="rounded-md border bg-muted/20 px-3 py-2"
                         >
                           <div className="flex flex-wrap items-center justify-between gap-2">
-                            <p className="text-sm font-medium">{provider.name}</p>
+                            <p className="text-sm font-medium">
+                              {provider.name}
+                            </p>
                             <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                              <span>{providerHostingLabel(provider.providerType)}</span>
-                              <span>{providerCapabilityLabel(provider.providerType)}</span>
                               <span>
-                                {provider.runtimeStatus === "ready" ? "Ready" : "Needs setup"}
+                                {providerHostingLabel(provider.providerType)}
+                              </span>
+                              <span>
+                                {providerCapabilityLabel(provider.providerType)}
+                              </span>
+                              <span>
+                                {provider.runtimeStatus === "ready"
+                                  ? "Ready"
+                                  : "Needs setup"}
                               </span>
                             </div>
                           </div>
@@ -4639,9 +5448,10 @@ export function DictationView() {
                       ))
                     ) : (
                       <p className="text-xs text-muted-foreground">
-                        No installed providers currently advertise coverage for this language view.
-                        Nautilus will still use the active dictation path, but non-GA languages and
-                        multi-language auto-detect sets should be treated as experimental.
+                        No installed providers currently advertise coverage for
+                        this language view. Nautilus will still use the active
+                        dictation path, but non-GA languages and multi-language
+                        auto-detect sets should be treated as experimental.
                       </p>
                     )}
                   </div>
@@ -4653,7 +5463,8 @@ export function DictationView() {
                     className="w-full p-2 border rounded-md bg-background"
                     value={dictationContextSource}
                     onChange={(event) => {
-                      const contextSource = event.target.value as DictationContextSource;
+                      const contextSource = event.target
+                        .value as DictationContextSource;
                       setDictationContextSource(contextSource);
                       const nextModePreset = syncModePreset({ contextSource });
                       void persistDictationPreferences({
@@ -4663,31 +5474,46 @@ export function DictationView() {
                     }}
                   >
                     <option value="none">Off</option>
-                    <option value="application_context">Use application context</option>
+                    <option value="application_context">
+                      Use application context
+                    </option>
                     <option value="selected_text">Use selected text</option>
                     <option value="clipboard">Use clipboard</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Lets voice commands transform existing text. Try &quot;command rewrite professional&quot;
-                    , &quot;command bulletize selection&quot;, &quot;command replace roadmap with launch plan&quot;,
-                    or editing commands like &quot;command replace selection with approved plan&quot;,
-                    &quot;command append today&quot;, &quot;command delete phrase roadmap&quot;, and
-                    case changes like &quot;command uppercase selection&quot; or
-                    &quot;command title case selection&quot;. Correction commands like
-                    &quot;command undo that&quot; work without text context.
-                    Application context captures the frontmost app, window title, and selected text when available.
+                    Lets voice commands transform existing text. Try
+                    &quot;command rewrite professional&quot; , &quot;command
+                    bulletize selection&quot;, &quot;command replace roadmap
+                    with launch plan&quot;, or editing commands like
+                    &quot;command replace selection with approved plan&quot;,
+                    &quot;command append today&quot;, &quot;command delete
+                    phrase roadmap&quot;, and case changes like &quot;command
+                    uppercase selection&quot; or &quot;command title case
+                    selection&quot;. Correction commands like &quot;command undo
+                    that&quot; work without text context. Application context
+                    captures the frontmost app, window title, and selected text
+                    when available.
                   </p>
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Auto-delete dictation recordings</label>
+                  <label className="text-sm font-medium">
+                    Auto-delete dictation recordings
+                  </label>
                   <select
                     className="w-full p-2 border rounded-md bg-background"
                     value={dictationRetentionPreset}
                     onChange={(event) => {
-                      const preset = event.target.value as "immediate" | "24h" | "72h" | "never" | "custom";
+                      const preset = event.target.value as
+                        | "immediate"
+                        | "24h"
+                        | "72h"
+                        | "never"
+                        | "custom";
                       setDictationRetentionPreset(preset);
-                      void persistDictationPreferences({ retentionPreset: preset });
+                      void persistDictationPreferences({
+                        retentionPreset: preset,
+                      });
                     }}
                   >
                     <option value="immediate">Immediately</option>
@@ -4698,16 +5524,23 @@ export function DictationView() {
                   </select>
                   {dictationRetentionPreset === "custom" && (
                     <div className="space-y-2">
-                      <label className="text-xs text-muted-foreground">Custom hours</label>
+                      <label className="text-xs text-muted-foreground">
+                        Custom hours
+                      </label>
                       <input
                         type="number"
                         min={1}
                         className="w-full p-2 border rounded-md bg-background"
                         value={dictationRetentionCustomHours}
                         onChange={(event) => {
-                          const nextHours = Math.max(1, Number(event.target.value) || 1);
+                          const nextHours = Math.max(
+                            1,
+                            Number(event.target.value) || 1,
+                          );
                           setDictationRetentionCustomHours(nextHours);
-                          void persistDictationPreferences({ retentionCustomHours: nextHours });
+                          void persistDictationPreferences({
+                            retentionCustomHours: nextHours,
+                          });
                         }}
                       />
                     </div>
@@ -4720,9 +5553,15 @@ export function DictationView() {
                     className="w-full p-2 border rounded-md bg-background"
                     value={dictationInsertionMode}
                     onChange={(event) => {
-                      const mode = event.target.value as "auto" | "paste" | "inline" | "clipboard_only";
+                      const mode = event.target.value as
+                        | "auto"
+                        | "paste"
+                        | "inline"
+                        | "clipboard_only";
                       setDictationInsertionMode(mode);
-                      const nextModePreset = syncModePreset({ insertionMode: mode });
+                      const nextModePreset = syncModePreset({
+                        insertionMode: mode,
+                      });
                       void persistDictationPreferences({
                         insertionMode: mode,
                         modePreset: nextModePreset,
@@ -4735,22 +5574,29 @@ export function DictationView() {
                     <option value="clipboard_only">Clipboard only</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Recommended tries the best available insertion path. Insert on release keeps the
-                    flow simple and consistent.
+                    Recommended tries the best available insertion path. Insert
+                    on release keeps the flow simple and consistent.
                   </p>
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-sm font-medium">Command mode prefix</label>
+                  <label className="text-sm font-medium">
+                    Command mode prefix
+                  </label>
                   <input
                     type="text"
                     className="w-full p-2 border rounded-md bg-background"
                     value={dictationCommandPrefix}
-                    onChange={(event) => setDictationCommandPrefix(event.target.value)}
+                    onChange={(event) =>
+                      setDictationCommandPrefix(event.target.value)
+                    }
                     onBlur={() => {
-                      const nextPrefix = dictationCommandPrefix.trim() || "command";
+                      const nextPrefix =
+                        dictationCommandPrefix.trim() || "command";
                       setDictationCommandPrefix(nextPrefix);
-                      void persistDictationPreferences({ commandPrefix: nextPrefix });
+                      void persistDictationPreferences({
+                        commandPrefix: nextPrefix,
+                      });
                     }}
                   />
                   <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
@@ -4760,7 +5606,9 @@ export function DictationView() {
                       onChange={(event) => {
                         const next = event.target.checked;
                         setDictationCommandModeEnabled(next);
-                        const nextModePreset = syncModePreset({ commandModeEnabled: next });
+                        const nextModePreset = syncModePreset({
+                          commandModeEnabled: next,
+                        });
                         void persistDictationPreferences({
                           commandModeEnabled: next,
                           modePreset: nextModePreset,
@@ -4776,18 +5624,25 @@ export function DictationView() {
                 <div>
                   <p className="text-sm font-medium">Text actions</p>
                   <p className="text-xs text-muted-foreground">
-                    Customize rewrite and bullet actions that run after dictation.
+                    Customize rewrite and bullet actions that run after
+                    dictation.
                   </p>
                 </div>
                 <div className="space-y-3">
                   {COMMAND_PRESET_FIELDS.map((field) => {
                     const preset = getCommandPreset(field.key);
-                    const promptValue = preset?.systemPrompt ?? field.defaultPrompt;
+                    const promptValue =
+                      preset?.systemPrompt ?? field.defaultPrompt;
                     const enabledValue = preset?.enabled ?? true;
                     return (
-                      <div key={field.key} className="rounded-md border p-3 space-y-2">
+                      <div
+                        key={field.key}
+                        className="rounded-md border p-3 space-y-2"
+                      >
                         <div className="flex items-center justify-between">
-                          <label className="text-sm font-medium">{field.label}</label>
+                          <label className="text-sm font-medium">
+                            {field.label}
+                          </label>
                           <div className="flex items-center gap-2">
                             <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
                               <input
@@ -4795,8 +5650,14 @@ export function DictationView() {
                                 checked={enabledValue}
                                 onChange={(event) => {
                                   const next = event.target.checked;
-                                  setCommandPresetDraft(field.key, { enabled: next });
-                                  void upsertCommandPreset(field.key, promptValue, next);
+                                  setCommandPresetDraft(field.key, {
+                                    enabled: next,
+                                  });
+                                  void upsertCommandPreset(
+                                    field.key,
+                                    promptValue,
+                                    next,
+                                  );
                                 }}
                               />
                               Enabled
@@ -4819,11 +5680,16 @@ export function DictationView() {
                             })
                           }
                           onBlur={(event) => {
-                            const nextPrompt = event.target.value.trim() || field.defaultPrompt;
+                            const nextPrompt =
+                              event.target.value.trim() || field.defaultPrompt;
                             setCommandPresetDraft(field.key, {
                               systemPrompt: nextPrompt,
                             });
-                            void upsertCommandPreset(field.key, nextPrompt, enabledValue);
+                            void upsertCommandPreset(
+                              field.key,
+                              nextPrompt,
+                              enabledValue,
+                            );
                           }}
                         />
                       </div>
@@ -4837,7 +5703,8 @@ export function DictationView() {
                   <div>
                     <p className="text-sm font-medium">Dictionary</p>
                     <p className="text-xs text-muted-foreground">
-                      Normalize names, brands, and phrases before snippets are applied.
+                      Normalize names, brands, and phrases before snippets are
+                      applied.
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -4867,7 +5734,9 @@ export function DictationView() {
                         onChange={(event) => {
                           const next = event.target.checked;
                           setDictationAutoLearnCorrections(next);
-                          void persistDictationPreferences({ autoLearnCorrections: next });
+                          void persistDictationPreferences({
+                            autoLearnCorrections: next,
+                          });
                         }}
                       />
                       Auto-learn corrections
@@ -4881,23 +5750,32 @@ export function DictationView() {
                     className="w-full p-2 border rounded-md bg-background"
                     placeholder="Say (e.g. open ai)"
                     value={newDictionarySpokenForm}
-                    onChange={(event) => setNewDictionarySpokenForm(event.target.value)}
+                    onChange={(event) =>
+                      setNewDictionarySpokenForm(event.target.value)
+                    }
                   />
                   <input
                     type="text"
                     className="w-full p-2 border rounded-md bg-background"
                     placeholder="Insert (e.g. OpenAI)"
                     value={newDictionaryReplacement}
-                    onChange={(event) => setNewDictionaryReplacement(event.target.value)}
+                    onChange={(event) =>
+                      setNewDictionaryReplacement(event.target.value)
+                    }
                   />
                   <input
                     type="text"
                     className="w-full p-2 border rounded-md bg-background"
                     placeholder="App scope (optional)"
                     value={newDictionaryAppScope}
-                    onChange={(event) => setNewDictionaryAppScope(event.target.value)}
+                    onChange={(event) =>
+                      setNewDictionaryAppScope(event.target.value)
+                    }
                   />
-                  <Button variant="outline" onClick={() => void handleAddDictionaryEntry()}>
+                  <Button
+                    variant="outline"
+                    onClick={() => void handleAddDictionaryEntry()}
+                  >
                     Add
                   </Button>
                 </div>
@@ -4905,7 +5783,9 @@ export function DictationView() {
                   <input
                     type="checkbox"
                     checked={newDictionaryCaseSensitive}
-                    onChange={(event) => setNewDictionaryCaseSensitive(event.target.checked)}
+                    onChange={(event) =>
+                      setNewDictionaryCaseSensitive(event.target.checked)
+                    }
                   />
                   Case-sensitive match
                 </label>
@@ -4913,7 +5793,10 @@ export function DictationView() {
                 {dictationDictionaryEntries.length > 0 && (
                   <div className="space-y-2">
                     {dictationDictionaryEntries.map((entry) => (
-                      <div key={entry.id} className="rounded-md border p-2 space-y-2">
+                      <div
+                        key={entry.id}
+                        className="rounded-md border p-2 space-y-2"
+                      >
                         <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_1fr] gap-2">
                           <input
                             type="text"
@@ -4923,9 +5806,12 @@ export function DictationView() {
                               setDictationDictionaryEntries((prev) =>
                                 prev.map((current) =>
                                   current.id === entry.id
-                                    ? { ...current, spokenForm: event.target.value }
-                                    : current
-                                )
+                                    ? {
+                                        ...current,
+                                        spokenForm: event.target.value,
+                                      }
+                                    : current,
+                                ),
                               )
                             }
                             onBlur={(event) =>
@@ -4942,9 +5828,12 @@ export function DictationView() {
                               setDictationDictionaryEntries((prev) =>
                                 prev.map((current) =>
                                   current.id === entry.id
-                                    ? { ...current, replacement: event.target.value }
-                                    : current
-                                )
+                                    ? {
+                                        ...current,
+                                        replacement: event.target.value,
+                                      }
+                                    : current,
+                                ),
                               )
                             }
                             onBlur={(event) =>
@@ -4962,9 +5851,12 @@ export function DictationView() {
                               setDictationDictionaryEntries((prev) =>
                                 prev.map((current) =>
                                   current.id === entry.id
-                                    ? { ...current, appScope: event.target.value }
-                                    : current
-                                )
+                                    ? {
+                                        ...current,
+                                        appScope: event.target.value,
+                                      }
+                                    : current,
+                                ),
                               )
                             }
                             onBlur={(event) =>
@@ -5004,7 +5896,9 @@ export function DictationView() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => void handleDeleteDictionaryEntry(entry.id)}
+                            onClick={() =>
+                              void handleDeleteDictionaryEntry(entry.id)
+                            }
                           >
                             Remove
                           </Button>
@@ -5014,16 +5908,24 @@ export function DictationView() {
                   </div>
                 )}
                 {dictionaryCsvStatus && (
-                  <p className="text-xs text-muted-foreground">{dictionaryCsvStatus}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {dictionaryCsvStatus}
+                  </p>
                 )}
                 <div className="rounded-md border bg-background/60 p-3 space-y-2">
                   <div className="flex items-center gap-2">
                     <BookOpen className="h-4 w-4 text-primary" />
-                    <p className="text-sm font-medium">Teach Nautilus your words</p>
+                    <p className="text-sm font-medium">
+                      Teach Nautilus your words
+                    </p>
                   </div>
-                  <p className="text-xs text-muted-foreground">{dictionaryCoverageSummary}</p>
                   <p className="text-xs text-muted-foreground">
-                    Use global entries for names and jargon you want everywhere. Use app scope when a replacement should only happen in a specific app.
+                    {dictionaryCoverageSummary}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Use global entries for names and jargon you want everywhere.
+                    Use app scope when a replacement should only happen in a
+                    specific app.
                   </p>
                 </div>
                 <div className="rounded-md border bg-muted/20 p-3 space-y-3">
@@ -5031,7 +5933,8 @@ export function DictationView() {
                     <div>
                       <p className="text-sm font-medium">Correction Inbox</p>
                       <p className="text-xs text-muted-foreground">
-                        Auto-learned corrections stay here until you approve them.
+                        Auto-learned corrections stay here until you approve
+                        them.
                       </p>
                     </div>
                     <div className="flex items-center gap-3">
@@ -5047,7 +5950,9 @@ export function DictationView() {
                             disabled={correctionInboxBusy}
                             onClick={() =>
                               void handleApproveCorrectionSuggestionGroup(
-                                groupedCorrectionSuggestions.flatMap((group) => group.suggestionIds)
+                                groupedCorrectionSuggestions.flatMap(
+                                  (group) => group.suggestionIds,
+                                ),
                               )
                             }
                           >
@@ -5060,7 +5965,9 @@ export function DictationView() {
                             disabled={correctionInboxBusy}
                             onClick={() =>
                               void handleRejectCorrectionSuggestionGroup(
-                                groupedCorrectionSuggestions.flatMap((group) => group.suggestionIds)
+                                groupedCorrectionSuggestions.flatMap(
+                                  (group) => group.suggestionIds,
+                                ),
                               )
                             }
                           >
@@ -5099,10 +6006,14 @@ export function DictationView() {
                                 size="sm"
                                 disabled={correctionInboxBusy}
                                 onClick={() =>
-                                  void handleApproveCorrectionSuggestionGroup(group.suggestionIds)
+                                  void handleApproveCorrectionSuggestionGroup(
+                                    group.suggestionIds,
+                                  )
                                 }
                               >
-                                {group.suggestionIds.length > 1 ? "Approve all" : "Approve"}
+                                {group.suggestionIds.length > 1
+                                  ? "Approve all"
+                                  : "Approve"}
                               </Button>
                               <Button
                                 type="button"
@@ -5110,10 +6021,14 @@ export function DictationView() {
                                 variant="outline"
                                 disabled={correctionInboxBusy}
                                 onClick={() =>
-                                  void handleRejectCorrectionSuggestionGroup(group.suggestionIds)
+                                  void handleRejectCorrectionSuggestionGroup(
+                                    group.suggestionIds,
+                                  )
                                 }
                               >
-                                {group.suggestionIds.length > 1 ? "Dismiss all" : "Dismiss"}
+                                {group.suggestionIds.length > 1
+                                  ? "Dismiss all"
+                                  : "Dismiss"}
                               </Button>
                             </div>
                           </div>
@@ -5122,13 +6037,17 @@ export function DictationView() {
                               <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                                 Heard
                               </p>
-                              <p className="mt-1 text-sm">{group.sampleOriginalText}</p>
+                              <p className="mt-1 text-sm">
+                                {group.sampleOriginalText}
+                              </p>
                             </div>
                             <div className="rounded-md bg-muted/40 px-2 py-2">
                               <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                                 Corrected
                               </p>
-                              <p className="mt-1 text-sm">{group.sampleCorrectedText}</p>
+                              <p className="mt-1 text-sm">
+                                {group.sampleCorrectedText}
+                              </p>
                             </div>
                           </div>
                         </div>
@@ -5136,21 +6055,29 @@ export function DictationView() {
                     </div>
                   ) : (
                     <p className="text-xs text-muted-foreground">
-                      No pending corrections. Auto-learned edits will appear here for review.
+                      No pending corrections. Auto-learned edits will appear
+                      here for review.
                     </p>
                   )}
                 </div>
                 <div className="rounded-md border bg-muted/20 p-3 space-y-2">
                   <p className="text-sm font-medium">Backtrack shortcuts</p>
                   <p className="text-xs text-muted-foreground">
-                    Use quick correction phrases right after an insert: <code>scratch that</code>,{" "}
-                    <code>actually ...</code>, <code>no, say ...</code>, <code>replace X with Y</code>, or{" "}
+                    Use quick correction phrases right after an insert:{" "}
+                    <code>scratch that</code>, <code>actually ...</code>,{" "}
+                    <code>no, say ...</code>, <code>replace X with Y</code>, or{" "}
                     <code>change X to Y</code>.
                   </p>
                   <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                    <span className="rounded-full border bg-background px-2 py-1">Undo last insert</span>
-                    <span className="rounded-full border bg-background px-2 py-1">Replace most recent phrase</span>
-                    <span className="rounded-full border bg-background px-2 py-1">Keep flow without touching the keyboard</span>
+                    <span className="rounded-full border bg-background px-2 py-1">
+                      Undo last insert
+                    </span>
+                    <span className="rounded-full border bg-background px-2 py-1">
+                      Replace most recent phrase
+                    </span>
+                    <span className="rounded-full border bg-background px-2 py-1">
+                      Keep flow without touching the keyboard
+                    </span>
                   </div>
                 </div>
               </div>
@@ -5170,7 +6097,9 @@ export function DictationView() {
                       onChange={(event) => {
                         const next = event.target.checked;
                         setDictationSnippetsEnabled(next);
-                        void persistDictationPreferences({ snippetsEnabled: next });
+                        void persistDictationPreferences({
+                          snippetsEnabled: next,
+                        });
                       }}
                     />
                     Enabled
@@ -5183,23 +6112,32 @@ export function DictationView() {
                     className="w-full p-2 border rounded-md bg-background"
                     placeholder="Trigger (e.g. brb)"
                     value={newSnippetTrigger}
-                    onChange={(event) => setNewSnippetTrigger(event.target.value)}
+                    onChange={(event) =>
+                      setNewSnippetTrigger(event.target.value)
+                    }
                   />
                   <input
                     type="text"
                     className="w-full p-2 border rounded-md bg-background"
                     placeholder="Expansion (e.g. be right back)"
                     value={newSnippetExpansion}
-                    onChange={(event) => setNewSnippetExpansion(event.target.value)}
+                    onChange={(event) =>
+                      setNewSnippetExpansion(event.target.value)
+                    }
                   />
                   <input
                     type="text"
                     className="w-full p-2 border rounded-md bg-background"
                     placeholder="App scope (optional)"
                     value={newSnippetAppScope}
-                    onChange={(event) => setNewSnippetAppScope(event.target.value)}
+                    onChange={(event) =>
+                      setNewSnippetAppScope(event.target.value)
+                    }
                   />
-                  <Button variant="outline" onClick={() => void handleAddSnippet()}>
+                  <Button
+                    variant="outline"
+                    onClick={() => void handleAddSnippet()}
+                  >
                     Add
                   </Button>
                 </div>
@@ -5207,7 +6145,9 @@ export function DictationView() {
                   <input
                     type="checkbox"
                     checked={newSnippetCaseSensitive}
-                    onChange={(event) => setNewSnippetCaseSensitive(event.target.checked)}
+                    onChange={(event) =>
+                      setNewSnippetCaseSensitive(event.target.checked)
+                    }
                   />
                   Case-sensitive trigger
                 </label>
@@ -5228,13 +6168,18 @@ export function DictationView() {
                               setDictationSnippets((prev) =>
                                 prev.map((current) =>
                                   current.id === snippet.id
-                                    ? { ...current, trigger: event.target.value }
-                                    : current
-                                )
+                                    ? {
+                                        ...current,
+                                        trigger: event.target.value,
+                                      }
+                                    : current,
+                                ),
                               )
                             }
                             onBlur={(event) =>
-                              void patchSnippet(snippet.id, { trigger: event.target.value.trim() })
+                              void patchSnippet(snippet.id, {
+                                trigger: event.target.value.trim(),
+                              })
                             }
                           />
                           <input
@@ -5245,13 +6190,18 @@ export function DictationView() {
                               setDictationSnippets((prev) =>
                                 prev.map((current) =>
                                   current.id === snippet.id
-                                    ? { ...current, expansion: event.target.value }
-                                    : current
-                                )
+                                    ? {
+                                        ...current,
+                                        expansion: event.target.value,
+                                      }
+                                    : current,
+                                ),
                               )
                             }
                             onBlur={(event) =>
-                              void patchSnippet(snippet.id, { expansion: event.target.value.trim() })
+                              void patchSnippet(snippet.id, {
+                                expansion: event.target.value.trim(),
+                              })
                             }
                           />
                           <input
@@ -5263,9 +6213,12 @@ export function DictationView() {
                               setDictationSnippets((prev) =>
                                 prev.map((current) =>
                                   current.id === snippet.id
-                                    ? { ...current, appScope: event.target.value }
-                                    : current
-                                )
+                                    ? {
+                                        ...current,
+                                        appScope: event.target.value,
+                                      }
+                                    : current,
+                                ),
                               )
                             }
                             onBlur={(event) =>
@@ -5319,12 +6272,14 @@ export function DictationView() {
           </Card>
         </div>
       </ScrollArea>
-      
+
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
           <DialogHeader>
             <div className="flex items-center justify-between gap-3">
-              <DialogTitle>{selectedRecording?.title ?? "Dictation"}</DialogTitle>
+              <DialogTitle>
+                {selectedRecording?.title ?? "Dictation"}
+              </DialogTitle>
               {selectedRecording && (
                 <div className="flex gap-2">
                   {selectedTranscript?.fullText?.trim() && (
@@ -5334,7 +6289,7 @@ export function DictationView() {
                       onClick={() =>
                         void toggleReadAloudPlayback(
                           selectedTranscript.fullText,
-                          `history-${selectedRecording.id}`
+                          `history-${selectedRecording.id}`,
                         )
                       }
                     >
@@ -5347,14 +6302,18 @@ export function DictationView() {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => void handleCopyHistoryTranscript(selectedRecording.id)}
+                    onClick={() =>
+                      void handleCopyHistoryTranscript(selectedRecording.id)
+                    }
                   >
                     Copy
                   </Button>
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => void handleDeleteHistoryItem(selectedRecording.id)}
+                    onClick={() =>
+                      void handleDeleteHistoryItem(selectedRecording.id)
+                    }
                   >
                     Delete
                   </Button>
@@ -5371,7 +6330,8 @@ export function DictationView() {
                   <div>
                     <p className="text-sm font-medium">Capture details</p>
                     <p className="text-xs text-muted-foreground">
-                      Inspect the original route, model, and transcript quality before reprocessing.
+                      Inspect the original route, model, and transcript quality
+                      before reprocessing.
                     </p>
                   </div>
                 </div>
@@ -5389,7 +6349,9 @@ export function DictationView() {
                       Actual engine
                     </p>
                     <p className="mt-1 text-sm font-medium">
-                      {selectedTranscript.actualProvider || selectedTranscript.requestedProvider || "Unknown"}
+                      {selectedTranscript.actualProvider ||
+                        selectedTranscript.requestedProvider ||
+                        "Unknown"}
                     </p>
                   </div>
                   <div className="rounded-md border bg-muted/30 px-3 py-2">
@@ -5397,7 +6359,9 @@ export function DictationView() {
                       Model
                     </p>
                     <p className="mt-1 text-sm font-medium">
-                      {selectedTranscript.modelId || selectedTranscript.model || "Unknown"}
+                      {selectedTranscript.modelId ||
+                        selectedTranscript.model ||
+                        "Unknown"}
                     </p>
                   </div>
                   <div className="rounded-md border bg-muted/30 px-3 py-2">
@@ -5445,7 +6409,8 @@ export function DictationView() {
                 <div>
                   <p className="text-sm font-medium">Prompt and context</p>
                   <p className="text-xs text-muted-foreground">
-                    Inspect the app context and prompt strategy Nautilus used for this dictation.
+                    Inspect the app context and prompt strategy Nautilus used
+                    for this dictation.
                   </p>
                 </div>
                 {selectedHistoryDetails ? (
@@ -5466,9 +6431,10 @@ export function DictationView() {
                         <p className="mt-1 text-sm font-medium">
                           {selectedHistoryDetails?.baseModeLabel ??
                             (selectedHistoryDetails?.baseModePreset
-                              ? modeDefinitionById[
+                              ? (modeDefinitionById[
                                   selectedHistoryDetails.baseModePreset as DictationModePreset
-                                ]?.label ?? selectedHistoryDetails.baseModePreset
+                                ]?.label ??
+                                selectedHistoryDetails.baseModePreset)
                               : "Unavailable")}
                         </p>
                       </div>
@@ -5477,7 +6443,8 @@ export function DictationView() {
                           Context source
                         </p>
                         <p className="mt-1 text-sm font-medium">
-                          {selectedHistoryDetails.contextSource ?? "Unavailable"}
+                          {selectedHistoryDetails.contextSource ??
+                            "Unavailable"}
                         </p>
                       </div>
                       <div className="rounded-md border bg-muted/30 px-3 py-2">
@@ -5509,7 +6476,9 @@ export function DictationView() {
                           Prompt strategy
                         </p>
                         <p className="mt-1 text-sm font-medium">
-                          {historyPromptSourceLabel(selectedHistoryDetails.promptSource)}
+                          {historyPromptSourceLabel(
+                            selectedHistoryDetails.promptSource,
+                          )}
                         </p>
                       </div>
                     </div>
@@ -5520,13 +6489,19 @@ export function DictationView() {
                       selectedHistoryDetails.commandApplied) && (
                       <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
                         {selectedHistoryDetails.customModeName && (
-                          <span>Custom mode: {selectedHistoryDetails.customModeName}</span>
+                          <span>
+                            Custom mode: {selectedHistoryDetails.customModeName}
+                          </span>
                         )}
                         {selectedHistoryDetails.contextAppName && (
-                          <span>Context app: {selectedHistoryDetails.contextAppName}</span>
+                          <span>
+                            Context app: {selectedHistoryDetails.contextAppName}
+                          </span>
                         )}
                         {selectedHistoryDetails.appTarget && (
-                          <span>Insert target: {selectedHistoryDetails.appTarget}</span>
+                          <span>
+                            Insert target: {selectedHistoryDetails.appTarget}
+                          </span>
                         )}
                         {selectedHistoryDetails.activationMatcher && (
                           <span>
@@ -5537,7 +6512,9 @@ export function DictationView() {
                           </span>
                         )}
                         {selectedHistoryDetails.commandApplied && (
-                          <span>Command: {selectedHistoryDetails.commandApplied}</span>
+                          <span>
+                            Command: {selectedHistoryDetails.commandApplied}
+                          </span>
                         )}
                       </div>
                     )}
@@ -5550,19 +6527,23 @@ export function DictationView() {
                         <div>
                           <p className="text-sm font-medium">Pipeline trace</p>
                           <p className="text-xs text-muted-foreground">
-                            Shows which deterministic stages changed the text before delivery.
+                            Shows which deterministic stages changed the text
+                            before delivery.
                           </p>
                         </div>
-                        {selectedHistoryDetails.pipelineStageKeys.length > 0 && (
+                        {selectedHistoryDetails.pipelineStageKeys.length >
+                          0 && (
                           <div className="flex flex-wrap gap-2">
-                            {selectedHistoryDetails.pipelineStageKeys.map((stageKey) => (
-                              <span
-                                key={stageKey}
-                                className="rounded-full border bg-background px-2 py-1 text-[11px] font-medium"
-                              >
-                                {historyPipelineStageLabel(stageKey)}
-                              </span>
-                            ))}
+                            {selectedHistoryDetails.pipelineStageKeys.map(
+                              (stageKey) => (
+                                <span
+                                  key={stageKey}
+                                  className="rounded-full border bg-background px-2 py-1 text-[11px] font-medium"
+                                >
+                                  {historyPipelineStageLabel(stageKey)}
+                                </span>
+                              ),
+                            )}
                           </div>
                         )}
                         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -5571,7 +6552,9 @@ export function DictationView() {
                               Dictionary
                             </p>
                             <p className="mt-1 text-sm font-medium">
-                              {selectedHistoryDetails.dictionaryAppliedCount ?? 0} rules
+                              {selectedHistoryDetails.dictionaryAppliedCount ??
+                                0}{" "}
+                              rules
                             </p>
                           </div>
                           <div className="rounded-md border bg-background px-3 py-2">
@@ -5579,7 +6562,8 @@ export function DictationView() {
                               Snippets
                             </p>
                             <p className="mt-1 text-sm font-medium">
-                              {selectedHistoryDetails.snippetAppliedCount ?? 0} expansions
+                              {selectedHistoryDetails.snippetAppliedCount ?? 0}{" "}
+                              expansions
                             </p>
                           </div>
                           <div className="rounded-md border bg-background px-3 py-2">
@@ -5587,7 +6571,9 @@ export function DictationView() {
                               Formatting
                             </p>
                             <p className="mt-1 text-sm font-medium">
-                              {selectedHistoryDetails.formattingApplied ? "Applied" : "Not applied"}
+                              {selectedHistoryDetails.formattingApplied
+                                ? "Applied"
+                                : "Not applied"}
                             </p>
                           </div>
                           <div className="rounded-md border bg-background px-3 py-2">
@@ -5595,7 +6581,9 @@ export function DictationView() {
                               Recent insert
                             </p>
                             <p className="mt-1 text-sm font-medium">
-                              {selectedHistoryDetails.recentInsertReused ? "Reused" : "Not reused"}
+                              {selectedHistoryDetails.recentInsertReused
+                                ? "Reused"
+                                : "Not reused"}
                             </p>
                           </div>
                         </div>
@@ -5605,10 +6593,13 @@ export function DictationView() {
                       selectedHistoryDetails.promptPreview) && (
                       <div className="grid gap-4 md:grid-cols-2">
                         <div className="space-y-2">
-                          <p className="text-sm font-medium">Captured context</p>
+                          <p className="text-sm font-medium">
+                            Captured context
+                          </p>
                           <div className="min-h-[110px] rounded-lg bg-muted p-4 text-sm">
                             <p className="whitespace-pre-wrap">
-                              {selectedHistoryDetails.contextPreview || "No saved context preview."}
+                              {selectedHistoryDetails.contextPreview ||
+                                "No saved context preview."}
                             </p>
                           </div>
                         </div>
@@ -5616,7 +6607,8 @@ export function DictationView() {
                           <p className="text-sm font-medium">Prompt preview</p>
                           <div className="min-h-[110px] rounded-lg bg-muted p-4 text-sm">
                             <p className="whitespace-pre-wrap">
-                              {selectedHistoryDetails.promptPreview || "Using the standard prompt for this path."}
+                              {selectedHistoryDetails.promptPreview ||
+                                "Using the standard prompt for this path."}
                             </p>
                           </div>
                         </div>
@@ -5625,8 +6617,8 @@ export function DictationView() {
                   </div>
                 ) : (
                   <p className="mt-4 text-sm text-muted-foreground">
-                    Prompt/context inspection is available for newer dictations saved after this
-                    update.
+                    Prompt/context inspection is available for newer dictations
+                    saved after this update.
                   </p>
                 )}
               </div>
@@ -5634,21 +6626,25 @@ export function DictationView() {
               <div className="rounded-lg border p-4 space-y-3">
                 <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
                   <div className="space-y-2">
-                    <label className="text-sm font-medium">Reprocess with mode</label>
+                    <label className="text-sm font-medium">
+                      Reprocess with mode
+                    </label>
                     <select
                       className="w-full min-w-[220px] rounded-md border bg-background p-2 text-sm"
                       value={reprocessModePreset}
                       onChange={(event) =>
-                        setReprocessModePreset(event.target.value as DictationModePreset)
+                        setReprocessModePreset(
+                          event.target.value as DictationModePreset,
+                        )
                       }
                     >
-                      {DICTATION_MODE_DEFINITIONS.filter((mode) => mode.id !== "custom").map(
-                        (mode) => (
-                          <option key={mode.id} value={mode.id}>
-                            {mode.label}
-                          </option>
-                        )
-                      )}
+                      {DICTATION_MODE_DEFINITIONS.filter(
+                        (mode) => mode.id !== "custom",
+                      ).map((mode) => (
+                        <option key={mode.id} value={mode.id}>
+                          {mode.label}
+                        </option>
+                      ))}
                     </select>
                   </div>
                   <div className="flex gap-2">
@@ -5665,7 +6661,7 @@ export function DictationView() {
                         onClick={() => {
                           setTranscribedText(reprocessedResult.outputText);
                           setPasteStatus(
-                            `Reprocessed with ${modeDefinitionById[reprocessedResult.modePreset as DictationModePreset]?.label ?? reprocessedResult.modePreset}`
+                            `Reprocessed with ${modeDefinitionById[reprocessedResult.modePreset as DictationModePreset]?.label ?? reprocessedResult.modePreset}`,
                           );
                         }}
                       >
@@ -5675,7 +6671,8 @@ export function DictationView() {
                   </div>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Compare the saved transcript with a mode-tuned result before you copy or reuse it.
+                  Compare the saved transcript with a mode-tuned result before
+                  you copy or reuse it.
                 </p>
                 {reprocessError && (
                   <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -5693,7 +6690,9 @@ export function DictationView() {
                     {selectedTranscript.requestedProvider || "Default route"}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {selectedTranscript.modelId || selectedTranscript.model || "Unknown model"}
+                    {selectedTranscript.modelId ||
+                      selectedTranscript.model ||
+                      "Unknown model"}
                   </p>
                 </div>
                 <div className="rounded-lg border bg-muted/20 p-3">
@@ -5702,9 +6701,11 @@ export function DictationView() {
                   </p>
                   <p className="mt-1 text-sm font-medium">
                     {reprocessedResult
-                      ? modeDefinitionById[reprocessedResult.modePreset as DictationModePreset]?.label ??
-                        reprocessedResult.modePreset
-                      : modeDefinitionById[reprocessModePreset]?.label ?? reprocessModePreset}
+                      ? (modeDefinitionById[
+                          reprocessedResult.modePreset as DictationModePreset
+                        ]?.label ?? reprocessedResult.modePreset)
+                      : (modeDefinitionById[reprocessModePreset]?.label ??
+                        reprocessModePreset)}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {reprocessedResult
@@ -5719,10 +6720,13 @@ export function DictationView() {
                     Compare
                   </p>
                   <p className="mt-1 text-sm font-medium">
-                    {reprocessedResult ? "Before and after" : "Raw transcript only"}
+                    {reprocessedResult
+                      ? "Before and after"
+                      : "Raw transcript only"}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Judge what Nautilus heard versus what you want to paste or save.
+                    Judge what Nautilus heard versus what you want to paste or
+                    save.
                   </p>
                 </div>
               </div>
@@ -5733,34 +6737,45 @@ export function DictationView() {
                     <div>
                       <p className="text-sm font-medium">What Nautilus heard</p>
                       <p className="text-xs text-muted-foreground">
-                        The saved raw transcript from the original capture. Edit it to teach
-                        Nautilus a correction.
+                        The saved raw transcript from the original capture. Edit
+                        it to teach Nautilus a correction.
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => navigator.clipboard.writeText(historyCorrectionText)}
+                        onClick={() =>
+                          navigator.clipboard.writeText(historyCorrectionText)
+                        }
                       >
                         Copy
                       </Button>
                       <Button
                         variant="ghost"
                         size="sm"
-                        disabled={historyCorrectionBaseline.trim() === historyCorrectionText.trim()}
+                        disabled={
+                          historyCorrectionBaseline.trim() ===
+                          historyCorrectionText.trim()
+                        }
                         onClick={() =>
-                          void learnCorrection(historyCorrectionBaseline, historyCorrectionText, {
-                            force: true,
-                            appTarget:
-                              selectedHistoryDetails?.activationMatcher ??
-                              selectedHistoryDetails?.appTarget ??
-                              selectedHistoryDetails?.contextAppName ??
-                              null,
-                            setStatus: setHistoryLearnStatus,
-                            onSuccess: () =>
-                              setHistoryCorrectionBaseline(historyCorrectionText.trim()),
-                          })
+                          void learnCorrection(
+                            historyCorrectionBaseline,
+                            historyCorrectionText,
+                            {
+                              force: true,
+                              appTarget:
+                                selectedHistoryDetails?.activationMatcher ??
+                                selectedHistoryDetails?.appTarget ??
+                                selectedHistoryDetails?.contextAppName ??
+                                null,
+                              setStatus: setHistoryLearnStatus,
+                              onSuccess: () =>
+                                setHistoryCorrectionBaseline(
+                                  historyCorrectionText.trim(),
+                                ),
+                            },
+                          )
                         }
                       >
                         Learn correction
@@ -5771,7 +6786,9 @@ export function DictationView() {
                     <textarea
                       className="min-h-[180px] w-full resize-y bg-transparent text-sm outline-none"
                       value={historyCorrectionText}
-                      onChange={(event) => setHistoryCorrectionText(event.target.value)}
+                      onChange={(event) =>
+                        setHistoryCorrectionText(event.target.value)
+                      }
                       onBlur={() => {
                         void maybeAutoLearnHistoryCorrection();
                       }}
@@ -5788,14 +6805,19 @@ export function DictationView() {
                     <div>
                       <p className="text-sm font-medium">Ready to use</p>
                       <p className="text-xs text-muted-foreground">
-                        A mode-shaped result for paste, clipboard, or follow-up writing.
+                        A mode-shaped result for paste, clipboard, or follow-up
+                        writing.
                       </p>
                     </div>
                     {reprocessedResult?.outputText && (
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => navigator.clipboard.writeText(reprocessedResult.outputText)}
+                        onClick={() =>
+                          navigator.clipboard.writeText(
+                            reprocessedResult.outputText,
+                          )
+                        }
                       >
                         Copy
                       </Button>
@@ -5808,21 +6830,36 @@ export function DictationView() {
                       </p>
                     ) : (
                       <p className="text-sm text-muted-foreground">
-                        Pick a mode and run Reprocess to preview an alternate result.
+                        Pick a mode and run Reprocess to preview an alternate
+                        result.
                       </p>
                     )}
                   </div>
                 </div>
               </div>
               <div className="rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
-                Duration: {selectedRecording ? formatRecordingDuration(selectedRecording.duration) : "N/A"} · 
-                Created: {selectedRecording ? new Date(selectedRecording.createdAt).toLocaleString() : "N/A"}
+                Duration:{" "}
+                {selectedRecording
+                  ? formatRecordingDuration(selectedRecording.duration)
+                  : "N/A"}{" "}
+                · Created:{" "}
+                {selectedRecording
+                  ? new Date(selectedRecording.createdAt).toLocaleString()
+                  : "N/A"}
                 {reprocessedResult && (
                   <>
-                    {" "}· Final mode: {modeDefinitionById[reprocessedResult.modePreset as DictationModePreset]?.label ?? reprocessedResult.modePreset}
-                    {" "}· {reprocessedResult.usedAi ? "AI tuned" : "Rule based"}
-                    {reprocessedResult.provider ? ` · Final engine: ${reprocessedResult.provider}` : ""}
-                    {reprocessedResult.modelId ? ` · Final model: ${reprocessedResult.modelId}` : ""}
+                    {" "}
+                    · Final mode:{" "}
+                    {modeDefinitionById[
+                      reprocessedResult.modePreset as DictationModePreset
+                    ]?.label ?? reprocessedResult.modePreset}{" "}
+                    · {reprocessedResult.usedAi ? "AI tuned" : "Rule based"}
+                    {reprocessedResult.provider
+                      ? ` · Final engine: ${reprocessedResult.provider}`
+                      : ""}
+                    {reprocessedResult.modelId
+                      ? ` · Final model: ${reprocessedResult.modelId}`
+                      : ""}
                   </>
                 )}
               </div>
@@ -5834,11 +6871,16 @@ export function DictationView() {
           )}
         </DialogContent>
       </Dialog>
-      <Dialog open={dictionaryCsvDialogOpen} onOpenChange={setDictionaryCsvDialogOpen}>
+      <Dialog
+        open={dictionaryCsvDialogOpen}
+        onOpenChange={setDictionaryCsvDialogOpen}
+      >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>
-              {dictionaryCsvMode === "import" ? "Import Dictionary CSV" : "Export Dictionary CSV"}
+              {dictionaryCsvMode === "import"
+                ? "Import Dictionary CSV"
+                : "Export Dictionary CSV"}
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
@@ -5868,7 +6910,11 @@ export function DictationView() {
             ) : null}
             <div className="flex flex-wrap justify-end gap-2">
               {dictionaryCsvMode === "export" ? (
-                <Button type="button" variant="outline" onClick={() => void handleCopyDictionaryCsv()}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void handleCopyDictionaryCsv()}
+                >
                   <Copy className="mr-2 h-4 w-4" />
                   Copy CSV
                 </Button>
