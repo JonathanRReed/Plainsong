@@ -97,7 +97,8 @@ export type AsrProviderType =
   | "windows_sdk_dictation"
   | "elevenlabs_scribe"
   | "openai_cloud"
-  | "groq";
+  | "groq"
+  | "cohere_transcribe";
 
 // LLM Types
 export interface LlmAnalysisResult {

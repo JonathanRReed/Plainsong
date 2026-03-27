@@ -42,6 +42,7 @@ const CLOUD_MEETING_DEFAULTS: AsrProviderType[] = [
   "elevenlabs_scribe",
   "openai_cloud",
   "groq",
+  "cohere_transcribe",
 ];
 
 function normalizeMeetingRoutePolicy(

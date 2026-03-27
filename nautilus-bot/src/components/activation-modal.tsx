@@ -2,6 +2,16 @@ import { useState } from "react";
 import { Shield, ExternalLink, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { activateLicense } from "@/lib/tauri";
 import type { LicenseInfo } from "@/lib/tauri";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from "@/components/ui/dialog";
 
 const BUY_PRO_URL = "https://nautilusbot.lemonsqueezy.com/buy/pro";
 const BUY_FRIENDS_URL = "https://nautilusbot.lemonsqueezy.com/buy/friends-club";
@@ -39,39 +49,30 @@ export function ActivationModal({ onActivated, onCancel, overlay = true }: Props
         }
     };
 
-    const card = (
-        <div className="relative flex w-full max-w-md flex-col items-center gap-6 rounded-2xl border border-border bg-card p-10 shadow-2xl">
+    const cardContent = (
+        <>
             <div className="pointer-events-none absolute inset-0 rounded-2xl bg-[radial-gradient(ellipse_80%_50%_at_50%_-10%,hsl(var(--primary)/0.12),transparent)]" />
 
-            {/* Icon + heading */}
-            <div className="flex flex-col items-center gap-3 text-center">
+            <DialogHeader className="items-center text-center">
                 <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 ring-1 ring-primary/20">
                     <Shield className="h-7 w-7 text-primary" />
                 </div>
-                <div>
-                    <h2 className="text-2xl font-semibold tracking-tight">Activate Nautilus</h2>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                        Paste the key from your Lemon Squeezy receipt.
-                    </p>
-                </div>
-            </div>
+                <DialogTitle className="text-2xl">Activate Nautilus</DialogTitle>
+                <DialogDescription>
+                    Paste the key from your Lemon Squeezy receipt.
+                </DialogDescription>
+            </DialogHeader>
 
-            {/* Key input */}
             <div className="w-full space-y-3">
-                <input
+                <Input
                     id="license-key-input"
-                    type="text"
                     value={keyInput}
                     onChange={(e) => { setError(null); setKeyInput(e.target.value.trim()); }}
                     onKeyDown={(e) => { if (e.key === "Enter") void handleActivate(); }}
                     placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                     spellCheck={false}
                     autoComplete="off"
-                    className={`
-            w-full rounded-lg border bg-background px-4 py-3 font-mono text-sm
-            placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2
-            ${error ? "border-destructive focus:ring-destructive/30" : "border-input focus:ring-primary/30"}
-          `}
+                    className={`h-12 font-mono ${error ? "border-destructive focus-visible:ring-destructive/30" : ""}`}
                     aria-label="License key"
                     aria-invalid={!!error}
                 />
@@ -89,58 +90,69 @@ export function ActivationModal({ onActivated, onCancel, overlay = true }: Props
                 )}
             </div>
 
-            {/* Actions */}
             <div className="flex w-full flex-col gap-2">
-                <button
+                <Button
                     id="activate-btn"
-                    type="button"
+                    size="lg"
                     onClick={() => void handleActivate()}
                     disabled={loading || success}
-                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-60"
+                    className="w-full"
                 >
-                    {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-                    {success && <CheckCircle2 className="h-4 w-4" />}
+                    {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                    {success && <CheckCircle2 className="mr-2 h-4 w-4" />}
                     {loading ? "Activating…" : success ? "Activated!" : "Activate License"}
-                </button>
+                </Button>
 
                 <div className="grid grid-cols-2 gap-2">
-                    <button
+                    <Button
                         id="buy-basic-btn"
-                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="text-xs"
                         onClick={() => window.open(BUY_PRO_URL, "_blank", "noopener,noreferrer")}
-                        className="flex items-center justify-center gap-1.5 rounded-lg border border-border px-3 py-2.5 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
                     >
-                        <ExternalLink className="h-3.5 w-3.5" />
+                        <ExternalLink className="mr-1 h-3.5 w-3.5" />
                         Buy Pro
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                         id="buy-friends-btn"
-                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="border-amber-300/60 bg-amber-50/50 text-xs text-amber-700 hover:bg-amber-50 dark:border-amber-700/40 dark:bg-amber-950/20 dark:text-amber-400"
                         onClick={() => window.open(BUY_FRIENDS_URL, "_blank", "noopener,noreferrer")}
-                        className="flex items-center justify-center gap-1.5 rounded-lg border border-amber-300/60 bg-amber-50/50 px-3 py-2.5 text-xs text-amber-700 transition-colors hover:bg-amber-50 dark:border-amber-700/40 dark:bg-amber-950/20 dark:text-amber-400"
                     >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                        Friends Club ⭐
-                    </button>
+                        <ExternalLink className="mr-1 h-3.5 w-3.5" />
+                        Friends Club
+                    </Button>
                 </div>
             </div>
 
-            <div className="flex w-full items-center justify-between text-xs text-muted-foreground/60">
-                <span>1 user · up to 5 computers · lifetime</span>
+            <DialogFooter className="w-full justify-between sm:justify-between">
+                <span className="text-xs text-muted-foreground/60">
+                    1 user · up to 5 computers · lifetime
+                </span>
                 {onCancel && (
-                    <button type="button" onClick={onCancel} className="hover:text-foreground">
+                    <Button variant="ghost" size="sm" className="text-xs" onClick={onCancel}>
                         Cancel
-                    </button>
+                    </Button>
                 )}
-            </div>
-        </div>
+            </DialogFooter>
+        </>
     );
 
-    if (!overlay) return card;
+    if (!overlay) {
+        return (
+            <div className="relative flex w-full max-w-md flex-col items-center gap-6 rounded-2xl border border-border bg-card p-10 shadow-2xl">
+                {cardContent}
+            </div>
+        );
+    }
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
-            {card}
-        </div>
+        <Dialog open onOpenChange={(open) => { if (!open) onCancel?.(); }}>
+            <DialogContent className="max-w-md items-center gap-6 p-10">
+                {cardContent}
+            </DialogContent>
+        </Dialog>
     );
 }

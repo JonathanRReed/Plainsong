@@ -40,6 +40,15 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import type {
   AsrBenchmarkEntry,
   PlatformOptimizationSettings,
@@ -624,6 +633,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         "openai_cloud",
         "elevenlabs_scribe",
         "groq",
+        "cohere_transcribe",
         "parakeet",
         "voxtral",
       ];
@@ -636,6 +646,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             "openai_cloud",
             "elevenlabs_scribe",
             "groq",
+            "cohere_transcribe",
             "distil_whisper",
             "parakeet",
             "voxtral",
@@ -647,6 +658,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             "openai_cloud",
             "elevenlabs_scribe",
             "groq",
+            "cohere_transcribe",
           ] as AsrProviderType[]);
     return ordered.indexOf(providerType);
   };
@@ -868,6 +880,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         return <Mic className="h-5 w-5" />;
       case "openai_cloud":
       case "elevenlabs_scribe":
+      case "cohere_transcribe":
         return <CloudLightning className="h-5 w-5" />;
       default:
         return <Cpu className="h-5 w-5" />;
@@ -960,6 +973,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         return "Add an ElevenLabs API key in Settings → API Keys";
       case "openai_cloud":
         return "Add an OpenAI API key in Settings → API Keys";
+      case "cohere_transcribe":
+        return "Add a Cohere API key in Settings → API Keys";
       default:
         return "Use the Download button to fetch the model (no Python needed)";
     }
@@ -1156,30 +1171,33 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   ) => {
     if (providerUsesManagedModel(providerType)) {
       return (
-        <label className="space-y-1 text-sm">
-          <span className="text-muted-foreground">{label}</span>
+        <div className="space-y-1.5">
+          <Label className="text-sm text-muted-foreground">{label}</Label>
           <div className="w-full rounded-md border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
             {managedModelLabel(providerType)}
           </div>
-        </label>
+        </div>
       );
     }
 
+    const resolvedOptions = options ?? modelOptionsForProvider(providerType);
+
     return (
-      <label className="space-y-1 text-sm">
-        <span className="text-muted-foreground">{label}</span>
-        <select
-          className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-        >
-          {(options ?? modelOptionsForProvider(providerType)).map((option) => (
-            <option key={`${label}-${option.id}`} value={option.id}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="space-y-1.5">
+        <Label className="text-sm text-muted-foreground">{label}</Label>
+        <Select value={value} onValueChange={onChange}>
+          <SelectTrigger className="w-full">
+            <SelectValue placeholder="Select model" />
+          </SelectTrigger>
+          <SelectContent>
+            {resolvedOptions.map((option) => (
+              <SelectItem key={`${label}-${option.id}`} value={option.id}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
     );
   };
 
@@ -1201,9 +1219,9 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     const globalMlxEnabled = platformSettings?.macos.mlxEnabled ?? true;
 
     return (
-      <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+      <div className="flex items-center justify-between rounded-md border px-3 py-2.5">
         <div className="space-y-1 pr-3">
-          <span className="font-medium">Use MLX route</span>
+          <Label className="text-sm font-medium">Use MLX route</Label>
           <p className="text-xs text-muted-foreground">
             Run this compatible local model through `mlx-audio` on Apple
             Silicon.
@@ -1212,11 +1230,9 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               : ""}
           </p>
         </div>
-        <input
-          type="checkbox"
+        <Switch
           checked={checked}
-          onChange={(event) => {
-            const enabled = event.target.checked;
+          onCheckedChange={(enabled) => {
             const update =
               slot === "shared"
                 ? { dictationMlxEnabled: enabled, meetingMlxEnabled: enabled }
@@ -1231,7 +1247,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             });
           }}
         />
-      </label>
+      </div>
     );
   };
 
@@ -1937,24 +1953,25 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             )}
 
           <div className="space-y-2">
-            <p className="text-xs text-muted-foreground">Model</p>
+            <Label className="text-xs text-muted-foreground">Model</Label>
             {modelOptions.length > 1 ? (
-              <select
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              <Select
                 value={selectedModelId}
-                onChange={(event) => {
-                  void handleModelChange(
-                    provider.providerType,
-                    event.target.value,
-                  );
+                onValueChange={(value) => {
+                  void handleModelChange(provider.providerType, value);
                 }}
               >
-                {modelOptions.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Select model" />
+                </SelectTrigger>
+                <SelectContent>
+                  {modelOptions.map((option) => (
+                    <SelectItem key={option.id} value={option.id}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             ) : (
               <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
                 {(modelOptions[0]?.label ?? selectedModelId) || "Default model"}
@@ -2201,16 +2218,15 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                   </p>
                 </div>
 
-                <label className="space-y-1 rounded-xl border bg-background/70 p-4 text-sm">
-                  <span className="text-muted-foreground">
+                <div className="space-y-1.5 rounded-xl border bg-background/70 p-4">
+                  <Label className="text-sm text-muted-foreground">
                     Meeting quality policy
-                  </span>
-                  <select
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                  </Label>
+                  <Select
                     value={meetingRoutePolicy}
-                    onChange={(event) => {
+                    onValueChange={(value) => {
                       void persistSelectionSettings({
-                        meetingRoutePolicy: event.target.value as
+                        meetingRoutePolicy: value as
                           | "prefer_local"
                           | "best_available",
                       }).catch((error) => {
@@ -2221,14 +2237,19 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                       });
                     }}
                   >
-                    <option value="prefer_local">Prefer local</option>
-                    <option value="best_available">Best available</option>
-                  </select>
+                    <SelectTrigger className="w-full" aria-label="Meeting quality policy">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="prefer_local">Prefer local</SelectItem>
+                      <SelectItem value="best_available">Best available</SelectItem>
+                    </SelectContent>
+                  </Select>
                   <p className="text-xs text-muted-foreground">
                     Controls how aggressively meetings favor cloud routes over
                     strong local ones.
                   </p>
-                </label>
+                </div>
               </div>
 
               {inventory.length === 0 && isLoading ? (
@@ -2412,36 +2433,39 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="grid gap-3 md:grid-cols-2">
-                  <label className="space-y-1 text-sm">
-                    <span className="text-muted-foreground">Mode</span>
-                    <select
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                  <div className="space-y-1.5">
+                    <Label className="text-sm text-muted-foreground">Mode</Label>
+                    <Select
                       value={platformSettings.mode}
                       disabled={platformSaveBusy}
-                      onChange={(event) => {
+                      onValueChange={(value) => {
                         const next: PlatformOptimizationSettings = {
                           ...platformSettings,
-                          mode: event.target.value as "auto" | "manual",
+                          mode: value as "auto" | "manual",
                         };
                         void persistPlatformSettings(next);
                       }}
                     >
-                      <option value="auto">Auto</option>
-                      <option value="manual">Manual</option>
-                    </select>
-                  </label>
-                  <label className="space-y-1 text-sm">
-                    <span className="text-muted-foreground">
+                      <SelectTrigger className="w-full" aria-label="Mode">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">Auto</SelectItem>
+                        <SelectItem value="manual">Manual</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-sm text-muted-foreground">
                       Fallback policy
-                    </span>
-                    <select
-                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    </Label>
+                    <Select
                       value={platformSettings.fallbackPolicy}
                       disabled={platformSaveBusy}
-                      onChange={(event) => {
+                      onValueChange={(value) => {
                         const next: PlatformOptimizationSettings = {
                           ...platformSettings,
-                          fallbackPolicy: event.target.value as
+                          fallbackPolicy: value as
                             | "local_only"
                             | "allow_cloud"
                             | "fail_fast",
@@ -2449,50 +2473,53 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                         void persistPlatformSettings(next);
                       }}
                     >
-                      <option value="local_only">Local only</option>
-                      <option value="allow_cloud">Allow cloud</option>
-                      <option value="fail_fast">Fail fast</option>
-                    </select>
-                  </label>
+                      <SelectTrigger className="w-full" aria-label="Fallback policy">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="local_only">Local only</SelectItem>
+                        <SelectItem value="allow_cloud">Allow cloud</SelectItem>
+                        <SelectItem value="fail_fast">Fail fast</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
 
                 <div className="grid gap-3 md:grid-cols-2">
-                  <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
-                    <span>Allow MLX acceleration routes</span>
-                    <input
-                      type="checkbox"
+                  <div className="flex items-center justify-between rounded-md border px-3 py-2.5">
+                    <Label className="text-sm">Allow MLX acceleration routes</Label>
+                    <Switch
                       checked={platformSettings.macos.mlxEnabled}
                       disabled={platformSaveBusy}
-                      onChange={(event) => {
+                      onCheckedChange={(checked) => {
                         const next: PlatformOptimizationSettings = {
                           ...platformSettings,
                           macos: {
                             ...platformSettings.macos,
-                            mlxEnabled: event.target.checked,
+                            mlxEnabled: checked,
                           },
                         };
                         void persistPlatformSettings(next);
                       }}
                     />
-                  </label>
-                  <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
-                    <span>Windows Foundry Local</span>
-                    <input
-                      type="checkbox"
+                  </div>
+                  <div className="flex items-center justify-between rounded-md border px-3 py-2.5">
+                    <Label className="text-sm">Windows Foundry Local</Label>
+                    <Switch
                       checked={platformSettings.windows.foundryEnabled}
                       disabled={platformSaveBusy}
-                      onChange={(event) => {
+                      onCheckedChange={(checked) => {
                         const next: PlatformOptimizationSettings = {
                           ...platformSettings,
                           windows: {
                             ...platformSettings.windows,
-                            foundryEnabled: event.target.checked,
+                            foundryEnabled: checked,
                           },
                         };
                         void persistPlatformSettings(next);
                       }}
                     />
-                  </label>
+                  </div>
                 </div>
 
                 {platformSettings.mode === "manual" ? (
@@ -2511,15 +2538,14 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                           key={`${engineId}-${index}`}
                           className="flex flex-wrap items-center gap-2"
                         >
-                          <select
-                            className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2 text-sm"
+                          <Select
                             value={engineId}
                             disabled={platformSaveBusy}
-                            onChange={(event) => {
+                            onValueChange={(value) => {
                               const nextPriority = [
                                 ...platformSettings.manualEnginePriority,
                               ];
-                              nextPriority[index] = event.target.value;
+                              nextPriority[index] = value;
                               const next: PlatformOptimizationSettings = {
                                 ...platformSettings,
                                 manualEnginePriority: nextPriority,
@@ -2527,20 +2553,25 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                               void persistPlatformSettings(next);
                             }}
                           >
-                            {manualEngineOptions
-                              .filter(
-                                (option) =>
-                                  option.value === engineId ||
-                                  !platformSettings.manualEnginePriority.includes(
-                                    option.value,
-                                  ),
-                              )
-                              .map((option) => (
-                                <option key={option.value} value={option.value}>
-                                  {option.label}
-                                </option>
-                              ))}
-                          </select>
+                            <SelectTrigger className="min-w-0 flex-1" aria-label={`Engine priority ${index + 1}`}>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {manualEngineOptions
+                                .filter(
+                                  (option) =>
+                                    option.value === engineId ||
+                                    !platformSettings.manualEnginePriority.includes(
+                                      option.value,
+                                    ),
+                                )
+                                .map((option) => (
+                                  <SelectItem key={option.value} value={option.value}>
+                                    {option.label}
+                                  </SelectItem>
+                                ))}
+                            </SelectContent>
+                          </Select>
                           <Button
                             size="sm"
                             variant="outline"

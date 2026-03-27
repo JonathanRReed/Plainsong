@@ -27,6 +27,7 @@ import {
   MEETING_CONSENT_NOTICE_TEXT,
 } from "@/lib/meeting-consent";
 import { getMeetingTemplateOption } from "@/lib/meeting-templates";
+import { AudioWaveform } from "@/components/ui/audio-waveform";
 
 interface MeetingRecordingStateChangedEvent {
   phase: "idle" | "recording" | "transcribing" | "error";
@@ -48,46 +49,6 @@ interface RecordingTranscriptionStreamEvent {
 }
 
 type DisplayMode = "full" | "compact" | "minimal";
-
-function MeetingWaveStrip({
-  levels,
-  compact = false,
-}: {
-  levels: number[];
-  compact?: boolean;
-}) {
-  const bars = levels.length
-    ? levels
-    : compact
-      ? [0.18, 0.34, 0.52, 0.66, 0.52, 0.34, 0.18]
-      : [0.14, 0.22, 0.34, 0.48, 0.64, 0.82, 0.64, 0.48, 0.34, 0.22, 0.14];
-
-  return (
-    <div
-      className={`relative flex items-center gap-1 ${compact ? "h-[18px]" : "h-8"}`}
-      aria-hidden="true"
-    >
-      <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-white/10" />
-      {bars.map((level, index) => {
-        const normalized = Math.max(0.14, Math.min(1, level));
-        return (
-          <div
-            key={`meeting-wave-${index}`}
-            className="flex h-full items-center"
-          >
-            <span
-              className={`${compact ? "w-1" : "w-1.5"} rounded-full bg-white/80 transition-[height,opacity] duration-150`}
-              style={{
-                height: `${(compact ? 4 : 6) + normalized * (compact ? 10 : 18)}px`,
-                opacity: 0.24 + normalized * 0.76,
-              }}
-            />
-          </div>
-        );
-      })}
-    </div>
-  );
-}
 
 export function RecordingPopup() {
   const window = getCurrentWindow();
@@ -454,14 +415,20 @@ export function RecordingPopup() {
         }}
       >
         <div className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/92 px-3 py-2 text-white shadow-[0_20px_60px_rgba(2,6,23,0.45)] backdrop-blur-md">
-          <div className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/[0.08] text-slate-100">
+          <div className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/8 text-slate-100">
             {isTranscribing ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <Mic className="h-3.5 w-3.5" />
             )}
           </div>
-          <MeetingWaveStrip levels={levels} compact />
+          <AudioWaveform
+            levels={levels.length ? levels : undefined}
+            active={!isTranscribing}
+            size="sm"
+            barCount={9}
+            barColor="white"
+          />
           <span className="text-xs font-medium uppercase tracking-[0.18em]">
             {isTranscribing ? "Processing" : captureModeLabel}
           </span>
@@ -512,7 +479,7 @@ export function RecordingPopup() {
             void window.startDragging();
           }}
         >
-          <div className="inline-flex h-6 items-center gap-1 rounded-full border border-white/8 bg-white/[0.03] px-2 text-slate-400">
+          <div className="inline-flex h-6 items-center gap-1 rounded-full border border-white/8 bg-white/3 px-2 text-slate-400">
             <GripHorizontal className="h-3 w-3" />
           </div>
           <div className="inline-flex items-center gap-1">
@@ -553,7 +520,7 @@ export function RecordingPopup() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-slate-100">
+          <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-slate-100">
             {isTranscribing ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
@@ -573,13 +540,13 @@ export function RecordingPopup() {
             Template: {meetingTemplateLabel}
           </span>
           {consentStatus.tracked ? (
-            <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium text-slate-100">
+            <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-slate-100">
               <CheckCircle2 className="h-3.5 w-3.5" />
               {consentStatus.label}
             </span>
           ) : null}
           {transcriptionPreview.trim() ? (
-            <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] font-medium text-slate-100">
+            <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-medium text-slate-100">
               <CheckCircle2 className="h-3.5 w-3.5" />
               Live transcript preview
             </span>
@@ -591,8 +558,15 @@ export function RecordingPopup() {
         >
           <div className="flex items-center gap-3">
             {displayMode === "full" && (
-              <div className="flex h-14 items-center rounded-2xl border border-white/10 bg-white/[0.04] px-3">
-                <MeetingWaveStrip levels={waveformBars} />
+              <div className="flex h-14 items-center rounded-2xl border border-white/10 bg-white/4 px-3">
+                <AudioWaveform
+                  levels={waveformBars}
+                  active={!isTranscribing}
+                  size="lg"
+                  barColor="white"
+                  glow
+                  glowColor="rgba(147,197,253,0.4)"
+                />
               </div>
             )}
             <div>
@@ -611,7 +585,7 @@ export function RecordingPopup() {
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="rounded-2xl border border-white/10 bg-white/[0.05] px-3 py-2 text-right">
+            <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-right">
               <p className="text-[10px] uppercase tracking-[0.18em] text-slate-400">
                 {isTranscribing ? "Status" : "Elapsed"}
               </p>
@@ -672,7 +646,7 @@ export function RecordingPopup() {
               {copiedNotice ? <span>Copied.</span> : null}
             </div>
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1.05fr)_minmax(220px,0.95fr)]">
-              <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+              <div className="rounded-2xl border border-white/10 bg-white/4 p-3">
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
                     Live notes
@@ -689,7 +663,7 @@ export function RecordingPopup() {
                   className="min-h-[176px] w-full resize-none rounded-xl border border-white/10 bg-slate-950/70 px-3 py-3 text-sm leading-6 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-white/20"
                 />
               </div>
-              <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+              <div className="rounded-2xl border border-white/10 bg-white/4 p-3">
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
                     Transcript preview
@@ -747,7 +721,7 @@ export function RecordingPopup() {
                 </button>
               </div>
             </div>
-            <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+            <div className="rounded-2xl border border-white/10 bg-white/4 p-3">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
                   Notes snapshot
@@ -758,7 +732,7 @@ export function RecordingPopup() {
                 {notesSummary}
               </p>
             </div>
-            <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+            <div className="rounded-2xl border border-white/10 bg-white/4 p-3">
               <div className="mb-2 flex items-center justify-between">
                 <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
                   Transcript preview

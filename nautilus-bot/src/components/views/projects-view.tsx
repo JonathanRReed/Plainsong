@@ -41,10 +41,10 @@ export function ProjectsView() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="p-6 border-b flex items-center justify-between">
+      <div className="border-b px-6 py-5 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Projects</h1>
-          <p className="text-muted-foreground">Organize recordings and personal libraries</p>
+          <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
+          <p className="mt-1 text-sm text-muted-foreground">Organize recordings and personal libraries</p>
         </div>
         <Button onClick={() => setShowNewProject(true)}>
           <Plus className="h-4 w-4 mr-2" />
@@ -71,14 +71,16 @@ export function ProjectsView() {
           ) : null}
 
           {!isLoading && !error && projects.length === 0 ? (
-            <div className="text-center py-12">
-              <Folder className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+            <div className="flex flex-col items-center justify-center py-20 text-center">
+              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-muted/50 mb-4">
+                <Folder className="h-8 w-8 text-muted-foreground" />
+              </div>
               <h3 className="text-lg font-medium">No projects yet</h3>
-              <p className="text-muted-foreground mt-1">
-                Create your first project to organize recordings.
+              <p className="mt-1 text-sm text-muted-foreground max-w-xs">
+                Create your first project to organize recordings and keep work separated.
               </p>
-              <Button className="mt-4" onClick={() => setShowNewProject(true)}>
-                <Plus className="h-4 w-4 mr-2" />
+              <Button className="mt-5" onClick={() => setShowNewProject(true)}>
+                <Plus className="mr-2 h-4 w-4" />
                 Create Project
               </Button>
             </div>
@@ -89,7 +91,7 @@ export function ProjectsView() {
               {projects.map((project) => (
                 <Card
                   key={project.id}
-                  className="cursor-pointer hover:border-trusted transition-colors"
+                  className="cursor-pointer transition-all hover:border-primary/30 hover:shadow-sm"
                 >
                   <CardHeader className="pb-3">
                     <div className="flex items-start justify-between">

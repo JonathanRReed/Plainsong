@@ -1,4 +1,5 @@
 pub mod canary;
+pub mod cohere;
 pub mod distil_whisper;
 pub mod elevenlabs_scribe;
 pub mod groq;
@@ -110,6 +111,7 @@ pub enum AsrProviderType {
     ElevenLabsScribe,
     OpenAiCloud,
     Groq,
+    CohereTranscribe,
 }
 
 impl AsrProviderType {
@@ -127,6 +129,7 @@ impl AsrProviderType {
             AsrProviderType::ElevenLabsScribe,
             AsrProviderType::OpenAiCloud,
             AsrProviderType::Groq,
+            AsrProviderType::CohereTranscribe,
         ]
     }
 
@@ -145,6 +148,7 @@ impl AsrProviderType {
             AsrProviderType::ElevenLabsScribe => "ElevenLabs Scribe",
             AsrProviderType::OpenAiCloud => "OpenAI Whisper (Cloud)",
             AsrProviderType::Groq => "Groq Whisper (Cloud)",
+            AsrProviderType::CohereTranscribe => "Cohere Transcribe",
         }
     }
 
@@ -162,6 +166,7 @@ impl AsrProviderType {
             AsrProviderType::ElevenLabsScribe => "scribe_v2",
             AsrProviderType::OpenAiCloud => "whisper-1",
             AsrProviderType::Groq => "whisper-large-v3-turbo",
+            AsrProviderType::CohereTranscribe => "cohere-transcribe-03-2026",
         }
     }
 
@@ -294,6 +299,10 @@ impl AsrProviderType {
                     label: "whisper-large-v3 (best accuracy)".to_string(),
                 },
             ],
+            AsrProviderType::CohereTranscribe => vec![ModelOption {
+                id: "cohere-transcribe-03-2026".to_string(),
+                label: "Cohere Transcribe (03-2026)".to_string(),
+            }],
         }
     }
 }
@@ -338,6 +347,9 @@ impl AsrProviderFactory {
                 openai_cloud::OpenAiCloudWhisperProvider::new(selected_model_id),
             ),
             AsrProviderType::Groq => Box::new(groq::GroqProvider::new(selected_model_id)),
+            AsrProviderType::CohereTranscribe => Box::new(
+                cohere::CohereTranscribeProvider::new(selected_model_id),
+            ),
         }
     }
 }

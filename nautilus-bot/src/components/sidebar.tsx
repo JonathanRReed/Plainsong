@@ -227,8 +227,8 @@ export function Sidebar({
       >
         <div className="p-4 flex items-center justify-between">
           <div className={cn(isCollapsed && "hidden")}>
-            <h1 className="font-semibold text-lg">Nautilus</h1>
-            <p className="mt-1 text-xs text-muted-foreground">Dictation first. Meetings included.</p>
+            <h1 className="font-semibold text-lg tracking-tight">Nautilus</h1>
+            <p className="mt-0.5 text-[11px] font-medium tracking-wide text-muted-foreground/70">Voice workspace</p>
           </div>
           {onToggleCollapse && (
             <Button
@@ -323,7 +323,10 @@ export function Sidebar({
                 isCollapsed && "justify-center"
               )}
             >
-              <div className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+              <div className="relative h-2 w-2">
+              <div className="absolute inset-0 rounded-full bg-red-500 animate-ping opacity-40" />
+              <div className="relative h-2 w-2 rounded-full bg-red-500" />
+            </div>
               {!isCollapsed && (
                 <span className="font-medium text-foreground">
                   {recordingMode === "meeting" ? "Meeting" : "Dictation"} {formattedDuration}

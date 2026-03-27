@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
 
 const invokeMock = vi.fn();
@@ -225,11 +226,14 @@ describe("Platform optimization settings", () => {
   });
 
   it("persists fallback policy changes", async () => {
+    const user = userEvent.setup();
     render(<AsrProviderManager />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Show tools" }));
-    const fallbackSelect = await screen.findByLabelText("Fallback policy");
-    fireEvent.change(fallbackSelect, { target: { value: "fail_fast" } });
+    const fallbackTrigger = await screen.findByRole("combobox", { name: /fallback policy/i });
+    await user.click(fallbackTrigger);
+    const failFastOption = await screen.findByRole("option", { name: /fail fast/i });
+    await user.click(failFastOption);
 
     await waitFor(() => {
       expect(saveSettingsMock).toHaveBeenCalled();
@@ -241,21 +245,26 @@ describe("Platform optimization settings", () => {
   });
 
   it("persists ordered manual engine priority", async () => {
+    const user = userEvent.setup();
     render(<AsrProviderManager />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Show tools" }));
-    const modeSelect = await screen.findByLabelText("Mode");
-    fireEvent.change(modeSelect, { target: { value: "manual" } });
+    const modeTrigger = await screen.findByRole("combobox", { name: /^mode$/i });
+    await user.click(modeTrigger);
+    const manualOption = await screen.findByRole("option", { name: /manual/i });
+    await user.click(manualOption);
 
     const addButton = await screen.findByRole("button", { name: "Add engine" });
-    fireEvent.click(addButton);
+    await user.click(addButton);
 
     await waitFor(() => {
       expect(saveSettingsMock).toHaveBeenCalled();
     });
 
-    const firstPrioritySelect = screen.getByDisplayValue("Provider default");
-    fireEvent.change(firstPrioritySelect, { target: { value: "windows_foundry_local" } });
+    const engineTrigger = await screen.findByRole("combobox", { name: /engine priority 1/i });
+    await user.click(engineTrigger);
+    const foundryOption = await screen.findByRole("option", { name: /windows foundry/i });
+    await user.click(foundryOption);
 
     await waitFor(() => {
       const savedPayload =
@@ -265,7 +274,7 @@ describe("Platform optimization settings", () => {
       ]);
     });
 
-    fireEvent.click(addButton);
+    await user.click(addButton);
 
     await waitFor(() => {
       const savedPayload =
@@ -521,8 +530,10 @@ describe("Platform optimization settings", () => {
   it("persists meeting route policy changes", async () => {
     render(<AsrProviderManager />);
 
-    const meetingPolicySelect = await screen.findByDisplayValue("Prefer local");
-    fireEvent.change(meetingPolicySelect, { target: { value: "best_available" } });
+    const meetingPolicyTrigger = await screen.findByRole("combobox", { name: /meeting quality policy/i });
+    await userEvent.click(meetingPolicyTrigger);
+    const bestOption = await screen.findByRole("option", { name: /best available/i });
+    await userEvent.click(bestOption);
 
     await waitFor(() => {
       expect(saveSettingsMock).toHaveBeenCalled();

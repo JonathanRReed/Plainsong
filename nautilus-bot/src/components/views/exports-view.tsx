@@ -8,7 +8,15 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { AlertCircle, CheckCircle2, FileOutput, Loader2, ShieldCheck, XCircle } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { AlertCircle, CheckCircle2, FileOutput, Loader2, ShieldCheck, XCircle, Eye } from "lucide-react";
 
 type ExportFormat = "markdown" | "json" | "text" | "evidence_bundle";
 type RedactionLevel = "none" | "basic" | "strict";
@@ -156,9 +164,15 @@ export function ExportsView() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="p-6 border-b">
-        <h1 className="text-2xl font-semibold">Exports</h1>
-        <p className="text-muted-foreground">Create shareable transcripts, notes, and evidence-ready exports</p>
+      <div className="border-b px-6 py-5">
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-semibold tracking-tight">Exports</h1>
+          <Badge variant="outline" className="text-[10px] font-medium uppercase tracking-widest">
+            <FileOutput className="mr-1 h-3 w-3" />
+            Share
+          </Badge>
+        </div>
+        <p className="mt-1 text-sm text-muted-foreground">Create shareable transcripts, notes, and evidence-ready exports</p>
       </div>
 
       <ScrollArea className="flex-1">
@@ -171,46 +185,48 @@ export function ExportsView() {
             <CardContent className="space-y-4">
               <div className="space-y-2">
                 <Label>Recording</Label>
-                <select
-                  value={recordingId}
-                  onChange={(e) => setRecordingId(e.target.value)}
-                  className="w-full p-2 border rounded-md bg-background"
-                >
-                  <option value="">Select recording</option>
-                  {recordings.map((recording) => (
-                    <option key={recording.id} value={recording.id}>
-                      {recording.title}
-                    </option>
-                  ))}
-                </select>
+                <Select value={recordingId} onValueChange={setRecordingId}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select recording" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {recordings.map((recording) => (
+                      <SelectItem key={recording.id} value={recording.id}>
+                        {recording.title}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label>Format</Label>
-                  <select
-                    value={format}
-                    onChange={(e) => setFormat(e.target.value as ExportFormat)}
-                    className="w-full p-2 border rounded-md bg-background"
-                  >
-                    <option value="markdown">Markdown</option>
-                    <option value="json">JSON</option>
-                    <option value="text">Plain Text</option>
-                    <option value="evidence_bundle">Signed Evidence Bundle (JSON)</option>
-                  </select>
+                  <Select value={format} onValueChange={(v) => setFormat(v as ExportFormat)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="markdown">Markdown</SelectItem>
+                      <SelectItem value="json">JSON</SelectItem>
+                      <SelectItem value="text">Plain Text</SelectItem>
+                      <SelectItem value="evidence_bundle">Signed Evidence Bundle</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 <div className="space-y-2">
                   <Label>Redaction Level</Label>
-                  <select
-                    value={redactionLevel}
-                    onChange={(e) => setRedactionLevel(e.target.value as RedactionLevel)}
-                    className="w-full p-2 border rounded-md bg-background"
-                  >
-                    <option value="none">None</option>
-                    <option value="basic">Basic</option>
-                    <option value="strict">Strict</option>
-                  </select>
+                  <Select value={redactionLevel} onValueChange={(v) => setRedactionLevel(v as RedactionLevel)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None</SelectItem>
+                      <SelectItem value="basic">Basic</SelectItem>
+                      <SelectItem value="strict">Strict</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
 
@@ -229,11 +245,11 @@ export function ExportsView() {
 
               <div className="flex gap-2">
                 <Button variant="outline" onClick={generatePreview} disabled={isWorking || !recordingId}>
-                  {isWorking ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
+                  {isWorking ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Eye className="mr-2 h-4 w-4" />}
                   Preview
                 </Button>
                 <Button onClick={exportNow} disabled={isWorking || !recordingId}>
-                  {isWorking ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <FileOutput className="h-4 w-4 mr-2" />}
+                  {isWorking ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileOutput className="mr-2 h-4 w-4" />}
                   Export
                 </Button>
               </div>
@@ -248,29 +264,26 @@ export function ExportsView() {
             <CardContent className="space-y-4">
               <div className="space-y-2">
                 <Label>Template</Label>
-                <select
-                  className="w-full p-2 border rounded-md bg-background"
-                  value={selectedTemplateId}
-                  onChange={(e) => setSelectedTemplateId(e.target.value)}
-                >
-                  {templates.length === 0 ? (
-                    <option value="">No templates available</option>
-                  ) : (
-                    templates.map((template) => (
-                      <option key={template.id} value={template.id}>
+                <Select value={selectedTemplateId} onValueChange={setSelectedTemplateId}>
+                  <SelectTrigger>
+                    <SelectValue placeholder={templates.length === 0 ? "No templates available" : "Select template"} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {templates.map((template) => (
+                      <SelectItem key={template.id} value={template.id}>
                         {template.name}
-                      </option>
-                    ))
-                  )}
-                </select>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               <Button
                 variant="outline"
                 onClick={generateTemplatePreview}
                 disabled={isWorking || !recordingId || !selectedTemplateId}
               >
-                {isWorking ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : null}
-                Render Template Preview
+                {isWorking ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Eye className="mr-2 h-4 w-4" />}
+                Render Preview
               </Button>
               <div className="space-y-2">
                 <Label>Template export path (optional)</Label>
@@ -284,7 +297,7 @@ export function ExportsView() {
                 onClick={exportTemplateNow}
                 disabled={isWorking || !recordingId || !selectedTemplateId}
               >
-                {isWorking ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <FileOutput className="h-4 w-4 mr-2" />}
+                {isWorking ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileOutput className="mr-2 h-4 w-4" />}
                 Export Template
               </Button>
               {lastTemplateExportPath && (
@@ -292,23 +305,23 @@ export function ExportsView() {
                   Template exported to <span className="font-mono break-all">{lastTemplateExportPath}</span>
                 </p>
               )}
-              <pre className="text-xs whitespace-pre-wrap p-3 rounded-md border bg-muted/30 min-h-[180px]">
-                {templatePreview || "No template preview generated yet."}
+              <pre className="text-xs leading-relaxed whitespace-pre-wrap rounded-lg border bg-muted/20 p-4 font-mono min-h-[180px]">
+                {templatePreview || <span className="text-muted-foreground">No template preview generated yet.</span>}
               </pre>
             </CardContent>
           </Card>
 
           {error && (
-            <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-center gap-2 text-sm text-destructive">
-              <AlertCircle className="h-4 w-4" />
-              {error}
+            <div className="flex items-center gap-3 rounded-lg border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>{error}</span>
             </div>
           )}
 
           {lastExportPath && (
-            <div className="p-3 bg-trusted/10 border border-trusted/20 rounded-lg flex items-center gap-2 text-sm">
-              <CheckCircle2 className="h-4 w-4 text-trusted" />
-              Export written to: <span className="font-mono break-all">{lastExportPath}</span>
+            <div className="flex items-center gap-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-sm">
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+              <span>Export written to: <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs break-all">{lastExportPath}</code></span>
             </div>
           )}
 
@@ -327,7 +340,7 @@ export function ExportsView() {
                 />
               </div>
               <Button variant="outline" onClick={verifyBundle} disabled={isVerifying || !verifyPath.trim()}>
-                {isVerifying ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <ShieldCheck className="h-4 w-4 mr-2" />}
+                {isVerifying ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-2 h-4 w-4" />}
                 Verify Bundle
               </Button>
 
@@ -365,8 +378,8 @@ export function ExportsView() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <pre className="text-xs whitespace-pre-wrap p-3 rounded-md border bg-muted/30 min-h-[240px]">
-                {previewContent || "No preview generated yet."}
+              <pre className="text-xs leading-relaxed whitespace-pre-wrap rounded-lg border bg-muted/20 p-4 font-mono min-h-[240px]">
+                {previewContent || <span className="text-muted-foreground">No preview generated yet.</span>}
               </pre>
             </CardContent>
           </Card>
