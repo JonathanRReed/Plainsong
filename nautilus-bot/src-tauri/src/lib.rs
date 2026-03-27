@@ -11260,9 +11260,10 @@ pub(crate) fn normalize_provider_secret_name(provider: &str) -> Result<&'static 
         "ollama-cloud" | "ollama_cloud" | "ollamacloud" => Ok("ollama-cloud"),
         "mistral" => Ok("mistral"),
         "groq" => Ok("groq"),
+        "cohere" => Ok("cohere"),
         "ollama" => Err("Local Ollama does not require a stored API key".to_string()),
         _ => Err(format!(
-            "Unsupported provider '{}'. Expected one of: openai, elevenlabs, anthropic, gemini, deepseek, ollama-cloud, mistral, groq",
+            "Unsupported provider '{}'. Expected one of: openai, elevenlabs, anthropic, gemini, deepseek, ollama-cloud, mistral, groq, cohere",
             provider
         )),
     }
@@ -18090,6 +18091,7 @@ fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static st
         asr::AsrProviderType::ElevenLabsScribe => "elevenlabs_scribe",
         asr::AsrProviderType::OpenAiCloud => "openai_cloud",
         asr::AsrProviderType::Groq => "groq",
+        asr::AsrProviderType::CohereTranscribe => "cohere_transcribe",
     }
 }
 
@@ -18107,6 +18109,7 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
         "elevenlabs_scribe" => Some(asr::AsrProviderType::ElevenLabsScribe),
         "openai_cloud" => Some(asr::AsrProviderType::OpenAiCloud),
         "groq" => Some(asr::AsrProviderType::Groq),
+        "cohere_transcribe" => Some(asr::AsrProviderType::CohereTranscribe),
         _ => None,
     }
 }

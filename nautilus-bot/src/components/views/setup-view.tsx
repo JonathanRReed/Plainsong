@@ -183,7 +183,7 @@ export function SetupView() {
               Guided setup and repairs
             </div>
             <div>
-              <h1 className="text-2xl font-semibold">Setup</h1>
+              <h1 className="text-2xl font-semibold tracking-tight">Setup</h1>
               <p className="text-sm text-muted-foreground">
                 Check dictation and meetings, rerun guided setup, and verify every route from one place.
               </p>
@@ -689,12 +689,14 @@ export function SetupView() {
             <CardContent className="grid gap-3 md:grid-cols-3">
               <div className="rounded-xl border border-border/70 p-4">
                 <div className="mb-2 flex items-center gap-2">
-                  {dictationReady ? (
-                    <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                  ) : (
-                    <AlertCircle className="h-4 w-4 text-amber-400" />
-                  )}
-                  <p className="font-medium">Dictation not ready</p>
+                  <div className={dictationReady ? "flex h-6 w-6 items-center justify-center rounded-md bg-emerald-500/10" : "flex h-6 w-6 items-center justify-center rounded-md bg-amber-500/10"}>
+                    {dictationReady ? (
+                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                    ) : (
+                      <AlertCircle className="h-3.5 w-3.5 text-amber-400" />
+                    )}
+                  </div>
+                  <p className="font-medium">{dictationReady ? "Dictation ready" : "Dictation not ready"}</p>
                 </div>
                 <p className="text-sm text-muted-foreground">
                   Re-run the dictation-focused guide and re-check permissions, hotkey behavior, and cursor insert.
@@ -705,12 +707,14 @@ export function SetupView() {
               </div>
               <div className="rounded-xl border border-border/70 p-4">
                 <div className="mb-2 flex items-center gap-2">
-                  {meetingReady ? (
-                    <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                  ) : (
-                    <AlertCircle className="h-4 w-4 text-amber-400" />
-                  )}
-                  <p className="font-medium">Meetings not ready</p>
+                  <div className={meetingReady ? "flex h-6 w-6 items-center justify-center rounded-md bg-emerald-500/10" : "flex h-6 w-6 items-center justify-center rounded-md bg-amber-500/10"}>
+                    {meetingReady ? (
+                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                    ) : (
+                      <AlertCircle className="h-3.5 w-3.5 text-amber-400" />
+                    )}
+                  </div>
+                  <p className="font-medium">{meetingReady ? "Meetings ready" : "Meetings not ready"}</p>
                 </div>
                 <p className="text-sm text-muted-foreground">
                   Re-run guided meeting setup to validate system audio, loopback, and a meeting-grade ASR route.

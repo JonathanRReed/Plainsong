@@ -172,8 +172,8 @@ describe("DashboardView memory chat", () => {
     expect(secondPrompt).toContain("User: What did we decide about pricing?");
     expect(secondPrompt).toContain("Assistant: You agreed to hold pricing at the current plan for Q3.");
     expect(secondPrompt).toContain("New user question: What was still unresolved?");
-    expect(screen.getByRole("button", { name: "Clear chat" })).toBeInTheDocument();
-    expect(screen.getByText("People & Companies")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Clear thread" })).toBeInTheDocument();
+    expect(screen.getByText("Relationship Memory")).toBeInTheDocument();
     expect(screen.getByText("Jonathan Reed")).toBeInTheDocument();
     expect(screen.getByText("ACME")).toBeInTheDocument();
   });
@@ -186,8 +186,8 @@ describe("DashboardView memory chat", () => {
 
     render(<DashboardView />);
 
-    await screen.findByText("People & Companies");
-    fireEvent.click(screen.getAllByRole("button", { name: "Ask Memory" })[1]);
+    await screen.findByText("Relationship Memory");
+    fireEvent.click(screen.getAllByRole("button", { name: "Ask" })[1]);
 
     await waitFor(() => {
       expect(askMemory).toHaveBeenCalledTimes(1);

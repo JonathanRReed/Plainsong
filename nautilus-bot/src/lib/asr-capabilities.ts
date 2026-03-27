@@ -26,6 +26,7 @@ const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
   "groq",
   "openai_cloud",
   "elevenlabs_scribe",
+  "cohere_transcribe",
 ]);
 
 const DICTATION_ONLY_PROVIDER_SET = new Set<AsrProviderType>([
@@ -40,6 +41,7 @@ const CLOUD_PROVIDER_SET = new Set<AsrProviderType>([
   "groq",
   "openai_cloud",
   "elevenlabs_scribe",
+  "cohere_transcribe",
 ]);
 
 export function isDownloadableProvider(providerType: AsrProviderType) {
@@ -199,6 +201,7 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
     case "groq":
     case "openai_cloud":
     case "elevenlabs_scribe":
+    case "cohere_transcribe":
       return true;
     default:
       return false;

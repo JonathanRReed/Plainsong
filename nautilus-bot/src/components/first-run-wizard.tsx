@@ -66,6 +66,7 @@ const MEETING_PROVIDER_PRIORITY: AsrProviderType[] = [
   "groq",
   "openai_cloud",
   "elevenlabs_scribe",
+  "cohere_transcribe",
 ];
 
 const POWER_MODEL_OPTIONS = [

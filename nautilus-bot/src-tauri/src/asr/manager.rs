@@ -1768,6 +1768,36 @@ fn runtime_diagnostics_for_provider(
                 },
             }
         }
+        AsrProviderType::CohereTranscribe => {
+            let has_key = has_provider_secret_or_env("cohere", "CO_API_KEY");
+            RuntimeDiagnosticsInternal {
+                runtime_status: if has_key {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingModel
+                },
+                runtime_message: Some(if has_key {
+                    "Cohere Transcribe cloud API ready. Low WER, 14 languages supported."
+                        .to_string()
+                } else {
+                    "Set CO_API_KEY to enable Cohere Transcribe cloud.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                    missing_files: if has_key {
+                        Vec::new()
+                    } else {
+                        vec!["CO_API_KEY".to_string()]
+                    },
+                    setup_action: if has_key {
+                        None
+                    } else {
+                        Some("Get API key from https://dashboard.cohere.com/api-keys and set in Settings -> API Keys.".to_string())
+                    },
+                },
+            }
+        }
     }
 }
 

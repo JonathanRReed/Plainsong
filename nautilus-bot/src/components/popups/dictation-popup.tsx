@@ -46,6 +46,7 @@ import {
 import { playDictationEarcon } from "@/lib/dictation-earcons";
 import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
 import { cn } from "@/lib/utils";
+import { AudioWaveform } from "@/components/ui/audio-waveform";
 import type { AsrProviderType } from "@/types";
 import type { DictationCustomMode } from "@/types/settings";
 
@@ -399,7 +400,7 @@ function PopupActionButton({
         "group flex items-start gap-3 rounded-xl border px-3 py-3 text-left transition-colors",
         tone === "primary"
           ? "border-white/12 bg-white/8 hover:bg-white/12"
-          : "border-white/10 bg-white/[0.045] hover:bg-white/[0.075]",
+          : "border-white/10 bg-white/4.5 hover:bg-white/7.5",
       )}
       onClick={onClick}
     >
@@ -408,7 +409,7 @@ function PopupActionButton({
           "mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
           tone === "primary"
             ? "bg-white/10 text-white"
-            : "bg-white/[0.08] text-slate-100",
+            : "bg-white/8 text-slate-100",
         )}
       >
         <Icon className="h-4 w-4" />
@@ -418,64 +419,6 @@ function PopupActionButton({
         <p className="mt-1 text-xs leading-relaxed text-slate-300">{detail}</p>
       </div>
     </button>
-  );
-}
-
-function DictationWaveStrip({
-  level,
-  active,
-  compact = false,
-  frame = 0,
-}: {
-  level: number;
-  active: boolean;
-  compact?: boolean;
-  frame?: number;
-}) {
-  const bars = compact
-    ? [0.12, 0.24, 0.38, 0.56, 0.82, 1, 0.82, 0.56, 0.38, 0.24, 0.12]
-    : [
-        0.08, 0.14, 0.2, 0.3, 0.42, 0.58, 0.76, 0.92, 1, 0.92, 0.76, 0.58, 0.42,
-        0.3, 0.2, 0.14, 0.08,
-      ];
-  const baseHeight = compact ? 5 : 7;
-  const maxExtraHeight = compact ? 9 : 15;
-
-  return (
-    <div
-      className={cn(
-        "relative flex items-center gap-[3px]",
-        compact ? "h-[16px]" : "h-7",
-      )}
-      aria-hidden="true"
-    >
-      <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-white/8" />
-      {bars.map((weight, index) => {
-        const drift = (Math.sin(frame * 0.55 + index * 0.72) + 1) / 2;
-        const intensity = active
-          ? Math.max(
-              0.18,
-              Math.min(1, level * (0.68 + weight * 0.78) + drift * 0.22),
-            )
-          : 0.14 + drift * 0.04;
-        return (
-          <div key={`meter-bar-${index}`} className="flex h-full items-center">
-            <span
-              className={cn(
-                "rounded-full bg-white/80 transition-[height,opacity,transform] duration-100",
-                compact ? "w-[2px]" : "w-[3px]",
-              )}
-              style={{
-                height: `${baseHeight + intensity * maxExtraHeight * weight}px`,
-                opacity: active ? 0.3 + intensity * 0.7 : 0.22,
-                transform: `scaleY(${0.96 + intensity * 0.04})`,
-                transformOrigin: "center center",
-              }}
-            />
-          </div>
-        );
-      })}
-    </div>
   );
 }
 
@@ -491,7 +434,6 @@ export function DictationPopup() {
   const [pushToTalk, setPushToTalk] = useState(true);
   const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
   const [displayAudioLevel, setDisplayAudioLevel] = useState(0);
-  const [waveFrame, setWaveFrame] = useState(0);
   const [modePreset, setModePreset] = useState<DictationModePreset>("voice");
   const [contextSource, setContextSource] =
     useState<DictationContextSource>("none");
@@ -862,18 +804,6 @@ export function DictationPopup() {
     };
   }, [phase]);
 
-  useEffect(() => {
-    if (phase !== "recording") {
-      setWaveFrame(0);
-      return;
-    }
-
-    const id = globalThis.setInterval(() => {
-      setWaveFrame((current) => (current + 1) % 1000);
-    }, 90);
-
-    return () => globalThis.clearInterval(id);
-  }, [phase]);
 
   useEffect(() => {
     const previousPhase = previousPhaseRef.current;
@@ -1072,14 +1002,15 @@ export function DictationPopup() {
         title="Double-click to expand"
       >
         <div className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/92 px-3 py-2 shadow-[0_10px_30px_rgba(2,6,23,0.4)] backdrop-blur-xl">
-          <div className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/[0.06] text-slate-100">
+          <div className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/6 text-slate-100">
             <Mic className="h-3 w-3" />
           </div>
-          <DictationWaveStrip
-            level={displayAudioLevel}
+          <AudioWaveform
+            levels={displayAudioLevel}
             active={phase === "recording"}
-            compact
-            frame={waveFrame}
+            size="sm"
+            barCount={11}
+            barColor="white"
           />
           <span className="text-[11px] font-medium tracking-[0.08em] text-slate-200">
             {statusLabel}
@@ -1150,7 +1081,7 @@ export function DictationPopup() {
             void window.startDragging();
           }}
         >
-          <div className="inline-flex h-6 items-center gap-1 rounded-full border border-white/8 bg-white/[0.03] px-2 text-slate-500">
+          <div className="inline-flex h-6 items-center gap-1 rounded-full border border-white/8 bg-white/3 px-2 text-slate-500">
             <GripHorizontal className="h-3 w-3" />
           </div>
           <div className="inline-flex items-center gap-1">
@@ -1202,17 +1133,17 @@ export function DictationPopup() {
               {!compact ? ` · ${contextMeta.label}` : ""}
             </p>
           </div>
-          <div className="shrink-0 rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] text-slate-300">
+          <div className="shrink-0 rounded-full border border-white/10 bg-white/4 px-4 py-3 text-[11px] text-slate-300">
             {routeLabel}
           </div>
         </div>
 
         {isCapturePhase && (
           <div className="space-y-4 text-white">
-            <div className="rounded-[22px] border border-white/10 bg-white/[0.04] px-4 py-4">
+            <div className="rounded-[22px] border border-white/10 bg-white/4 px-4 py-4">
               <div className="flex items-center gap-3">
                 <div className="inline-flex h-10 items-center gap-3 rounded-full border border-white/10 bg-slate-900/80 px-3">
-                  <div className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/[0.08]">
+                  <div className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/8">
                     <Mic
                       className={cn(
                         "h-3.5 w-3.5 text-slate-100 transition-opacity",
@@ -1220,10 +1151,14 @@ export function DictationPopup() {
                       )}
                     />
                   </div>
-                  <DictationWaveStrip
-                    level={displayAudioLevel}
+                  <AudioWaveform
+                    levels={displayAudioLevel}
                     active={phase === "recording"}
-                    frame={waveFrame}
+                    size="md"
+                    barCount={15}
+                    barColor="white"
+                    glow
+                    glowColor="rgba(147,197,253,0.5)"
                   />
                 </div>
                 <div className="min-w-0 flex-1">
@@ -1272,7 +1207,7 @@ export function DictationPopup() {
               </p>
             </div>
             {!compact && preview && (
-              <div className="rounded-[20px] border border-white/10 bg-white/[0.03] px-4 py-3">
+              <div className="rounded-[20px] border border-white/10 bg-white/3 px-4 py-3">
                 <p className="text-[11px] font-medium tracking-[0.16em] text-slate-500">
                   Live text
                 </p>
@@ -1311,7 +1246,7 @@ export function DictationPopup() {
                 </p>
               )}
               {!compact && preview && (
-                <div className="mt-2 max-w-[330px] rounded-xl border border-white/10 bg-white/[0.045] px-3 py-2">
+                <div className="mt-2 max-w-[330px] rounded-xl border border-white/10 bg-white/4.5 px-3 py-2">
                   <p className="text-[11px] uppercase tracking-wide text-slate-400">
                     Live preview
                   </p>
@@ -1334,7 +1269,7 @@ export function DictationPopup() {
                   `Finishing ${insertionMeta.label.toLowerCase()}${targetDetail} with ${routeLabel}.`}
               </p>
               {!compact && preview && (
-                <div className="mt-2 max-w-[330px] rounded-xl border border-white/10 bg-white/[0.045] px-3 py-2">
+                <div className="mt-2 max-w-[330px] rounded-xl border border-white/10 bg-white/4.5 px-3 py-2">
                   <p className="text-[11px] uppercase tracking-wide text-slate-400">
                     Latest text
                   </p>
@@ -1360,12 +1295,12 @@ export function DictationPopup() {
               {!compact && (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-200">
                   {commandLabel && (
-                    <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1">
+                    <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
                       {commandLabel}
                     </span>
                   )}
                   {finalSnippetAppliedCount > 0 && (
-                    <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1">
+                    <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
                       {finalSnippetAppliedCount === 1
                         ? "1 snippet"
                         : `${finalSnippetAppliedCount} snippets`}
@@ -1384,7 +1319,7 @@ export function DictationPopup() {
                 </div>
               )}
               {!compact && (finalText || preview) && (
-                <div className="mt-3 max-w-[330px] rounded-xl border border-white/10 bg-white/[0.045] px-3 py-2">
+                <div className="mt-3 max-w-[330px] rounded-xl border border-white/10 bg-white/4.5 px-3 py-2">
                   <p className="text-[11px] uppercase tracking-wide text-slate-400">
                     Latest result
                   </p>
@@ -1394,7 +1329,7 @@ export function DictationPopup() {
                 </div>
               )}
               {!compact && (
-                <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.045] px-3 py-2">
+                <div className="mt-3 rounded-xl border border-white/10 bg-white/4.5 px-3 py-2">
                   <p className="text-[11px] uppercase tracking-wide text-slate-400">
                     Voice edits
                   </p>
@@ -1478,7 +1413,7 @@ export function DictationPopup() {
                 <div className="mt-2 flex items-center gap-2 text-xs text-slate-300">
                   <button
                     type="button"
-                    className="rounded-lg border border-white/10 bg-white/[0.05] px-2.5 py-1.5 hover:bg-white/[0.08]"
+                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/8"
                     onClick={() => void handleStartAgain()}
                   >
                     Start again

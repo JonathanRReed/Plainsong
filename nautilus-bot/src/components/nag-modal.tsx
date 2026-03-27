@@ -5,8 +5,16 @@
  * Re-shows after 24h if dismissed (via localStorage timestamp).
  */
 import { useState } from "react";
-import { X, Clock, ExternalLink, KeyRound } from "lucide-react";
+import { Clock, ExternalLink, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from "@/components/ui/dialog";
 
 const BUY_PRO_URL = "https://nautilusbot.lemonsqueezy.com/buy/pro";
 const BUY_FRIENDS_URL = "https://nautilusbot.lemonsqueezy.com/buy/friends-club";
@@ -53,48 +61,34 @@ export function NagModal({ onActivate }: Props) {
         setVisible(false);
     };
 
-    if (!visible) return null;
-
     return (
-        // Semi-transparent backdrop, does not prevent interaction with main app
-        <div
-            className="fixed inset-0 z-40 flex items-end justify-center pb-8 sm:items-center pointer-events-none"
-            aria-live="polite"
-        >
-            <div className="pointer-events-auto w-full max-w-sm rounded-2xl border border-border bg-card shadow-2xl mx-4 overflow-hidden">
-                {/* Header bar */}
-                <div className="flex items-center justify-between border-b border-border bg-muted/40 px-4 py-3">
-                    <div className="flex items-center gap-2">
-                        <Clock className="h-4 w-4 text-amber-500" />
-                        <span className="text-sm font-semibold">Free trial ended</span>
-                    </div>
-                    <button
-                        type="button"
-                        id="nag-dismiss-btn"
-                        onClick={dismiss}
-                        aria-label="Dismiss, remind me later"
-                        className="rounded p-1 text-muted-foreground transition-colors hover:text-foreground"
-                    >
-                        <X className="h-4 w-4" />
-                    </button>
+        <Dialog open={visible} onOpenChange={(open) => { if (!open) dismiss(); }}>
+            <DialogContent className="max-w-sm gap-0 overflow-hidden p-0">
+                <div className="border-b border-border bg-muted/40 px-5 py-3">
+                    <DialogHeader className="space-y-0">
+                        <DialogTitle className="flex items-center gap-2 text-sm">
+                            <Clock className="h-4 w-4 text-amber-500" />
+                            Free trial ended
+                        </DialogTitle>
+                    </DialogHeader>
                 </div>
 
                 <div className="space-y-4 p-5">
-                    <p className="text-sm text-muted-foreground leading-relaxed">
+                    <DialogDescription className="leading-relaxed">
                         Your 30-day free trial has ended. Nautilus keeps working — a license
                         removes this reminder and supports continued development.
-                    </p>
+                    </DialogDescription>
 
                     <div className="space-y-2">
-                        <button
+                        <Button
                             id="nag-activate-btn"
-                            type="button"
+                            variant="outline"
+                            className="w-full border-primary/40 bg-primary/5 text-primary hover:bg-primary/10"
                             onClick={() => { dismiss(); onActivate(); }}
-                            className="flex w-full items-center justify-center gap-2 rounded-lg border border-primary/40 bg-primary/5 px-4 py-2.5 text-sm font-medium text-primary transition-colors hover:bg-primary/10"
                         >
-                            <KeyRound className="h-4 w-4" />
+                            <KeyRound className="mr-2 h-4 w-4" />
                             Enter License Key
-                        </button>
+                        </Button>
 
                         <div className="grid grid-cols-2 gap-2">
                             <Button
@@ -115,16 +109,18 @@ export function NagModal({ onActivate }: Props) {
                                 onClick={() => { dismiss(); window.open(BUY_FRIENDS_URL, "_blank", "noopener,noreferrer"); }}
                             >
                                 <ExternalLink className="mr-1 h-3.5 w-3.5" />
-                                Friends Club ⭐
+                                Friends Club
                             </Button>
                         </div>
                     </div>
 
-                    <p className="text-center text-xs text-muted-foreground/60">
-                        Snoozes for 24 hours · 1 purchase, up to 5 computers
-                    </p>
+                    <DialogFooter className="justify-center sm:justify-center">
+                        <p className="text-xs text-muted-foreground/60">
+                            Snoozes for 24 hours · 1 purchase, up to 5 computers
+                        </p>
+                    </DialogFooter>
                 </div>
-            </div>
-        </div>
+            </DialogContent>
+        </Dialog>
     );
 }
