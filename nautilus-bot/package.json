@@ -28,7 +28,8 @@
     "gate:release:local": "node scripts/verify-local-release.mjs",
     "gate:prompt-eval": "node scripts/run-dictation-prompt-eval.mjs",
     "gate:dictation:artifacts": "node scripts/refresh-dictation-parity-artifacts.mjs",
-    "gate:blockers:refresh": "bun run gate:dictation:artifacts && node scripts/refresh-blocker-artifacts.mjs && node scripts/export-qa-evidence-bundle.mjs --matrix docs/packaged-app-qa-matrix.md --out artifacts/packaged-qa-evidence-bundle.json",
+    "gate:blockers:refresh": "bun run gate:dictation:artifacts && node scripts/refresh-blocker-artifacts.mjs && node scripts/export-qa-evidence-bundle.mjs --matrix docs/packaged-app-qa-matrix.md --out artifacts/packaged-qa-evidence-bundle.json && node scripts/generate-launch-readiness-report.mjs",
+    "gate:launch:report": "node scripts/generate-launch-readiness-report.mjs",
     "benchmark:dictation:fixture": "node scripts/generate-dictation-benchmark.mjs --fixtures docs/evals/dictation-parity-fixture.json --out artifacts/evals/dictation-benchmark-run.json",
     "benchmark:dictation:baseline:dev": "node scripts/generate-dictation-benchmark.mjs --fixtures docs/evals/dictation-parity-fixture.json --out artifacts/evals/dictation-benchmark-baseline-dev.json",
     "benchmark:dictation:fixtures:refresh": "node scripts/refresh-local-benchmark-artifacts.mjs",
@@ -50,6 +51,9 @@
   "author": "NautilusBot",
   "license": "MIT",
   "homepage": "https://nautilusbot.app",
+  "overrides": {
+    "esbuild": "^0.27.0"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/nautilusbot/nautilus"
@@ -98,17 +102,17 @@
     "@types/node": "^25.2.0",
     "@types/react": "^19.2.11",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^4.3.0",
+    "@vitejs/plugin-react": "^6.0.1",
     "autoprefixer": "^10.4.24",
     "concurrently": "^9.2.1",
     "electron": "^41.1.1",
     "electron-builder": "^26.8.1",
+    "esbuild": "^0.27.0",
     "jsdom": "^28.0.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.18",
     "typescript": "^5.9.3",
-    "vite": "^5.4.0",
-    "vitest": "^4.0.18",
-    "wait-on": "^9.0.4"
+    "vite": "^8.0.8",
+    "vitest": "^4.1.4"
   }
 }

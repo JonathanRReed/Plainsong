@@ -8,13 +8,6 @@ const getSettingsMock = vi.fn();
 const saveSettingsMock = vi.fn();
 const getPermissionDiagnosticsMock = vi.fn();
 
-const buttonWithText = (scope: ReturnType<typeof within> | typeof screen, text: string) => {
-  const button = (scope.getAllByRole("button") as HTMLButtonElement[])
-    .find((candidate) => candidate.textContent?.includes(text));
-  expect(button).not.toBeNull();
-  return button as HTMLButtonElement;
-};
-
 vi.mock("@/lib/electron", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
   listen: vi.fn(async () => () => {}),
@@ -317,7 +310,7 @@ describe("Platform optimization settings", () => {
     render(<AsrProviderManager />);
 
     expect(await screen.findByText("Apple Native setup")).toBeInTheDocument();
-    expect(screen.getByText("Built into macOS")).toBeInTheDocument();
+    expect(screen.getAllByText("Built into macOS").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Show tools" }));
 
@@ -332,7 +325,7 @@ describe("Platform optimization settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Split dictation + meetings" }));
     expect(await screen.findByText("Dictation")).toBeInTheDocument();
     expect(screen.getByText("Recommended")).toBeInTheDocument();
-    expect(screen.getAllByText("UsefulSensors Moonshine").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Moonshine Base").length).toBeGreaterThan(0);
     expect(screen.getByText("Current routing")).toBeInTheDocument();
   });
 
@@ -341,7 +334,8 @@ describe("Platform optimization settings", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Split dictation + meetings" }));
     const dictationPanel = await screen.findByRole("tabpanel", { name: "Dictation" });
-    fireEvent.click(buttonWithText(within(dictationPanel), "Apple Native Speech"));
+    fireEvent.click(within(dictationPanel).getByRole("combobox"));
+    fireEvent.click(await screen.findByText("Apple Native Speech"));
 
     await waitFor(() => {
       expect(saveSettingsMock).toHaveBeenCalled();

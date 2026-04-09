@@ -67,8 +67,6 @@ vi.mock("@/lib/backend", () => ({
   getRelationshipMemory,
   searchTranscripts: vi.fn(),
   validateLicense: vi.fn(async () => ({
-    key: "",
-    instanceId: "",
     tier: "pro",
     valid: true,
     lsStatus: "active",

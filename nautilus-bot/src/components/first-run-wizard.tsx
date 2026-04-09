@@ -38,6 +38,10 @@ import {
   formatShortcutForDisplay,
   normalizeShortcut,
 } from "@/lib/shortcuts";
+import {
+  buildAsrRouteCatalog,
+  getRecommendedLaneRoute,
+} from "@/lib/asr-route-catalog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
@@ -50,24 +54,6 @@ type Props = {
 };
 
 type Step = "welcome" | "permissions" | "dictation-model" | "hotkey" | "meeting-setup";
-
-const DICTATION_ONLY_PROVIDER_SET = new Set<AsrProviderType>([
-  "macos_apple_speech",
-  "windows_sdk_dictation",
-  "moonshine",
-  "whisper",
-  "whisper_candle",
-]);
-
-const MEETING_PROVIDER_PRIORITY: AsrProviderType[] = [
-  "distil_whisper",
-  "parakeet",
-  "voxtral",
-  "groq",
-  "openai_cloud",
-  "elevenlabs_scribe",
-  "cohere_transcribe",
-];
 
 const POWER_MODEL_OPTIONS = [
   {
@@ -83,10 +69,10 @@ const POWER_MODEL_OPTIONS = [
     desc: "Lightweight local fallback for lower-end machines",
   },
   {
-    id: "parakeet-ctc-0.6b",
-    label: "Parakeet 0.6B",
+    id: "parakeet-tdt-0.6b-v3",
+    label: "Parakeet TDT 0.6B v3",
     size: "Managed",
-    desc: "Higher-quality local route when accuracy matters more",
+    desc: "Higher-accuracy local route when meeting quality matters more",
   },
 ];
 
@@ -97,10 +83,6 @@ const STEP_LABELS: Record<Step, string> = {
   hotkey: "Hotkey",
   "meeting-setup": "Meeting setup",
 };
-
-function isMeetingEligibleProvider(providerType: AsrProviderType) {
-  return !DICTATION_ONLY_PROVIDER_SET.has(providerType);
-}
 
 function formatShortcutFromKeyboardEvent(event: KeyboardEvent<HTMLInputElement>) {
   const parts: string[] = [];
@@ -141,34 +123,18 @@ function summarizeMeetingRoute(provider: AsrProviderType | null, modelId: string
 }
 
 function getRecommendedMeetingRoute(providers: AsrProviderInfo[]) {
-  for (const providerType of MEETING_PROVIDER_PRIORITY) {
-    const provider = providers.find((item) => item.providerType === providerType);
-    if (!provider?.inferenceEnabled) {
-      continue;
-    }
-    const modelId = provider.modelOptions[0]?.id ?? provider.selectedModelId ?? null;
-    if (!modelId) {
-      continue;
-    }
-    return { providerType, modelId };
-  }
-
-  const provider = providers.find(
-    (item) =>
-      item.providerType !== "mlx_audio" &&
-      isMeetingEligibleProvider(item.providerType) &&
-      item.inferenceEnabled
+  const recommended = getRecommendedLaneRoute(
+    buildAsrRouteCatalog(providers, "prefer_local"),
+    "meeting",
+    "prefer_local",
   );
-  if (!provider) {
+  if (!recommended) {
     return null;
   }
-
-  const modelId = provider.modelOptions[0]?.id ?? provider.selectedModelId ?? null;
-  if (!modelId) {
-    return null;
-  }
-
-  return { providerType: provider.providerType, modelId };
+  return {
+    providerType: recommended.providerType,
+    modelId: recommended.modelId,
+  };
 }
 
 export function FirstRunWizard({ mode = "full", onComplete }: Props) {
@@ -265,7 +231,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         if (settings.transcription.dictationProvider === "moonshine") {
           setSelectedModelId("moonshine-base");
         } else if (settings.transcription.dictationProvider === "parakeet") {
-          setSelectedModelId("parakeet-ctc-0.6b");
+          setSelectedModelId("parakeet-tdt-0.6b-v3");
         } else {
           setSelectedModelId("distil-large-v3.5");
         }
@@ -396,7 +362,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       const providerType: AsrProviderType =
         selected === "moonshine-base"
           ? "moonshine"
-          : selected === "parakeet-ctc-0.6b"
+          : selected === "parakeet-tdt-0.6b-v3"
             ? "parakeet"
             : "distil_whisper";
       await downloadAsrModels(providerType);

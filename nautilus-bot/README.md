@@ -1,8 +1,16 @@
 # Nautilus Bot
 
-Nautilus is a local-first desktop app for recording, transcribing, and auditing dictation/meeting audio.
+Nautilus is a local-first desktop app for dictation and meeting capture.
 
-## Current Production Scope (2026-04-09)
+Launch status on 2026-04-09: `NO-GO`.
+
+Launch readiness is tracked in:
+
+- `docs/launch-readiness-dashboard.md`
+- `artifacts/launch-readiness-report.json`
+- `docs/final-ship-checklist.md`
+
+## Implemented Product Surface (2026-04-09)
 
 - Dictation capture via global hotkey
 - Dictation push-to-talk and live partial preview
@@ -18,6 +26,26 @@ Nautilus is a local-first desktop app for recording, transcribing, and auditing 
 - Clipboard restore after paste success
 - Local backup plus cloud sync integrations (rclone/iCloud paths)
 - Bring-your-own API keys for cloud transcription and analysis providers
+
+This section describes what the codebase currently implements.
+It is not the same thing as launch-certified scope.
+
+## Launch-Certified Scope
+
+The certified launch scope is narrower than the implemented surface and is controlled by evidence, not code presence.
+
+- Frozen launch app matrix: `docs/dictation-app-compatibility-matrix.md`
+- Frozen launch language set: `docs/evals/dictation-language-certification-matrix.md`
+- Launch claim policy: `docs/launch-claim-scope.md`
+- Entitlement matrix: `docs/entitlement-matrix.md`
+
+Current state:
+
+- packaged dictation certification is still pending
+- packaged meeting certification is still pending
+- app-specific launch claims are not yet certified
+- language certification is frozen, but packaged evidence is still pending
+- cloud providers are optional bring-your-own-key integrations, not fully local workflows
 
 ## Capability Status
 
@@ -41,6 +69,14 @@ Nautilus is a local-first desktop app for recording, transcribing, and auditing 
 
 - Supported through loopback/virtual devices where available
 - Availability is environment-dependent and validated at runtime
+
+## Claim Discipline
+
+- Do not treat implemented features as launch-certified features.
+- Do not claim app coverage beyond the frozen launch matrix.
+- Do not claim language coverage beyond the frozen certification matrix.
+- Do not describe cloud-backed workflows as fully local.
+- Do not describe cloud sync as hosted Nautilus storage; it is bring-your-own-cloud only.
 
 ## Quick Start
 
@@ -89,6 +125,7 @@ cargo test --manifest-path rust-sidecar/Cargo.toml --tests
 Use `bun run test`, not `bun test`. The repo test runner is Vitest.
 Use `bun run gate:release:local` for the current-platform local release verification pass.
 Use `bun run gate:blockers:refresh` to regenerate the blocker JSON and packaged QA evidence bundle from the current repo state.
+Use `bun run gate:launch:report` to regenerate the launch dashboard and machine-readable launch status report.
 Use `bun run electron:build:mac` only on macOS, and `bun run electron:build:win` only on Windows.
 
 ## Security Notes
@@ -100,6 +137,9 @@ Use `bun run electron:build:mac` only on macOS, and `bun run electron:build:win`
 
 ## Launch Audit Artifacts
 
+- `docs/launch-readiness-dashboard.md`
+- `docs/launch-claim-scope.md`
+- `docs/entitlement-matrix.md`
 - `docs/prelaunch-readiness.md`
 - `docs/prelaunch-action-checklist.md`
 - `docs/competitor-parity-gates.md`

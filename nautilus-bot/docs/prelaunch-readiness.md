@@ -25,6 +25,9 @@ This report summarizes launch-readiness status for the strict GA scope: **all AS
 - Added benchmark gate artifact schema validation (`docs/ci/schemas/benchmark-gate-result.schema.json`).
 - Filled packaged QA matrix owners and evidence paths to support execution tracking.
 - Resolved frontend dependency advisory (`rollup`) and restored a clean dependency audit state.
+- Hardened licensing so raw license key material is stored in OS secure storage instead of the persisted renderer-visible cache.
+- Hardened backup and restore with staged writes, rollback support, and non-destructive iCloud swap behavior.
+- Added an explicit renderer command allowlist at the Electron bridge to narrow the preload command surface.
 
 ## What Was Executed (2026-03-05 blocked-first run)
 
@@ -56,8 +59,11 @@ Current status:
 - Dictation parity Phase 0 artifacts: ⚠️ PARTIAL (local command, snippet, dictionary, formatting, correction, prompt-regression, launch-language, and launch-app artifacts now regenerate cleanly and cover the frozen corpus; packaged benchmark and QA evidence still missing)
 - Superwhisper core comparison: ✅ PARITY-OR-BETTER on the repo-owned interactive dictation surface; public 100-language breadth, translate-to-English positioning, and file-transcription product path still need explicit launch scope or follow-up work
 - Cloud ASR smoke gate: ❌ BLOCKED (missing required cloud API secrets)
+- Internal launch hardening: ✅ COMPLETE for licensing, backup or restore safety, and renderer command allowlisting
+- Frontend dependency audit: ⚠️ PARTIAL (critical `wait-on` to `axios` path removed; remaining Bun-reported `esbuild` advisory is treated as a local dev residual because the installed graph resolves to `esbuild@0.27.7` and dev binds to `127.0.0.1`)
 
 See `docs/strict-release-blocker-register.md` for blocker ownership and unblock actions.
+See `docs/launch-execution-plan.md` for the recommended execution order, owners, and effort.
 
 ## Current Blockers
 
@@ -85,6 +91,10 @@ See `docs/strict-release-blocker-register.md` for blocker ownership and unblock 
 3. Apple paid signing/notarization setup is unavailable, blocking signed DMG + notarization evidence.
 4. Windows code-signing certificate is unavailable, blocking signed installer security evidence.
 5. Packaged QA rows are marked BLOCKED, but strict release requires PASS evidence across scope.
+6. Bun still reports the generic `esbuild` dev-server advisory against the Vite family:
+   - installed graph resolves to `esbuild@0.27.7`
+   - residual risk is local-dev-only and mitigated by binding dev to `127.0.0.1`
+   - release builds do not expose the Vite dev server
 
 ## Recent Ship-Path Fixes
 
@@ -94,7 +104,11 @@ See `docs/strict-release-blocker-register.md` for blocker ownership and unblock 
 - The stale `dictation-parity-benchmark` helper no longer bloats `Nautilus.app`; the benchmark workflow now runs from a dedicated Rust binary target instead of a packaged binary.
 - The repo now includes `bun run gate:release:local` to capture a reproducible current-platform local release artifact before manual QA.
 - The repo now includes `bun run gate:blockers:refresh` to refresh blocker evidence and the packaged QA bundle from the current repo state.
+- The repo now includes `bun run gate:launch:report` and writes `docs/launch-readiness-dashboard.md` plus `artifacts/launch-readiness-report.json` as the single repo-side launch control surface.
 - The repo now includes `bun run gate:dictation:artifacts` to regenerate the local dictation parity evidence suite and its launch-facing markdown rollups.
+- The repo no longer ships raw license material to the renderer, and license secrets now live in OS secure storage.
+- Backup creation now writes a manifest, restore is staged with rollback, and iCloud sync swaps non-destructively.
+- Renderer commands are now explicitly allowlisted in Electron before crossing the preload boundary.
 
 ## Residual Preconditions
 
@@ -111,4 +125,5 @@ See `docs/strict-release-blocker-register.md` for blocker ownership and unblock 
   1. cloud smoke prerequisites are met and gate passes,
   2. CP benchmark artifacts exist and pass schema + launch-threshold checks,
   3. blocked QA rows are replaced with executed PASS evidence where required,
-  4. signed update/install flows are validated on macOS + Windows packaged builds.
+  4. signed update/install flows are validated on macOS + Windows packaged builds,
+  5. the remaining Bun-reported `esbuild` advisory remains documented as a local-dev residual unless the upstream tooling stops flagging it.

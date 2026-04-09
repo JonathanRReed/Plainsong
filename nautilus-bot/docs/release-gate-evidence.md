@@ -1,18 +1,19 @@
 # Release Gate Evidence
 
-This file records launch-gate outcomes after the March hardening pass, the blocker-first strict run on **2026-03-05**, the local ship-path verification refresh on **2026-03-20**, and the Electron release-path refresh on **2026-04-09**.
+This file records launch-gate outcomes after the March hardening pass, the blocker-first strict run on **2026-03-05**, the local ship-path verification refresh on **2026-03-20**, the Electron release-path refresh on **2026-04-09**, and the independent launch audit refresh on **2026-04-09**.
 
 ## Frontend Gates
 
-| Command | Outcome |
-| --- | --- |
-| `bun run lint` | PASS |
-| `bun run typecheck` | PASS |
-| `bun run test` | PASS |
-| `bun run build:renderer` | PASS |
-| `bun audit` | PASS |
+| Command | Outcome | Notes |
+| --- | --- | --- |
+| `bun run lint` | PASS | Includes `bun run typecheck`, `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings` through the package script |
+| `bun run typecheck` | PASS | No TypeScript errors in the current repo state |
+| `bun run test` | PASS | 25 files, 165 tests passing in the current repo state |
+| `bun run build:renderer` | PASS | Production renderer build succeeds |
+| `bun audit` | PARTIAL | As of 2026-04-09, the critical `wait-on` to `axios` advisory was removed by deleting the unused dependency and stale npm lockfile. The Vite stack was upgraded to Vite 8 with `esbuild@0.27.x`. Bun still reports the generic `esbuild <=0.24.2` dev-server advisory against the Vite family, but the live graph resolves to `esbuild@0.27.7` and dev is bound to `127.0.0.1`. Residual risk is documented and accepted for local dev only. |
 | `bun run gate:dictation:artifacts` | PASS | Regenerates `artifacts/dictation-parity-evidence.json` plus the launch-facing dictation parity rollups under `docs/evals/` |
 | `bun run gate:blockers:refresh` | PASS | Regenerates `artifacts/release-blockers.json`, `artifacts/benchmark-packaged.blocked.md`, and `artifacts/packaged-qa-evidence-bundle.json` from the current repo state |
+| `bun run gate:launch:report` | PASS | Regenerates `artifacts/launch-readiness-report.json` and `docs/launch-readiness-dashboard.md` so launch state is visible in one place |
 | `bun run gate:release:local` | PASS | Produces `artifacts/local-release-macos.json` for the current-platform local release sweep, including the current size-gate summary |
 
 ## Rust Gates
@@ -95,5 +96,10 @@ This file records launch-gate outcomes after the March hardening pass, the block
   - `docs/dictation-app-compatibility-matrix.md`
   - `docs/dictation-blocked-app-register.md`
 - Cloud smoke gate is blocked by missing required live keys: `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `MISTRAL_API_KEY`.
+- Dependency audit status on 2026-04-09:
+  - removed the unused `wait-on` dependency and the stale `package-lock.json`, which cleared the `axios` critical advisory
+  - upgraded to `vite@8.0.8`, `@vitejs/plugin-react@6.0.1`, and `esbuild@0.27.7`
+  - Bun still reports the generic `esbuild` dev-server advisory against the Vite family even though the installed graph resolves above the vulnerable range
+  - residual risk is limited to the local dev server and is mitigated by binding dev to `127.0.0.1`
 - Production update validation still depends on final release credentials and signed packaged artifacts.
 - Signed install validation remains blocked by unavailable Apple notarization setup and Windows signing certificate.

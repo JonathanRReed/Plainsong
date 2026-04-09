@@ -1,6 +1,6 @@
 # Dictation Dictionary Fixture Report
 
-Generated: 2026-04-09T17:28:42.960Z
+Generated: 2026-04-09T22:43:34.310Z
 
 Dictionary fixtures pass at 100%. This report verifies longest-match handling and app-scoped replacements in the current local code path.
 

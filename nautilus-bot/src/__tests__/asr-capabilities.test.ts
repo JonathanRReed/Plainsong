@@ -35,6 +35,10 @@ describe("ASR capability mappings", () => {
       providerType: "whisper",
       modelId: "large-v3-turbo",
     });
+    expect(visibleRouteForMlxModel("mlx-community/parakeet-tdt-0.6b-v3")).toEqual({
+      providerType: "parakeet",
+      modelId: "parakeet-tdt-0.6b-v3",
+    });
   });
 
   it("keeps frontend provider eligibility aligned with backend meeting rules", () => {
@@ -48,6 +52,7 @@ describe("ASR capability mappings", () => {
     expect(isMeetingEligibleProvider("whisper_candle")).toBe(false);
     expect(isSharedMeetingCompatible("distil_whisper", "distil-large-v3.5")).toBe(true);
     expect(isSharedMeetingCompatible("parakeet", "parakeet-ctc-0.6b")).toBe(true);
+    expect(isSharedMeetingCompatible("parakeet", "parakeet-tdt-0.6b-v3")).toBe(true);
     expect(isSharedMeetingCompatible("voxtral", "voxtral-local")).toBe(true);
     expect(isSharedMeetingCompatible("whisper", "base.en")).toBe(false);
     expect(isSharedMeetingCompatible("whisper_candle", "whisper-large-v3-turbo")).toBe(false);
