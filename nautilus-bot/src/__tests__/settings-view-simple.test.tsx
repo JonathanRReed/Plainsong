@@ -201,8 +201,6 @@ vi.mock("@/lib/backend", () => ({
   unlockVault: vi.fn(),
   verifyBackupCloudConnection: vi.fn(),
   validateLicense: vi.fn(async () => ({
-    key: "",
-    instanceId: "",
     tier: "none",
     valid: false,
     lsStatus: "",
@@ -340,8 +338,6 @@ describe("SettingsView performance behavior", () => {
   it("shows only basic color schemes for trial users", async () => {
     const backend = await import("@/lib/backend");
     vi.mocked(backend.validateLicense).mockResolvedValue({
-      key: "",
-      instanceId: "",
       tier: "none",
       valid: false,
       lsStatus: "",
@@ -368,8 +364,6 @@ describe("SettingsView performance behavior", () => {
   it("persists selected color scheme for paid users", async () => {
     const backend = await import("@/lib/backend");
     vi.mocked(backend.validateLicense).mockResolvedValue({
-      key: "pro-license",
-      instanceId: "instance",
       tier: "pro",
       valid: true,
       lsStatus: "active",

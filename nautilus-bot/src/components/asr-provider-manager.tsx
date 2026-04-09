@@ -1,19 +1,23 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
 import {
-  isMeetingEligibleModel as sharedIsMeetingEligibleModel,
-  isSharedMeetingCompatible as sharedIsSharedMeetingCompatible,
   isVisibleAsrProvider,
   modelSupportsMlxAcceleration,
-  providerCapabilityLabel,
-  providerHostingLabel,
 } from "@/lib/asr-capabilities";
 import {
   mergeSelectionStateUpdate,
   selectionStateFromSettings,
 } from "@/lib/asr-route-selection";
+import {
+  buildAsrRouteCatalog,
+  getLaneRoutes,
+  getRecommendedLaneRoute,
+  routeIdFor,
+  type AsrRouteCatalogEntry,
+  type AsrRouteLane,
+} from "@/lib/asr-route-catalog";
 import {
   refreshAsrRuntimeProbes,
   repairLocalModelCache,
@@ -37,6 +41,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { AsrRouteCombobox } from "@/components/asr-route-combobox";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -136,32 +141,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
 
   type SelectionProvider = AsrProviderInfo | AsrProviderInventory;
 
-  type WorkflowLane = "dictation" | "meeting" | "shared";
-
-  const isMeetingEligibleModel = (
-    providerType: AsrProviderType,
-    modelId: string,
-  ) => {
-    if (!sharedIsMeetingEligibleModel(providerType, modelId)) {
-      return false;
-    }
-
-    const normalizedModelId = modelId.trim();
-    if (!normalizedModelId) {
-      return true;
-    }
-
-    return modelOptionsForProvider(providerType).some(
-      (option) => option.id === normalizedModelId,
-    );
-  };
-
-  const isSharedMeetingCompatible = (
-    providerType: AsrProviderType,
-    modelId: string,
-  ) =>
-    sharedIsSharedMeetingCompatible(providerType, modelId) &&
-    isMeetingEligibleModel(providerType, modelId);
+  type WorkflowLane = AsrRouteLane;
 
   const defaultPlatformSettings = (): PlatformOptimizationSettings => ({
     mode: "auto",
@@ -549,9 +529,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       (provider) => provider.providerType === providerType,
     );
 
-  const modelOptionsForProvider = (providerType: AsrProviderType) =>
-    selectionProviderByType(providerType)?.modelOptions ?? [];
-
   const providerHasMlxAcceleration = (
     providerType: AsrProviderType,
     modelId: string,
@@ -589,6 +566,10 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   );
   const advancedMlxProvider =
     providers.find((provider) => provider.providerType === "mlx_audio") ?? null;
+  const routeCatalog = useMemo(
+    () => buildAsrRouteCatalog(routeSelectableProviders, meetingRoutePolicy),
+    [meetingRoutePolicy, routeSelectableProviders],
+  );
 
   const inventoryReadiness = (provider: SelectionProvider) => {
     const status = normalizeDownloadStatus(provider.downloadStatus);
@@ -616,89 +597,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     };
   };
 
-  const lanePriority = (
-    lane: WorkflowLane,
-    providerType: AsrProviderType,
-    policy: "prefer_local" | "best_available",
-  ) => {
-    if (lane === "dictation") {
-      const ordered: AsrProviderType[] = [
-        "moonshine",
-        "macos_apple_speech",
-        "distil_whisper",
-        "whisper",
-        "windows_sdk_dictation",
-        "whisper_candle",
-        "openai_cloud",
-        "elevenlabs_scribe",
-        "groq",
-        "cohere_transcribe",
-        "parakeet",
-        "voxtral",
-      ];
-      return ordered.indexOf(providerType);
-    }
-
-    const ordered =
-      policy === "best_available"
-        ? ([
-            "openai_cloud",
-            "elevenlabs_scribe",
-            "groq",
-            "cohere_transcribe",
-            "distil_whisper",
-            "parakeet",
-            "voxtral",
-          ] as AsrProviderType[])
-        : ([
-            "distil_whisper",
-            "parakeet",
-            "voxtral",
-            "openai_cloud",
-            "elevenlabs_scribe",
-            "groq",
-            "cohere_transcribe",
-          ] as AsrProviderType[]);
-    return ordered.indexOf(providerType);
-  };
-
-  const laneProviders = (lane: WorkflowLane) =>
-    routeSelectableProviders
-      .filter((provider) => {
-        if (provider.providerType === "mlx_audio") {
-          return false;
-        }
-        if (lane === "dictation") {
-          return true;
-        }
-
-        const eligibleModels = modelOptionsForProvider(
-          provider.providerType,
-        ).filter((option) =>
-          lane === "meeting"
-            ? isMeetingEligibleModel(provider.providerType, option.id)
-            : isSharedMeetingCompatible(provider.providerType, option.id),
-        );
-
-        return eligibleModels.length > 0;
-      })
-      .sort((left, right) => {
-        const leftReadiness = inventoryReadiness(left);
-        const rightReadiness = inventoryReadiness(right);
-        if (leftReadiness.label === "Ready" && rightReadiness.label !== "Ready")
-          return -1;
-        if (leftReadiness.label !== "Ready" && rightReadiness.label === "Ready")
-          return 1;
-
-        return (
-          lanePriority(lane, left.providerType, meetingRoutePolicy) -
-          lanePriority(lane, right.providerType, meetingRoutePolicy)
-        );
-      });
-
-  const recommendedLaneProvider = useCallback((lane: WorkflowLane) =>
-    laneProviders(lane)[0] ?? null, [laneProviders]);
-
   const providerUiName = (provider: SelectionProvider) =>
     provider.providerType === "mlx_audio"
       ? "Additional MLX models"
@@ -708,17 +606,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     provider.providerType === "mlx_audio"
       ? "Extra Apple Silicon MLX routes that do not map cleanly to another Nautilus provider family. Use the MLX toggle on Whisper, Moonshine, Parakeet, and Voxtral when you want the same family through mlx-audio."
       : provider.description;
-
-  const providerUsesManagedModel = (providerType: AsrProviderType) =>
-    providerType === "macos_apple_speech" ||
-    providerType === "windows_sdk_dictation";
-
-  const managedModelLabel = (providerType: AsrProviderType) =>
-    providerType === "macos_apple_speech"
-      ? "Built into macOS"
-      : providerType === "windows_sdk_dictation"
-        ? "Built into Windows"
-        : "Built into your system";
 
   const handleSetDefault = async (providerType: AsrProviderType) => {
     const selected = providers.find(
@@ -1161,45 +1048,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     useSharedAsrSelection,
   ]);
 
-  const renderModelControl = (
-    label: string,
-    providerType: AsrProviderType,
-    value: string,
-    onChange: (modelId: string) => void,
-    options?: Array<{ id: string; label: string }>,
-  ) => {
-    if (providerUsesManagedModel(providerType)) {
-      return (
-        <div className="space-y-1.5">
-          <Label className="text-sm text-muted-foreground">{label}</Label>
-          <div className="w-full rounded-md border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
-            {managedModelLabel(providerType)}
-          </div>
-        </div>
-      );
-    }
-
-    const resolvedOptions = options ?? modelOptionsForProvider(providerType);
-
-    return (
-      <div className="space-y-1.5">
-        <Label className="text-sm text-muted-foreground">{label}</Label>
-        <Select value={value} onValueChange={onChange}>
-          <SelectTrigger className="w-full">
-            <SelectValue placeholder="Select model" />
-          </SelectTrigger>
-          <SelectContent>
-            {resolvedOptions.map((option) => (
-              <SelectItem key={`${label}-${option.id}`} value={option.id}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-    );
-  };
-
   const renderMlxAccelerationToggle = (
     providerType: AsrProviderType,
     modelId: string,
@@ -1250,89 +1098,103 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     );
   };
 
-  const activeProviderForLane = (lane: WorkflowLane) =>
-    lane === "shared"
-      ? selectionProviderByType(defaultProvider)
-      : lane === "meeting"
-        ? selectionProviderByType(meetingProvider)
-        : selectionProviderByType(dictationProvider);
-
-  const activeModelIdForLane = (lane: WorkflowLane) =>
-    lane === "shared"
-      ? defaultModelId
-      : lane === "meeting"
-        ? meetingModelId
-        : dictationModelId;
-
-  const laneModelOptions = (
-    lane: WorkflowLane,
-    providerType: AsrProviderType,
-  ) => {
-    const options = modelOptionsForProvider(providerType);
-    if (lane === "dictation") {
-      return options;
-    }
-    return options.filter((option) =>
-      lane === "meeting"
-        ? isMeetingEligibleModel(providerType, option.id)
-        : isSharedMeetingCompatible(providerType, option.id),
-    );
-  };
-
-  const applyLaneProviderSelection = async (
-    lane: WorkflowLane,
-    providerType: AsrProviderType,
-  ) => {
-    const nextModelId =
-      laneModelOptions(lane, providerType)[0]?.id ??
-      modelOptionsForProvider(providerType)[0]?.id ??
-      providerType;
-    const updates =
-      lane === "shared"
-        ? { defaultProvider: providerType, selectedModelId: nextModelId }
-        : lane === "meeting"
-          ? { meetingProvider: providerType, meetingModelId: nextModelId }
-          : { dictationProvider: providerType, dictationModelId: nextModelId };
-
-    await persistSelectionSettings(updates);
-
-    if (providerType === "macos_apple_speech") {
-      await requestDictationPermissions();
-      const updatedInventory = await loadInventory();
-      await loadSelectionSettings(updatedInventory);
-    } else {
-      const updatedInventory = await loadInventory();
-      await loadSelectionSettings(updatedInventory);
-    }
-  };
-
-  const applyLaneModelSelection = async (
-    lane: WorkflowLane,
-    modelId: string,
-  ) => {
-    const updates =
-      lane === "shared"
-        ? { selectedModelId: modelId }
-        : lane === "meeting"
-          ? { meetingModelId: modelId }
-          : { dictationModelId: modelId };
-    await persistSelectionSettings(updates);
-    const updatedInventory = await loadInventory();
-    await loadSelectionSettings(updatedInventory);
-  };
-
-  const renderWorkflowLane = (lane: WorkflowLane) => {
-    const providersForLane = laneProviders(lane);
-    const activeProvider = activeProviderForLane(lane);
-    const recommendedProvider = recommendedLaneProvider(lane);
-    const activeProviderType =
+  const activeRouteForLane = (lane: WorkflowLane) => {
+    const providerType =
       lane === "shared"
         ? defaultProvider
         : lane === "meeting"
           ? meetingProvider
           : dictationProvider;
-    const activeModelId = activeModelIdForLane(lane);
-    const modelOptions = laneModelOptions(lane, activeProviderType);
+    const modelId =
+      lane === "shared"
+        ? defaultModelId
+        : lane === "meeting"
+          ? meetingModelId
+          : dictationModelId;
+
+    return (
+      routeCatalog.find(
+        (route) => route.routeId === routeIdFor(providerType, modelId),
+      ) ?? null
+    );
+  };
+
+  const applyLaneRouteSelection = async (
+    lane: WorkflowLane,
+    route: AsrRouteCatalogEntry,
+  ) => {
+    const updates =
+      lane === "shared"
+        ? {
+            defaultProvider: route.providerType,
+            selectedModelId: route.modelId,
+          }
+        : lane === "meeting"
+          ? {
+              meetingProvider: route.providerType,
+              meetingModelId: route.modelId,
+            }
+          : {
+              dictationProvider: route.providerType,
+              dictationModelId: route.modelId,
+            };
+
+    await persistSelectionSettings(updates);
+
+    if (route.providerType === "macos_apple_speech") {
+      await requestDictationPermissions();
+    }
+
+    const updatedInventory = await loadInventory();
+    await loadSelectionSettings(updatedInventory);
+  };
+
+  const routeActionVariant = (
+    route: AsrRouteCatalogEntry,
+  ): "default" | "outline" => (route.action === "download" ? "default" : "outline");
+
+  const routeReadinessBadgeVariant = (
+    route: AsrRouteCatalogEntry,
+  ): "default" | "secondary" | "outline" | "destructive" => {
+    switch (route.readiness) {
+      case "ready":
+        return "default";
+      case "needs_download":
+        return "secondary";
+      case "unavailable":
+        return "destructive";
+      default:
+        return "outline";
+    }
+  };
+
+  const handleRouteAction = async (route: AsrRouteCatalogEntry) => {
+    if (route.action === "download") {
+      await handleDownload(route.providerType);
+      return;
+    }
+    if (route.action === "open_system_setup") {
+      if (route.providerType === "macos_apple_speech") {
+        await openPermissionSettings("speech");
+      } else {
+        await copySetupCommand(route.providerType);
+      }
+      return;
+    }
+    if (route.action === "fix_setup" || route.action === "connect_api_key") {
+      setShowAdvancedTools(true);
+      await copySetupCommand(route.providerType);
+    }
+  };
+
+  const renderWorkflowLane = (lane: WorkflowLane) => {
+    const laneRoutes = getLaneRoutes(routeCatalog, lane, meetingRoutePolicy);
+    const activeRoute = activeRouteForLane(lane);
+    const recommendedRoute = getRecommendedLaneRoute(
+      routeCatalog,
+      lane,
+      meetingRoutePolicy,
+    );
     const laneTitle =
       lane === "shared"
         ? "Shared route"
@@ -1356,105 +1218,152 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 {laneDescription}
               </p>
             </div>
-            {activeProvider ? (
+            {activeRoute ? (
               <Badge variant="outline" className="bg-background/70">
-                Current: {providerUiName(activeProvider)}
+                Current: {activeRoute.label}
               </Badge>
             ) : null}
           </div>
-          {recommendedProvider ? (
+          {recommendedRoute ? (
             <div className="mt-4 rounded-lg border border-trusted/30 bg-background/80 p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="text-sm font-medium">
-                      {providerUiName(recommendedProvider)}
+                      {recommendedRoute.label}
                     </p>
                     <Badge variant="outline">Recommended</Badge>
                     <Badge variant="outline">
-                      {providerHostingLabel(recommendedProvider.providerType)}
+                      {recommendedRoute.hosting === "platform"
+                        ? "Platform"
+                        : recommendedRoute.hosting === "cloud"
+                          ? "Cloud"
+                          : "Local"}
+                    </Badge>
+                    <Badge variant={routeReadinessBadgeVariant(recommendedRoute)}>
+                      {recommendedRoute.readinessLabel}
                     </Badge>
                     <Badge variant="outline">
-                      {inventoryReadiness(recommendedProvider).label}
+                      {recommendedRoute.capabilityBadge}
                     </Badge>
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {providerUiDescription(recommendedProvider)}
+                    {recommendedRoute.summary}
                   </p>
                 </div>
-                <Button
-                  size="sm"
-                  variant={
-                    activeProviderType === recommendedProvider.providerType
-                      ? "default"
-                      : "outline"
-                  }
-                  onClick={() =>
-                    void applyLaneProviderSelection(
-                      lane,
-                      recommendedProvider.providerType,
-                    )
-                  }
-                >
-                  {activeProviderType === recommendedProvider.providerType
-                    ? "Selected"
-                    : "Use recommended"}
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant={
+                      activeRoute?.routeId === recommendedRoute.routeId
+                        ? "default"
+                        : "outline"
+                    }
+                    onClick={() =>
+                      void applyLaneRouteSelection(lane, recommendedRoute)
+                    }
+                  >
+                    {activeRoute?.routeId === recommendedRoute.routeId
+                      ? "Selected"
+                      : "Use recommended"}
+                  </Button>
+                  {recommendedRoute.action && recommendedRoute.actionLabel ? (
+                    <Button
+                      size="sm"
+                      variant={routeActionVariant(recommendedRoute)}
+                      onClick={() => void handleRouteAction(recommendedRoute)}
+                    >
+                      {recommendedRoute.actionLabel}
+                    </Button>
+                  ) : null}
+                </div>
               </div>
             </div>
           ) : null}
-          <div className="mt-4 grid gap-3 xl:grid-cols-2 2xl:grid-cols-3">
-            {providersForLane.map((provider) => (
-              <button
-                key={`${lane}-${provider.providerType}`}
-                type="button"
-                className={cn(
-                  "rounded-lg border px-4 py-3 text-left transition-colors",
-                  activeProviderType === provider.providerType
-                    ? "border-trusted bg-trusted/5"
-                    : "bg-background hover:bg-muted/20",
-                )}
-                onClick={() =>
-                  void applyLaneProviderSelection(lane, provider.providerType)
-                }
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm font-medium">
-                    {providerUiName(provider)}
-                  </p>
-                  <Badge variant="outline">
-                    {inventoryReadiness(provider).label}
-                  </Badge>
-                </div>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {providerHostingLabel(provider.providerType)} ·{" "}
-                  {providerCapabilityLabel(provider.providerType)}
-                </p>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  {providerUiDescription(provider)}
-                </p>
-              </button>
-            ))}
+          <div className="mt-4 space-y-1.5">
+            <Label className="text-sm text-muted-foreground">
+              {laneTitle} selector
+            </Label>
+            <AsrRouteCombobox
+              routes={laneRoutes}
+              value={activeRoute?.routeId ?? null}
+              placeholder={`Choose a ${lane === "meeting" ? "meeting" : lane === "shared" ? "shared" : "dictation"} route`}
+              onSelect={(route) => {
+                void applyLaneRouteSelection(lane, route).catch((error) => {
+                  console.error("Failed to update ASR route:", error);
+                });
+              }}
+            />
           </div>
         </div>
 
         <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_280px]">
           <div className="rounded-xl border bg-background/70 p-4">
-            {renderModelControl(
-              `${laneTitle} model`,
-              activeProviderType,
-              activeModelId,
-              (modelId) => {
-                void applyLaneModelSelection(lane, modelId).catch((error) => {
-                  console.error("Failed to update ASR model selection:", error);
-                });
-              },
-              modelOptions,
+            {activeRoute ? (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="outline">{activeRoute.providerLabel}</Badge>
+                  <Badge variant="outline">
+                    {activeRoute.hosting === "platform"
+                      ? "Platform"
+                      : activeRoute.hosting === "cloud"
+                        ? "Cloud"
+                        : "Local"}
+                  </Badge>
+                  <Badge variant="outline">{activeRoute.capabilityBadge}</Badge>
+                  <Badge variant={routeReadinessBadgeVariant(activeRoute)}>
+                    {activeRoute.readinessLabel}
+                  </Badge>
+                  {activeRoute.experimental ? (
+                    <Badge variant="outline">Experimental</Badge>
+                  ) : null}
+                  {activeRoute.supportsMlxAcceleration ? (
+                    <Badge variant="outline">Apple Silicon accel</Badge>
+                  ) : null}
+                </div>
+                <div>
+                  <p className="text-sm font-medium">{activeRoute.label}</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {activeRoute.summary}
+                  </p>
+                </div>
+                {activeRoute.action && activeRoute.actionLabel ? (
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      variant={routeActionVariant(activeRoute)}
+                      disabled={isLoading}
+                      onClick={() => void handleRouteAction(activeRoute)}
+                    >
+                      {activeRoute.actionLabel}
+                    </Button>
+                    {(activeRoute.action === "fix_setup" ||
+                      activeRoute.action === "connect_api_key") ? (
+                      <p className="self-center text-xs text-muted-foreground">
+                        The action copies the exact setup step and opens the
+                        advanced panel.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                Choose a route for this workflow.
+              </p>
             )}
-            <div className="mt-3">
+            <div className="mt-4">
               {renderMlxAccelerationToggle(
-                activeProviderType,
-                activeModelId,
+                lane === "shared"
+                  ? defaultProvider
+                  : lane === "meeting"
+                    ? meetingProvider
+                    : dictationProvider,
+                lane === "shared"
+                  ? defaultModelId
+                  : lane === "meeting"
+                    ? meetingModelId
+                    : dictationModelId,
                 lane,
               )}
             </div>
@@ -1465,13 +1374,11 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               Route notes
             </p>
             <p className="mt-2 text-sm font-medium">
-              {activeProvider
-                ? providerUiName(activeProvider)
-                : "No route selected"}
+              {activeRoute ? activeRoute.label : "No route selected"}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              {activeProvider
-                ? `${providerHostingLabel(activeProvider.providerType, activeProvider.selectedModelId)} · ${providerCapabilityLabel(activeProvider.providerType)}`
+              {activeRoute
+                ? `${activeRoute.providerLabel} · ${activeRoute.capabilityBadge}`
                 : "Choose a route for this workflow."}
             </p>
             <p className="mt-3 text-xs text-muted-foreground">

@@ -61,7 +61,7 @@ const PROVIDER_BUNDLES: Array<{
     id: "parakeet",
     providerType: "parakeet",
     label: "NVIDIA Parakeet bundle",
-    description: "Downloads the currently selected Parakeet model. Stable CTC 0.6B is recommended; larger and legacy variants remain available on demand.",
+    description: "Downloads the currently selected Parakeet model. TDT 0.6B v3 is the recommended release; larger and legacy variants remain available on demand.",
     indicator: "parakeet/encoder.onnx",
   },
   {

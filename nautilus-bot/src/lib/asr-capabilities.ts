@@ -144,7 +144,7 @@ export function visibleRouteForMlxModel(modelId: string | null | undefined): {
     case "mlx-community/whisper-large-v3-turbo-asr-fp16":
       return { providerType: "whisper", modelId: "large-v3-turbo" };
     case "mlx-community/parakeet-tdt-0.6b-v3":
-      return { providerType: "parakeet", modelId: "parakeet-ctc-0.6b" };
+      return { providerType: "parakeet", modelId: "parakeet-tdt-0.6b-v3" };
     case "mlx-community/Voxtral-Mini-3B-2507-bf16":
       return { providerType: "voxtral", modelId: "voxtral-local" };
     default:
@@ -193,7 +193,10 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
     case "distil_whisper":
       return normalizedModelId.startsWith("distil");
     case "parakeet":
-      return normalizedModelId.startsWith("parakeet-ctc");
+      return (
+        normalizedModelId.startsWith("parakeet-ctc") ||
+        normalizedModelId.startsWith("parakeet-tdt-0.6b")
+      );
     case "mlx_audio":
       return !normalizedModelId.includes("moonshine");
     case "voxtral":

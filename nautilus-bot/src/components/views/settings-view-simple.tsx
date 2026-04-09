@@ -820,8 +820,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       .catch(() => {
         if (mounted) {
           setLicenseInfo({
-            key: "",
-            instanceId: "",
             tier: "none",
             valid: false,
             lsStatus: "",
@@ -5179,12 +5177,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                               </div>
                               <div className="grid grid-cols-2 gap-2 text-sm">
                                 <span className="text-muted-foreground">
-                                  Key
-                                </span>
-                                <span className="font-mono text-xs truncate">
-                                  {licenseInfo.key.slice(0, 8)}···
-                                </span>
-                                <span className="text-muted-foreground">
                                   Devices
                                 </span>
                                 <span>
@@ -5254,8 +5246,9 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                 </span>
                               </div>
                               <p className="text-xs text-muted-foreground">
-                                All Pro features are available during your
-                                trial.
+                                Trial access includes the current Pro feature
+                                set. Friends Club-only features such as cloud
+                                sync and priority support stay gated.
                               </p>
                             </div>
                             <div className="space-y-2">
@@ -5366,7 +5359,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                               </p>
                               <p className="text-xs text-muted-foreground">
                                 Enter your license key below, or buy one to
-                                unlock updates and Pro features.
+                                unlock updates and the Pro feature set. Friends
+                                Club adds cloud sync and priority support.
                               </p>
                             </div>
                             <div className="space-y-2">

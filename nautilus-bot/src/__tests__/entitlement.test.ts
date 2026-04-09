@@ -10,8 +10,6 @@ function makeLicense(
   overrides: Partial<LicenseInfo> = {}
 ): LicenseInfo {
   return {
-    key: "",
-    instanceId: "",
     tier: "none",
     valid: false,
     lsStatus: "",

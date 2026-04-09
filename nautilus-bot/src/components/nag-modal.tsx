@@ -16,7 +16,7 @@ import {
     DialogTitle,
 } from "@/components/ui/dialog";
 
-const BUY_PRO_URL = "https://nautilusbot.lemonsqueezy.com/buy/pro";
+const BUY_PRO_URL = "https://nautilusbot.lemonsqueezy.com/buy/basic";
 const BUY_FRIENDS_URL = "https://nautilusbot.lemonsqueezy.com/buy/friends-club";
 const DISMISS_KEY = "nautilus_nag_dismissed_at";
 const TRIAL_EXPIRED_KEY = "nautilus_trial_expired_at";
@@ -76,7 +76,8 @@ export function NagModal({ onActivate }: Props) {
                 <div className="space-y-4 p-5">
                     <DialogDescription className="leading-relaxed">
                         Your 30-day free trial has ended. Nautilus keeps working — a license
-                        removes this reminder and supports continued development.
+                        removes this reminder. Pro unlocks updates and core paid features.
+                        Friends Club adds cloud sync and priority support.
                     </DialogDescription>
 
                     <div className="space-y-2">
@@ -116,7 +117,7 @@ export function NagModal({ onActivate }: Props) {
 
                     <DialogFooter className="justify-center sm:justify-center">
                         <p className="text-xs text-muted-foreground/60">
-                            Snoozes for 24 hours · 1 purchase, up to 5 computers
+                            Snoozes for 24 hours · Pro supports up to 5 computers · Friends Club supports up to 10
                         </p>
                     </DialogFooter>
                 </div>

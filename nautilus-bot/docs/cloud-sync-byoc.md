@@ -1,6 +1,12 @@
 # Cloud Sync — Bring Your Own Cloud (BYOC)
 
-Nautilus is **local-first**: all recordings, transcripts, and encryption keys stay on your Mac by default. Cloud sync is optional and uses *your* storage — we never host your data.
+Nautilus is **local-first**: recordings, transcripts, and local secrets stay on your machine by default. Cloud sync is optional, uses *your* storage, and is not a hosted Nautilus cloud service.
+
+Current product note:
+
+- cloud sync is a Friends Club entitlement in the current code
+- cloud providers are optional BYOC integrations
+- packaged launch certification for cloud sync is still pending in the QA matrix
 
 ## Supported Providers
 
@@ -61,7 +67,7 @@ For maximum privacy, use [Syncthing](https://syncthing.net/) to sync directly be
 ## Security Considerations
 
 - **Vault encryption**: Always enable Vault encryption before syncing sensitive recordings to any cloud provider.
-- **API keys**: Nautilus stores cloud credentials in the macOS Keychain, never in plain text.
+- **API keys**: Nautilus stores cloud credentials in OS secure storage, not plain text files.
 - **Zero-knowledge**: We have no access to your cloud storage. Nautilus talks directly to your provider.
 - **Selective sync**: You can choose to sync only transcripts (small) and skip audio files (large) to save bandwidth.
 

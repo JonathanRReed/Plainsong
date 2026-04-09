@@ -3,6 +3,7 @@
 This checklist tracks remaining release blockers for strict all-provider GA on macOS + Windows.
 
 Current blocker register: `docs/strict-release-blocker-register.md`.
+Execution plan: `docs/launch-execution-plan.md`.
 
 ## A) Required Secrets
 
@@ -19,6 +20,7 @@ Current blocker register: `docs/strict-release-blocker-register.md`.
 
 ## C) Automated Gates
 
+- [x] Resolve or formally accept the current `bun audit` findings, then refresh `docs/release-gate-evidence.md`. (`wait-on` removed, Vite stack upgraded, remaining Bun-reported `esbuild` advisory documented as local-dev-only residual)
 - [ ] Release workflow `prepare` job passes secret validation + cloud smoke gate. — BLOCKED (missing cloud secrets).
 - [x] Rust live cloud integration test gate passes (`asr_live_cloud_integration`).
 - [x] Local ASR performance gate passes (`asr_local_performance_gate`, RTF <= 1.2).

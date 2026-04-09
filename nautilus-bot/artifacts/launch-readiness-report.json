@@ -1,0 +1,116 @@
+{
+  "generatedAt": "2026-04-09T22:43:47.521Z",
+  "status": "NO-GO",
+  "areas": {
+    "dictation": {
+      "status": "BLOCKED",
+      "benchmarkMacosPass": true,
+      "benchmarkWindowsPass": true,
+      "parityFixturesPass": true,
+      "promptEvalPass": true,
+      "qaSummary": {
+        "total": 19,
+        "pass": 0,
+        "fail": 0,
+        "blocked": 19,
+        "pending": 0
+      },
+      "appMatrixSummary": {
+        "total": 16,
+        "supported": 0,
+        "partial": 0,
+        "clipboardOnly": 0,
+        "unsupported": 0,
+        "pending": 16
+      }
+    },
+    "meetings": {
+      "status": "BLOCKED",
+      "qaSummary": {
+        "total": 22,
+        "pass": 0,
+        "fail": 0,
+        "blocked": 22,
+        "pending": 0
+      }
+    },
+    "trust": {
+      "status": "BLOCKED",
+      "qaSummary": {
+        "total": 22,
+        "pass": 0,
+        "fail": 0,
+        "blocked": 22,
+        "pending": 0
+      },
+      "localReleasePass": true,
+      "cloudSmokeReady": false,
+      "appleReleaseSigningReady": false,
+      "windowsReleaseSigningReady": false
+    },
+    "launchClaims": {
+      "status": "BLOCKED",
+      "appMatrixSummary": {
+        "total": 16,
+        "supported": 0,
+        "partial": 0,
+        "clipboardOnly": 0,
+        "unsupported": 0,
+        "pending": 16
+      },
+      "languageMatrixSummary": {
+        "total": 10,
+        "packagedPass": 0,
+        "packagedPending": 10
+      }
+    }
+  },
+  "blockers": [
+    {
+      "gate": "cloud-asr-smoke",
+      "status": "BLOCKED",
+      "evidence": "artifacts/cloud-asr-smoke.blocked.md",
+      "reason": "Missing required live cloud ASR secrets: OPENAI_API_KEY, ELEVENLABS_API_KEY, MISTRAL_API_KEY"
+    },
+    {
+      "gate": "benchmark-gates-packaged",
+      "status": "BLOCKED",
+      "evidence": "artifacts/benchmark-packaged.blocked.md",
+      "reason": "Benchmark gate artifacts are still local or fixture-tagged runs; packaged dictation benchmark evidence is still missing."
+    },
+    {
+      "gate": "apple-release-signing",
+      "status": "BLOCKED",
+      "evidence": "artifacts/qa/macos/security-gatekeeper.md",
+      "reason": "Gatekeeper still rejects the local dev-signed app; release signing and notarization are not configured."
+    },
+    {
+      "gate": "windows-release-signing",
+      "status": "BLOCKED",
+      "evidence": "artifacts/qa/windows/security-authenticode.md",
+      "reason": "Windows signing and SmartScreen validation have not been executed from a Windows release host."
+    },
+    {
+      "gate": "packaged-qa-matrix",
+      "status": "BLOCKED",
+      "evidence": "artifacts/packaged-qa-evidence-bundle.json",
+      "reason": "Packaged QA matrix remains 49 BLOCKED / 0 PASS."
+    }
+  ],
+  "nextActions": [
+    "Provision Apple signing and notarization credentials, then execute the macOS packaged QA rows.",
+    "Provision the Windows signing certificate, then execute the Windows packaged QA rows.",
+    "Capture packaged dictation benchmark evidence and update the launch app matrix from PENDING to verified statuses.",
+    "Freeze public launch claims to the verified app and language set only."
+  ],
+  "evidence": {
+    "releaseBlockers": "artifacts/release-blockers.json",
+    "qaBundle": "artifacts/packaged-qa-evidence-bundle.json",
+    "benchmarkMacos": "artifacts/benchmark-gates-macos.json",
+    "benchmarkWindows": "artifacts/benchmark-gates-windows.json",
+    "dictationParity": "artifacts/dictation-parity-evidence.json",
+    "dictationPromptEval": "artifacts/dictation-prompt-eval.json",
+    "appMatrix": "docs/dictation-app-compatibility-matrix.md",
+    "languageMatrix": "docs/evals/dictation-language-certification-matrix.md"
+  }
+}

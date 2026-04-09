@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 const SETTINGS_BACKUP_FILENAME: &str = "settings.json";
+const BACKUP_MANIFEST_FILENAME: &str = "manifest.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -104,6 +105,23 @@ pub enum BackupType {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+enum BackupComponent {
+    Database,
+    Recordings,
+    Settings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupManifest {
+    id: String,
+    timestamp: DateTime<Utc>,
+    backup_type: BackupType,
+    components: Vec<BackupComponent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum SetupCheckStatus {
     Pass,
     Fail,
@@ -190,18 +208,21 @@ impl BackupManager {
         let backup_id = format!("{}_{}", backup_prefix, timestamp.format("%Y%m%d_%H%M%S"));
         let backup_path = backup_dir.join(&backup_id);
         tokio::fs::create_dir_all(&backup_path).await?;
+        let mut components = Vec::new();
 
         if matches!(backup_type, BackupType::Full | BackupType::Incremental) {
             let db_path = data_dir.join("nautilus.db");
             if db_path.exists() {
                 let db_backup = backup_path.join("nautilus.db");
                 tokio::fs::copy(&db_path, db_backup).await?;
+                components.push(BackupComponent::Database);
             }
 
             let recordings_dir = data_dir.join("recordings");
             if recordings_dir.exists() {
                 let recordings_backup = backup_path.join("recordings");
                 copy_dir_recursive(&recordings_dir, &recordings_backup).await?;
+                components.push(BackupComponent::Recordings);
             }
         }
 
@@ -209,7 +230,23 @@ impl BackupManager {
         if settings_path.exists() {
             let settings_backup = backup_path.join(SETTINGS_BACKUP_FILENAME);
             tokio::fs::copy(&settings_path, settings_backup).await?;
+            components.push(BackupComponent::Settings);
         }
+
+        if components.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Cannot create backup because no backup components were found"
+            ));
+        }
+
+        write_backup_manifest(
+            &backup_path,
+            &backup_id,
+            timestamp,
+            backup_type.clone(),
+            &components,
+        )
+        .await?;
 
         let size_bytes = calculate_dir_size(&backup_path).await?;
         let items_count = count_dir_items(&backup_path).await?;
@@ -241,27 +278,8 @@ impl BackupManager {
             .ok_or_else(|| anyhow::anyhow!("No backup directory configured"))?;
 
         let backup_path = resolve_existing_backup_path(backup_dir, backup_id)?;
-
-        // Restore database
-        let db_backup = backup_path.join("nautilus.db");
-        if db_backup.exists() {
-            let db_path = data_dir.join("nautilus.db");
-            tokio::fs::copy(&db_backup, db_path).await?;
-        }
-
-        // Restore recordings
-        let recordings_backup = backup_path.join("recordings");
-        if recordings_backup.exists() {
-            let recordings_dir = data_dir.join("recordings");
-            copy_dir_recursive(&recordings_backup, &recordings_dir).await?;
-        }
-
-        // Restore settings
-        let settings_backup = backup_path.join(SETTINGS_BACKUP_FILENAME);
-        if settings_backup.exists() {
-            let settings_path = crate::settings::settings_file_path()?;
-            tokio::fs::copy(&settings_backup, settings_path).await?;
-        }
+        let settings_path = crate::settings::settings_file_path()?;
+        restore_backup_into_targets(&backup_path, data_dir, &settings_path).await?;
 
         tracing::info!("Backup restored: {}", backup_id);
         Ok(())
@@ -736,6 +754,313 @@ fn validate_cloud_folder(raw_folder: &str) -> Result<String> {
     Ok(folder.to_string())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RestorePathKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone)]
+struct RestoreUnit {
+    component: BackupComponent,
+    source_path: PathBuf,
+    live_path: PathBuf,
+    staged_path: PathBuf,
+    rollback_path: PathBuf,
+    path_kind: RestorePathKind,
+}
+
+fn backup_manifest_path(backup_path: &Path) -> PathBuf {
+    backup_path.join(BACKUP_MANIFEST_FILENAME)
+}
+
+async fn write_backup_manifest(
+    backup_path: &Path,
+    backup_id: &str,
+    timestamp: DateTime<Utc>,
+    backup_type: BackupType,
+    components: &[BackupComponent],
+) -> Result<()> {
+    let manifest = BackupManifest {
+        id: backup_id.to_string(),
+        timestamp,
+        backup_type,
+        components: components.to_vec(),
+    };
+    let manifest_json =
+        serde_json::to_string_pretty(&manifest).context("Failed to serialize backup manifest")?;
+    tokio::fs::write(backup_manifest_path(backup_path), manifest_json)
+        .await
+        .context("Failed to write backup manifest")?;
+    Ok(())
+}
+
+async fn read_backup_manifest(backup_path: &Path) -> Result<Option<BackupManifest>> {
+    let manifest_path = backup_manifest_path(backup_path);
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+
+    let raw = tokio::fs::read_to_string(&manifest_path)
+        .await
+        .with_context(|| format!("Failed to read backup manifest {}", manifest_path.display()))?;
+    let manifest: BackupManifest =
+        serde_json::from_str(&raw).context("Failed to parse backup manifest")?;
+    Ok(Some(manifest))
+}
+
+fn detect_backup_components(backup_path: &Path) -> Vec<BackupComponent> {
+    let mut components = Vec::new();
+    if backup_path.join("nautilus.db").exists() {
+        components.push(BackupComponent::Database);
+    }
+    if backup_path.join("recordings").exists() {
+        components.push(BackupComponent::Recordings);
+    }
+    if backup_path.join(SETTINGS_BACKUP_FILENAME).exists() {
+        components.push(BackupComponent::Settings);
+    }
+    components
+}
+
+async fn restore_components_for_backup(backup_path: &Path) -> Result<Vec<BackupComponent>> {
+    if let Some(manifest) = read_backup_manifest(backup_path).await? {
+        if manifest.components.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Backup manifest does not list any restorable components"
+            ));
+        }
+        return Ok(manifest.components);
+    }
+
+    let components = detect_backup_components(backup_path);
+    if components.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Backup does not contain any restorable components"
+        ));
+    }
+    Ok(components)
+}
+
+fn restore_artifact_path(
+    base: &Path,
+    file_name: &str,
+    suffix: &str,
+    transaction_id: &str,
+) -> PathBuf {
+    base.join(format!(".{}.{}.{}", file_name, suffix, transaction_id))
+}
+
+fn build_restore_units(
+    backup_path: &Path,
+    data_dir: &Path,
+    settings_path: &Path,
+    components: &[BackupComponent],
+    transaction_id: &str,
+) -> Vec<RestoreUnit> {
+    components
+        .iter()
+        .map(|component| match component {
+            BackupComponent::Database => RestoreUnit {
+                component: BackupComponent::Database,
+                source_path: backup_path.join("nautilus.db"),
+                live_path: data_dir.join("nautilus.db"),
+                staged_path: restore_artifact_path(
+                    data_dir,
+                    "nautilus.db",
+                    "restore-stage",
+                    transaction_id,
+                ),
+                rollback_path: restore_artifact_path(
+                    data_dir,
+                    "nautilus.db",
+                    "restore-rollback",
+                    transaction_id,
+                ),
+                path_kind: RestorePathKind::File,
+            },
+            BackupComponent::Recordings => RestoreUnit {
+                component: BackupComponent::Recordings,
+                source_path: backup_path.join("recordings"),
+                live_path: data_dir.join("recordings"),
+                staged_path: restore_artifact_path(
+                    data_dir,
+                    "recordings",
+                    "restore-stage",
+                    transaction_id,
+                ),
+                rollback_path: restore_artifact_path(
+                    data_dir,
+                    "recordings",
+                    "restore-rollback",
+                    transaction_id,
+                ),
+                path_kind: RestorePathKind::Directory,
+            },
+            BackupComponent::Settings => {
+                let settings_parent = settings_path.parent().unwrap_or_else(|| Path::new("."));
+                let settings_file_name = settings_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(SETTINGS_BACKUP_FILENAME);
+                RestoreUnit {
+                    component: BackupComponent::Settings,
+                    source_path: backup_path.join(SETTINGS_BACKUP_FILENAME),
+                    live_path: settings_path.to_path_buf(),
+                    staged_path: restore_artifact_path(
+                        settings_parent,
+                        settings_file_name,
+                        "restore-stage",
+                        transaction_id,
+                    ),
+                    rollback_path: restore_artifact_path(
+                        settings_parent,
+                        settings_file_name,
+                        "restore-rollback",
+                        transaction_id,
+                    ),
+                    path_kind: RestorePathKind::File,
+                }
+            }
+        })
+        .collect()
+}
+
+async fn remove_path_if_exists(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    if path.is_dir() {
+        tokio::fs::remove_dir_all(path)
+            .await
+            .with_context(|| format!("Failed to remove directory {}", path.display()))?;
+    } else {
+        tokio::fs::remove_file(path)
+            .await
+            .with_context(|| format!("Failed to remove file {}", path.display()))?;
+    }
+    Ok(())
+}
+
+async fn stage_restore_units(units: &[RestoreUnit]) -> Result<()> {
+    for unit in units {
+        if let Some(parent) = unit.staged_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        remove_path_if_exists(&unit.staged_path).await?;
+        remove_path_if_exists(&unit.rollback_path).await?;
+
+        match unit.path_kind {
+            RestorePathKind::File => {
+                tokio::fs::copy(&unit.source_path, &unit.staged_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to stage {:?} from {}",
+                            unit.component,
+                            unit.source_path.display()
+                        )
+                    })?;
+            }
+            RestorePathKind::Directory => {
+                copy_dir_recursive(&unit.source_path, &unit.staged_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to stage {:?} from {}",
+                            unit.component,
+                            unit.source_path.display()
+                        )
+                    })?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn rollback_restore_units(units: &[RestoreUnit]) {
+    for unit in units.iter().rev() {
+        let _ = remove_path_if_exists(&unit.live_path).await;
+        if unit.rollback_path.exists() {
+            let _ = tokio::fs::rename(&unit.rollback_path, &unit.live_path).await;
+        }
+        let _ = remove_path_if_exists(&unit.staged_path).await;
+    }
+}
+
+async fn cleanup_restore_artifacts(units: &[RestoreUnit]) {
+    for unit in units {
+        let _ = remove_path_if_exists(&unit.rollback_path).await;
+        let _ = remove_path_if_exists(&unit.staged_path).await;
+    }
+}
+
+async fn commit_restore_units(units: &[RestoreUnit]) -> Result<()> {
+    let mut committed_units: Vec<RestoreUnit> = Vec::new();
+
+    for unit in units {
+        if let Some(parent) = unit.live_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let had_live_target = unit.live_path.exists();
+        if had_live_target {
+            tokio::fs::rename(&unit.live_path, &unit.rollback_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to move live {:?} into rollback location",
+                        unit.component
+                    )
+                })?;
+        }
+
+        if let Err(err) = tokio::fs::rename(&unit.staged_path, &unit.live_path).await {
+            if had_live_target && unit.rollback_path.exists() {
+                let _ = tokio::fs::rename(&unit.rollback_path, &unit.live_path).await;
+            }
+            rollback_restore_units(&committed_units).await;
+            cleanup_restore_artifacts(units).await;
+            return Err(anyhow::anyhow!(
+                "Failed to commit restored {:?}: {}",
+                unit.component,
+                err
+            ));
+        }
+
+        committed_units.push(unit.clone());
+    }
+
+    cleanup_restore_artifacts(units).await;
+    Ok(())
+}
+
+async fn restore_backup_into_targets(
+    backup_path: &Path,
+    data_dir: &Path,
+    settings_path: &Path,
+) -> Result<()> {
+    let components = restore_components_for_backup(backup_path).await?;
+    let transaction_id = format!("{}-{}", Utc::now().timestamp_millis(), std::process::id());
+    let units = build_restore_units(
+        backup_path,
+        data_dir,
+        settings_path,
+        &components,
+        &transaction_id,
+    );
+    stage_restore_units(&units).await?;
+
+    if let Err(err) = commit_restore_units(&units).await {
+        cleanup_restore_artifacts(&units).await;
+        return Err(err);
+    }
+
+    Ok(())
+}
+
 /// Copy directory recursively
 async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     tokio::fs::create_dir_all(dst).await?;
@@ -928,12 +1253,43 @@ async fn sync_to_icloud(config: &BackupConfig, source: &Path) -> Result<()> {
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow::anyhow!("Invalid backup path"))?;
     let folder = validate_cloud_folder(&config.cloud_folder)?;
-    let destination = root.join(folder).join(backup_id);
+    let destination_root = root.join(folder);
+    tokio::fs::create_dir_all(&destination_root).await?;
+    let destination = destination_root.join(backup_id);
+    let transaction_id = format!("{}-{}", Utc::now().timestamp_millis(), std::process::id());
+    let temp_destination =
+        destination_root.join(format!(".{}.icloud-stage.{}", backup_id, transaction_id));
+    let previous_destination =
+        destination_root.join(format!(".{}.icloud-previous.{}", backup_id, transaction_id));
+
+    remove_path_if_exists(&temp_destination).await?;
+    remove_path_if_exists(&previous_destination).await?;
+    copy_dir_recursive(source, &temp_destination).await?;
 
     if destination.exists() {
-        tokio::fs::remove_dir_all(&destination).await?;
+        tokio::fs::rename(&destination, &previous_destination)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to stage previous iCloud backup {}",
+                    destination.display()
+                )
+            })?;
     }
-    copy_dir_recursive(source, &destination).await?;
+
+    if let Err(err) = tokio::fs::rename(&temp_destination, &destination).await {
+        let _ = remove_path_if_exists(&temp_destination).await;
+        if previous_destination.exists() {
+            let _ = tokio::fs::rename(&previous_destination, &destination).await;
+        }
+        return Err(anyhow::anyhow!(
+            "Failed to commit iCloud sync for {}: {}",
+            destination.display(),
+            err
+        ));
+    }
+
+    remove_path_if_exists(&previous_destination).await?;
     tracing::info!("Backup synced to iCloud path {}", destination.display());
     Ok(())
 }
@@ -1024,6 +1380,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::runtime::Runtime;
 
     fn unique_test_dir(name: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1086,5 +1443,132 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
 
         assert!(matches!(inferred, BackupType::Full));
+    }
+
+    #[test]
+    fn restore_commit_rolls_back_when_later_unit_fails() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("restore-rollback");
+            let backup_dir = root.join("backup");
+            let live_data_dir = root.join("live-data");
+            let config_dir = root.join("config");
+            let settings_path = config_dir.join("settings.json");
+            fs::create_dir_all(&backup_dir).expect("create backup dir");
+            fs::create_dir_all(&live_data_dir).expect("create live data dir");
+            fs::create_dir_all(&config_dir).expect("create config dir");
+
+            fs::write(backup_dir.join("nautilus.db"), "new-db").expect("write backup db");
+            fs::write(
+                backup_dir.join(SETTINGS_BACKUP_FILENAME),
+                "{\"theme\":\"new\"}",
+            )
+            .expect("write backup settings");
+            fs::write(live_data_dir.join("nautilus.db"), "old-db").expect("write live db");
+            fs::write(&settings_path, "{\"theme\":\"old\"}").expect("write live settings");
+
+            let units = build_restore_units(
+                &backup_dir,
+                &live_data_dir,
+                &settings_path,
+                &[BackupComponent::Database, BackupComponent::Settings],
+                "tx-rollback",
+            );
+
+            stage_restore_units(&units)
+                .await
+                .expect("stage restore units");
+            remove_path_if_exists(&units[1].staged_path)
+                .await
+                .expect("remove staged settings to force failure");
+
+            let err = commit_restore_units(&units)
+                .await
+                .expect_err("commit should fail");
+            assert!(err.to_string().contains("Failed to commit restored"));
+            assert_eq!(
+                fs::read_to_string(live_data_dir.join("nautilus.db")).expect("read rolled back db"),
+                "old-db"
+            );
+            assert_eq!(
+                fs::read_to_string(&settings_path).expect("read rolled back settings"),
+                "{\"theme\":\"old\"}"
+            );
+
+            let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn restore_components_use_manifest_when_present() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let backup_dir = unique_test_dir("manifest");
+            fs::create_dir_all(&backup_dir).expect("create backup dir");
+            fs::write(backup_dir.join("nautilus.db"), "db").expect("write db");
+            write_backup_manifest(
+                &backup_dir,
+                "backup_20260409_120000",
+                Utc::now(),
+                BackupType::Settings,
+                &[BackupComponent::Settings],
+            )
+            .await
+            .expect("write manifest");
+
+            let components = restore_components_for_backup(&backup_dir)
+                .await
+                .expect("read restore components");
+            assert_eq!(components, vec![BackupComponent::Settings]);
+
+            let _ = fs::remove_dir_all(&backup_dir);
+        });
+    }
+
+    #[test]
+    fn sync_to_icloud_swaps_existing_destination() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("icloud-sync");
+            let source = root.join("source-backup");
+            let icloud_root = root.join("icloud");
+            let destination = icloud_root.join("NautilusBackups").join("source-backup");
+
+            fs::create_dir_all(&source).expect("create source dir");
+            fs::create_dir_all(&destination).expect("create destination dir");
+            fs::write(source.join("settings.json"), "{\"version\":\"new\"}")
+                .expect("write new backup");
+            fs::write(destination.join("settings.json"), "{\"version\":\"old\"}")
+                .expect("write existing backup");
+
+            let config = BackupConfig {
+                cloud_sync: true,
+                cloud_provider: Some(CloudProvider::ICloud),
+                icloud_path: Some(icloud_root.clone()),
+                ..BackupConfig::default()
+            };
+
+            sync_to_icloud(&config, &source)
+                .await
+                .expect("sync to icloud should succeed");
+
+            assert_eq!(
+                fs::read_to_string(destination.join("settings.json")).expect("read synced backup"),
+                "{\"version\":\"new\"}"
+            );
+            let temp_entries = fs::read_dir(icloud_root.join("NautilusBackups"))
+                .expect("read icloud folder")
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".source-backup")
+                })
+                .count();
+            assert_eq!(temp_entries, 0);
+
+            let _ = fs::remove_dir_all(&root);
+        });
     }
 }

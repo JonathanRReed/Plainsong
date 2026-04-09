@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-04-09T16:08:53.831Z",
+  "generatedAt": "2026-04-09T22:43:47.406Z",
   "strictReady": false,
   "blockers": [
     {
@@ -49,7 +49,7 @@
     "dmgHelperPassed": true,
     "localSizeGate": {
       "target": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app",
-      "sizeMb": 403.1,
+      "sizeMb": 403.22,
       "maxMb": 450,
       "pass": true
     }

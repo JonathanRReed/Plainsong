@@ -13,7 +13,7 @@ import {
     DialogTitle,
 } from "@/components/ui/dialog";
 
-const BUY_PRO_URL = "https://nautilusbot.lemonsqueezy.com/buy/pro";
+const BUY_PRO_URL = "https://nautilusbot.lemonsqueezy.com/buy/basic";
 const BUY_FRIENDS_URL = "https://nautilusbot.lemonsqueezy.com/buy/friends-club";
 
 type Props = {
@@ -129,7 +129,7 @@ export function ActivationModal({ onActivated, onCancel, overlay = true }: Props
 
             <DialogFooter className="w-full justify-between sm:justify-between">
                 <span className="text-xs text-muted-foreground/60">
-                    1 user · up to 5 computers · lifetime
+                    Pro: up to 5 computers · Friends Club: up to 10 computers
                 </span>
                 {onCancel && (
                     <Button variant="ghost" size="sm" className="text-xs" onClick={onCancel}>

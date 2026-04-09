@@ -1,6 +1,6 @@
 # Dictation Language Certification Matrix
 
-Generated: 2026-04-09T17:28:42.960Z
+Generated: 2026-04-09T22:43:34.310Z
 
 This matrix freezes the current launch-language guidance. It is truthful about the current state: provider guidance exists and the local benchmark corpus now exercises every frozen launch language, but packaged benchmark and insertion evidence is still pending.
 

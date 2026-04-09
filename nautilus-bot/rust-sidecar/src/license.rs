@@ -17,6 +17,11 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[cfg(test)]
+use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 const LS_API_BASE: &str = "https://api.lemonsqueezy.com/v1/licenses";
@@ -24,6 +29,10 @@ const STATE_FILENAME: &str = "nautilus_license.json";
 const APP_DIR_NAME: &str = "NautilusBot";
 const TRIAL_DAYS: i64 = 30;
 const GRACE_PERIOD_DAYS: i64 = 7;
+const SECRET_LICENSE_KEY: &str = "license_key";
+const SECRET_INSTANCE_ID: &str = "license_instance_id";
+const SECRET_DEVICE_ID: &str = "license_device_id";
+const SECRET_FIRST_RUN_AT: &str = "license_first_run_at";
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -40,9 +49,11 @@ pub enum Tier {
 #[serde(rename_all = "camelCase")]
 pub struct LicenseState {
     /// The stored LS license key (empty if none).
+    #[serde(default, skip_serializing)]
     pub key: String,
     /// The instance ID returned by the LS activate endpoint — stored to avoid
     /// burning extra activation slots on repeated launches.
+    #[serde(default, skip_serializing)]
     pub instance_id: String,
     /// Detected tier from `meta.variant_name`.
     pub tier: Tier,
@@ -55,8 +66,10 @@ pub struct LicenseState {
     /// ISO 8601 timestamp of the last successful validate call.
     pub last_validated_at: String,
     /// ISO 8601 timestamp of when the user first launched the app.
+    #[serde(default, skip_serializing)]
     pub first_run_at: String,
     /// A stable device identifier (hostname + generated UUID) used as instance_name.
+    #[serde(default, skip_serializing)]
     pub device_id: String,
 }
 
@@ -64,8 +77,6 @@ pub struct LicenseState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LicenseInfo {
-    pub key: String,
-    pub instance_id: String,
     pub tier: Tier,
     /// Whether the license is currently considered valid (active + not expired/disabled,
     /// or within the grace period).
@@ -177,10 +188,95 @@ struct LsDeactivateResponse {
 // ── State persistence ─────────────────────────────────────────────────────────
 
 fn state_path() -> Result<PathBuf> {
+    #[cfg(test)]
+    {
+        let override_lock = TEST_STATE_PATH_OVERRIDE.get_or_init(|| Mutex::new(None));
+        if let Some(path) = override_lock
+            .lock()
+            .expect("state path override lock")
+            .clone()
+        {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).context("Cannot create test data directory")?;
+            }
+            return Ok(path);
+        }
+    }
+
     let data_dir = dirs::data_dir().context("Cannot determine data directory")?;
     let dir = data_dir.join(APP_DIR_NAME);
     std::fs::create_dir_all(&dir).context("Cannot create data directory")?;
     Ok(dir.join(STATE_FILENAME))
+}
+
+#[cfg(test)]
+static TEST_SECRET_STORE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+#[cfg(test)]
+static TEST_STATE_PATH_OVERRIDE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+fn secure_secret_get(secret_key: &str) -> Result<Option<String>> {
+    #[cfg(test)]
+    {
+        let store = TEST_SECRET_STORE.get_or_init(|| Mutex::new(HashMap::new()));
+        return Ok(store
+            .lock()
+            .expect("test secret store lock")
+            .get(secret_key)
+            .cloned());
+    }
+
+    #[cfg(not(test))]
+    {
+        crate::secrets::get_internal_secret(secret_key)
+    }
+}
+
+fn secure_secret_set(secret_key: &str, value: &str) -> Result<()> {
+    #[cfg(test)]
+    {
+        let store = TEST_SECRET_STORE.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut guard = store.lock().expect("test secret store lock");
+        if value.is_empty() {
+            guard.remove(secret_key);
+        } else {
+            guard.insert(secret_key.to_string(), value.to_string());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    {
+        if value.is_empty() {
+            crate::secrets::clear_internal_secret(secret_key)
+        } else {
+            crate::secrets::set_internal_secret(secret_key, value)
+        }
+    }
+}
+
+fn migrate_or_hydrate_secret(state_value: &mut String, secret_key: &str) -> Result<bool> {
+    match secure_secret_get(secret_key)? {
+        Some(stored_value) => {
+            if *state_value != stored_value {
+                *state_value = stored_value;
+            }
+            Ok(false)
+        }
+        None if !state_value.is_empty() => {
+            secure_secret_set(secret_key, state_value)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+fn sync_secrets(state: &LicenseState) -> Result<()> {
+    secure_secret_set(SECRET_LICENSE_KEY, &state.key)?;
+    secure_secret_set(SECRET_INSTANCE_ID, &state.instance_id)?;
+    secure_secret_set(SECRET_DEVICE_ID, &state.device_id)?;
+    secure_secret_set(SECRET_FIRST_RUN_AT, &state.first_run_at)?;
+    Ok(())
 }
 
 pub(crate) fn load_state() -> LicenseState {
@@ -198,10 +294,29 @@ pub(crate) fn load_state() -> LicenseState {
         LicenseState::default()
     };
 
+    let mut needs_persist = false;
+
+    match migrate_or_hydrate_secret(&mut state.key, SECRET_LICENSE_KEY) {
+        Ok(changed) => needs_persist |= changed,
+        Err(err) => tracing::warn!("Failed to load secure license key: {}", err),
+    }
+    match migrate_or_hydrate_secret(&mut state.instance_id, SECRET_INSTANCE_ID) {
+        Ok(changed) => needs_persist |= changed,
+        Err(err) => tracing::warn!("Failed to load secure license instance: {}", err),
+    }
+    match migrate_or_hydrate_secret(&mut state.first_run_at, SECRET_FIRST_RUN_AT) {
+        Ok(changed) => needs_persist |= changed,
+        Err(err) => tracing::warn!("Failed to load secure trial anchor: {}", err),
+    }
+    match migrate_or_hydrate_secret(&mut state.device_id, SECRET_DEVICE_ID) {
+        Ok(changed) => needs_persist |= changed,
+        Err(err) => tracing::warn!("Failed to load secure device id: {}", err),
+    }
+
     // Set first_run_at on very first launch.
     if state.first_run_at.is_empty() {
         state.first_run_at = chrono::Utc::now().to_rfc3339();
-        let _ = persist_state(&state);
+        needs_persist = true;
     }
 
     // Generate a stable device ID if missing.
@@ -210,13 +325,20 @@ pub(crate) fn load_state() -> LicenseState {
             .map(|h| h.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
         state.device_id = format!("{}-{}", hostname, uuid::Uuid::new_v4());
-        let _ = persist_state(&state);
+        needs_persist = true;
+    }
+
+    if needs_persist {
+        if let Err(err) = persist_state(&state) {
+            tracing::warn!("Failed to persist hardened license state: {}", err);
+        }
     }
 
     state
 }
 
 fn persist_state(state: &LicenseState) -> Result<()> {
+    sync_secrets(state)?;
     let path = state_path()?;
     let json = serde_json::to_string_pretty(state).context("Serialization error")?;
     std::fs::write(&path, json).context("Failed to write license state")?;
@@ -230,8 +352,6 @@ fn info_from_state(state: &LicenseState) -> LicenseInfo {
     let (trial_days_remaining, nag_required) = trial_status(state, valid);
     let trial_active = trial_days_remaining > 0;
     LicenseInfo {
-        key: state.key.clone(),
-        instance_id: state.instance_id.clone(),
         tier: state.tier.clone(),
         valid,
         ls_status: state.ls_status.clone(),
@@ -534,6 +654,35 @@ pub async fn deactivate_license() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("nautilus-license-test-{name}-{suffix}"))
+    }
+
+    fn set_test_state_path(path: PathBuf) {
+        let override_lock = TEST_STATE_PATH_OVERRIDE.get_or_init(|| Mutex::new(None));
+        *override_lock.lock().expect("state path override lock") = Some(path);
+    }
+
+    fn clear_test_state_path() {
+        let override_lock = TEST_STATE_PATH_OVERRIDE.get_or_init(|| Mutex::new(None));
+        *override_lock.lock().expect("state path override lock") = None;
+    }
+
+    fn clear_test_secret_store() {
+        let store = TEST_SECRET_STORE.get_or_init(|| Mutex::new(HashMap::new()));
+        store.lock().expect("test secret store lock").clear();
+    }
 
     fn sample_state(status: &str, validated_days_ago: i64) -> LicenseState {
         let last_validated = chrono::Utc::now() - chrono::Duration::days(validated_days_ago);
@@ -591,12 +740,6 @@ mod tests {
 
     fn make_info(valid: bool, trial_active: bool, tier: Tier) -> LicenseInfo {
         LicenseInfo {
-            key: if valid {
-                "k".to_string()
-            } else {
-                String::new()
-            },
-            instance_id: String::new(),
             tier,
             valid,
             ls_status: if valid {
@@ -657,5 +800,117 @@ mod tests {
         assert!(!ent.experimental_enabled);
         assert!(!ent.can_update);
         assert_eq!(ent.tier, "free");
+    }
+
+    #[test]
+    fn persist_state_writes_cache_without_secret_fields() {
+        let _guard = TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test lock");
+        clear_test_secret_store();
+
+        let dir = unique_test_dir("persist-cache");
+        let state_path = dir.join("nautilus_license.json");
+        set_test_state_path(state_path.clone());
+
+        let state = LicenseState {
+            key: "license-key".to_string(),
+            instance_id: "instance-id".to_string(),
+            tier: Tier::Pro,
+            ls_status: "active".to_string(),
+            activations_limit: 5,
+            activations_usage: 1,
+            last_validated_at: "2026-04-09T12:00:00Z".to_string(),
+            first_run_at: "2026-04-01T12:00:00Z".to_string(),
+            device_id: "device-123".to_string(),
+        };
+
+        persist_state(&state).expect("persist license state");
+
+        let raw = fs::read_to_string(&state_path).expect("read persisted state");
+        let json: Value = serde_json::from_str(&raw).expect("parse persisted state");
+        assert!(json.get("key").is_none());
+        assert!(json.get("instanceId").is_none());
+        assert!(json.get("firstRunAt").is_none());
+        assert!(json.get("deviceId").is_none());
+        assert_eq!(
+            secure_secret_get(SECRET_LICENSE_KEY).expect("read key"),
+            Some("license-key".to_string())
+        );
+        assert_eq!(
+            secure_secret_get(SECRET_INSTANCE_ID).expect("read instance"),
+            Some("instance-id".to_string())
+        );
+        assert_eq!(
+            secure_secret_get(SECRET_FIRST_RUN_AT).expect("read first run"),
+            Some("2026-04-01T12:00:00Z".to_string())
+        );
+        assert_eq!(
+            secure_secret_get(SECRET_DEVICE_ID).expect("read device"),
+            Some("device-123".to_string())
+        );
+
+        clear_test_state_path();
+        clear_test_secret_store();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_state_migrates_legacy_plaintext_fields_to_secure_store() {
+        let _guard = TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test lock");
+        clear_test_secret_store();
+
+        let dir = unique_test_dir("migrate-legacy");
+        fs::create_dir_all(&dir).expect("create test dir");
+        let state_path = dir.join("nautilus_license.json");
+        set_test_state_path(state_path.clone());
+
+        fs::write(
+            &state_path,
+            serde_json::json!({
+                "key": "legacy-key",
+                "instanceId": "legacy-instance",
+                "tier": "pro",
+                "lsStatus": "active",
+                "activationsLimit": 5,
+                "activationsUsage": 1,
+                "lastValidatedAt": "2026-04-09T12:00:00Z",
+                "firstRunAt": "2026-04-01T12:00:00Z",
+                "deviceId": "legacy-device"
+            })
+            .to_string(),
+        )
+        .expect("write legacy state");
+
+        let state = load_state();
+
+        assert_eq!(state.key, "legacy-key");
+        assert_eq!(state.instance_id, "legacy-instance");
+        assert_eq!(state.first_run_at, "2026-04-01T12:00:00Z");
+        assert_eq!(state.device_id, "legacy-device");
+        assert_eq!(
+            secure_secret_get(SECRET_LICENSE_KEY).expect("read key"),
+            Some("legacy-key".to_string())
+        );
+        assert_eq!(
+            secure_secret_get(SECRET_INSTANCE_ID).expect("read instance"),
+            Some("legacy-instance".to_string())
+        );
+
+        let raw = fs::read_to_string(&state_path).expect("read migrated state");
+        let json: Value = serde_json::from_str(&raw).expect("parse migrated state");
+        assert!(json.get("key").is_none());
+        assert!(json.get("instanceId").is_none());
+        assert!(json.get("firstRunAt").is_none());
+        assert!(json.get("deviceId").is_none());
+        assert_eq!(json.get("tier").and_then(Value::as_str), Some("pro"));
+
+        clear_test_state_path();
+        clear_test_secret_store();
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -193,3 +193,9 @@ pub fn get_internal_secret(key: &str) -> Result<Option<String>> {
     let account = internal_account_name(key)?;
     get_secret_for_account(&account)
 }
+
+pub fn clear_internal_secret(key: &str) -> Result<()> {
+    migrate_legacy_file_if_needed();
+    let account = internal_account_name(key)?;
+    clear_secret_for_account(&account)
+}

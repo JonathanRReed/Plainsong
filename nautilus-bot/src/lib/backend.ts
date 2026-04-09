@@ -1158,8 +1158,6 @@ export type LicenseTier = "none" | "pro" | "friends_club";
 export type LicenseLsStatus = "active" | "inactive" | "expired" | "disabled" | "";
 
 export interface LicenseInfo {
-  key: string;
-  instanceId: string;
   tier: LicenseTier;
   valid: boolean;
   lsStatus: LicenseLsStatus;

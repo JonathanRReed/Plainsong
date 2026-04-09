@@ -5,6 +5,7 @@ import {
   modelSupportsMlxAcceleration,
   visibleRouteForMlxModel,
 } from "@/lib/asr-capabilities";
+import { laneProviderOrder } from "@/lib/asr-route-catalog";
 import type {
   AsrProviderInfo,
   AsrProviderInventory,
@@ -32,19 +33,6 @@ export type AsrRouteSelectionUpdate = Partial<AsrRouteSelectionState>;
 
 const DEFAULT_PROVIDER: AsrProviderType = "distil_whisper";
 const DEFAULT_MODEL_ID = "distil-large-v3.5";
-const LOCAL_MEETING_DEFAULTS: AsrProviderType[] = [
-  "distil_whisper",
-  "mlx_audio",
-  "parakeet",
-  "voxtral",
-];
-const CLOUD_MEETING_DEFAULTS: AsrProviderType[] = [
-  "elevenlabs_scribe",
-  "openai_cloud",
-  "groq",
-  "cohere_transcribe",
-];
-
 function normalizeMeetingRoutePolicy(
   policy: string | null | undefined
 ): "prefer_local" | "best_available" {
@@ -152,11 +140,7 @@ function preferredMeetingProviderCandidates(
   meetingProvider?: AsrProviderType
 ) {
   const orderedCandidates = [meetingProvider, defaultProvider, dictationProvider];
-  if (meetingRoutePolicy === "best_available") {
-    orderedCandidates.push(...CLOUD_MEETING_DEFAULTS, ...LOCAL_MEETING_DEFAULTS);
-  } else {
-    orderedCandidates.push(...LOCAL_MEETING_DEFAULTS, ...CLOUD_MEETING_DEFAULTS);
-  }
+  orderedCandidates.push(...laneProviderOrder("meeting", meetingRoutePolicy));
 
   const seen = new Set<AsrProviderType>();
   const candidates: AsrProviderType[] = [];

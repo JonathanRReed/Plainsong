@@ -2,7 +2,7 @@
 
 Status: BLOCKED
 Owner: qa-macos
-Generated: 2026-04-09T16:08:53.831Z
+Generated: 2026-04-09T22:43:47.406Z
 
 ## Current Local Observation
 - Current packaged DMG exists, but no previous signed release build was installed and upgraded in this pass.
