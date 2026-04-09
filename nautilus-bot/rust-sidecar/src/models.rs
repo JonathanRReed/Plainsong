@@ -148,6 +148,14 @@ pub struct DictationStartOptions {
     #[serde(default)]
     pub context_app_bundle_id: Option<String>,
     #[serde(default)]
+    pub resolved_mode_preset: Option<String>,
+    #[serde(default)]
+    pub resolved_custom_mode_id: Option<String>,
+    #[serde(default)]
+    pub resolved_mode_label: Option<String>,
+    #[serde(default)]
+    pub activation_matcher: Option<String>,
+    #[serde(default)]
     pub preferred_input_device_id: Option<String>,
 }
 
@@ -169,6 +177,10 @@ impl Default for DictationStartOptions {
             captured_context_text: None,
             context_app_name: None,
             context_app_bundle_id: None,
+            resolved_mode_preset: None,
+            resolved_custom_mode_id: None,
+            resolved_mode_label: None,
+            activation_matcher: None,
             preferred_input_device_id: None,
         }
     }

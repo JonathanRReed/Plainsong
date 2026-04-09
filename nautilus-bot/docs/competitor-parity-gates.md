@@ -5,13 +5,17 @@ This document defines launch-blocking parity checks so Nautilus ships at parity-
 - Superwhisper-style fast dictation UX (local-first, low friction)
 - Granola-style meeting UX (bot-free capture, transcript-centric behavior, clear consent)
 
-Benchmark date: 2026-02-24.
+Benchmark date: 2026-04-09.
 
 ## External Baseline References
 
-- Superwhisper: [Changelog](https://superwhisper.com/changelog), [Voice Mode](https://superwhisper.com/docs/getting-started/voice-mode)
+- Superwhisper: [Homepage](https://superwhisper.com/), [Keyboard Shortcuts](https://superwhisper.com/docs/get-started/settings-shortcuts), [Advanced Settings](https://superwhisper.com/docs/get-started/settings-advanced), [Reprocess from History](https://superwhisper.com/docs/get-started/transcribe-history), [Windows Feature Support](https://superwhisper.com/docs/get-started/windows), [Changelog](https://ai.superwhisper.com/changelog)
 - Granola: [Transcription Help](https://docs.granola.ai/help-center/taking-notes/transcription), [Participant Consent](https://docs.granola.ai/help-center/taking-notes/participant-consent)
 - Otter: [Bot-free meeting notes](https://otter.ai/blog/meeting-bot-free)
+
+Current comparative audit:
+
+- `docs/evals/superwhisper-parity-audit-2026-04-09.md`
 
 ## Gate Scorecard
 

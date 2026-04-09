@@ -52,7 +52,15 @@ function parseJsonOutput(check) {
   try {
     return JSON.parse(check.stdout);
   } catch {
-    return null;
+    const jsonStart = check.stdout.indexOf("{");
+    if (jsonStart < 0) {
+      return null;
+    }
+    try {
+      return JSON.parse(check.stdout.slice(jsonStart));
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -60,6 +68,8 @@ function currentPlatformChecks() {
   const checks = [
     run("lint", "bun", ["run", "lint"]),
     run("test", "bun", ["run", "test"]),
+    run("dictation-artifacts", "bun", ["run", "gate:dictation:artifacts"]),
+    run("prompt-eval", "bun", ["run", "gate:prompt-eval"]),
     run("benchmark-refresh", "bun", ["run", "benchmark:dictation:fixtures:refresh"]),
     run("benchmark-gate-macos", "bun", ["run", "gate:benchmark:macos"]),
     run("benchmark-gate-windows", "bun", ["run", "gate:benchmark:windows"]),
@@ -107,6 +117,7 @@ const artifact = {
     exitCode: check.exitCode,
   })),
   observations: {
+    promptEval: parseJsonOutput(checks.find((check) => check.label === "prompt-eval")),
     sizeGate: sizeGate
       ? {
           target: sizeGate.target,

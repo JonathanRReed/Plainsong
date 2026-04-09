@@ -1,6 +1,6 @@
 # Dictation Command Corpus Log
 
-Generated: 2026-04-09T16:08:48.649Z
+Generated: 2026-04-09T17:28:42.960Z
 
 Local benchmark command checks currently pass at 100%. This corpus proves command parsing and no-command safety in the local fixture path. Packaged validation is still required for launch claims.
 

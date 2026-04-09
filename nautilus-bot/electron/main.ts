@@ -10,6 +10,10 @@ import {
 import { existsSync } from "fs";
 import path from "path";
 import { autoUpdater, type AppUpdater } from "electron-updater";
+import {
+  resolveDictationShortcutBehavior,
+  resolveDictationShortcutDecision,
+} from "./dictation-shortcut-controller";
 import { IpcBridge } from "./ipc-bridge";
 import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
 
@@ -426,19 +430,36 @@ function convertShortcutToAccelerator(shortcut: string | undefined): string | nu
   return mapped.join("+");
 }
 
-async function toggleDictationFromGlobalShortcut(): Promise<void> {
+async function handleDictationGlobalShortcut(settings: AppSettings): Promise<void> {
   if (!ipcBridge) {
     return;
   }
 
-  const shouldStart = dictationPhase === "idle" || dictationPhase === "done" || dictationPhase === "error";
+  const behavior = resolveDictationShortcutBehavior(settings.transcription ?? {});
+  const decision = resolveDictationShortcutDecision({
+    phase: dictationPhase as
+      | "idle"
+      | "recording"
+      | "stopping"
+      | "transcribing"
+      | "delivering"
+      | "done"
+      | "error",
+    behavior,
+    capability: "press_only",
+    signal: "pressed",
+  });
 
-  if (shouldStart) {
+  if (decision.action === "start") {
     await ipcBridge.invoke("start_dictation", {});
     return;
   }
 
-  await ipcBridge.invoke("stop_dictation", { stopReason: "toggle" });
+  if (decision.action === "stop") {
+    await ipcBridge.invoke("stop_dictation", {
+      stopReason: decision.stopReason ?? "toggle",
+    });
+  }
 }
 
 async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
@@ -456,14 +477,14 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
 
   const dictationShortcut = convertShortcutToAccelerator(settings.shortcuts?.toggleDictation);
   const openWindowShortcut = convertShortcutToAccelerator(settings.shortcuts?.openWindow);
-  const usesPressOnlyElectronFallback =
-    !!settings.transcription?.dictationPushToTalk && !settings.transcription?.dictationHandsFreeEnabled;
+  const behavior = resolveDictationShortcutBehavior(settings.transcription ?? {});
+  const usesPressOnlyElectronFallback = behavior === "hold_to_talk";
 
   globalShortcut.unregisterAll();
 
   if (dictationShortcut) {
     const registered = globalShortcut.register(dictationShortcut, () => {
-      void toggleDictationFromGlobalShortcut().catch((error) => {
+      void handleDictationGlobalShortcut(settings).catch((error) => {
         console.error("[shortcuts] dictation shortcut failed", error);
       });
     });
