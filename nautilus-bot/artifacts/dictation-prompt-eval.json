@@ -1,0 +1,253 @@
+{
+  "generatedAt": "2026-04-09T17:28:51.708Z",
+  "sourceArtifacts": {
+    "benchmarkFixtures": "docs/evals/dictation-parity-fixture.json",
+    "evidenceFixtures": "docs/evals/dictation-quality-fixtures.json",
+    "parityEvidence": "artifacts/dictation-prompt-eval.raw.json"
+  },
+  "summary": {
+    "allPass": true,
+    "commandSuccessRate": 1,
+    "formattingSuccessRate": 1,
+    "correctionSuccessRate": 1
+  },
+  "groups": [
+    {
+      "key": "command_prompts",
+      "label": "Command grammar",
+      "cases": [
+        {
+          "group": "command_prompts",
+          "id": "basic-notes",
+          "label": "Basic dictation in notes",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "command-newline",
+          "label": "Insert newline by command",
+          "expected": "newline",
+          "actual": "newline",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "command-paragraph",
+          "label": "Insert paragraph break by command",
+          "expected": "paragraph",
+          "actual": "paragraph",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "command-undo",
+          "label": "Undo the last insert by voice",
+          "expected": "undo_last_insert",
+          "actual": "undo_last_insert",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "command-delete-last-sentence",
+          "label": "Delete the last sentence by voice",
+          "expected": "delete_last_sentence",
+          "actual": "delete_last_sentence",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "command-rewrite-shorter",
+          "label": "Rewrite shorter command",
+          "expected": "rewrite_shorter",
+          "actual": "rewrite_shorter",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "command-rewrite-professional",
+          "label": "Rewrite professional command",
+          "expected": "rewrite_professional",
+          "actual": "rewrite_professional",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "command-bulletize-selection",
+          "label": "Bulletize selection command",
+          "expected": "bulletize_selection",
+          "actual": "bulletize_selection",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "snippet-positive-slack",
+          "label": "App-scoped snippet expands in Slack",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "snippet-negative-notion",
+          "label": "App-scoped snippet stays off in Notion",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "safety-no-command-center",
+          "label": "Command prefix inside normal speech stays plain text",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "es-word-follow-up",
+          "label": "Spanish follow-up in Word",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "pt-outlook-follow-up",
+          "label": "Portuguese follow-up in Outlook",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "fr-notepad-quick-note",
+          "label": "French quick note in Notepad",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "de-hubspot-call-log",
+          "label": "German call log in HubSpot",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "it-google-docs-brief",
+          "label": "Italian brief in Google Docs",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "nl-slack-check-in",
+          "label": "Dutch check-in in Slack",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "ja-notion-brief",
+          "label": "Japanese brief in Notion",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "ko-cursor-comment",
+          "label": "Korean comment in Cursor",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        },
+        {
+          "group": "command_prompts",
+          "id": "zh-vscode-checklist",
+          "label": "Mandarin checklist in VS Code",
+          "expected": "no command",
+          "actual": "none",
+          "pass": true
+        }
+      ],
+      "successRate": 1
+    },
+    {
+      "key": "formatting_prompts",
+      "label": "Formatting and mode transforms",
+      "cases": [
+        {
+          "group": "formatting_prompts",
+          "id": "fmt-spoken-punctuation",
+          "label": "Spoken punctuation tokens become structured prose",
+          "expected": "Hello, this is jon.\n\nI will follow up?",
+          "actual": "Hello, this is jon.\n\nI will follow up?",
+          "pass": true
+        },
+        {
+          "group": "formatting_prompts",
+          "id": "fmt-chat-lightweight",
+          "label": "Chat mode keeps line breaks lightweight",
+          "expected": "Hi there\nI can send that over tomorrow",
+          "actual": "Hi there\nI can send that over tomorrow",
+          "pass": true
+        },
+        {
+          "group": "formatting_prompts",
+          "id": "fmt-email-style",
+          "label": "Email hints preserve direct punctuation",
+          "expected": "Hi jonathan can you review the launch plan?",
+          "actual": "Hi jonathan can you review the launch plan?",
+          "pass": true
+        },
+        {
+          "group": "formatting_prompts",
+          "id": "fmt-document-style",
+          "label": "Document apps keep paragraph structure",
+          "expected": "First section.\n\nSecond section.",
+          "actual": "First section.\n\nSecond section.",
+          "pass": true
+        },
+        {
+          "group": "formatting_prompts",
+          "id": "fmt-symbols",
+          "label": "Quotes and symbols survive formatting",
+          "expected": "\"Launch ready\" @ team/ops",
+          "actual": "\"Launch ready\" @ team/ops",
+          "pass": true
+        }
+      ],
+      "successRate": 1
+    },
+    {
+      "key": "rewrite_and_correction",
+      "label": "Correction and rewrite helpers",
+      "cases": [
+        {
+          "group": "rewrite_and_correction",
+          "id": "corr-replace-phrase",
+          "label": "Case-insensitive phrase replacement edits all matches",
+          "expected": "launch plan review for the launch plan team",
+          "actual": "launch plan review for the launch plan team",
+          "pass": true
+        },
+        {
+          "group": "rewrite_and_correction",
+          "id": "corr-replace-target",
+          "label": "Replace phrase works for repeated product terms",
+          "expected": "Please send the launch plan update after the launch plan review.",
+          "actual": "Please send the launch plan update after the launch plan review.",
+          "pass": true
+        }
+      ],
+      "successRate": 1
+    }
+  ]
+}

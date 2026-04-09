@@ -221,6 +221,7 @@ fn describe_dictation_cursor_insert_status(
 }
 
 type DictationCommandAction = crate::dictation_parity::DictationCommandAction;
+use crate::dictation_parity::apply_contextual_phrase_replacement;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct DictationSessionTracker {
@@ -7739,6 +7740,10 @@ fn dictation_options_from_settings(settings: &settings::Settings) -> models::Dic
         captured_context_text: None,
         context_app_name: None,
         context_app_bundle_id: None,
+        resolved_mode_preset: None,
+        resolved_custom_mode_id: None,
+        resolved_mode_label: None,
+        activation_matcher: None,
         preferred_input_device_id: settings
             .audio
             .dictation_input_device
@@ -12254,6 +12259,7 @@ fn capture_application_context_text(target_app: Option<&str>) -> Result<Option<S
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .or_else(get_frontmost_app_name);
+    let browser_host = get_frontmost_browser_url().and_then(|url| extract_host_from_url(&url));
     let selected_text = capture_selected_text_via_clipboard(target_app)
         .ok()
         .flatten()
@@ -12262,6 +12268,9 @@ fn capture_application_context_text(target_app: Option<&str>) -> Result<Option<S
     let mut sections = Vec::new();
     if let Some(name) = app_name {
         sections.push(format!("Active app: {}", name));
+    }
+    if let Some(host) = browser_host {
+        sections.push(format!("Browser context: {}", host));
     }
     if let Some(selection) = selected_text {
         sections.push(format!("Selected text:\n{}", selection));
@@ -12594,6 +12603,354 @@ async fn clear_inline_dictation_session(
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct DictationCommandExecutionResult {
+    output_text: String,
+    command_applied: String,
+    prompt_source: Option<String>,
+    prompt_preview: Option<String>,
+    undo_previous_insert: bool,
+}
+
+async fn capture_sidecar_dictation_start_context(
+    state: &AppState,
+    settings_snapshot: &settings::Settings,
+    options: &mut models::DictationStartOptions,
+) {
+    #[cfg(target_os = "macos")]
+    capture_pending_hotkey_target(state);
+
+    let (app_name, app_bundle_id, browser_url) = {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(target) = take_pending_hotkey_target(state) {
+                (target.app_name, target.app_bundle_id, target.browser_url)
+            } else {
+                capture_hotkey_target_context(false)
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = state;
+            let _ = settings_snapshot;
+            capture_hotkey_target_context(false)
+        }
+    };
+    if options.context_app_name.is_none() {
+        options.context_app_name = app_name.clone();
+    }
+    if options.context_app_bundle_id.is_none() {
+        options.context_app_bundle_id = app_bundle_id.clone();
+    }
+
+    options.resolved_mode_preset = Some(
+        settings_snapshot
+            .transcription
+            .dictation_mode_preset
+            .clone(),
+    );
+    options.resolved_custom_mode_id = settings_snapshot
+        .transcription
+        .dictation_selected_custom_mode_id
+        .clone();
+    options.resolved_mode_label = Some(dictation_mode_label(
+        &settings_snapshot.transcription.dictation_mode_preset,
+        settings_snapshot
+            .transcription
+            .dictation_selected_custom_mode_id
+            .as_deref(),
+        &settings_snapshot.transcription.dictation_custom_modes,
+    ));
+
+    if options.activation_matcher.is_none() {
+        if let Some(mode) = active_dictation_custom_mode(settings_snapshot) {
+            options.activation_matcher = custom_mode_matches_context(
+                mode,
+                options.context_app_name.as_deref(),
+                browser_url.as_deref(),
+            );
+        }
+    }
+
+    if options.captured_context_text.is_some() {
+        return;
+    }
+
+    let context_source = normalize_dictation_context_source(&options.context_source);
+    if context_source == "none" {
+        return;
+    }
+
+    match capture_dictation_context_text(context_source, options.context_app_name.as_deref()) {
+        Ok(captured_context_text) => {
+            options.captured_context_text = captured_context_text;
+        }
+        Err(error) => {
+            tracing::info!(
+                "Dictation start context capture failed for source '{}': {}",
+                context_source,
+                error
+            );
+        }
+    }
+}
+
+async fn execute_dictation_command_action(
+    state: &AppState,
+    command_key: &str,
+    action: DictationCommandAction,
+    captured_context_text: Option<&str>,
+    context_source: &str,
+) -> Result<DictationCommandExecutionResult, String> {
+    use crate::dictation_parity::{
+        append_to_context_selection, delete_phrase_from_context, lowercase_context_selection,
+        prepend_to_context_selection, replace_context_selection, sentence_case_context_selection,
+        title_case_context_selection, uppercase_context_selection,
+    };
+
+    let execution = match action {
+        DictationCommandAction::InsertText(text) => DictationCommandExecutionResult {
+            output_text: text,
+            command_applied: command_key.to_string(),
+            prompt_source: None,
+            prompt_preview: None,
+            undo_previous_insert: false,
+        },
+        DictationCommandAction::UndoLastInsert | DictationCommandAction::DeleteLastSentence => {
+            DictationCommandExecutionResult {
+                output_text: String::new(),
+                command_applied: command_key.to_string(),
+                prompt_source: None,
+                prompt_preview: None,
+                undo_previous_insert: true,
+            }
+        }
+        DictationCommandAction::ReplaceEntireSelection(replacement) => {
+            let contextual_input = resolve_contextual_command_input(
+                &replacement,
+                captured_context_text,
+                context_source,
+                "Replace Text",
+            )?;
+            let output_text = replace_context_selection(&contextual_input, &replacement)?;
+            DictationCommandExecutionResult {
+                output_text,
+                command_applied: command_key.to_string(),
+                prompt_source: None,
+                prompt_preview: None,
+                undo_previous_insert: false,
+            }
+        }
+        DictationCommandAction::ReplaceSelection {
+            target,
+            replacement,
+        } => {
+            let contextual_input = resolve_contextual_command_input(
+                "",
+                captured_context_text,
+                context_source,
+                "Replace Text",
+            )?;
+            let (output_text, _) =
+                apply_contextual_phrase_replacement(&contextual_input, &target, &replacement)?;
+            DictationCommandExecutionResult {
+                output_text,
+                command_applied: command_key.to_string(),
+                prompt_source: None,
+                prompt_preview: None,
+                undo_previous_insert: false,
+            }
+        }
+        DictationCommandAction::AppendToSelection(suffix) => {
+            let contextual_input = resolve_contextual_command_input(
+                "",
+                captured_context_text,
+                context_source,
+                "Append Text",
+            )?;
+            let output_text = append_to_context_selection(&contextual_input, &suffix)?;
+            DictationCommandExecutionResult {
+                output_text,
+                command_applied: command_key.to_string(),
+                prompt_source: None,
+                prompt_preview: None,
+                undo_previous_insert: false,
+            }
+        }
+        DictationCommandAction::PrependToSelection(prefix) => {
+            let contextual_input = resolve_contextual_command_input(
+                "",
+                captured_context_text,
+                context_source,
+                "Prepend Text",
+            )?;
+            let output_text = prepend_to_context_selection(&contextual_input, &prefix)?;
+            DictationCommandExecutionResult {
+                output_text,
+                command_applied: command_key.to_string(),
+                prompt_source: None,
+                prompt_preview: None,
+                undo_previous_insert: false,
+            }
+        }
+        DictationCommandAction::DeletePhrase(target) => {
+            let contextual_input = resolve_contextual_command_input(
+                "",
+                captured_context_text,
+                context_source,
+                "Delete Phrase",
+            )?;
+            let (output_text, _) = delete_phrase_from_context(&contextual_input, &target)?;
+            DictationCommandExecutionResult {
+                output_text,
+                command_applied: command_key.to_string(),
+                prompt_source: None,
+                prompt_preview: None,
+                undo_previous_insert: false,
+            }
+        }
+        DictationCommandAction::DeleteSelection => DictationCommandExecutionResult {
+            output_text: String::new(),
+            command_applied: command_key.to_string(),
+            prompt_source: None,
+            prompt_preview: None,
+            undo_previous_insert: false,
+        },
+        DictationCommandAction::UppercaseSelection => {
+            let contextual_input = resolve_contextual_command_input(
+                "",
+                captured_context_text,
+                context_source,
+                "Uppercase Selection",
+            )?;
+            let output_text = uppercase_context_selection(&contextual_input)?;
+            DictationCommandExecutionResult {
+                output_text,
+                command_applied: command_key.to_string(),
+                prompt_source: None,
+                prompt_preview: None,
+                undo_previous_insert: false,
+            }
+        }
+        DictationCommandAction::LowercaseSelection => {
+            let contextual_input = resolve_contextual_command_input(
+                "",
+                captured_context_text,
+                context_source,
+                "Lowercase Selection",
+            )?;
+            let output_text = lowercase_context_selection(&contextual_input)?;
+            DictationCommandExecutionResult {
+                output_text,
+                command_applied: command_key.to_string(),
+                prompt_source: None,
+                prompt_preview: None,
+                undo_previous_insert: false,
+            }
+        }
+        DictationCommandAction::TitleCaseSelection => {
+            let contextual_input = resolve_contextual_command_input(
+                "",
+                captured_context_text,
+                context_source,
+                "Title Case Selection",
+            )?;
+            let output_text = title_case_context_selection(&contextual_input)?;
+            DictationCommandExecutionResult {
+                output_text,
+                command_applied: command_key.to_string(),
+                prompt_source: None,
+                prompt_preview: None,
+                undo_previous_insert: false,
+            }
+        }
+        DictationCommandAction::SentenceCaseSelection => {
+            let contextual_input = resolve_contextual_command_input(
+                "",
+                captured_context_text,
+                context_source,
+                "Sentence Case Selection",
+            )?;
+            let output_text = sentence_case_context_selection(&contextual_input)?;
+            DictationCommandExecutionResult {
+                output_text,
+                command_applied: command_key.to_string(),
+                prompt_source: None,
+                prompt_preview: None,
+                undo_previous_insert: false,
+            }
+        }
+        DictationCommandAction::RewriteShorter(payload)
+        | DictationCommandAction::RewriteProfessional(payload)
+        | DictationCommandAction::Bulletize(payload) => {
+            let action_label = match command_key {
+                "rewrite_shorter" => "Rewrite Shorter",
+                "rewrite_professional" => "Rewrite Professional",
+                "bulletize_selection" => "Bulletize Selection",
+                _ => "Dictation Command",
+            };
+            let contextual_input = resolve_contextual_command_input(
+                &payload,
+                captured_context_text,
+                context_source,
+                action_label,
+            )?;
+            let prompt = resolve_dictation_command_prompt(state, command_key).await?;
+            let output_text = match command_key {
+                "rewrite_shorter" => run_custom_dictation_transform_with_selected_provider(
+                    state,
+                    &contextual_input,
+                    &prompt,
+                )
+                .await
+                .map(|(output, _, _)| output)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(
+                        "Rewrite Shorter command fell back to local transform: {}",
+                        error
+                    );
+                    rewrite_shorter_text(&contextual_input)
+                }),
+                "rewrite_professional" => run_custom_dictation_transform_with_selected_provider(
+                    state,
+                    &contextual_input,
+                    &prompt,
+                )
+                .await
+                .map(|(output, _, _)| output)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(
+                        "Rewrite Professional command fell back to local transform: {}",
+                        error
+                    );
+                    rewrite_professional_text(&contextual_input)
+                }),
+                "bulletize_selection" => run_custom_dictation_transform_with_selected_provider(
+                    state,
+                    &contextual_input,
+                    &prompt,
+                )
+                .await
+                .map(|(output, _, _)| output)
+                .unwrap_or_else(|error| {
+                    tracing::warn!("Bulletize command fell back to local transform: {}", error);
+                    bulletize_text(&contextual_input)
+                }),
+                _ => contextual_input,
+            };
+            DictationCommandExecutionResult {
+                output_text,
+                command_applied: command_key.to_string(),
+                prompt_source: Some(format!("dictation_command:{}", command_key)),
+                prompt_preview: Some(prompt),
+                undo_previous_insert: false,
+            }
+        }
+    };
+
+    Ok(execution)
 }
 
 // ─── Sidecar public API ───────────────────────────────────────────────────────
@@ -12980,6 +13337,7 @@ async fn start_dictation_for_sidecar(
     ));
     options.resolved_hosting =
         Some(hosting_environment_to_settings_value(resolved_hosting).to_string());
+    capture_sidecar_dictation_start_context(state, &settings_snapshot, &mut options).await;
 
     {
         let mut runtime_state = state.dictation_runtime_state.lock().await;
@@ -13084,6 +13442,23 @@ async fn start_dictation_for_sidecar(
         overlay.dictation_provider =
             Some(asr_provider_to_settings_value(dictation_provider).to_string());
         overlay.dictation_model_id = Some(dictation_model_id.clone());
+        overlay.resolved_mode_preset = options.resolved_mode_preset.clone();
+        overlay.resolved_custom_mode_id = options.resolved_custom_mode_id.clone();
+        overlay.resolved_mode_label = options.resolved_mode_label.clone();
+        overlay.context_source = Some(options.context_source.clone());
+        overlay.insertion_mode = Some(
+            normalize_dictation_insertion_mode(
+                &settings_snapshot.transcription.dictation_insertion_mode,
+            )
+            .to_string(),
+        );
+        overlay.app_target = options.context_app_name.clone();
+        overlay.activation_matcher = options.activation_matcher.clone();
+        overlay.requested_route = options.route_preference.clone();
+        overlay.resolved_route = options.resolved_route.clone();
+        overlay.provider_model_label = options.provider_model_label.clone();
+        overlay.dictation_route_preference = options.route_preference.clone();
+        overlay.dictation_resolved_hosting = options.resolved_hosting.clone();
     }
 
     handle.emit_event(
@@ -13095,6 +13470,18 @@ async fn start_dictation_for_sidecar(
             "message": "Preparing dictation",
             "dictationProvider": asr_provider_to_settings_value(dictation_provider),
             "dictationModelId": dictation_model_id,
+            "resolvedModePreset": options.resolved_mode_preset,
+            "resolvedCustomModeId": options.resolved_custom_mode_id,
+            "resolvedModeLabel": options.resolved_mode_label,
+            "contextSource": options.context_source,
+            "insertionMode": normalize_dictation_insertion_mode(&settings_snapshot.transcription.dictation_insertion_mode),
+            "appTarget": options.context_app_name,
+            "activationMatcher": options.activation_matcher,
+            "requestedRoute": options.route_preference,
+            "resolvedRoute": options.resolved_route,
+            "providerModelLabel": options.provider_model_label,
+            "dictationRoutePreference": options.route_preference,
+            "dictationResolvedHosting": options.resolved_hosting,
         }),
     );
 
@@ -13140,10 +13527,19 @@ async fn start_dictation_for_sidecar(
         let mut runtime_state = state.dictation_runtime_state.lock().await;
         *runtime_state = DictationSessionState::Recording;
     }
+    {
+        let mut tracker = state.dictation_session_tracker.lock().await;
+        if tracker.active_session_id == Some(session_id) && tracker.startup_latency_ms.is_none() {
+            tracker.startup_latency_ms = tracker.started_at.map(|started_at| {
+                started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+            });
+        }
+    }
 
     // Update overlay state to "recording" phase (matches frontend DictationPhase type).
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         overlay.phase = "recording".to_string();
+        overlay.message = Some("Listening".to_string());
     }
 
     handle.emit_event(
@@ -13154,6 +13550,18 @@ async fn start_dictation_for_sidecar(
             "startedAtMs": session_started_at_ms,
             "dictationProvider": asr_provider_to_settings_value(dictation_provider),
             "dictationModelId": dictation_model_id,
+            "resolvedModePreset": options.resolved_mode_preset,
+            "resolvedCustomModeId": options.resolved_custom_mode_id,
+            "resolvedModeLabel": options.resolved_mode_label,
+            "contextSource": options.context_source,
+            "insertionMode": normalize_dictation_insertion_mode(&settings_snapshot.transcription.dictation_insertion_mode),
+            "appTarget": options.context_app_name,
+            "activationMatcher": options.activation_matcher,
+            "requestedRoute": options.route_preference,
+            "resolvedRoute": options.resolved_route,
+            "providerModelLabel": options.provider_model_label,
+            "dictationRoutePreference": options.route_preference,
+            "dictationResolvedHosting": options.resolved_hosting,
         }),
     );
 
@@ -13170,10 +13578,13 @@ async fn stop_dictation_for_sidecar(
         .await
         .ok_or_else(|| "No active dictation session to stop".to_string())?;
     let dictation_options = state.dictation_start_options.lock().await.clone();
-    let fallback_provider_type = {
+    let settings_snapshot = {
         let sm = state.settings_manager.lock().await;
+        sm.settings().clone()
+    };
+    let fallback_provider_type = {
         resolve_transcription_provider_and_model(
-            &sm.settings().transcription,
+            &settings_snapshot.transcription,
             TranscriptionScope::Dictation,
         )
         .0
@@ -13183,8 +13594,12 @@ async fn stop_dictation_for_sidecar(
         .as_deref()
         .and_then(asr_provider_from_settings_value)
         .unwrap_or(fallback_provider_type);
+    let requested_model_id = dictation_options.requested_model_id.clone();
+    let app_target = dictation_options.context_app_name.clone();
+    let app_bundle_id = dictation_options.context_app_bundle_id.clone();
+    let requested_insertion_mode = tracker_insertion_mode(state).await;
 
-    if let Some(model_id) = dictation_options.requested_model_id.as_ref() {
+    if let Some(model_id) = requested_model_id.as_ref() {
         state
             .asr_manager
             .set_provider_model_id(provider_type, model_id.clone())
@@ -13201,50 +13616,604 @@ async fn stop_dictation_for_sidecar(
             "phase": "stopping",
             "sessionId": session_id,
             "stopReason": stop_reason,
+            "resolvedModePreset": dictation_options.resolved_mode_preset,
+            "resolvedCustomModeId": dictation_options.resolved_custom_mode_id,
+            "resolvedModeLabel": dictation_options.resolved_mode_label,
+            "contextSource": dictation_options.context_source,
+            "insertionMode": requested_insertion_mode,
+            "appTarget": app_target,
+            "activationMatcher": dictation_options.activation_matcher,
+            "requestedRoute": dictation_options.route_preference,
+            "resolvedRoute": dictation_options.resolved_route,
+            "providerModelLabel": dictation_options.provider_model_label,
+            "dictationRoutePreference": dictation_options.route_preference,
+            "dictationResolvedHosting": dictation_options.resolved_hosting,
         }),
     );
 
-    let transcribed_text = {
+    let audio_bytes = {
         let mut audio = state.audio_capture.lock().await;
         match audio.stop_dictation() {
-            Ok(audio_bytes) => {
-                drop(audio);
-
-                // Emit transcribing phase while ASR is running.
+            Ok(audio_bytes) => audio_bytes,
+            Err(error) => {
+                {
+                    let mut runtime_state = state.dictation_runtime_state.lock().await;
+                    *runtime_state = DictationSessionState::Idle;
+                }
+                {
+                    let mut tracker = state.dictation_session_tracker.lock().await;
+                    tracker.active_session_id = None;
+                    tracker.started_at = None;
+                    tracker.started_at_epoch_ms = None;
+                    tracker.startup_latency_ms = None;
+                }
+                {
+                    let mut active_options = state.dictation_start_options.lock().await;
+                    *active_options = models::DictationStartOptions::default();
+                }
                 if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
-                    overlay.phase = "transcribing".to_string();
+                    overlay.phase = "error".to_string();
+                    overlay.message = Some(format!("Failed to stop dictation audio: {}", error));
                 }
                 handle.emit_event(
                     "dictation-state-changed",
                     serde_json::json!({
-                        "phase": "transcribing",
+                        "phase": "error",
                         "sessionId": session_id,
-                        "message": "Transcribing…",
+                        "message": format!("Failed to stop dictation audio: {}", error),
                     }),
                 );
+                handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
+                return Err(format!("Failed to stop dictation audio: {}", error));
+            }
+        }
+    };
 
-                let asr = state.asr_manager.get_provider(provider_type).await;
-                let tmp_path =
-                    std::env::temp_dir().join(format!("sidecar_dictation_{}.wav", session_id));
-                if let Err(e) = std::fs::write(&tmp_path, &audio_bytes) {
-                    tracing::warn!("Sidecar: failed to write temp audio file: {}", e);
-                    String::new()
-                } else {
-                    match asr.transcribe(&tmp_path).await {
-                        Ok(result) => result.text,
-                        Err(e) => {
-                            tracing::warn!("Sidecar dictation transcription failed: {}", e);
-                            String::new()
+    if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
+        overlay.phase = "transcribing".to_string();
+        overlay.message = Some("Transcribing…".to_string());
+    }
+    handle.emit_event(
+        "dictation-state-changed",
+        serde_json::json!({
+            "phase": "transcribing",
+            "sessionId": session_id,
+            "message": "Transcribing…",
+            "resolvedModePreset": dictation_options.resolved_mode_preset,
+            "resolvedCustomModeId": dictation_options.resolved_custom_mode_id,
+            "resolvedModeLabel": dictation_options.resolved_mode_label,
+            "contextSource": dictation_options.context_source,
+            "insertionMode": requested_insertion_mode,
+            "appTarget": app_target,
+            "activationMatcher": dictation_options.activation_matcher,
+            "requestedRoute": dictation_options.route_preference,
+            "resolvedRoute": dictation_options.resolved_route,
+            "providerModelLabel": dictation_options.provider_model_label,
+            "dictationRoutePreference": dictation_options.route_preference,
+            "dictationResolvedHosting": dictation_options.resolved_hosting,
+        }),
+    );
+
+    let transcription_result = match state
+        .asr_manager
+        .transcribe_bytes_for_dictation(provider_type, &audio_bytes, requested_model_id.as_deref())
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            {
+                let mut runtime_state = state.dictation_runtime_state.lock().await;
+                *runtime_state = DictationSessionState::Idle;
+            }
+            {
+                let mut tracker = state.dictation_session_tracker.lock().await;
+                tracker.active_session_id = None;
+                tracker.started_at = None;
+                tracker.started_at_epoch_ms = None;
+                tracker.startup_latency_ms = None;
+            }
+            {
+                let mut active_options = state.dictation_start_options.lock().await;
+                *active_options = models::DictationStartOptions::default();
+            }
+            if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
+                overlay.phase = "error".to_string();
+                overlay.message = Some(format!("Dictation transcription failed: {}", error));
+            }
+            handle.emit_event(
+                "dictation-state-changed",
+                serde_json::json!({
+                    "phase": "error",
+                    "sessionId": session_id,
+                    "message": format!("Dictation transcription failed: {}", error),
+                }),
+            );
+            handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
+            return Err(format!("Dictation transcription failed: {}", error));
+        }
+    };
+
+    let raw_transcribed_text =
+        sanitize_dictation_output(&transcription_result.text, &transcription_result.text)
+            .trim()
+            .to_string();
+    let now = chrono::Utc::now();
+    let recent_delivery = state.recent_dictation_delivery.lock().await.clone();
+    let recent_inserted_text = recent_delivery
+        .as_ref()
+        .filter(|delivery| {
+            recent_delivery_matches_target_and_is_fresh(
+                delivery,
+                app_target.as_deref(),
+                app_bundle_id.as_deref(),
+                now,
+            )
+        })
+        .map(|delivery| delivery.text.as_str());
+
+    let dictionary_entries = if settings_snapshot
+        .transcription
+        .dictation_auto_learn_corrections
+    {
+        let db = state.db.lock().await;
+        db.list_dictation_dictionary_entries()
+            .map_err(|error| error.to_string())?
+    } else {
+        Vec::new()
+    };
+    let snippets = if settings_snapshot.transcription.dictation_snippets_enabled {
+        let db = state.db.lock().await;
+        db.list_dictation_snippets()
+            .map_err(|error| error.to_string())?
+    } else {
+        Vec::new()
+    };
+
+    let effective_mode = resolved_dictation_mode_preset(&settings_snapshot).to_string();
+    let formatting_hint = resolve_dictation_formatting_hint(
+        app_target.as_deref(),
+        dictation_options.activation_matcher.as_deref(),
+        dictation_options.context_app_name.as_deref(),
+    );
+
+    let mut final_text = raw_transcribed_text.clone();
+    let mut command_applied: Option<String> = None;
+    let mut prompt_source: Option<String> = None;
+    let mut prompt_preview: Option<String> = None;
+    let mut dictionary_applied_count = 0usize;
+    let mut snippet_applied_count = 0usize;
+    let mut formatting_applied = false;
+    let mut recent_insert_reused = false;
+    let mut pipeline_stage_keys: Vec<String> = Vec::new();
+    let mut undo_previous_insert = false;
+
+    if settings_snapshot
+        .transcription
+        .dictation_command_mode_enabled
+    {
+        if let Some((command_key, action)) = parse_dictation_command(
+            raw_transcribed_text.as_str(),
+            &settings_snapshot.transcription.dictation_command_prefix,
+        ) {
+            let execution = execute_dictation_command_action(
+                state,
+                &command_key,
+                action,
+                dictation_options.captured_context_text.as_deref(),
+                &dictation_options.context_source,
+            )
+            .await?;
+            final_text = execution.output_text.trim().to_string();
+            command_applied = Some(execution.command_applied);
+            prompt_source = execution.prompt_source;
+            prompt_preview = execution.prompt_preview;
+            undo_previous_insert = execution.undo_previous_insert;
+            pipeline_stage_keys.push("command".to_string());
+        }
+    }
+
+    if command_applied.is_none() {
+        let pipeline_result = crate::dictation_pipeline::apply_dictation_pipeline(
+            crate::dictation_pipeline::DictationPipelineInput {
+                text: raw_transcribed_text.as_str(),
+                dictionary_entries: &dictionary_entries,
+                snippets: &snippets,
+                app_target: app_target.as_deref(),
+                mode_preset: effective_mode.as_str(),
+                formatting_hint: formatting_hint.as_deref(),
+                smart_formatting_enabled: true,
+                recent_inserted_text,
+            },
+        );
+        final_text = pipeline_result.text.trim().to_string();
+        command_applied = pipeline_result.command_applied.clone();
+        dictionary_applied_count = pipeline_result.dictionary_applied_count;
+        snippet_applied_count = pipeline_result.snippet_applied_count;
+        formatting_applied = pipeline_result.formatting_applied;
+        recent_insert_reused = pipeline_result.recent_insert_reused;
+        pipeline_stage_keys = pipeline_result.pipeline_stage_keys.clone();
+        undo_previous_insert = pipeline_result.undo_previous_insert;
+    }
+
+    if !final_text.is_empty() && command_applied.is_none() {
+        match effective_mode.as_str() {
+            "messages" | "email" | "meeting_follow_up" => {
+                if let Some(prompt) = dictation_mode_transform_prompt(&effective_mode) {
+                    match run_custom_dictation_transform_with_selected_provider(
+                        state,
+                        final_text.as_str(),
+                        prompt,
+                    )
+                    .await
+                    {
+                        Ok((output, _, _)) => {
+                            final_text =
+                                sanitize_dictation_output(output.trim(), final_text.as_str())
+                                    .trim()
+                                    .to_string();
+                            prompt_source = Some(format!("mode_transform:{}", effective_mode));
+                            prompt_preview = truncate_for_audit_preview(Some(prompt), 180);
+                            pipeline_stage_keys.push("mode_transform".to_string());
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "Dictation mode transform fell back to local handling for '{}': {}",
+                                effective_mode,
+                                error
+                            );
+                            final_text = match effective_mode.as_str() {
+                                "messages" => rewrite_shorter_text(final_text.as_str()),
+                                "email" | "meeting_follow_up" => {
+                                    rewrite_professional_text(final_text.as_str())
+                                }
+                                _ => final_text,
+                            };
+                            pipeline_stage_keys.push("mode_transform_fallback".to_string());
                         }
                     }
                 }
             }
-            Err(e) => {
-                tracing::warn!("Sidecar stop_dictation audio error: {}", e);
-                String::new()
+            "notes" => {
+                let bulletized = bulletize_text(final_text.as_str());
+                if bulletized != final_text {
+                    final_text = bulletized;
+                    pipeline_stage_keys.push("mode_transform".to_string());
+                }
+            }
+            _ => {
+                if settings_snapshot.transcription.dictation_ai_formatting
+                    || matches!(
+                        dictation_options.profile,
+                        models::DictationProfile::PowerRewrite
+                    )
+                {
+                    match run_dictation_formatting_with_selected_provider(
+                        state,
+                        final_text.as_str(),
+                        &dictation_options,
+                    )
+                    .await
+                    {
+                        Ok(output) => {
+                            final_text =
+                                sanitize_dictation_output(output.trim(), final_text.as_str())
+                                    .trim()
+                                    .to_string();
+                            let (resolved_prompt_source, resolved_prompt_preview) =
+                                resolve_dictation_format_prompt_metadata(&settings_snapshot);
+                            prompt_source = resolved_prompt_source;
+                            prompt_preview =
+                                truncate_for_audit_preview(resolved_prompt_preview.as_deref(), 180);
+                            if !pipeline_stage_keys
+                                .iter()
+                                .any(|stage| stage == "smart_formatting")
+                            {
+                                pipeline_stage_keys.push("smart_formatting".to_string());
+                            }
+                            formatting_applied = true;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "LLM dictation formatting failed, keeping local pipeline output: {}",
+                                error
+                            );
+                        }
+                    }
+                }
             }
         }
+    }
+
+    final_text = sanitize_dictation_output(final_text.as_str(), raw_transcribed_text.as_str())
+        .trim()
+        .to_string();
+
+    let startup_latency_ms = {
+        let tracker = state.dictation_session_tracker.lock().await;
+        tracker.startup_latency_ms
     };
+    let transcription_latency_ms = transcription_result.processing_time_ms;
+    let mut insert_latency_ms: Option<u64> = None;
+    let mut pasted = false;
+    let mut copied = false;
+    let mut paste_error: Option<String> = None;
+    let mut actual_insertion_mode = requested_insertion_mode.clone();
+    let mut outcome = "ready".to_string();
+    let mut undo_performed = false;
+
+    if undo_previous_insert {
+        if recent_inserted_text.is_some() {
+            match send_native_undo_key() {
+                Ok(()) => {
+                    undo_performed = true;
+                    outcome = "undone".to_string();
+                }
+                Err(error) => {
+                    paste_error = Some(error);
+                }
+            }
+        } else if final_text.is_empty() {
+            paste_error = Some("No recent dictation insert was available to undo.".to_string());
+            actual_insertion_mode = "command_only".to_string();
+            outcome = "error".to_string();
+        }
+    }
+
+    if !final_text.is_empty() {
+        let insert_started_at = std::time::Instant::now();
+        let paste_outcome =
+            match DictationInsertionMode::from_settings_value(&requested_insertion_mode) {
+                DictationInsertionMode::ClipboardOnly => {
+                    match copy_to_clipboard(final_text.as_str()) {
+                        Ok(()) => PasteOutcome {
+                            pasted: false,
+                            copied: true,
+                            direct_accessibility: false,
+                            successful_strategy: None,
+                            error: None,
+                        },
+                        Err(error) => PasteOutcome {
+                            pasted: false,
+                            copied: false,
+                            direct_accessibility: false,
+                            successful_strategy: None,
+                            error: Some(error),
+                        },
+                    }
+                }
+                DictationInsertionMode::Inline => {
+                    actual_insertion_mode = "paste".to_string();
+                    paste_text_systemwide(
+                        state,
+                        final_text.as_str(),
+                        tracker_copy_to_clipboard(state).await,
+                        app_target.as_deref(),
+                        app_bundle_id.as_deref(),
+                    )
+                }
+                _ => paste_text_systemwide(
+                    state,
+                    final_text.as_str(),
+                    tracker_copy_to_clipboard(state).await,
+                    app_target.as_deref(),
+                    app_bundle_id.as_deref(),
+                ),
+            };
+        insert_latency_ms = Some(
+            insert_started_at
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+        );
+        pasted = paste_outcome.pasted;
+        copied = paste_outcome.copied;
+        if paste_error.is_none() {
+            paste_error = paste_outcome.error;
+        }
+        outcome = if pasted {
+            if undo_performed {
+                "replaced".to_string()
+            } else {
+                "pasted".to_string()
+            }
+        } else if copied {
+            if undo_performed {
+                "copied_replacement".to_string()
+            } else {
+                "copied".to_string()
+            }
+        } else if paste_error.is_some() {
+            "error".to_string()
+        } else {
+            outcome
+        };
+    } else if undo_performed {
+        actual_insertion_mode = "command_only".to_string();
+    } else if paste_error.is_none() {
+        outcome = "empty".to_string();
+    }
+
+    let end_to_end_ms = {
+        let tracker = state.dictation_session_tracker.lock().await;
+        tracker
+            .started_at
+            .map(|started_at| started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+            .unwrap_or(transcription_latency_ms + insert_latency_ms.unwrap_or(0))
+    };
+    let fallback_message = build_provider_fallback_message(
+        transcription_result.requested_provider,
+        transcription_result.actual_provider,
+        transcription_result.fallback_reason.as_deref(),
+        transcription_result.optimization_applied,
+    );
+
+    let recording_id = uuid::Uuid::new_v4().to_string();
+    let stored_text = if final_text.trim().is_empty() {
+        raw_transcribed_text.clone()
+    } else {
+        final_text.clone()
+    };
+    let transcript = models::Transcript {
+        id: uuid::Uuid::new_v4().to_string(),
+        recording_id: recording_id.clone(),
+        segments: if stored_text == raw_transcribed_text {
+            transcription_result
+                .segments
+                .iter()
+                .cloned()
+                .map(|segment| models::TranscriptSegment {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    start_time: segment.start_time,
+                    end_time: segment.end_time,
+                    text: segment.text,
+                    speaker_id: None,
+                    confidence: segment.confidence,
+                })
+                .collect()
+        } else if stored_text.is_empty() {
+            Vec::new()
+        } else {
+            vec![models::TranscriptSegment {
+                id: uuid::Uuid::new_v4().to_string(),
+                start_time: 0.0,
+                end_time: 0.0,
+                text: stored_text.clone(),
+                speaker_id: None,
+                confidence: transcription_result.confidence,
+            }]
+        },
+        full_text: stored_text.clone(),
+        language: transcription_result.language.clone(),
+        confidence: transcription_result.confidence,
+        model: transcription_result.model_name.clone(),
+        model_id: Some(transcription_result.model_id.clone()),
+        requested_provider: Some(
+            asr_provider_to_settings_value(transcription_result.requested_provider).to_string(),
+        ),
+        actual_provider: Some(
+            asr_provider_to_settings_value(transcription_result.actual_provider).to_string(),
+        ),
+        created_at: now,
+    };
+
+    {
+        let mut db = state.db.lock().await;
+        let _ = db.create_recording(&models::Recording {
+            id: recording_id.clone(),
+            title: format!(
+                "Dictation - {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M")
+            ),
+            project_id: dictation_options
+                .project_id
+                .clone()
+                .unwrap_or_else(|| "inbox".to_string()),
+            duration: i64::try_from(audio_bytes.len()).unwrap_or(0),
+            created_at: now,
+            updated_at: now,
+            source_type: "dictation".to_string(),
+            audio_path: String::new(),
+            status: "completed".to_string(),
+            summary: None,
+            action_items: None,
+            meeting_notes: None,
+            meeting_template_id: None,
+            meeting_capture_mode: None,
+            notes_updated_at: None,
+            consent_prompt_shown: false,
+            consent_notice_mode: None,
+            consent_notice_surface: None,
+            consent_notice_message: None,
+            consent_notice_updated_at: None,
+        });
+        let _ = db.save_transcript(&transcript);
+        let _ = db.save_transcript_artifact(&TranscriptArtifactRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            recording_id: recording_id.clone(),
+            transcript_id: Some(transcript.id.clone()),
+            segment_count: transcript.segments.len() as i64,
+            model_id: Some(transcription_result.model_id.clone()),
+            requested_provider: Some(
+                asr_provider_to_settings_value(transcription_result.requested_provider).to_string(),
+            ),
+            actual_provider: Some(
+                asr_provider_to_settings_value(transcription_result.actual_provider).to_string(),
+            ),
+            quality_score: Some(transcription_result.confidence),
+            startup_latency_ms: startup_latency_ms.map(|value| value as i64),
+            transcription_latency_ms: Some(transcription_latency_ms as i64),
+            insert_latency_ms: insert_latency_ms.map(|value| value as i64),
+            end_to_end_ms: Some(end_to_end_ms as i64),
+            created_at: now,
+        });
+        let _ = db.save_insertion_action(&InsertionActionRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: Some(session_id.to_string()),
+            recording_id: Some(recording_id.clone()),
+            requested_mode: requested_insertion_mode.clone(),
+            actual_mode: actual_insertion_mode.clone(),
+            pasted,
+            copied,
+            failed: paste_error.is_some() && !pasted && !copied,
+            undo_token: None,
+            command_applied: command_applied.clone(),
+            snippet_applied_count: snippet_applied_count as i64,
+            app_target: app_target.clone(),
+            error: paste_error.clone(),
+            created_at: now,
+        });
+
+        let custom_mode = active_dictation_custom_mode(&settings_snapshot);
+        let audit_details = serde_json::json!({
+            "recording_id": &recording_id,
+            "session_id": session_id.to_string(),
+            "stop_reason": stop_reason,
+            "dictation_mode_preset": dictation_options.resolved_mode_preset,
+            "dictation_mode_label": dictation_options.resolved_mode_label,
+            "dictation_base_mode_preset": effective_mode,
+            "dictation_base_mode_label": resolved_dictation_base_mode_label(&settings_snapshot),
+            "dictation_custom_mode_id": custom_mode.map(|mode| mode.id.clone()),
+            "dictation_custom_mode_name": custom_mode.map(|mode| mode.name.clone()),
+            "context_source": normalize_dictation_context_source(&dictation_options.context_source),
+            "context_preview": truncate_for_audit_preview(dictation_options.captured_context_text.as_deref(), 180),
+            "context_app_name": dictation_options.context_app_name,
+            "app_target": app_target,
+            "activation_matcher": dictation_options.activation_matcher,
+            "command_applied": command_applied,
+            "dictionary_applied_count": dictionary_applied_count,
+            "snippet_applied_count": snippet_applied_count,
+            "formatting_applied": formatting_applied,
+            "recent_insert_reused": recent_insert_reused,
+            "pipeline_stage_keys": pipeline_stage_keys,
+            "prompt_source": prompt_source,
+            "prompt_preview": prompt_preview,
+            "requested_provider": asr_provider_to_settings_value(transcription_result.requested_provider),
+            "actual_provider": asr_provider_to_settings_value(transcription_result.actual_provider),
+            "model_id": transcription_result.model_id,
+            "route_preference": dictation_options.route_preference,
+            "resolved_hosting": dictation_options.resolved_hosting,
+            "startup_latency_ms": startup_latency_ms,
+            "transcription_latency_ms": transcription_latency_ms,
+            "insert_latency_ms": insert_latency_ms,
+            "end_to_end_ms": end_to_end_ms,
+            "outcome": outcome,
+        });
+        let _ = db.log_audit_event("dictation_completed", Some(audit_details), "info");
+    }
+
+    {
+        let mut recent_delivery_slot = state.recent_dictation_delivery.lock().await;
+        if pasted || copied {
+            *recent_delivery_slot = Some(RecentDictationDelivery {
+                text: final_text.clone(),
+                app_target: app_target.clone(),
+                app_bundle_id: app_bundle_id.clone(),
+                delivered_at: now,
+            });
+        } else if undo_performed {
+            *recent_delivery_slot = None;
+        }
+    }
 
     {
         let mut runtime_state = state.dictation_runtime_state.lock().await;
@@ -13254,24 +14223,107 @@ async fn stop_dictation_for_sidecar(
         let mut tracker = state.dictation_session_tracker.lock().await;
         tracker.active_session_id = None;
         tracker.started_at = None;
+        tracker.started_at_epoch_ms = None;
+        tracker.startup_latency_ms = None;
+    }
+    {
+        let mut active_options = state.dictation_start_options.lock().await;
+        *active_options = models::DictationStartOptions::default();
     }
 
     // Emit done phase so the popup shows the result, then idle to dismiss it.
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         overlay.phase = "done".to_string();
+        overlay.message = Some(if pasted {
+            "Inserted into the target app".to_string()
+        } else if copied {
+            "Copied to the clipboard".to_string()
+        } else if undo_performed {
+            "Undo applied".to_string()
+        } else if final_text.is_empty() {
+            "No speech detected".to_string()
+        } else {
+            "Result ready".to_string()
+        });
+        overlay.preview = Some(final_text.clone());
+        overlay.stop_reason = Some(stop_reason.to_string());
+        overlay.outcome = Some(outcome.clone());
     }
-    handle.emit_event(
-        "dictation-text-ready",
-        serde_json::json!({ "text": &transcribed_text, "sessionId": session_id }),
+    let payload = build_dictation_text_ready_payload(
+        session_id,
+        stop_reason,
+        &outcome,
+        &transcription_result,
+        pasted,
+        copied,
+        paste_error.as_deref(),
+        fallback_message.as_deref(),
+        startup_latency_ms,
+        transcription_latency_ms,
+        insert_latency_ms,
+        end_to_end_ms,
+        actual_insertion_mode.as_str(),
+        command_applied.as_deref(),
+        dictionary_applied_count,
+        snippet_applied_count,
+        formatting_applied,
+        recent_insert_reused,
+        &pipeline_stage_keys,
+        app_target.as_deref(),
+        dictation_options.activation_matcher.as_deref(),
+        Some(normalize_dictation_context_source(
+            &dictation_options.context_source,
+        )),
+        dictation_options
+            .captured_context_text
+            .as_deref()
+            .map(|value| value.chars().count()),
+        dictation_options.route_preference.as_deref(),
+        dictation_options.resolved_route.as_deref(),
+        dictation_options.resolved_hosting.as_deref(),
+        dictation_options.provider_model_label.as_deref(),
     );
+    let mut payload_value = serde_json::to_value(payload).map_err(|error| error.to_string())?;
+    if let Some(object) = payload_value.as_object_mut() {
+        object.insert(
+            "text".to_string(),
+            serde_json::Value::String(final_text.clone()),
+        );
+    }
+    handle.emit_event("dictation-text-ready", payload_value);
     handle.emit_event(
         "dictation-state-changed",
         serde_json::json!({
             "phase": "done",
             "sessionId": session_id,
             "stopReason": stop_reason,
-            "outcome": "copied",
-            "preview": &transcribed_text,
+            "outcome": outcome,
+            "preview": &final_text,
+            "message": if pasted {
+                "Inserted into the target app"
+            } else if copied {
+                "Copied to the clipboard"
+            } else if undo_performed {
+                "Undo applied"
+            } else if final_text.is_empty() {
+                "No speech detected"
+            } else {
+                "Result ready"
+            },
+            "resolvedModePreset": dictation_options.resolved_mode_preset,
+            "resolvedCustomModeId": dictation_options.resolved_custom_mode_id,
+            "resolvedModeLabel": dictation_options.resolved_mode_label,
+            "contextSource": dictation_options.context_source,
+            "insertionMode": actual_insertion_mode,
+            "appTarget": app_target,
+            "activationMatcher": dictation_options.activation_matcher,
+            "dictationProvider": asr_provider_to_settings_value(provider_type),
+            "dictationModelId": requested_model_id,
+            "requestedRoute": dictation_options.route_preference,
+            "resolvedRoute": dictation_options.resolved_route,
+            "providerModelLabel": dictation_options.provider_model_label,
+            "dictationRoutePreference": dictation_options.route_preference,
+            "dictationResolvedHosting": dictation_options.resolved_hosting,
         }),
     );
 
@@ -13294,7 +14346,7 @@ async fn stop_dictation_for_sidecar(
     );
     handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
 
-    Ok(transcribed_text)
+    Ok(final_text)
 }
 
 /// Sidecar-compatible start_recording. Emits state events via SidecarHandle.

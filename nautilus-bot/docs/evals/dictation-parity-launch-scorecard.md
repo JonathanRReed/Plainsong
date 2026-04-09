@@ -5,7 +5,7 @@ Owner: Nautilus engineering
 
 ## Goal
 
-Define the launch-blocking scorecard for Nautilus dictation parity against the current Wispr Flow bar, using evidence that can be reproduced from packaged macOS and Windows builds.
+Define the launch-blocking scorecard for Nautilus dictation parity against the current Superwhisper bar, using evidence that can be reproduced from packaged macOS and Windows builds.
 
 This scorecard is product-facing. It is not satisfied by code existence alone.
 
@@ -31,14 +31,17 @@ Core product claim:
 - `docs/evals/wispr-vs-nautilus-scorecard-template.csv`
 - `docs/evals/dictation-parity-fixture.json`
 - `artifacts/dictation-parity-evidence.json`
+- `artifacts/dictation-prompt-eval.json`
 - `docs/evals/dictation-command-corpus-log.md`
 - `docs/evals/dictation-snippet-fixture-list.md`
 - `docs/evals/dictation-dictionary-fixture-report.md`
 - `docs/evals/dictation-formatter-benchmark-report.md`
+- `docs/evals/dictation-prompt-eval-report.md`
 - `docs/evals/dictation-language-certification-matrix.md`
 - `docs/evals/dictation-app-matrix-evidence.md`
 - `docs/evals/dictation-hands-free-readiness.md`
 - `docs/evals/dictation-parity-artifact-summary.md`
+- `docs/evals/superwhisper-parity-audit-2026-04-09.md`
 - `docs/dictation-app-compatibility-matrix.md`
 - `docs/dictation-blocked-app-register.md`
 - `artifacts/qa/macos/capture-dictation-hotkey.md`
@@ -143,13 +146,16 @@ What the current codebase already supports:
 - deterministic smart formatting in the live dictation path
 - deterministic selected-text correction commands including replace, append, prepend, delete phrase, and case transforms
 - hands-free dictation mode across onboarding, settings, popup, and runtime
+- push-to-talk controls and live partial preview
 - insertion mode telemetry and end-to-end timing
 - language override plumbing
 - context source plumbing
 - app-aware custom modes with activation matchers, inherited base styles, and mode-specific prompts
+- mini recording window controls for dictation and meetings
 - keep-warm policy controls
 - benchmark generation and verification scripts
 - dictation history and popup metadata that preserve custom mode identity and base style
+- clipboard restore after paste success
 
 What is still missing or not launch-certified:
 
@@ -168,7 +174,8 @@ Current artifact note:
 - `docs/evals/benchmark-run-latest-windows.json` exists as the current local fixture-run Windows candidate
 - `artifacts/benchmark-gates-macos.json` and `artifacts/benchmark-gates-windows.json` now pass from the refreshed fixture pipeline
 - `artifacts/dictation-parity-evidence.json` now passes across command, snippet, dictionary, formatting, and correction fixture suites
-- the generated companion artifacts now live in `docs/evals/dictation-command-corpus-log.md`, `docs/evals/dictation-snippet-fixture-list.md`, `docs/evals/dictation-dictionary-fixture-report.md`, `docs/evals/dictation-formatter-benchmark-report.md`, `docs/evals/dictation-language-certification-matrix.md`, `docs/evals/dictation-app-matrix-evidence.md`, and `docs/evals/dictation-parity-artifact-summary.md`
+- `artifacts/dictation-prompt-eval.json` now passes across the command grammar, formatting, and correction prompt-regression suites
+- the generated companion artifacts now live in `docs/evals/dictation-command-corpus-log.md`, `docs/evals/dictation-snippet-fixture-list.md`, `docs/evals/dictation-dictionary-fixture-report.md`, `docs/evals/dictation-formatter-benchmark-report.md`, `docs/evals/dictation-prompt-eval-report.md`, `docs/evals/dictation-language-certification-matrix.md`, `docs/evals/dictation-app-matrix-evidence.md`, and `docs/evals/dictation-parity-artifact-summary.md`
 - the frozen launch-language set is now fully represented in the local benchmark corpus
 - the frozen launch app matrix is now fully represented in the local benchmark corpus
 - these local JSON artifacts are useful for schema and gate plumbing, but they do not replace packaged app evidence

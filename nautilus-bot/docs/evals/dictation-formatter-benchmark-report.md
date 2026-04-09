@@ -1,6 +1,6 @@
 # Dictation Formatter Benchmark Report
 
-Generated: 2026-04-09T16:08:48.649Z
+Generated: 2026-04-09T17:28:42.960Z
 
 Formatting and correction fixtures now have reproducible local evidence. Smart formatting passes at 100%, and correction cases pass at 100%. Packaged QA is still required before launch claims move beyond local evidence.
 

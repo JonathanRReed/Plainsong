@@ -1,6 +1,6 @@
 # Dictation App Matrix Evidence
 
-Generated: 2026-04-09T16:08:48.649Z
+Generated: 2026-04-09T17:28:42.960Z
 
 This rollup compares the frozen launch app matrix with the current local benchmark corpus and blocked-app register. It does not replace packaged QA, but it shows where the local corpus already exercises insertion behavior and where gaps remain.
 

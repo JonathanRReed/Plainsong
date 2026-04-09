@@ -1,6 +1,6 @@
 # Dictation Snippet Fixture List
 
-Generated: 2026-04-09T16:08:48.649Z
+Generated: 2026-04-09T17:28:42.960Z
 
 Local snippet coverage currently passes at 100%. These fixtures prove expansion and app-scope behavior in the local benchmark path.
 

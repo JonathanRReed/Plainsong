@@ -88,6 +88,7 @@ function parseBlockedRegister() {
 
 const generatedAt = new Date().toISOString();
 const evidenceOut = "artifacts/dictation-parity-evidence.json";
+const promptEvalArtifactOut = "artifacts/dictation-prompt-eval.json";
 
 run("cargo", [
   "run",
@@ -106,7 +107,18 @@ run("cargo", [
   generatedAt,
 ]);
 
+run("node", [
+  "scripts/run-dictation-prompt-eval.mjs",
+  "--parity-out",
+  "artifacts/dictation-prompt-eval.raw.json",
+  "--out",
+  promptEvalArtifactOut,
+  "--report-out",
+  "docs/evals/dictation-prompt-eval-report.md",
+]);
+
 const evidence = readJson(evidenceOut);
+const promptEval = readJson(promptEvalArtifactOut);
 const macosBenchmark = readJson("docs/evals/benchmark-run-latest-macos.json");
 const windowsBenchmark = readJson("docs/evals/benchmark-run-latest-windows.json");
 const macosGate = readJson("artifacts/benchmark-gates-macos.json");
@@ -353,12 +365,19 @@ Generated: ${generatedAt}
 - Dictionary fixtures: ${formatPercent(evidence.summary.dictionarySuccessRate)}
 - Formatting fixtures: ${formatPercent(evidence.summary.formattingSuccessRate)}
 - Correction fixtures: ${formatPercent(evidence.summary.correctionSuccessRate)}
+- Prompt eval, command grammar: ${formatPercent(promptEval.summary.commandSuccessRate)}
+- Prompt eval, formatting and mode transforms: ${formatPercent(
+    promptEval.summary.formattingSuccessRate
+  )}
+- Prompt eval, correction and rewrite helpers: ${formatPercent(
+    promptEval.summary.correctionSuccessRate
+  )}
 - macOS latency gate: ${macosGate.pass ? "PASS" : "FAIL"}
 - Windows latency gate: ${windowsGate.pass ? "PASS" : "FAIL"}
 
 ## Remaining truth
 
-- Local fixture evidence is now reproducible across commands, snippets, dictionary behavior, formatting behavior, language guidance, and app-matrix rollup.
+- Local fixture evidence is now reproducible across commands, snippets, dictionary behavior, formatting behavior, prompt regression, language guidance, and app-matrix rollup.
 - The frozen launch-language set is now covered in the local benchmark corpus.
 - The frozen launch app matrix is now fully covered in the local benchmark corpus.
 - Packaged dictation evidence is still required for launch claims.

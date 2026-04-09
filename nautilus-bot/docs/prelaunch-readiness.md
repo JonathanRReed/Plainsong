@@ -53,7 +53,8 @@ Current status:
 - Local packaged update path: ✅ PASS (packaging path verified through the Electron release flow; production release still requires final signing and notarization credentials)
 - Packaged QA matrix execution: ⚠️ BLOCKED (49/49 blocked; no rows pending, no rows passed)
 - Benchmark parity artifacts (CP-13/CP-14/CP-15): ⚠️ PARTIAL (local fixture-driven baseline, macOS, and Windows benchmark JSON artifacts now exist and the local gate outputs pass; packaged benchmark evidence is still missing)
-- Dictation parity Phase 0 artifacts: ⚠️ PARTIAL (local command, snippet, dictionary, formatting, correction, launch-language, and launch-app artifacts now regenerate cleanly and cover the frozen corpus; packaged benchmark and QA evidence still missing)
+- Dictation parity Phase 0 artifacts: ⚠️ PARTIAL (local command, snippet, dictionary, formatting, correction, prompt-regression, launch-language, and launch-app artifacts now regenerate cleanly and cover the frozen corpus; packaged benchmark and QA evidence still missing)
+- Superwhisper core comparison: ✅ PARITY-OR-BETTER on the repo-owned interactive dictation surface; public 100-language breadth, translate-to-English positioning, and file-transcription product path still need explicit launch scope or follow-up work
 - Cloud ASR smoke gate: ❌ BLOCKED (missing required cloud API secrets)
 
 See `docs/strict-release-blocker-register.md` for blocker ownership and unblock actions.
@@ -71,7 +72,9 @@ See `docs/strict-release-blocker-register.md` for blocker ownership and unblock 
    - Present locally: `artifacts/benchmark-gates-macos.json`
    - Present locally: `artifacts/benchmark-gates-windows.json`
    - Present locally: `artifacts/dictation-parity-evidence.json`
+   - Present locally: `artifacts/dictation-prompt-eval.json`
    - Present locally: `docs/evals/dictation-parity-artifact-summary.md`
+   - Present locally: `docs/evals/dictation-prompt-eval-report.md`
    - Present locally: `docs/evals/dictation-language-certification-matrix.md`
    - Present locally: `docs/evals/dictation-app-matrix-evidence.md`
    - The local benchmark corpus now covers the frozen launch-language set and the frozen launch app matrix.
