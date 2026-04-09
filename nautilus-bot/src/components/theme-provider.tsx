@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/electron";
 import { normalizeThemeSchemeForAccess } from "@/lib/theme-schemes";
 
 type Theme = "light" | "dark" | "system";

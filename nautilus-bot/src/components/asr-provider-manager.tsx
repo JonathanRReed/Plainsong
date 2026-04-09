@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
@@ -26,9 +26,8 @@ import {
   requestDictationPermissions,
   repairCursorInsertPermissions,
   type PermissionDiagnostics,
-} from "@/lib/tauri";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+} from "@/lib/backend";
+import { invoke, listen } from "@/lib/electron";
 import {
   Card,
   CardContent,
@@ -697,8 +696,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         );
       });
 
-  const recommendedLaneProvider = (lane: WorkflowLane) =>
-    laneProviders(lane)[0] ?? null;
+  const recommendedLaneProvider = useCallback((lane: WorkflowLane) =>
+    laneProviders(lane)[0] ?? null, [laneProviders]);
 
   const providerUiName = (provider: SelectionProvider) =>
     provider.providerType === "mlx_audio"
@@ -1472,7 +1471,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
               {activeProvider
-                ? `${providerHostingLabel(activeProvider.providerType)} · ${providerCapabilityLabel(activeProvider.providerType)}`
+                ? `${providerHostingLabel(activeProvider.providerType, activeProvider.selectedModelId)} · ${providerCapabilityLabel(activeProvider.providerType)}`
                 : "Choose a route for this workflow."}
             </p>
             <p className="mt-3 text-xs text-muted-foreground">

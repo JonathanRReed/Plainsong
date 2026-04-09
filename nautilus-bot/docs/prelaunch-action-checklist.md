@@ -6,8 +6,8 @@ Current blocker register: `docs/strict-release-blocker-register.md`.
 
 ## A) Required Secrets
 
-- [ ] Confirm updater/signing secrets are set: `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (if used), `TAURI_SIGNING_PUBLIC_KEY`.
-- [ ] Confirm macOS signing/notarization secrets are set (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`, `KEYCHAIN_PASSWORD`) — BLOCKED (Apple setup unavailable in this cycle).
+- [ ] Confirm Electron release publishing and signing credentials are set in CI for the active release workflow.
+- [ ] Confirm macOS signing and notarization credentials are set for the Electron packaging flow — BLOCKED (Apple setup unavailable in this cycle).
 - [ ] Confirm Windows signing secrets are set (`WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`) — BLOCKED (Windows cert unavailable in this cycle).
 - [ ] Confirm cloud ASR live-test secrets are set (`OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `MISTRAL_API_KEY`) — BLOCKED (`scripts/live-cloud-asr-smoke.mjs` fails without these).
 - [ ] Optional but recommended for deterministic preflight provisioning: set `NAUTILUS_ASR_ASSET_BUNDLE_URL` to a tar/zip bundle that expands into `Nautilus/models/*`.
@@ -24,9 +24,10 @@ Current blocker register: `docs/strict-release-blocker-register.md`.
 - [x] Local ASR performance gate passes (`asr_local_performance_gate`, RTF <= 1.2).
 - [x] Local ASR performance gate runs with fail-fast provider policy (no hidden fallback passes).
 - [x] Cold-start gate passes on M1-class baseline (`scripts/cold-start-gate.mjs`, threshold < 2500ms). (historical evidence in `docs/release-gate-evidence.md`)
-- [x] Bundle size gate passes (`node scripts/size-gate.mjs --app src-tauri/target/release/bundle/macos/Nautilus.app --max-mb 35`).
-- [ ] Benchmark launch gates pass via `scripts/verify-benchmark-gates.mjs` for both `benchmark-run-latest-macos.json` and `benchmark-run-latest-windows.json` against baseline. — BLOCKED (benchmark JSON files missing).
-- [x] Standard build-quality gates remain green (`tsc`, `npm test`, `vite build`, `fmt`, `clippy`, `check`, `test --lib`).
+- [x] Bundle size gate passes (`node scripts/size-gate.mjs --app release/mac-arm64/Nautilus.app --max-mb 450`).
+- [x] Current-platform local release sweep passes (`bun run gate:release:local`, artifact `artifacts/local-release-macos.json`).
+- [ ] Benchmark launch gates pass via `scripts/verify-benchmark-gates.mjs` for both `benchmark-run-latest-macos.json` and `benchmark-run-latest-windows.json` against baseline. — BLOCKED (local fixture gates now pass, but packaged benchmark evidence is still missing).
+- [x] Standard build-quality gates remain green (`bun run lint`, `bun run test`, `bun run build:renderer`, `fmt`, `clippy`, `check`, `test --lib`).
 
 ## D) Packaged QA (Required)
 

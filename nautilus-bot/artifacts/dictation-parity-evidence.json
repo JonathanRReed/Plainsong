@@ -1,0 +1,363 @@
+{
+  "generatedAt": "2026-04-09T16:08:48.649Z",
+  "commandCases": [
+    {
+      "id": "basic-notes",
+      "label": "Basic dictation in notes",
+      "appTarget": "Apple Notes",
+      "language": "en",
+      "inputText": "please schedule lunch with Maya tomorrow at noon",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    },
+    {
+      "id": "command-newline",
+      "label": "Insert newline by command",
+      "appTarget": "Google Docs",
+      "language": "en",
+      "inputText": "command newline",
+      "expectedCommand": "newline",
+      "expectNoCommand": false,
+      "actualCommand": "newline",
+      "pass": true
+    },
+    {
+      "id": "command-paragraph",
+      "label": "Insert paragraph break by command",
+      "appTarget": "Google Docs",
+      "language": "en",
+      "inputText": "command paragraph",
+      "expectedCommand": "paragraph",
+      "expectNoCommand": false,
+      "actualCommand": "paragraph",
+      "pass": true
+    },
+    {
+      "id": "command-undo",
+      "label": "Undo the last insert by voice",
+      "appTarget": "Cursor",
+      "language": "en",
+      "inputText": "command undo last insert",
+      "expectedCommand": "undo_last_insert",
+      "expectNoCommand": false,
+      "actualCommand": "undo_last_insert",
+      "pass": true
+    },
+    {
+      "id": "command-delete-last-sentence",
+      "label": "Delete the last sentence by voice",
+      "appTarget": "VS Code",
+      "language": "en",
+      "inputText": "command delete last sentence",
+      "expectedCommand": "delete_last_sentence",
+      "expectNoCommand": false,
+      "actualCommand": "delete_last_sentence",
+      "pass": true
+    },
+    {
+      "id": "command-rewrite-shorter",
+      "label": "Rewrite shorter command",
+      "appTarget": "Slack",
+      "language": "en",
+      "inputText": "command rewrite shorter thanks for the detailed update and i will get back to you tomorrow morning",
+      "expectedCommand": "rewrite_shorter",
+      "expectNoCommand": false,
+      "actualCommand": "rewrite_shorter",
+      "pass": true
+    },
+    {
+      "id": "command-rewrite-professional",
+      "label": "Rewrite professional command",
+      "appTarget": "Cursor",
+      "language": "en",
+      "inputText": "command rewrite professional thanks for the update",
+      "expectedCommand": "rewrite_professional",
+      "expectNoCommand": false,
+      "actualCommand": "rewrite_professional",
+      "pass": true
+    },
+    {
+      "id": "command-bulletize-selection",
+      "label": "Bulletize selection command",
+      "appTarget": "VS Code",
+      "language": "en",
+      "inputText": "command bulletize selection roadmap, budget and owners",
+      "expectedCommand": "bulletize_selection",
+      "expectNoCommand": false,
+      "actualCommand": "bulletize_selection",
+      "pass": true
+    },
+    {
+      "id": "snippet-positive-slack",
+      "label": "App-scoped snippet expands in Slack",
+      "appTarget": "Slack",
+      "language": "en",
+      "inputText": "brb",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    },
+    {
+      "id": "snippet-negative-notion",
+      "label": "App-scoped snippet stays off in Notion",
+      "appTarget": "Notion",
+      "language": "en",
+      "inputText": "brb",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    },
+    {
+      "id": "safety-no-command-center",
+      "label": "Command prefix inside normal speech stays plain text",
+      "appTarget": "Messages",
+      "language": "en",
+      "inputText": "please command center the image after lunch",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    },
+    {
+      "id": "es-word-follow-up",
+      "label": "Spanish follow-up in Word",
+      "appTarget": "Word",
+      "language": "es",
+      "inputText": "por favor envia el resumen final al equipo despues de la reunion",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    },
+    {
+      "id": "pt-outlook-follow-up",
+      "label": "Portuguese follow-up in Outlook",
+      "appTarget": "Outlook",
+      "language": "pt",
+      "inputText": "envie a confirmacao para o cliente ainda hoje a tarde",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    },
+    {
+      "id": "fr-notepad-quick-note",
+      "label": "French quick note in Notepad",
+      "appTarget": "Notepad",
+      "language": "fr",
+      "inputText": "note la prochaine etape et confirme la date demain matin",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    },
+    {
+      "id": "de-hubspot-call-log",
+      "label": "German call log in HubSpot",
+      "appTarget": "HubSpot",
+      "language": "de",
+      "inputText": "bitte protokolliere den kundenstatus und den nachsten schritt fur freitag",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    },
+    {
+      "id": "it-google-docs-brief",
+      "label": "Italian brief in Google Docs",
+      "appTarget": "Google Docs",
+      "language": "it",
+      "inputText": "scrivi il riepilogo finale e condividilo con il team prodotto",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    },
+    {
+      "id": "nl-slack-check-in",
+      "label": "Dutch check-in in Slack",
+      "appTarget": "Slack",
+      "language": "nl",
+      "inputText": "deel de update met het team en vraag om feedback voor vanmiddag",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    },
+    {
+      "id": "ja-notion-brief",
+      "label": "Japanese brief in Notion",
+      "appTarget": "Notion",
+      "language": "ja",
+      "inputText": "会議の要点を整理して明日の朝までに共有してください",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    },
+    {
+      "id": "ko-cursor-comment",
+      "label": "Korean comment in Cursor",
+      "appTarget": "Cursor",
+      "language": "ko",
+      "inputText": "이 변경의 다음 단계와 위험 요소를 코드 주석에 남겨 주세요",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    },
+    {
+      "id": "zh-vscode-checklist",
+      "label": "Mandarin checklist in VS Code",
+      "appTarget": "VS Code",
+      "language": "zh",
+      "inputText": "请把今天的发布检查项写成清单并提醒我下午复查",
+      "expectedCommand": null,
+      "expectNoCommand": true,
+      "actualCommand": null,
+      "pass": true
+    }
+  ],
+  "snippetCases": [
+    {
+      "id": "snippet-positive-slack",
+      "label": "App-scoped snippet expands in Slack",
+      "appTarget": "Slack",
+      "language": "en",
+      "inputText": "brb",
+      "expectedSnippetAppliedCount": 1,
+      "actualSnippetAppliedCount": 1,
+      "expectedOutput": "be right back",
+      "actualOutput": "be right back",
+      "pass": true
+    },
+    {
+      "id": "snippet-negative-notion",
+      "label": "App-scoped snippet stays off in Notion",
+      "appTarget": "Notion",
+      "language": "en",
+      "inputText": "brb",
+      "expectedSnippetAppliedCount": 0,
+      "actualSnippetAppliedCount": 0,
+      "expectedOutput": "brb",
+      "actualOutput": "brb",
+      "pass": true
+    }
+  ],
+  "dictionaryCases": [
+    {
+      "id": "dict-openai",
+      "label": "Brand terms prefer the longest matching phrase",
+      "language": "en",
+      "appTarget": "Slack",
+      "inputText": "please email open ai today and reopen the task",
+      "expectedOutput": "please email OpenAI today and reopen the task",
+      "actualOutput": "please email OpenAI today and reopen the task",
+      "expectedAppliedCount": 1,
+      "actualAppliedCount": 1,
+      "pass": true
+    },
+    {
+      "id": "dict-app-scope",
+      "label": "Dictionary scope applies only in the matching app",
+      "language": "en",
+      "appTarget": "Gmail",
+      "inputText": "follow up tomorrow",
+      "expectedOutput": "follow-up tomorrow",
+      "actualOutput": "follow-up tomorrow",
+      "expectedAppliedCount": 1,
+      "actualAppliedCount": 1,
+      "pass": true
+    }
+  ],
+  "formattingCases": [
+    {
+      "id": "fmt-spoken-punctuation",
+      "label": "Spoken punctuation tokens become structured prose",
+      "modePreset": "voice",
+      "formattingHint": null,
+      "inputText": "hello comma this is jon period new paragraph i will follow up question mark",
+      "expectedOutput": "Hello, this is jon.\n\nI will follow up?",
+      "actualOutput": "Hello, this is jon.\n\nI will follow up?",
+      "pass": true
+    },
+    {
+      "id": "fmt-chat-lightweight",
+      "label": "Chat mode keeps line breaks lightweight",
+      "modePreset": "messages",
+      "formattingHint": null,
+      "inputText": "hi there new line i can send that over tomorrow",
+      "expectedOutput": "Hi there\nI can send that over tomorrow",
+      "actualOutput": "Hi there\nI can send that over tomorrow",
+      "pass": true
+    },
+    {
+      "id": "fmt-email-style",
+      "label": "Email hints preserve direct punctuation",
+      "modePreset": "voice",
+      "formattingHint": "Gmail",
+      "inputText": "hi jonathan can you review the launch plan question mark",
+      "expectedOutput": "Hi jonathan can you review the launch plan?",
+      "actualOutput": "Hi jonathan can you review the launch plan?",
+      "pass": true
+    },
+    {
+      "id": "fmt-document-style",
+      "label": "Document apps keep paragraph structure",
+      "modePreset": "voice",
+      "formattingHint": "Notion",
+      "inputText": "first section period new paragraph second section period",
+      "expectedOutput": "First section.\n\nSecond section.",
+      "actualOutput": "First section.\n\nSecond section.",
+      "pass": true
+    },
+    {
+      "id": "fmt-symbols",
+      "label": "Quotes and symbols survive formatting",
+      "modePreset": "messages",
+      "formattingHint": "Slack",
+      "inputText": "open quote launch ready close quote at sign team slash ops",
+      "expectedOutput": "\"Launch ready\" @ team/ops",
+      "actualOutput": "\"Launch ready\" @ team/ops",
+      "pass": true
+    }
+  ],
+  "correctionCases": [
+    {
+      "id": "corr-replace-phrase",
+      "label": "Case-insensitive phrase replacement edits all matches",
+      "inputText": "Roadmap review for the roadmap team",
+      "target": "roadmap",
+      "replacement": "launch plan",
+      "expectedOutput": "launch plan review for the launch plan team",
+      "actualOutput": "launch plan review for the launch plan team",
+      "expectedAppliedCount": 2,
+      "actualAppliedCount": 2,
+      "pass": true
+    },
+    {
+      "id": "corr-replace-target",
+      "label": "Replace phrase works for repeated product terms",
+      "inputText": "Please send the roadmap update after the roadmap review.",
+      "target": "roadmap",
+      "replacement": "launch plan",
+      "expectedOutput": "Please send the launch plan update after the launch plan review.",
+      "actualOutput": "Please send the launch plan update after the launch plan review.",
+      "expectedAppliedCount": 2,
+      "actualAppliedCount": 2,
+      "pass": true
+    }
+  ],
+  "summary": {
+    "commandSuccessRate": 1.0,
+    "snippetSuccessRate": 1.0,
+    "dictionarySuccessRate": 1.0,
+    "formattingSuccessRate": 1.0,
+    "correctionSuccessRate": 1.0,
+    "allPass": true
+  }
+}

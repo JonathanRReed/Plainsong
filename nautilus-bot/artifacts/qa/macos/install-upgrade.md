@@ -2,12 +2,10 @@
 
 Status: BLOCKED
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Generated: 2026-04-09T16:08:53.831Z
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Current Local Observation
+- Current packaged DMG exists, but no previous signed release build was installed and upgraded in this pass.
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+## Blocking Detail
+- Upgrade-path verification still requires a real prior signed build, an upgrade install, and retained-data verification.

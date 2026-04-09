@@ -22,15 +22,16 @@ const mockRecordings = [
   },
 ];
 
-vi.mock("@/lib/tauri", () => ({
+vi.mock("@/lib/backend", () => ({
   getRecordings: vi.fn(() => Promise.resolve(mockRecordings)),
 }));
 
-vi.mock("@tauri-apps/api/event", () => ({
+vi.mock("@/lib/electron", () => ({
   listen: vi.fn(async (eventName: string, handler: (event: { payload: any }) => void) => {
     eventMocks.listeners.set(eventName, handler);
     return () => eventMocks.listeners.delete(eventName);
   }),
+  invoke: vi.fn(),
 }));
 
 describe("useRecordings", () => {
@@ -55,7 +56,7 @@ describe("useRecordings", () => {
   });
 
   it("passes projectId to fetch", async () => {
-    const { getRecordings } = await import("@/lib/tauri");
+    const { getRecordings } = await import("@/lib/backend");
     renderHook(() => useRecordings("p1"), { wrapper });
 
     await waitFor(() => {
@@ -64,7 +65,7 @@ describe("useRecordings", () => {
   });
 
   it("deduplicates recording fetches by project key", async () => {
-    const { getRecordings } = await import("@/lib/tauri");
+    const { getRecordings } = await import("@/lib/backend");
     const mockedGetRecordings = vi.mocked(getRecordings);
 
     const { result } = renderHook(
@@ -84,7 +85,7 @@ describe("useRecordings", () => {
   });
 
   it("refreshes recordings when meeting status changes outside the current view", async () => {
-    const { getRecordings } = await import("@/lib/tauri");
+    const { getRecordings } = await import("@/lib/backend");
     const mockedGetRecordings = vi.mocked(getRecordings);
 
     mockedGetRecordings

@@ -14,7 +14,7 @@ Fix the product issues found in the audit without widening the behavioral surfac
 
 ### Rust persistence helpers
 
-- Add a shared settings-path helper in `src-tauri/src/settings.rs`.
+- Add a shared settings-path helper in `rust-sidecar/src/settings.rs`.
 - Reuse that helper from both the settings manager and backup/restore code.
 - Keep the backup artifact name as `settings.json`, but source and restore it from the canonical Nautilus config path.
 
@@ -40,4 +40,4 @@ Fix the product issues found in the audit without widening the behavioral surfac
 
 - Extend frontend tests to cover stale AI responses and stale meeting chat loads.
 - Keep the Rust test expectation aligned with the intended contextual-command copy.
-- Re-run `npm test -- --run`, `npm run build`, and `cargo test`.
+- Re-run `bun run test`, `bun run build`, and `cargo test`.

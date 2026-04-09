@@ -2,12 +2,11 @@
 
 Status: BLOCKED
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Generated: 2026-04-09T16:08:53.831Z
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Current Local Observation
+- Local packaged artifacts build successfully.
+- No signed update feed or prior installed release candidate was exercised in this pass.
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+## Blocking Detail
+- Stable-channel install validation still requires signed release artifacts and a real update flow test.

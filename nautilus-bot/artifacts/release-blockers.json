@@ -1,21 +1,57 @@
 {
-  "generatedAt": "2026-03-05T04:23:01.088Z",
+  "generatedAt": "2026-04-09T16:08:53.831Z",
   "strictReady": false,
   "blockers": [
     {
       "gate": "cloud-asr-smoke",
-      "exitCode": 1,
-      "evidence": "artifacts/cloud-asr-smoke.blocked.md"
+      "status": "BLOCKED",
+      "evidence": "artifacts/cloud-asr-smoke.blocked.md",
+      "reason": "Missing required live cloud ASR secrets: OPENAI_API_KEY, ELEVENLABS_API_KEY, MISTRAL_API_KEY"
     },
     {
-      "gate": "benchmark-gates-macos",
-      "exitCode": 1,
-      "evidence": "artifacts/benchmark-gates-macos.blocked.md"
+      "gate": "benchmark-gates-packaged",
+      "status": "BLOCKED",
+      "evidence": "artifacts/benchmark-packaged.blocked.md",
+      "reason": "Benchmark gate artifacts are still local or fixture-tagged runs; packaged dictation benchmark evidence is still missing."
     },
     {
-      "gate": "benchmark-gates-windows",
-      "exitCode": 1,
-      "evidence": "artifacts/benchmark-gates-windows.blocked.md"
+      "gate": "apple-release-signing",
+      "status": "BLOCKED",
+      "evidence": "artifacts/qa/macos/security-gatekeeper.md",
+      "reason": "Gatekeeper still rejects the local dev-signed app; release signing and notarization are not configured."
+    },
+    {
+      "gate": "windows-release-signing",
+      "status": "BLOCKED",
+      "evidence": "artifacts/qa/windows/security-authenticode.md",
+      "reason": "Windows signing and SmartScreen validation have not been executed from a Windows release host."
+    },
+    {
+      "gate": "packaged-qa-matrix",
+      "status": "BLOCKED",
+      "evidence": "artifacts/packaged-qa-evidence-bundle.json",
+      "reason": "Packaged QA matrix remains 49 BLOCKED / 0 PASS."
     }
-  ]
+  ],
+  "observations": {
+    "localReleasePass": true,
+    "localBenchmarkGatesPass": true,
+    "packagedBenchmarkEvidenceReady": false,
+    "qaSummary": {
+      "total": 49,
+      "pass": 0,
+      "fail": 0,
+      "blocked": 49,
+      "pending": 0
+    },
+    "codesignVerified": true,
+    "electronBuildPassed": true,
+    "dmgHelperPassed": true,
+    "localSizeGate": {
+      "target": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app",
+      "sizeMb": 403.1,
+      "maxMb": 450,
+      "pass": true
+    }
+  }
 }

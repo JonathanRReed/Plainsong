@@ -1,0 +1,106 @@
+{
+  "schemaVersion": "1.0",
+  "dictionaryCases": [
+    {
+      "id": "dict-openai",
+      "label": "Brand terms prefer the longest matching phrase",
+      "language": "en",
+      "appTarget": "Slack",
+      "inputText": "please email open ai today and reopen the task",
+      "rules": [
+        {
+          "spokenForm": "open",
+          "replacement": "OPEN",
+          "enabled": true,
+          "caseSensitive": false
+        },
+        {
+          "spokenForm": "open ai",
+          "replacement": "OpenAI",
+          "enabled": true,
+          "caseSensitive": false
+        }
+      ],
+      "expectedOutput": "please email OpenAI today and reopen the task",
+      "expectedAppliedCount": 1
+    },
+    {
+      "id": "dict-app-scope",
+      "label": "Dictionary scope applies only in the matching app",
+      "language": "en",
+      "appTarget": "Gmail",
+      "inputText": "follow up tomorrow",
+      "rules": [
+        {
+          "spokenForm": "follow up",
+          "replacement": "follow-up",
+          "appScope": "gmail",
+          "enabled": true,
+          "caseSensitive": false
+        }
+      ],
+      "expectedOutput": "follow-up tomorrow",
+      "expectedAppliedCount": 1
+    }
+  ],
+  "formattingCases": [
+    {
+      "id": "fmt-spoken-punctuation",
+      "label": "Spoken punctuation tokens become structured prose",
+      "modePreset": "voice",
+      "inputText": "hello comma this is jon period new paragraph i will follow up question mark",
+      "expectedOutput": "Hello, this is jon.\n\nI will follow up?"
+    },
+    {
+      "id": "fmt-chat-lightweight",
+      "label": "Chat mode keeps line breaks lightweight",
+      "modePreset": "messages",
+      "inputText": "hi there new line i can send that over tomorrow",
+      "expectedOutput": "Hi there\nI can send that over tomorrow"
+    },
+    {
+      "id": "fmt-email-style",
+      "label": "Email hints preserve direct punctuation",
+      "modePreset": "voice",
+      "formattingHint": "Gmail",
+      "inputText": "hi jonathan can you review the launch plan question mark",
+      "expectedOutput": "Hi jonathan can you review the launch plan?"
+    },
+    {
+      "id": "fmt-document-style",
+      "label": "Document apps keep paragraph structure",
+      "modePreset": "voice",
+      "formattingHint": "Notion",
+      "inputText": "first section period new paragraph second section period",
+      "expectedOutput": "First section.\n\nSecond section."
+    },
+    {
+      "id": "fmt-symbols",
+      "label": "Quotes and symbols survive formatting",
+      "modePreset": "messages",
+      "formattingHint": "Slack",
+      "inputText": "open quote launch ready close quote at sign team slash ops",
+      "expectedOutput": "\"Launch ready\" @ team/ops"
+    }
+  ],
+  "correctionCases": [
+    {
+      "id": "corr-replace-phrase",
+      "label": "Case-insensitive phrase replacement edits all matches",
+      "inputText": "Roadmap review for the roadmap team",
+      "target": "roadmap",
+      "replacement": "launch plan",
+      "expectedOutput": "launch plan review for the launch plan team",
+      "expectedAppliedCount": 2
+    },
+    {
+      "id": "corr-replace-target",
+      "label": "Replace phrase works for repeated product terms",
+      "inputText": "Please send the roadmap update after the roadmap review.",
+      "target": "roadmap",
+      "replacement": "launch plan",
+      "expectedOutput": "Please send the launch plan update after the launch plan review.",
+      "expectedAppliedCount": 2
+    }
+  ]
+}

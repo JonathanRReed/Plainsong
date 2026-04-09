@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-03-12T17:59:26.402Z",
+  "generatedAt": "2026-04-09T16:04:05.055Z",
   "baselinePath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/evals/benchmark-run-baseline.json",
   "candidatePath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/evals/benchmark-run-latest-macos.json",
   "schemaPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/evals/benchmark-run.schema.json",
@@ -9,9 +9,9 @@
     "latencyImprovementMin": 0.25
   },
   "metrics": {
-    "baselineP50EndToEndMs": 260,
-    "candidateP50EndToEndMs": 260,
-    "latencyImprovement": 0,
+    "baselineP50EndToEndMs": 400.4,
+    "candidateP50EndToEndMs": 286,
+    "latencyImprovement": 0.2857142857142857,
     "commandSuccessRate": 1,
     "snippetSuccessRate": 1
   },
@@ -32,8 +32,8 @@
     },
     {
       "id": "cp15-latency-improvement",
-      "pass": false,
-      "actual": 0,
+      "pass": true,
+      "actual": 0.2857142857142857,
       "required": 0.25,
       "comparator": ">="
     },
@@ -46,5 +46,5 @@
       "details": []
     }
   ],
-  "pass": false
+  "pass": true
 }

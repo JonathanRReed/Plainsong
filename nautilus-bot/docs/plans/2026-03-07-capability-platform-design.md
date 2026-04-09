@@ -349,16 +349,16 @@ Possible actions:
 
 ### Backend Target Structure
 
-- `src-tauri/src/capture/`
-- `src-tauri/src/context/`
-- `src-tauri/src/insertion/`
-- `src-tauri/src/transcription/`
-- `src-tauri/src/workflows/dictation/`
-- `src-tauri/src/workflows/meetings/`
-- `src-tauri/src/integrations/`
-- `src-tauri/src/governance/`
-- `src-tauri/src/events/`
-- `src-tauri/src/store/`
+- `rust-sidecar/src/capture/`
+- `rust-sidecar/src/context/`
+- `rust-sidecar/src/insertion/`
+- `rust-sidecar/src/transcription/`
+- `rust-sidecar/src/workflows/dictation/`
+- `rust-sidecar/src/workflows/meetings/`
+- `rust-sidecar/src/integrations/`
+- `rust-sidecar/src/governance/`
+- `rust-sidecar/src/events/`
+- `rust-sidecar/src/store/`
 
 ### Frontend Target Structure
 
@@ -367,7 +367,7 @@ Possible actions:
 - `src/features/settings/`
 - `src/features/shared-runtime/`
 - `src/components/ui/`
-- `src/lib/tauri/`
+- `src/lib/backend/`
 
 ### Boundary Rules
 

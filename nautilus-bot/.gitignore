@@ -5,14 +5,17 @@ node_modules/
 
 # Build outputs
 dist/
+dist-electron/
+release/
+manifests/
 dist-ssr/
 *.local
 
-# Tauri
-/src-tauri/target/
-/src-tauri/WixTools/
-/src-tauri/gen/
-/src-tauri/binaries/
+# Rust sidecar
+/rust-sidecar/target/
+/rust-sidecar/WixTools/
+/rust-sidecar/gen/
+/rust-sidecar/binaries/
 
 # Editor directories and files
 .vscode/*

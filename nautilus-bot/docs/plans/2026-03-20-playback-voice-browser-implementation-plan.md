@@ -45,6 +45,6 @@ Ship the first practical playback slice without exposing fake provider controls.
 
 - targeted frontend tests for popup, dictation view, and meetings
 - backend tests for selected-text capture command
-- full `npm test`
-- `npm run build`
+- full `bun run test`
+- `bun run build`
 - Rust tests when backend commands change

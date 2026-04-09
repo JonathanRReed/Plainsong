@@ -40,14 +40,14 @@ import {
   exportRecordingV2,
   openExportPath,
   getRelationshipMemory,
-} from "@/lib/tauri";
+} from "@/lib/backend";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import type {
   CompanyMemoryProfile,
   MeetingChatMessage,
   PersonMemoryProfile,
   RelationshipMemory,
-} from "@/lib/tauri";
+} from "@/lib/backend";
 import type { MeetingTranscriptDetails, Recording } from "@/types";
 import {
   buildMeetingTemplateOutline,
@@ -62,7 +62,7 @@ import {
   OPEN_RECORDING_WORKSPACE_EVENT,
   type OpenRecordingWorkspaceDetail,
 } from "@/lib/navigation";
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "@/lib/electron";
 import {
   AlertCircle,
   CheckCircle2,
@@ -737,6 +737,8 @@ export function RecordingsView() {
   );
   const [isBulkReclassifying, setIsBulkReclassifying] = useState(false);
   const [isExportingMeeting, setIsExportingMeeting] = useState(false);
+  const [isRefreshingTranscriptPanel, setIsRefreshingTranscriptPanel] =
+    useState(false);
   const [lastMeetingExportPath, setLastMeetingExportPath] = useState<string | null>(null);
   const [relationshipMemory, setRelationshipMemory] = useState<RelationshipMemory | null>(null);
 
@@ -751,6 +753,7 @@ export function RecordingsView() {
     isLoadingDetail,
     detailError,
     loadRecordingDetail,
+    refreshSelectedRecording,
     refreshTranscript,
     refreshTranscriptDetails,
     clearRecordingDetail,
@@ -788,6 +791,30 @@ export function RecordingsView() {
       cancelled = true;
     };
   }, []);
+
+  const handleRefreshTranscriptPanel = async () => {
+    if (!selectedRecording) {
+      return;
+    }
+
+    setIsRefreshingTranscriptPanel(true);
+    try {
+      await Promise.all([
+        refreshSelectedRecording(selectedRecording.id),
+        refreshTranscript(selectedRecording.id),
+        refreshTranscriptDetails(selectedRecording.id),
+      ]);
+      toast("Transcript panel refreshed.", "success");
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Transcript refresh failed. Try again after processing advances.";
+      toast(message, "error");
+    } finally {
+      setIsRefreshingTranscriptPanel(false);
+    }
+  };
 
   useEffect(() => {
     return () => {
@@ -3928,14 +3955,73 @@ export function RecordingsView() {
                   {detailError}
                 </div>
               ) : (
-                <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                <div className="flex flex-1 items-center justify-center px-6">
                   {selectedRecording?.status === "processing" ? (
-                    <span className="inline-flex items-center">
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Processing transcript...
-                    </span>
+                    <div className="max-w-md rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                      <div className="flex items-center gap-2 text-foreground">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span className="font-medium">Processing transcript</span>
+                      </div>
+                      <p className="mt-2 leading-relaxed">
+                        Transcript lines have not landed yet. Auto-refresh is still running in the
+                        background, and you can force a manual refresh if the detail panel looks
+                        stale.
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleRefreshTranscriptPanel()}
+                          disabled={isRefreshingTranscriptPanel}
+                        >
+                          {isRefreshingTranscriptPanel ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                          )}
+                          Refresh now
+                        </Button>
+                        <span className="text-xs text-muted-foreground">
+                          Consent: {selectedMeetingConsent.label}
+                        </span>
+                        {selectedMeetingConsent.needsManualNotice ? (
+                          <span className="text-xs text-amber-700 dark:text-amber-300">
+                            Share the notice before distributing this capture.
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
                   ) : (
-                    "Transcript is not available yet. It will appear after processing completes."
+                    <div className="max-w-md rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                      <p className="font-medium text-foreground">
+                        Transcript is not available yet
+                      </p>
+                      <p className="mt-2 leading-relaxed">
+                        This meeting does not have grounded transcript lines yet. Refresh the
+                        detail panel if processing already finished, or return to the note canvas
+                        while capture is still active.
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleRefreshTranscriptPanel()}
+                          disabled={isRefreshingTranscriptPanel || !selectedRecording}
+                        >
+                          {isRefreshingTranscriptPanel ? (
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                          )}
+                          Refresh transcript
+                        </Button>
+                        <span className="text-xs text-muted-foreground">
+                          Capture mode: {selectedMeetingCaptureMode}
+                        </span>
+                      </div>
+                    </div>
                   )}
                 </div>
               )}

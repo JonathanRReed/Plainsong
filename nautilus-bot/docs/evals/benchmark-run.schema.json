@@ -53,6 +53,9 @@
         ],
         "properties": {
           "timestamp": { "type": "string", "format": "date-time" },
+          "scenarioId": { "type": "string", "minLength": 1 },
+          "scenarioLabel": { "type": "string", "minLength": 1 },
+          "language": { "type": "string", "minLength": 1 },
           "appTarget": { "type": "string", "minLength": 1 },
           "requestedProvider": { "type": "string", "minLength": 1 },
           "actualProvider": { "type": "string", "minLength": 1 },

@@ -32,7 +32,7 @@ function directoryBytes(targetPath) {
 
 const appPath = valueFor("--app");
 if (!appPath) {
-  console.error("Usage: node scripts/size-gate.mjs --app <path-to-app-or-binary> [--max-mb 35]");
+  console.error("Usage: node scripts/size-gate.mjs --app <path-to-app-or-binary> [--max-mb 450]");
   process.exit(1);
 }
 

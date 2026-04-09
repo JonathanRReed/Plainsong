@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@/lib/electron";
 import "./index.css";
 
 function detectOverlayMode(): "dictation" | "recording" | null {
@@ -14,7 +14,7 @@ function detectOverlayMode(): "dictation" | "recording" | null {
     if (label === "dictation-overlay") return "dictation";
     if (label === "recording-overlay") return "recording";
   } catch {
-    // Not running inside a Tauri window context.
+    // Window label is unavailable outside the Electron bridge.
   }
 
   return null;
@@ -32,24 +32,48 @@ if (import.meta.env.DEV && typeof performance !== "undefined") {
 }
 
 async function bootstrap() {
-  const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
+  console.log("[main] Bootstrap starting");
+  const rootElement = document.getElementById("root");
+  console.log("[main] Root element:", rootElement);
 
-  if (overlayMode) {
-    const { OverlayRoot } = await import("./overlay-root");
-    root.render(
-      <React.StrictMode>
-        <OverlayRoot overlayMode={overlayMode} />
-      </React.StrictMode>
-    );
+  if (!rootElement) {
+    console.error("[main] Root element not found!");
     return;
   }
 
-  const { default: App } = await import("./App");
-  root.render(
-    <React.StrictMode>
-      <App />
-    </React.StrictMode>
-  );
+  const root = ReactDOM.createRoot(rootElement);
+  console.log("[main] Root created");
+
+  if (overlayMode) {
+    console.log("[main] Loading overlay root");
+    try {
+      const { OverlayRoot } = await import("./overlay-root");
+      console.log("[main] Overlay root loaded");
+      root.render(
+        <React.StrictMode>
+          <OverlayRoot overlayMode={overlayMode} />
+        </React.StrictMode>
+      );
+      console.log("[main] Overlay rendered");
+    } catch (err) {
+      console.error("[main] Failed to load overlay root:", err);
+    }
+    return;
+  }
+
+  console.log("[main] Loading App");
+  try {
+    const { default: App } = await import("./App");
+    console.log("[main] App loaded");
+    root.render(
+      <React.StrictMode>
+        <App />
+      </React.StrictMode>
+    );
+    console.log("[main] App rendered");
+  } catch (err) {
+    console.error("[main] Failed to load App:", err);
+  }
 }
 
 void bootstrap();

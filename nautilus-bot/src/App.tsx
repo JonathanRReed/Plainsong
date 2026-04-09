@@ -3,27 +3,23 @@ import {
   Suspense,
   lazy,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type ComponentType,
   type ErrorInfo,
   type ReactNode,
 } from "react";
-import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@/lib/electron";
 import { Sidebar } from "@/components/sidebar";
 import { RecordingProvider } from "@/hooks/use-recording";
 import { DataCacheProvider } from "@/hooks/data-cache-context";
-import { DictationPopup } from "@/components/popups/dictation-popup";
-import { RecordingPopup } from "@/components/popups/recording-popup";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ActivationModal } from "@/components/activation-modal";
 import { NagModal, shouldShowNag } from "@/components/nag-modal";
 import { FirstRunWizard } from "@/components/first-run-wizard";
 import { ToastProvider, useToast } from "@/components/toast";
-import { validateLicense } from "@/lib/tauri";
+import { validateLicense } from "@/lib/backend";
 import {
   MEETING_ONBOARDING_STORAGE_KEY,
   ONBOARDING_STORAGE_KEY,
@@ -35,7 +31,7 @@ import {
   OPEN_RECORDING_WORKSPACE_EVENT as OPEN_RECORDING_WORKSPACE_CUSTOM_EVENT,
   type MainViewId,
 } from "@/lib/navigation";
-import type { LicenseInfo } from "@/lib/tauri";
+import type { LicenseInfo } from "@/lib/backend";
 import { usePeriodicLicenseCheck } from "@/hooks/use-periodic-license-check";
 
 const DashboardView = lazy(() =>
@@ -123,36 +119,9 @@ const VIEW_COMPONENTS: Record<ViewId, ComponentType> = {
   setup: SetupView,
 };
 
-type OverlayMode = "dictation" | "recording" | null;
-
 interface MainViewRequestEvent {
   view?: ViewId | string | null;
   recordingId?: string | null;
-}
-
-function getOverlayMode(): OverlayMode {
-  if (typeof window === "undefined") return null;
-  const overlay = new URLSearchParams(window.location.search).get("overlay");
-  if (overlay === "dictation" || overlay === "recording") return overlay;
-  try {
-    const label = getCurrentWindow().label;
-    if (label === "dictation-overlay") return "dictation";
-    if (label === "recording-overlay") return "recording";
-  } catch {
-    // Not in a Tauri window.
-  }
-  return null;
-}
-
-function OverlayBackgroundFix() {
-  useEffect(() => {
-    const overlay = getOverlayMode();
-    if (overlay) {
-      document.body.style.backgroundColor = "transparent";
-      document.documentElement.style.backgroundColor = "transparent";
-    }
-  }, []);
-  return null;
 }
 
 function AppRuntimeListeners() {
@@ -207,7 +176,6 @@ function AppRuntimeListeners() {
 }
 
 function App() {
-  const overlayMode = useMemo(getOverlayMode, []);
   const [activeView, setActiveView] = useState<ViewId>("dashboard");
   const [pendingRecordingWorkspaceId, setPendingRecordingWorkspaceId] = useState<string | null>(
     null
@@ -224,12 +192,8 @@ function App() {
   const [wizardMode, setWizardMode] = useState<OnboardingMode | null>(null);
   const [showNag, setShowNag] = useState(false);
 
-  // Check license on startup (skip for overlay windows)
+  // Check license on startup
   useEffect(() => {
-    if (overlayMode) {
-      setLicenseChecked(true);
-      return;
-    }
     void validateLicense()
       .then((info) => {
         setLicense(info);
@@ -238,12 +202,13 @@ function App() {
           setShowNag(true);
         }
       })
-      .catch(() => {
-        // Tauri not available (web/dev mode) – proceed in trial mode
+      .catch((err) => {
+        // Electron not available or error – proceed in trial mode
+        console.error("License validation failed:", err);
         setLicense(null);
         setLicenseChecked(true);
       });
-  }, [overlayMode]);
+  }, []);
 
   // Periodic license validation (every 4 hours)
   usePeriodicLicenseCheck({
@@ -277,12 +242,12 @@ function App() {
   }, [activeView]);
 
   useEffect(() => {
-    if (overlayMode || !licenseChecked) {
+    if (!licenseChecked) {
       return;
     }
     const alreadyOnboarded = localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
     setWizardMode(alreadyOnboarded ? null : "full");
-  }, [overlayMode, licenseChecked]);
+  }, [licenseChecked]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -370,18 +335,6 @@ function App() {
     }
     setWizardMode(null);
   };
-
-  // ── Overlay windows (dictation popup, recording popup) ───────────────────
-  if (overlayMode) {
-    return (
-      <ThemeProvider>
-        <OverlayBackgroundFix />
-        <TooltipProvider>
-          {overlayMode === "dictation" ? <DictationPopup /> : <RecordingPopup />}
-        </TooltipProvider>
-      </ThemeProvider>
-    );
-  }
 
   // ── Startup splash while license is being checked ────────────────────────
   if (!licenseChecked) {

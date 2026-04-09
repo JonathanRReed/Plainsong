@@ -8,7 +8,7 @@ import {
   setUpdateChannel,
   canUseBetaChannel,
   type UpdateChannel,
-} from "@/lib/tauri";
+} from "@/lib/backend";
 
 interface BetaChannelToggleProps {
   disabled?: boolean;

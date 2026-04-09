@@ -100,7 +100,7 @@ const setupStatusMock = vi.hoisted(() => ({
   ],
 }));
 
-const tauriMocks = vi.hoisted(() => ({
+const backendMocks = vi.hoisted(() => ({
   downloadAsrModels: vi.fn(async () => {}),
   openPermissionSettings: vi.fn(async () => {}),
   refreshAsrRuntimeProbes: vi.fn(async () => {}),
@@ -146,7 +146,7 @@ vi.mock("@/hooks/use-setup-status", () => ({
   useSetupStatus: () => setupStatusMock,
 }));
 
-vi.mock("@/lib/tauri", () => tauriMocks);
+vi.mock("@/lib/backend", () => backendMocks);
 vi.mock("@/lib/onboarding", () => onboardingMocks);
 vi.mock("@/lib/navigation", () => navigationMocks);
 
@@ -199,8 +199,8 @@ describe("SetupView", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Download" })[0]);
 
     await waitFor(() => {
-      expect(tauriMocks.downloadAsrModels).toHaveBeenCalledWith("parakeet");
-      expect(tauriMocks.refreshAsrRuntimeProbes).toHaveBeenCalled();
+      expect(backendMocks.downloadAsrModels).toHaveBeenCalledWith("parakeet");
+      expect(backendMocks.refreshAsrRuntimeProbes).toHaveBeenCalled();
       expect(setupStatusMock.refresh).toHaveBeenCalled();
     });
   });
@@ -231,7 +231,7 @@ describe("SetupView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Test dictation" }));
 
     await waitFor(() => {
-      expect(tauriMocks.verifyDictationSetup).toHaveBeenCalled();
+      expect(backendMocks.verifyDictationSetup).toHaveBeenCalled();
       expect(
         screen.getByText(/Dictation verification: Dictation is ready/i)
       ).toBeInTheDocument();
@@ -244,10 +244,22 @@ describe("SetupView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Test insert permissions" }));
 
     await waitFor(() => {
-      expect(tauriMocks.smokeTestCursorInsert).toHaveBeenCalledWith("Nautilus insert test");
+      expect(backendMocks.smokeTestCursorInsert).toHaveBeenCalledWith("Nautilus insert test");
       expect(
         screen.getByText(/Insert permissions test: Sent a test insert to Notes/i)
       ).toBeInTheDocument();
+    });
+  });
+
+  it("runs permission repair actions from setup", async () => {
+    render(<SetupView />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Request permissions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open Accessibility" }));
+
+    await waitFor(() => {
+      expect(backendMocks.requestDictationPermissions).toHaveBeenCalledTimes(1);
+      expect(backendMocks.openPermissionSettings).toHaveBeenCalledWith("accessibility");
     });
   });
 

@@ -27,7 +27,7 @@ const provisionRequested = flag("--provision");
 const provisionEnabled = !flag("--no-provision") && (provisionRequested || !flag("--validate-only"));
 const outFile = valueFor("--out");
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const pythonRunnerPath = path.join(scriptDir, "..", "src-tauri", "python", "asr", "runner.py");
+const pythonRunnerPath = path.join(scriptDir, "..", "rust-sidecar", "python", "asr", "runner.py");
 const hfToken = process.env.HF_TOKEN || process.env.HUGGINGFACE_HUB_TOKEN || "";
 
 function defaultDataDir() {

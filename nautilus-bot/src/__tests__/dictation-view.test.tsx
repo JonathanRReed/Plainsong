@@ -7,7 +7,7 @@ const speechSynthesisMock = {
   cancel: vi.fn(),
 };
 
-const tauriMocks = vi.hoisted(() => ({
+const backendMocks = vi.hoisted(() => ({
   eventListeners: new Map<string, (event: { payload: any }) => void>(),
   saveSettings: vi.fn(async () => {}),
   refetchDictationHistory: vi.fn(),
@@ -107,21 +107,22 @@ const tauriMocks = vi.hoisted(() => ({
   })),
 }));
 
-vi.mock("@tauri-apps/api/event", () => ({
+vi.mock("@/lib/electron", () => ({
   listen: vi.fn(async (eventName: string, handler: (event: { payload: any }) => void) => {
-    tauriMocks.eventListeners.set(eventName, handler);
+    backendMocks.eventListeners.set(eventName, handler);
     return () => {
-      tauriMocks.eventListeners.delete(eventName);
+      backendMocks.eventListeners.delete(eventName);
     };
   }),
+  invoke: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-recording", () => ({
   useRecording: () => ({
     isRecording: false,
     formattedDuration: "0:00",
-    startDictation: tauriMocks.startDictation,
-    stopDictation: tauriMocks.stopDictation,
+    startDictation: backendMocks.startDictation,
+    stopDictation: backendMocks.stopDictation,
   }),
 }));
 
@@ -135,13 +136,13 @@ vi.mock("@/hooks/use-recordings", () => ({
   useRecordings: () => ({
     recordings: [],
     isLoading: false,
-    refetch: tauriMocks.refetchDictationHistory,
+    refetch: backendMocks.refetchDictationHistory,
   }),
 }));
 
-vi.mock("@/lib/tauri", () => ({
-  getSettings: tauriMocks.getSettings,
-  saveSettings: tauriMocks.saveSettings,
+vi.mock("@/lib/backend", () => ({
+  getSettings: backendMocks.getSettings,
+  saveSettings: backendMocks.saveSettings,
   getTranscript: vi.fn(),
   getDictationHistoryDetails: vi.fn(async () => null),
   getDictationInsights: vi.fn(async () => ({
@@ -277,7 +278,7 @@ vi.mock("@/lib/tauri", () => ({
 describe("DictationView modes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    tauriMocks.eventListeners.clear();
+    backendMocks.eventListeners.clear();
     speechSynthesisMock.speak.mockClear();
     speechSynthesisMock.cancel.mockClear();
     Object.assign(window, {
@@ -316,10 +317,10 @@ describe("DictationView modes", () => {
     fireEvent.click(screen.getByRole("button", { name: /flow profile: slack & chat/i }));
 
     await waitFor(() => {
-      expect(tauriMocks.saveSettings).toHaveBeenCalled();
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
     });
 
-    const saveCalls = tauriMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+    const saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<[any]>;
     const latestCall = saveCalls[saveCalls.length - 1];
     expect(latestCall).toBeTruthy();
     const latestSettings = latestCall![0];
@@ -347,10 +348,10 @@ describe("DictationView modes", () => {
     fireEvent.click(screen.getByRole("button", { name: /save current setup/i }));
 
     await waitFor(() => {
-      expect(tauriMocks.saveSettings).toHaveBeenCalled();
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
     });
 
-    const saveCalls = tauriMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+    const saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<[any]>;
     const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
     expect(latestSettings.transcription.dictationModePreset).toBe("custom");
     expect(latestSettings.transcription.dictationSelectedCustomModeId).toBeTruthy();
@@ -369,10 +370,10 @@ describe("DictationView modes", () => {
     fireEvent.click(screen.getAllByRole("button", { name: /install and use/i })[0]);
 
     await waitFor(() => {
-      expect(tauriMocks.saveSettings).toHaveBeenCalled();
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
     });
 
-    const saveCalls = tauriMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+    const saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<[any]>;
     const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
     expect(latestSettings.transcription.dictationModePreset).toBe("custom");
     expect(latestSettings.transcription.dictationSelectedCustomModeId).toBe("builtin-slack-replies");
@@ -388,7 +389,7 @@ describe("DictationView modes", () => {
     render(<DictationView />);
 
     await screen.findByText("Flow Profiles");
-    const handler = tauriMocks.eventListeners.get("dictation-text-ready");
+    const handler = backendMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
     await act(async () => {
@@ -401,7 +402,7 @@ describe("DictationView modes", () => {
     });
 
     await waitFor(() => {
-      expect(tauriMocks.refetchDictationHistory).toHaveBeenCalled();
+      expect(backendMocks.refetchDictationHistory).toHaveBeenCalled();
     });
   });
 
@@ -409,7 +410,7 @@ describe("DictationView modes", () => {
     render(<DictationView />);
 
     await screen.findByText("Flow Profiles");
-    const handler = tauriMocks.eventListeners.get("dictation-text-ready");
+    const handler = backendMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
     await act(async () => {
@@ -430,14 +431,14 @@ describe("DictationView modes", () => {
   });
 
   it("can read selected text aloud from the capture card", async () => {
-    const tauri = await import("@/lib/tauri");
+    const backend = await import("@/lib/backend");
 
     render(<DictationView />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Read selected text" }));
 
     await waitFor(() => {
-      expect(tauri.captureSelectedTextForPlayback).toHaveBeenCalled();
+      expect(backend.captureSelectedTextForPlayback).toHaveBeenCalled();
       expect(speechSynthesisMock.cancel).toHaveBeenCalled();
       expect(speechSynthesisMock.speak).toHaveBeenCalled();
     });
@@ -447,7 +448,7 @@ describe("DictationView modes", () => {
     render(<DictationView />);
 
     await screen.findByText("Flow Profiles");
-    const handler = tauriMocks.eventListeners.get("dictation-state-changed");
+    const handler = backendMocks.eventListeners.get("dictation-state-changed");
     expect(handler).toBeTruthy();
 
     await act(async () => {
@@ -470,7 +471,7 @@ describe("DictationView modes", () => {
     render(<DictationView />);
 
     await screen.findByText("Flow Profiles");
-    const handler = tauriMocks.eventListeners.get("dictation-text-ready");
+    const handler = backendMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
     await act(async () => {
@@ -489,11 +490,11 @@ describe("DictationView modes", () => {
   });
 
   it("learns a corrected latest-result word on blur", async () => {
-    const tauri = await import("@/lib/tauri");
+    const backend = await import("@/lib/backend");
     render(<DictationView />);
 
     await screen.findByText("Flow Profiles");
-    const handler = tauriMocks.eventListeners.get("dictation-text-ready");
+    const handler = backendMocks.eventListeners.get("dictation-text-ready");
 
     await act(async () => {
       handler?.({
@@ -509,7 +510,7 @@ describe("DictationView modes", () => {
     fireEvent.blur(editor);
 
     await waitFor(() => {
-      expect(tauri.queueDictationCorrectionSuggestion).toHaveBeenCalledWith({
+      expect(backend.queueDictationCorrectionSuggestion).toHaveBeenCalledWith({
         originalText: "please email jon tomorrow",
         correctedText: "please email John tomorrow",
         appTarget: null,
@@ -521,8 +522,8 @@ describe("DictationView modes", () => {
   });
 
   it("groups duplicate correction suggestions and clears the group together", async () => {
-    const tauri = await import("@/lib/tauri");
-    vi.mocked(tauri.listDictationCorrectionSuggestions).mockResolvedValueOnce([
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.listDictationCorrectionSuggestions).mockResolvedValueOnce([
       {
         id: "suggestion-1",
         originalText: "jon will join",
@@ -552,8 +553,8 @@ describe("DictationView modes", () => {
     fireEvent.click(screen.getByRole("button", { name: "Approve all" }));
 
     await waitFor(() => {
-      expect(tauri.approveDictationCorrectionSuggestion).toHaveBeenCalledWith("suggestion-1");
-      expect(tauri.rejectDictationCorrectionSuggestion).toHaveBeenCalledWith("suggestion-2");
+      expect(backend.approveDictationCorrectionSuggestion).toHaveBeenCalledWith("suggestion-1");
+      expect(backend.rejectDictationCorrectionSuggestion).toHaveBeenCalledWith("suggestion-2");
     });
   });
 
@@ -566,10 +567,10 @@ describe("DictationView modes", () => {
     });
 
     await waitFor(() => {
-      expect(tauriMocks.saveSettings).toHaveBeenCalled();
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
     });
 
-    const saveCalls = tauriMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+    const saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<[any]>;
     const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
     expect(latestSettings.transcription.language).toBe("es");
   });
@@ -582,7 +583,7 @@ describe("DictationView modes", () => {
     fireEvent.click(screen.getByRole("button", { name: /start dictation/i }));
 
     await waitFor(() => {
-      expect(tauriMocks.startDictation).toHaveBeenCalledWith(
+      expect(backendMocks.startDictation).toHaveBeenCalledWith(
         expect.objectContaining({
           languageOverride: "fr",
         })
@@ -591,7 +592,7 @@ describe("DictationView modes", () => {
   });
 
   it("surfaces a start failure when dictation cannot begin", async () => {
-    tauriMocks.startDictation.mockRejectedValueOnce(
+    backendMocks.startDictation.mockRejectedValueOnce(
       new Error("Microphone permission is not ready.")
     );
 

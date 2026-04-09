@@ -24,11 +24,11 @@ This report summarizes launch-readiness status for the strict GA scope: **all AS
 - Added benchmark launch gate enforcement script for CP-13/CP-14/CP-15 (`scripts/verify-benchmark-gates.mjs`).
 - Added benchmark gate artifact schema validation (`docs/ci/schemas/benchmark-gate-result.schema.json`).
 - Filled packaged QA matrix owners and evidence paths to support execution tracking.
-- Resolved frontend dependency advisory (`rollup`) and restored `npm audit` clean state.
+- Resolved frontend dependency advisory (`rollup`) and restored a clean dependency audit state.
 
 ## What Was Executed (2026-03-05 blocked-first run)
 
-- Re-ran strict automated build/test gates (`tsc`, `npm test`, `npm run build`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo test --lib`, `cargo test --tests`) and confirmed pass.
+- Re-ran strict automated build/test gates (`bun run typecheck`, `bun run test`, `bun run build:renderer`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo test --lib`, `cargo test --tests`) and confirmed pass.
 - Ran strict ASR preflight artifact generation and schema validation:
   - `artifacts/asr-preflight-macos.json` (schema-valid; strict run fails due missing cloud secrets).
 - Converted packaged QA matrix from `PENDING` to explicit `BLOCKED` rows with evidence stubs:
@@ -38,8 +38,7 @@ This report summarizes launch-readiness status for the strict GA scope: **all AS
   - `artifacts/packaged-qa-evidence-bundle.json`.
 - Captured strict gate blocker outputs:
   - `artifacts/cloud-asr-smoke.blocked.md`
-  - `artifacts/benchmark-gates-macos.blocked.md`
-  - `artifacts/benchmark-gates-windows.blocked.md`
+  - `artifacts/benchmark-packaged.blocked.md`
   - `artifacts/release-blockers.json`
 
 ## Release Gate Status
@@ -50,11 +49,11 @@ Current status:
 
 - Frontend compile/test/build: ✅ PASS
 - Rust format/clippy/check/lib/tests: ✅ PASS
-- Local packaging perf gates: ✅ PASS (`npm run gate:size` now passes at `33.7 MB`; cold-start remains historical evidence)
-- Local updater artifact signing path: ✅ PASS (verified with a freshly generated private key + password; production release still requires the canonical private key that matches the committed updater public key)
+- Local packaging perf gates: ✅ PASS (`bun run gate:size` now passes at `403.09 MB` against the `450 MB` budget; cold-start remains historical evidence)
+- Local packaged update path: ✅ PASS (packaging path verified through the Electron release flow; production release still requires final signing and notarization credentials)
 - Packaged QA matrix execution: ⚠️ BLOCKED (49/49 blocked; no rows pending, no rows passed)
-- Benchmark parity artifacts (CP-13/CP-14/CP-15): ⚠️ PARTIAL (local fixture-driven `docs/evals/benchmark-run-baseline.json` and `docs/evals/benchmark-run-latest-macos.json` exist; the Windows capture helper now exists but `docs/evals/benchmark-run-latest-windows.json` is still missing; macOS gate currently fails latency-improvement because baseline and candidate are the same run)
-- Dictation parity Phase 0 artifacts: ⚠️ IN PROGRESS (`docs/evals/dictation-parity-launch-scorecard.md`, app matrix frozen, benchmark JSON still missing)
+- Benchmark parity artifacts (CP-13/CP-14/CP-15): ⚠️ PARTIAL (local fixture-driven baseline, macOS, and Windows benchmark JSON artifacts now exist and the local gate outputs pass; packaged benchmark evidence is still missing)
+- Dictation parity Phase 0 artifacts: ⚠️ PARTIAL (local command, snippet, dictionary, formatting, correction, launch-language, and launch-app artifacts now regenerate cleanly and cover the frozen corpus; packaged benchmark and QA evidence still missing)
 - Cloud ASR smoke gate: ❌ BLOCKED (missing required cloud API secrets)
 
 See `docs/strict-release-blocker-register.md` for blocker ownership and unblock actions.
@@ -65,11 +64,18 @@ See `docs/strict-release-blocker-register.md` for blocker ownership and unblock 
    - `OPENAI_API_KEY`
    - `ELEVENLABS_API_KEY`
    - `MISTRAL_API_KEY`
-2. Benchmark run artifacts for CP-13/CP-14/CP-15 are still incomplete:
+2. Benchmark run artifacts for CP-13/CP-14/CP-15 are still not launch-complete:
    - Present locally: `docs/evals/benchmark-run-baseline.json`
    - Present locally: `docs/evals/benchmark-run-latest-macos.json`
-   - Missing: `docs/evals/benchmark-run-latest-windows.json` (capture path is now wired via `npm run benchmark:dictation:windows` on a Windows machine)
-   - The current macOS artifact is generated from the fixture benchmark runner, not packaged-app execution, so it does not satisfy the packaged evidence requirement by itself.
+   - Present locally: `docs/evals/benchmark-run-latest-windows.json`
+   - Present locally: `artifacts/benchmark-gates-macos.json`
+   - Present locally: `artifacts/benchmark-gates-windows.json`
+   - Present locally: `artifacts/dictation-parity-evidence.json`
+   - Present locally: `docs/evals/dictation-parity-artifact-summary.md`
+   - Present locally: `docs/evals/dictation-language-certification-matrix.md`
+   - Present locally: `docs/evals/dictation-app-matrix-evidence.md`
+   - The local benchmark corpus now covers the frozen launch-language set and the frozen launch app matrix.
+   - The current baseline and platform artifacts are fixture-driven local runs, not packaged-app execution, so they do not satisfy the packaged evidence requirement by themselves.
    - Tracking doc: `docs/evals/dictation-parity-launch-scorecard.md`
    - App matrix: `docs/dictation-app-compatibility-matrix.md`
    - Blocked apps: `docs/dictation-blocked-app-register.md`
@@ -79,15 +85,17 @@ See `docs/strict-release-blocker-register.md` for blocker ownership and unblock 
 
 ## Recent Ship-Path Fixes
 
-- The updater config no longer ships with a placeholder public key in `src-tauri/tauri.conf.json`.
-- Local `tauri build` packaging now disables updater artifact generation automatically when no private signing key is present, so app-only packaged QA builds can complete without failing on unsigned updater artifacts.
-- Local signed updater artifact generation is now verified with an explicit private key + password path, producing `Nautilus.app.tar.gz` and `.sig` successfully in the bundle output.
-- The stale `dictation-parity-benchmark` helper no longer bloats `Nautilus.app`; the benchmark workflow now runs from a Rust example target instead of a packaged binary.
+- Packaging no longer depends on retired shell config files or updater key injection.
+- Local Electron packaging is now the only supported desktop release path.
+- Signed package verification is tracked against the `release/` artifacts generated by `electron-builder`.
+- The stale `dictation-parity-benchmark` helper no longer bloats `Nautilus.app`; the benchmark workflow now runs from a dedicated Rust binary target instead of a packaged binary.
+- The repo now includes `bun run gate:release:local` to capture a reproducible current-platform local release artifact before manual QA.
+- The repo now includes `bun run gate:blockers:refresh` to refresh blocker evidence and the packaged QA bundle from the current repo state.
+- The repo now includes `bun run gate:dictation:artifacts` to regenerate the local dictation parity evidence suite and its launch-facing markdown rollups.
 
 ## Residual Preconditions
 
-- Release signing + notarization secrets must be configured (`TAURI_SIGNING_*`, `APPLE_*`, `WINDOWS_CERTIFICATE*`) and accessible in the release environment.
-- The release environment must hold the private updater key that matches `plugins.updater.pubkey`; local proof with a temporary key only validates the tooling path, not production key continuity.
+- Release signing and notarization credentials must be configured for macOS and Windows in the release environment.
 - Gate runners must have access to required local ASR model assets if local RTF gate remains enforced in CI.
 - Benchmark baseline/candidate JSON artifacts must exist and pass schema + threshold validation.
 - Dictation Phase 0 must move from frozen assumptions to real packaged evidence before any dictation parity claim is credible.

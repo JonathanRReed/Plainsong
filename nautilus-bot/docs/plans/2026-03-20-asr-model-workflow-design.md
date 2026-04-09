@@ -117,7 +117,7 @@ Implementation changes:
 ### Phase 1
 
 - add `get_asr_provider_inventory` to the backend
-- add frontend inventory types and Tauri wrapper
+- add frontend inventory types and Electron backend bridge
 - refactor the ASR manager main screen to use workflow lanes and inventory data
 
 ### Phase 2
@@ -135,7 +135,7 @@ Implementation changes:
 - frontend tests for the workflow-first lane rendering
 - tests for lane eligibility and recommended ordering
 - backend tests for inventory payload shape and compatibility classification
-- full `npm test`
-- `npm run build`
+- full `bun run test`
+- `bun run build`
 - `cargo test --lib`
 - `cargo clippy --all-targets -- -D warnings`

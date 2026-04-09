@@ -30,7 +30,7 @@ Status values: `PASS` / `FAIL` / `BLOCKED` / `PENDING`
 | CP-09 | License tier gating | Trial/basic/pro/friends-club licensing states unlock and gate correct features across restart. | QA matrix rows + entitlement snapshots |
 | CP-10 | 30-day lockout | Trial expiration and pro lockout behavior trigger at boundary with expected nags/restrictions. | QA matrix row + timestamped test notes |
 | CP-11 | Signed updates | Updater check/download/install path succeeds on signed macOS and Windows builds. | QA matrix rows + updater logs |
-| CP-12 | Size + efficiency | `Nautilus.app <= 35 MB`; cold start and idle CPU meet release thresholds in prelaunch checklist. | `release-gate-evidence.md` entries |
+| CP-12 | Size + efficiency | `Nautilus.app <= 450 MB`; cold start and idle CPU meet release thresholds in prelaunch checklist. | `release-gate-evidence.md` entries |
 | CP-13 | Command mode v1 | Prefix-based commands (`newline`, `paragraph`, `undo last insert`, `delete last sentence`, `bulletize selection`, `rewrite shorter`, `rewrite professional`) execute with >=95% intent success on benchmark set. | Scorecard CSV + command test log |
 | CP-14 | Snippets v1 | Snippet trigger expansion (with app scope support) succeeds >=99% on benchmark set. | Scorecard CSV + snippet fixture list |
 | CP-15 | End-to-end latency | `end_to_end_ms` telemetry emitted and p50 improves >=25% vs baseline in benchmark corpus. Provider-integrity fields (`requestedProvider`, `actualProvider`, `isFallback`) are present in benchmark artifacts. | Baseline + follow-up benchmark reports (schema-validated) |
@@ -40,10 +40,11 @@ Status values: `PASS` / `FAIL` / `BLOCKED` / `PENDING`
 Run these before manual packaged QA:
 
 ```bash
-npm test
+bun run lint
+bun run test
 cargo check
-npm run build
-npm run gate:size
+bun run electron:build
+bun run gate:size
 node scripts/cold-start-gate.mjs --threshold-ms 2500 -- <packaged-launch-command>
 node scripts/verify-benchmark-gates.mjs \
   --schema docs/evals/benchmark-run.schema.json \

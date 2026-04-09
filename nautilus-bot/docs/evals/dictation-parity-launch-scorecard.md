@@ -1,6 +1,6 @@
 # Dictation Parity Launch Scorecard
 
-Date: 2026-03-12
+Date: 2026-04-09
 Owner: Nautilus engineering
 
 ## Goal
@@ -30,6 +30,15 @@ Core product claim:
 - `docs/evals/benchmark-run-latest-windows.json`
 - `docs/evals/wispr-vs-nautilus-scorecard-template.csv`
 - `docs/evals/dictation-parity-fixture.json`
+- `artifacts/dictation-parity-evidence.json`
+- `docs/evals/dictation-command-corpus-log.md`
+- `docs/evals/dictation-snippet-fixture-list.md`
+- `docs/evals/dictation-dictionary-fixture-report.md`
+- `docs/evals/dictation-formatter-benchmark-report.md`
+- `docs/evals/dictation-language-certification-matrix.md`
+- `docs/evals/dictation-app-matrix-evidence.md`
+- `docs/evals/dictation-hands-free-readiness.md`
+- `docs/evals/dictation-parity-artifact-summary.md`
 - `docs/dictation-app-compatibility-matrix.md`
 - `docs/dictation-blocked-app-register.md`
 - `artifacts/qa/macos/capture-dictation-hotkey.md`
@@ -52,14 +61,14 @@ Status values:
 | DP-01 | Packaged dictation start and stop | `BLOCKED` | Dictation hotkey succeeds 10/10 on macOS and Windows packaged builds with no stuck overlay or silent failure. | packaged QA rows + short capture video |
 | DP-02 | Insertion reliability in launch app matrix | `PENDING` | Insertion success or graceful recovery is `>= 98%` across the launch app matrix. | benchmark run JSON + QA notes |
 | DP-03 | Provider-integrity telemetry | `PARTIAL` | `requestedProvider`, `actualProvider`, `isFallback`, `insertionModeUsed`, `commandApplied`, `snippetAppliedCount`, and `endToEndMs` are present for benchmark rows. | benchmark schema validation + event sample |
-| DP-04 | Command mode v1 | `PARTIAL` | Launch command set achieves `>= 95%` intent success on fixture corpus. | benchmark gate output + command corpus log |
-| DP-05 | Snippets v1 | `PARTIAL` | Snippet expansion achieves `>= 99%` success, including app-scoped snippets. | benchmark gate output + snippet fixture list |
+| DP-04 | Command mode v1 | `PARTIAL` | Launch command set achieves `>= 95%` intent success on fixture corpus. | `artifacts/dictation-parity-evidence.json` + command corpus log |
+| DP-05 | Snippets v1 | `PARTIAL` | Snippet expansion achieves `>= 99%` success, including app-scoped snippets. | `artifacts/dictation-parity-evidence.json` + snippet fixture list |
 | DP-06 | Dictionary v1 | `PARTIAL` | Protected terms and replacements persist correctly across supported apps and GA languages. | dictionary fixture report + packaged QA |
-| DP-07 | Smart formatting and correction | `PARTIAL` | Formatting and bounded correction measurably improve output without unacceptable false edits. | formatter benchmark report + QA notes |
+| DP-07 | Smart formatting and correction | `PARTIAL` | Formatting and bounded correction measurably improve output without unacceptable false edits. | `artifacts/dictation-parity-evidence.json` + formatter benchmark report + QA notes |
 | DP-08 | Hands-free mode | `PARTIAL` | Hands-free can start, stop, and recover reliably with visible cues and low false-trigger rate. | long-session QA notes + video |
 | DP-09 | Context-aware styles | `PARTIAL` | App-aware style transforms improve output in the approved launch app matrix and never block dictation. | style benchmark rows + QA notes |
-| DP-10 | GA language certification | `BLOCKED` | Top 10 to 20 languages have documented provider-model guidance and benchmark evidence. | language certification matrix + benchmark artifacts |
-| DP-11 | Latency parity trend | `BLOCKED` | Candidate p50 `end_to_end_ms` improves by `>= 25%` versus established baseline. | `verify-benchmark-gates.mjs` output |
+| DP-10 | GA language certification | `PARTIAL` | Top 10 to 20 languages have documented provider-model guidance and benchmark evidence. | language certification matrix + benchmark artifacts |
+| DP-11 | Latency parity trend | `PARTIAL` | Candidate p50 `end_to_end_ms` improves by `>= 25%` versus established baseline. | `verify-benchmark-gates.mjs` output + benchmark gate artifacts |
 | DP-12 | Trust and recovery UX | `PARTIAL` | Users can see recording, processing, fallback, and delivery states and recover from failure quickly. | packaged QA notes + event samples |
 
 ## Launch App Matrix
@@ -144,37 +153,43 @@ What the current codebase already supports:
 
 What is still missing or not launch-certified:
 
-- benchmark run JSON artifacts
+- packaged benchmark run artifacts
 - packaged app evidence for current dictation claims
-- launch-grade dictionary evidence across verified apps and GA languages
-- launch-grade smart formatting and correction evidence
+- packaged dictionary evidence across verified apps and GA languages
+- packaged smart formatting and correction evidence
 - launch-grade hands-free reliability evidence
-- GA language certification evidence
+- packaged GA language certification evidence
 - context-aware styles limited to a verified app matrix with packaged evidence
 
 Current artifact note:
 
-- `docs/evals/benchmark-run-baseline.json` exists as the current local macOS fixture-run baseline
-- `docs/evals/benchmark-run-latest-macos.json` exists as the current local macOS fixture-run candidate
-- `docs/evals/benchmark-run-latest-windows.json` is still missing, but the capture path is now wired via `scripts/capture-windows-dictation-benchmark.mjs`
+- `docs/evals/benchmark-run-baseline.json` exists as the current local fixture-run baseline
+- `docs/evals/benchmark-run-latest-macos.json` exists as the current local fixture-run macOS candidate
+- `docs/evals/benchmark-run-latest-windows.json` exists as the current local fixture-run Windows candidate
+- `artifacts/benchmark-gates-macos.json` and `artifacts/benchmark-gates-windows.json` now pass from the refreshed fixture pipeline
+- `artifacts/dictation-parity-evidence.json` now passes across command, snippet, dictionary, formatting, and correction fixture suites
+- the generated companion artifacts now live in `docs/evals/dictation-command-corpus-log.md`, `docs/evals/dictation-snippet-fixture-list.md`, `docs/evals/dictation-dictionary-fixture-report.md`, `docs/evals/dictation-formatter-benchmark-report.md`, `docs/evals/dictation-language-certification-matrix.md`, `docs/evals/dictation-app-matrix-evidence.md`, and `docs/evals/dictation-parity-artifact-summary.md`
+- the frozen launch-language set is now fully represented in the local benchmark corpus
+- the frozen launch app matrix is now fully represented in the local benchmark corpus
 - these local JSON artifacts are useful for schema and gate plumbing, but they do not replace packaged app evidence
 
 ## Phase 0 Deliverables
 
-- real `benchmark-run-baseline.json`
-- real `benchmark-run-latest-macos.json`
-- real `benchmark-run-latest-windows.json`
+- packaged `benchmark-run-baseline.json`
+- packaged `benchmark-run-latest-macos.json`
+- packaged `benchmark-run-latest-windows.json`
 - launch app matrix owner list
 - launch language candidate list
 - baseline CSV populated from current runs
 - blocked-app register for insertion issues
+- packaged evidence to replace the current local parity artifact suite
 
 ## Commands
 
 Baseline generation path:
 
 ```bash
-npm run build
+bun run electron:build
 node scripts/generate-dictation-benchmark.mjs --fixtures docs/evals/dictation-parity-fixture.json --out artifacts/evals/dictation-benchmark-baseline-dev.json
 node scripts/verify-benchmark-gates.mjs --schema docs/evals/benchmark-run.schema.json --baseline docs/evals/benchmark-run-baseline.json --candidate docs/evals/benchmark-run-latest-macos.json --out artifacts/benchmark-gates-macos.json
 node scripts/verify-benchmark-gates.mjs --schema docs/evals/benchmark-run.schema.json --baseline docs/evals/benchmark-run-baseline.json --candidate docs/evals/benchmark-run-latest-windows.json --out artifacts/benchmark-gates-windows.json

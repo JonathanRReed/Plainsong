@@ -1,6 +1,8 @@
 import { useState, type ChangeEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageHeader } from "@/components/ui/page-header";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -41,21 +43,21 @@ export function ProjectsView() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="border-b px-6 py-5 flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Projects</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Organize recordings and personal libraries</p>
-        </div>
-        <Button onClick={() => setShowNewProject(true)}>
-          <Plus className="h-4 w-4 mr-2" />
-          New Project
-        </Button>
-      </div>
+      <PageHeader
+        title="Projects"
+        subtitle="Organize recordings and personal libraries"
+        actions={
+          <Button onClick={() => setShowNewProject(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            New Project
+          </Button>
+        }
+      />
 
       <ScrollArea className="flex-1">
         <div className="p-6">
           {error ? (
-            <Card>
+            <Card variant="default">
               <CardContent className="py-6 text-sm text-destructive">
                 {error}
               </CardContent>
@@ -63,7 +65,7 @@ export function ProjectsView() {
           ) : null}
 
           {isLoading ? (
-            <Card>
+            <Card variant="default">
               <CardContent className="py-6 text-sm text-muted-foreground">
                 Loading projects...
               </CardContent>
@@ -71,19 +73,15 @@ export function ProjectsView() {
           ) : null}
 
           {!isLoading && !error && projects.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-20 text-center">
-              <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-muted/50 mb-4">
-                <Folder className="h-8 w-8 text-muted-foreground" />
-              </div>
-              <h3 className="text-lg font-medium">No projects yet</h3>
-              <p className="mt-1 text-sm text-muted-foreground max-w-xs">
-                Create your first project to organize recordings and keep work separated.
-              </p>
-              <Button className="mt-5" onClick={() => setShowNewProject(true)}>
-                <Plus className="mr-2 h-4 w-4" />
-                Create Project
-              </Button>
-            </div>
+            <EmptyState
+              icon={<Folder className="h-8 w-8 text-muted-foreground" />}
+              title="No projects yet"
+              description="Create your first project to organize recordings and keep work separated."
+              action={{
+                label: "Create Project",
+                onClick: () => setShowNewProject(true),
+              }}
+            />
           ) : null}
 
           {!isLoading && !error && projects.length > 0 ? (
@@ -91,13 +89,14 @@ export function ProjectsView() {
               {projects.map((project) => (
                 <Card
                   key={project.id}
-                  className="cursor-pointer transition-all hover:border-primary/30 hover:shadow-sm"
+                  variant="interactive"
+                  className="group"
                 >
                   <CardHeader className="pb-3">
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
-                        <div className="h-10 w-10 rounded-lg bg-trusted/10 flex items-center justify-center">
-                          <Folder className="h-5 w-5 text-trusted" />
+                        <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                          <Folder className="h-5 w-5 text-primary" />
                         </div>
                         <div>
                           <CardTitle className="text-lg">{project.name}</CardTitle>
@@ -106,7 +105,7 @@ export function ProjectsView() {
                           </p>
                         </div>
                       </div>
-                      <Button variant="ghost" size="icon" className="h-8 w-8">
+                      <Button variant="ghost" size="icon" className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity">
                         <MoreHorizontal className="h-4 w-4" />
                       </Button>
                     </div>
@@ -117,7 +116,7 @@ export function ProjectsView() {
                     </p>
                     <div className="flex items-center justify-between mt-4 text-xs text-muted-foreground">
                       <span>{project.encrypted ? "Encrypted" : "Standard"}</span>
-                      <span className="flex items-center gap-2">
+                      <span className="flex items-center gap-2 text-primary">
                         View recordings
                         <ChevronRight className="h-3 w-3" />
                       </span>

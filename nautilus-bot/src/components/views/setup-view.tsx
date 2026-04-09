@@ -26,7 +26,7 @@ import {
   verifyDictationSetup,
   verifyMeetingSetup,
   verifySystemAudioSetup,
-} from "@/lib/tauri";
+} from "@/lib/backend";
 import {
   isCloudProvider,
   isDownloadableProvider,
@@ -43,14 +43,19 @@ import type { AsrProviderInfo } from "@/types";
 
 function statusTone(ready: boolean) {
   return ready
-    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-100"
-    : "border-amber-500/30 bg-amber-500/10 text-amber-100";
+    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-950 dark:text-emerald-100"
+    : "border-amber-500/30 bg-amber-500/10 text-amber-950 dark:text-amber-100";
 }
+
+const readinessDetailClass = "rounded-lg border border-border/60 bg-background/60 px-3 py-2";
 
 function providerBadge(provider: AsrProviderInfo) {
   if (provider.runtimeStatus === "ready") {
     return (
-      <Badge variant="outline" className="border-emerald-500/30 text-emerald-300">
+      <Badge
+        variant="outline"
+        className="border-emerald-500/30 text-emerald-700 dark:text-emerald-300"
+      >
         Ready
       </Badge>
     );
@@ -58,7 +63,10 @@ function providerBadge(provider: AsrProviderInfo) {
 
   if (provider.runtimeStatus === "missing_model") {
     return (
-      <Badge variant="outline" className="border-amber-500/30 text-amber-300">
+      <Badge
+        variant="outline"
+        className="border-amber-500/30 text-amber-700 dark:text-amber-300"
+      >
         Missing model
       </Badge>
     );
@@ -66,14 +74,17 @@ function providerBadge(provider: AsrProviderInfo) {
 
   if (provider.runtimeStatus === "missing_runtime") {
     return (
-      <Badge variant="outline" className="border-amber-500/30 text-amber-300">
+      <Badge
+        variant="outline"
+        className="border-amber-500/30 text-amber-700 dark:text-amber-300"
+      >
         Runtime setup
       </Badge>
     );
   }
 
   return (
-    <Badge variant="outline" className="border-rose-500/30 text-rose-300">
+    <Badge variant="outline" className="border-rose-500/30 text-rose-700 dark:text-rose-300">
       Error
     </Badge>
   );
@@ -178,7 +189,7 @@ export function SetupView() {
       <div className="border-b px-6 py-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="space-y-2">
-            <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-200">
+            <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-800 dark:text-cyan-200">
               <Sparkles className="h-3.5 w-3.5" />
               Guided setup and repairs
             </div>
@@ -206,12 +217,16 @@ export function SetupView() {
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="space-y-6">
           {error ? (
-            <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+            <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-900 dark:text-rose-100">
               {error}
             </div>
           ) : null}
           {statusMessage ? (
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+            <div
+              role="status"
+              aria-live="polite"
+              className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100"
+            >
               {statusMessage}
             </div>
           ) : null}
@@ -228,42 +243,42 @@ export function SetupView() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
-                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                <div className={`flex items-center justify-between ${readinessDetailClass}`}>
                   <span>Active route</span>
                   <span className="font-medium">{dictationRoute.summary}</span>
                 </div>
-                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                <div className={`flex items-center justify-between ${readinessDetailClass}`}>
                   <span>Route preference</span>
                   <span className="font-medium">
                     {dictationRoutePreference === "cloud" ? "Cloud preferred" : "Local preferred"}
                   </span>
                 </div>
                 <div className="grid gap-2 sm:grid-cols-3">
-                  <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                  <div className={readinessDetailClass}>
                     <div className="text-xs text-current opacity-70">Microphone</div>
                     <div className="mt-1 font-medium">
                       {permissions?.microphoneReady ? "Ready" : "Needs access"}
                     </div>
                   </div>
-                  <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                  <div className={readinessDetailClass}>
                     <div className="text-xs text-current opacity-70">Speech</div>
                     <div className="mt-1 font-medium">
                       {permissions?.speechRecognitionReady ?? true ? "Ready" : "Needs access"}
                     </div>
                   </div>
-                  <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                  <div className={readinessDetailClass}>
                     <div className="text-xs text-current opacity-70">Cursor insert</div>
                     <div className="mt-1 font-medium">{cursorInsertLabel}</div>
                   </div>
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
-                  <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                  <div className={readinessDetailClass}>
                     <div className="text-xs text-current opacity-70">Local dictation</div>
                     <div className="mt-1 font-medium">
                       {dictationLocalReady ? "Ready" : "No ready route"}
                     </div>
                   </div>
-                  <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                  <div className={readinessDetailClass}>
                     <div className="text-xs text-current opacity-70">Cloud dictation</div>
                     <div className="mt-1 font-medium">
                       {dictationCloudReady ? "Ready" : "No ready route"}
@@ -387,18 +402,18 @@ export function SetupView() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
-                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                <div className={`flex items-center justify-between ${readinessDetailClass}`}>
                   <span>Active route</span>
                   <span className="font-medium">{meetingRoute.summary}</span>
                 </div>
-                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                <div className={`flex items-center justify-between ${readinessDetailClass}`}>
                   <span>Meeting policy</span>
                   <span className="font-medium">
                     {meetingRoutePolicy === "best_available" ? "Best available" : "Prefer local"}
                   </span>
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
-                  <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                  <div className={readinessDetailClass}>
                     <div className="text-xs text-current opacity-70">System audio</div>
                     <div className="mt-1 font-medium">
                       {systemAudioAvailable === null
@@ -408,12 +423,12 @@ export function SetupView() {
                           : "Not detected"}
                     </div>
                   </div>
-                  <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                  <div className={readinessDetailClass}>
                     <div className="text-xs text-current opacity-70">Loopback device</div>
                     <div className="mt-1 font-medium">{loopbackDevice ?? "Not found"}</div>
                   </div>
                 </div>
-                <div className="rounded-lg border border-white/10 bg-black/10 px-3 py-2">
+                <div className={readinessDetailClass}>
                   <div className="text-xs text-current opacity-70">Meeting capture mode</div>
                   <div className="mt-1 font-medium">
                     {meetingCaptureMode === "me_and_them"
@@ -582,7 +597,10 @@ export function SetupView() {
                               {providerCapabilityLabel(provider.providerType)}
                             </Badge>
                             <Badge variant="outline">
-                              {providerHostingLabel(provider.providerType)}
+                              {providerHostingLabel(
+                                provider.providerType,
+                                provider.selectedModelId,
+                              )}
                             </Badge>
                           </div>
                           <p className="text-sm text-muted-foreground">
@@ -656,7 +674,7 @@ export function SetupView() {
                           </p>
                         ) : null}
                         {provider.runtimeDetails.missingFiles?.length ? (
-                          <p className="text-xs text-amber-300">
+                          <p className="text-xs text-amber-700 dark:text-amber-300">
                             Missing:{" "}
                             <span className="font-mono">
                               {provider.runtimeDetails.missingFiles.join(", ")}

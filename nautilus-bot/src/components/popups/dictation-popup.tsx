@@ -1,13 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { LogicalSize } from "@tauri-apps/api/dpi";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize, invoke, listen, getCurrentWindow } from "@/lib/electron";
 import {
   AppWindow,
   CheckCircle2,
   Clipboard,
-  GripHorizontal,
   History,
   Loader2,
   Mail,
@@ -29,11 +25,8 @@ import {
   getDictationAudioLevel,
   startDictation,
   stopDictation,
-} from "@/lib/tauri";
-import {
-  providerHostingPreference,
-  type DictationRoutePreference,
-} from "@/lib/asr-capabilities";
+} from "@/lib/backend";
+import type { DictationRoutePreference } from "@/lib/asr-capabilities";
 import {
   formatAppliedDictationCommandLabel,
   isBacktrackDictationCommand,
@@ -47,7 +40,6 @@ import { playDictationEarcon } from "@/lib/dictation-earcons";
 import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
 import { cn } from "@/lib/utils";
 import { AudioWaveform } from "@/components/ui/audio-waveform";
-import type { AsrProviderType } from "@/types";
 import type { DictationCustomMode } from "@/types/settings";
 
 type DisplayMode = "full" | "compact" | "minimal";
@@ -380,6 +372,28 @@ function formatDoneMessage(
   return "The result is ready for a quick spoken edit or another pass.";
 }
 
+function formatHandsFreeRuntimeHint(
+  handsFreeEnabled: boolean,
+  silenceTimeoutSeconds: number,
+  runtimeAppTarget: string | null,
+  contextDetail: string,
+) {
+  const targetDetail = runtimeAppTarget
+    ? `Sending to ${runtimeAppTarget}`
+    : contextDetail;
+
+  if (!handsFreeEnabled) {
+    return targetDetail;
+  }
+
+  const silenceDetail =
+    silenceTimeoutSeconds > 0
+      ? `stops after ${silenceTimeoutSeconds}s of silence or when you press again`
+      : "stops when you press again after you finish speaking";
+
+  return `Hands-free, ${silenceDetail}. ${targetDetail}`;
+}
+
 function PopupActionButton({
   icon: Icon,
   label,
@@ -431,8 +445,10 @@ export function DictationPopup() {
   const [preview, setPreview] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<string | null>(null);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("full");
-  const [pushToTalk, setPushToTalk] = useState(true);
-  const [handsFreeEnabled, setHandsFreeEnabled] = useState(false);
+  const [_pushToTalk, _setPushToTalk] = useState(true);
+  const [_handsFreeEnabled, _setHandsFreeEnabled] = useState(false);
+  const [handsFreeSilenceTimeoutSeconds, setHandsFreeSilenceTimeoutSeconds] =
+    useState(0);
   const [displayAudioLevel, setDisplayAudioLevel] = useState(0);
   const [modePreset, setModePreset] = useState<DictationModePreset>("voice");
   const [contextSource, setContextSource] =
@@ -450,9 +466,9 @@ export function DictationPopup() {
   const [providerModelLabel, setProviderModelLabel] = useState<string | null>(
     null,
   );
-  const [dictationRoutePreference, setDictationRoutePreference] =
+  const [_dictationRoutePreference, _setDictationRoutePreference] =
     useState<DictationRoutePreference>("local");
-  const [dictationResolvedHosting, setDictationResolvedHosting] =
+  const [_dictationResolvedHosting, _setDictationResolvedHosting] =
     useState<DictationRoutePreference | null>(null);
   const [dictationInsertionMode, setDictationInsertionMode] =
     useState<DictationInsertionMode>("paste");
@@ -482,8 +498,8 @@ export function DictationPopup() {
 
   const refreshPopupSettings = async () => {
     const settings = await getSettings();
-    setPushToTalk(Boolean(settings.transcription.dictationPushToTalk));
-    setHandsFreeEnabled(
+    _setPushToTalk(Boolean(settings.transcription.dictationPushToTalk));
+    _setHandsFreeEnabled(
       Boolean(settings.transcription.dictationHandsFreeEnabled),
     );
     setModePreset(
@@ -500,7 +516,7 @@ export function DictationPopup() {
     );
     setDictationProvider(settings.transcription.dictationProvider ?? null);
     setDictationModelId(settings.transcription.dictationModelId ?? null);
-    setDictationRoutePreference(
+    _setDictationRoutePreference(
       settings.transcription.dictationRoutePreference === "cloud"
         ? "cloud"
         : "local",
@@ -523,6 +539,9 @@ export function DictationPopup() {
     );
     setDictationCommandPrefix(
       settings.transcription.dictationCommandPrefix ?? "command",
+    );
+    setHandsFreeSilenceTimeoutSeconds(
+      settings.transcription.dictationSilenceTimeoutSeconds ?? 0,
     );
   };
 
@@ -569,10 +588,10 @@ export function DictationPopup() {
       setProviderModelLabel(payload.providerModelLabel ?? null);
     }
     if (typeof payload.dictationRoutePreference !== "undefined") {
-      setDictationRoutePreference(payload.dictationRoutePreference ?? "local");
+      _setDictationRoutePreference(payload.dictationRoutePreference ?? "local");
     }
     if (typeof payload.dictationResolvedHosting !== "undefined") {
-      setDictationResolvedHosting(payload.dictationResolvedHosting ?? null);
+      _setDictationResolvedHosting(payload.dictationResolvedHosting ?? null);
     }
   };
 
@@ -711,7 +730,7 @@ export function DictationPopup() {
             setRequestedRoute(payload.routePreference ?? null);
           }
           if (typeof payload.resolvedHosting !== "undefined") {
-            setDictationResolvedHosting(payload.resolvedHosting ?? null);
+            _setDictationResolvedHosting(payload.resolvedHosting ?? null);
           }
           if (
             typeof payload.insertionModeUsed !== "undefined" &&
@@ -844,14 +863,6 @@ export function DictationPopup() {
     dictationProvider,
     dictationModelId,
   );
-  const hostingLabel =
-    dictationResolvedHosting ??
-    (dictationProvider
-      ? providerHostingPreference(
-          dictationProvider as AsrProviderType,
-          dictationModelId,
-        )
-      : dictationRoutePreference);
   const targetDetail = runtimeAppTarget ? ` for ${runtimeAppTarget}` : "";
   const autoActivationDetail =
     activationMatcher && runtimeAppTarget
@@ -885,14 +896,9 @@ export function DictationPopup() {
 
   useEffect(() => {
     if (phase !== "idle") {
-      const showWindow = (
-        window as typeof window & { show?: () => Promise<void> }
-      ).show;
-      if (typeof showWindow === "function") {
-        void showWindow.call(window).catch((error) => {
-          console.error("Failed to show dictation popup:", error);
-        });
-      }
+      void window.show().catch((error) => {
+        console.error("Failed to show dictation popup:", error);
+      });
       return;
     }
 
@@ -992,12 +998,8 @@ export function DictationPopup() {
 
     return (
       <div
+        data-drag-region
         className="h-screen w-screen bg-transparent flex items-center justify-center"
-        onMouseDownCapture={(event) => {
-          if (event.button !== 0) return;
-          event.preventDefault();
-          void window.startDragging();
-        }}
         onDoubleClick={() => void cycleDisplayMode()}
         title="Double-click to expand"
       >
@@ -1071,141 +1073,87 @@ export function DictationPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="overflow-hidden rounded-[24px] border border-white/10 bg-slate-950/94 px-4 py-3 backdrop-blur-2xl shadow-[0_24px_80px_rgba(2,6,23,0.48)]">
-        <div
-          data-tauri-drag-region
-          className="mb-3 flex cursor-grab select-none items-center justify-between text-slate-300 active:cursor-grabbing"
-          onMouseDownCapture={(event) => {
-            if (event.button !== 0) return;
-            event.preventDefault();
-            void window.startDragging();
-          }}
-        >
-          <div className="inline-flex h-6 items-center gap-1 rounded-full border border-white/8 bg-white/3 px-2 text-slate-500">
-            <GripHorizontal className="h-3 w-3" />
+      <div className="overflow-hidden rounded-[20px] border border-white/8 bg-black/80 px-4 py-3.5 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.5)]">
+        {/* Header - Minimal */}
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-medium text-slate-400">{phaseLabel}</span>
+            <span className="text-slate-600">·</span>
+            <span className="text-xs text-slate-300">{selectedModeLabel}</span>
           </div>
-          <div className="inline-flex items-center gap-1">
+          <div className="flex items-center gap-0.5">
             <button
               type="button"
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-slate-300 hover:bg-white/8 hover:text-white"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-white/5 hover:text-slate-200 transition-colors"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void cycleDisplayMode()}
-              aria-label={compact ? "Expand popup" : "Compact popup"}
+              aria-label={compact ? "Expand" : "Compact"}
             >
-              {compact ? (
-                <PanelsTopLeft className="h-3.5 w-3.5" />
-              ) : (
-                <Minimize2 className="h-3.5 w-3.5" />
-              )}
+              {compact ? <PanelsTopLeft className="h-3.5 w-3.5" /> : <Minimize2 className="h-3.5 w-3.5" />}
             </button>
             <button
               type="button"
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-slate-300 hover:bg-white/8 hover:text-white"
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={() => void openMainApp()}
-              aria-label="Open app"
-            >
-              <AppWindow className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              className="inline-flex h-6 w-6 items-center justify-center rounded-md text-slate-300 hover:bg-white/8 hover:text-white"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-white/5 hover:text-slate-200 transition-colors"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void hidePopup()}
-              aria-label="Hide popup"
+              aria-label="Hide"
             >
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
         </div>
 
-        <div className="mb-4 flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-[11px] font-medium tracking-[0.14em] text-slate-400">
-              <span>{phaseLabel}</span>
-              <span className="text-slate-600">•</span>
-              <span>{selectedModeLabel}</span>
-            </div>
-            <p className="mt-1 truncate text-sm text-slate-300">
-              {runtimeAppTarget
-                ? `Targeting ${runtimeAppTarget}`
-                : `${hostingLabel === "cloud" ? "Cloud" : "Local"} route`}
-              {!compact ? ` · ${contextMeta.label}` : ""}
-            </p>
-          </div>
-          <div className="shrink-0 rounded-full border border-white/10 bg-white/4 px-4 py-3 text-[11px] text-slate-300">
-            {routeLabel}
-          </div>
-        </div>
-
         {isCapturePhase && (
-          <div className="space-y-4 text-white">
-            <div className="rounded-[22px] border border-white/10 bg-white/4 px-4 py-4">
-              <div className="flex items-center gap-3">
-                <div className="inline-flex h-10 items-center gap-3 rounded-full border border-white/10 bg-slate-900/80 px-3">
-                  <div className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/8">
-                    <Mic
-                      className={cn(
-                        "h-3.5 w-3.5 text-slate-100 transition-opacity",
-                        phase === "recording" ? "opacity-100" : "opacity-80",
-                      )}
-                    />
-                  </div>
-                  <AudioWaveform
-                    levels={displayAudioLevel}
-                    active={phase === "recording"}
-                    size="md"
-                    barCount={15}
-                    barColor="white"
-                    glow
-                    glowColor="rgba(147,197,253,0.5)"
-                  />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-[15px] font-semibold tracking-tight">
-                    {phase === "primed" ? "Ready to dictate" : "Listening"}
-                  </p>
-                  <p className="mt-1 text-sm leading-5 text-slate-300">
-                    {runtimeAppTarget
-                      ? `Text will go to ${runtimeAppTarget}`
-                      : contextMeta.detail}
-                  </p>
-                </div>
-                <span className="shrink-0 font-mono text-sm text-slate-300">
-                  {phase === "recording" ? elapsedText : "--:--"}
-                </span>
-                <button
-                  type="button"
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/12 bg-white/8 text-white hover:bg-white/12"
-                  onClick={() => void handleStopFromPopup()}
-                  aria-label="Stop dictation"
-                >
-                  <Square className="h-4 w-4 fill-current" />
-                </button>
+          <div className="space-y-3">
+            {/* Main Recording Bar - Super Minimal */}
+            <div className="flex items-center gap-3 rounded-2xl bg-white/3 px-3 py-2.5">
+              {/* Mic Icon */}
+              <div className={cn(
+                "flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all",
+                phase === "recording" ? "bg-emerald-500/15" : "bg-white/5"
+              )}>
+                <Mic className={cn("h-4 w-4", phase === "recording" ? "text-emerald-400" : "text-slate-400")} />
               </div>
-
-              <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
-                <span>{selectedModeLabel}</span>
-                <span className="text-slate-600">•</span>
-                <span>{insertionMeta.label}</span>
-                {activationMatcher ? (
-                  <>
-                    <span className="text-slate-600">•</span>
-                    <span>Auto for {activationMatcher}</span>
-                  </>
-                ) : null}
+              
+              {/* Waveform */}
+              <div className="flex-1">
+                <AudioWaveform
+                  levels={displayAudioLevel}
+                  active={phase === "recording"}
+                  size="sm"
+                  barCount={20}
+                  barColor="white"
+                />
               </div>
-
-              <p className="mt-2 text-xs leading-5 text-slate-400">
-                {phase === "recording"
-                  ? handsFreeEnabled
-                    ? `Pause speaking to stop automatically${dictationInsertionMode === "clipboard_only" ? " and copy to the clipboard" : ""}.`
-                    : pushToTalk
-                      ? `Release the hotkey to ${dictationInsertionMode === "clipboard_only" ? "copy the result" : "finish dictation"}.`
-                      : `Press the hotkey again to ${dictationInsertionMode === "clipboard_only" ? "copy the result" : "finish dictation"}.`
-                  : "Start speaking as soon as the overlay is ready."}
-              </p>
+              
+              {/* Timer */}
+              <span className={cn(
+                "shrink-0 font-mono text-sm tabular-nums",
+                phase === "recording" ? "text-emerald-400" : "text-slate-500"
+              )}>
+                {elapsedText}
+              </span>
+              
+              {/* Stop Button */}
+              <button
+                type="button"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/15 transition-colors"
+                onClick={() => void handleStopFromPopup()}
+                aria-label="Stop"
+              >
+                <Square className="h-3.5 w-3.5 fill-current" />
+              </button>
             </div>
+            
+            {/* Subtle Status Line */}
+            <p className="text-[11px] text-slate-500 text-center">
+              {formatHandsFreeRuntimeHint(
+                _handsFreeEnabled,
+                handsFreeSilenceTimeoutSeconds,
+                runtimeAppTarget,
+                contextMeta.detail,
+              )}
+            </p>
             {!compact && preview && (
               <div className="rounded-[20px] border border-white/10 bg-white/3 px-4 py-3">
                 <p className="text-[11px] font-medium tracking-[0.16em] text-slate-500">

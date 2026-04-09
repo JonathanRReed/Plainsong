@@ -1,0 +1,105 @@
+{
+  "schemaVersion": "1.0",
+  "languages": [
+    {
+      "code": "en",
+      "language": "English",
+      "launchTier": "GA candidate",
+      "recommendedDictationProvider": "distil_whisper",
+      "recommendedMeetingProvider": "distil_whisper",
+      "fallbackProvider": "whisper",
+      "localEvidence": "Benchmark corpus and formatting fixtures cover English command, snippet, dictionary, formatting, and launch-app baseline paths.",
+      "packagedEvidenceStatus": "PENDING"
+    },
+    {
+      "code": "es",
+      "language": "Spanish",
+      "launchTier": "GA candidate",
+      "recommendedDictationProvider": "whisper",
+      "recommendedMeetingProvider": "whisper",
+      "fallbackProvider": "openai_cloud",
+      "localEvidence": "Local benchmark fixture coverage now exercises Spanish dictation in the launch corpus; packaged insertion and benchmark evidence is still required.",
+      "packagedEvidenceStatus": "PENDING"
+    },
+    {
+      "code": "pt",
+      "language": "Portuguese",
+      "launchTier": "Expansion candidate",
+      "recommendedDictationProvider": "whisper",
+      "recommendedMeetingProvider": "whisper",
+      "fallbackProvider": "openai_cloud",
+      "localEvidence": "Local benchmark fixture coverage now exercises Portuguese dictation; launch certification still needs packaged benchmark and app-matrix evidence.",
+      "packagedEvidenceStatus": "PENDING"
+    },
+    {
+      "code": "fr",
+      "language": "French",
+      "launchTier": "Expansion candidate",
+      "recommendedDictationProvider": "whisper",
+      "recommendedMeetingProvider": "whisper",
+      "fallbackProvider": "openai_cloud",
+      "localEvidence": "Local benchmark fixture coverage now exercises French dictation; launch certification still needs packaged benchmark and app-matrix evidence.",
+      "packagedEvidenceStatus": "PENDING"
+    },
+    {
+      "code": "de",
+      "language": "German",
+      "launchTier": "Expansion candidate",
+      "recommendedDictationProvider": "whisper",
+      "recommendedMeetingProvider": "whisper",
+      "fallbackProvider": "openai_cloud",
+      "localEvidence": "Local benchmark fixture coverage now exercises German dictation; launch certification still needs packaged benchmark and app-matrix evidence.",
+      "packagedEvidenceStatus": "PENDING"
+    },
+    {
+      "code": "it",
+      "language": "Italian",
+      "launchTier": "Expansion candidate",
+      "recommendedDictationProvider": "whisper",
+      "recommendedMeetingProvider": "whisper",
+      "fallbackProvider": "openai_cloud",
+      "localEvidence": "Local benchmark fixture coverage now exercises Italian dictation; launch certification still needs packaged benchmark and app-matrix evidence.",
+      "packagedEvidenceStatus": "PENDING"
+    },
+    {
+      "code": "nl",
+      "language": "Dutch",
+      "launchTier": "Expansion candidate",
+      "recommendedDictationProvider": "whisper",
+      "recommendedMeetingProvider": "whisper",
+      "fallbackProvider": "openai_cloud",
+      "localEvidence": "Local benchmark fixture coverage now exercises Dutch dictation; launch certification still needs packaged benchmark and app-matrix evidence.",
+      "packagedEvidenceStatus": "PENDING"
+    },
+    {
+      "code": "ja",
+      "language": "Japanese",
+      "launchTier": "Expansion candidate",
+      "recommendedDictationProvider": "whisper",
+      "recommendedMeetingProvider": "whisper",
+      "fallbackProvider": "openai_cloud",
+      "localEvidence": "Local benchmark fixture coverage now exercises Japanese dictation; launch certification still needs packaged benchmark and app-matrix evidence.",
+      "packagedEvidenceStatus": "PENDING"
+    },
+    {
+      "code": "ko",
+      "language": "Korean",
+      "launchTier": "Expansion candidate",
+      "recommendedDictationProvider": "whisper",
+      "recommendedMeetingProvider": "whisper",
+      "fallbackProvider": "openai_cloud",
+      "localEvidence": "Local benchmark fixture coverage now exercises Korean dictation; launch certification still needs packaged benchmark and app-matrix evidence.",
+      "packagedEvidenceStatus": "PENDING"
+    },
+    {
+      "code": "zh",
+      "language": "Mandarin Chinese",
+      "launchTier": "Expansion candidate",
+      "recommendedDictationProvider": "whisper",
+      "recommendedMeetingProvider": "whisper",
+      "fallbackProvider": "openai_cloud",
+      "localEvidence": "Local benchmark fixture coverage now exercises Mandarin dictation; launch certification still needs packaged benchmark and app-matrix evidence.",
+      "packagedEvidenceStatus": "PENDING"
+    }
+  ]
+}

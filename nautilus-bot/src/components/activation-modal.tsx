@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Shield, ExternalLink, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
-import { activateLicense } from "@/lib/tauri";
-import type { LicenseInfo } from "@/lib/tauri";
+import { activateLicense } from "@/lib/backend";
+import type { LicenseInfo } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {

@@ -2,16 +2,16 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AiAnalysisPanel } from "@/components/ai-analysis-panel";
 
-const tauriMocks = vi.hoisted(() => ({
+const backendMocks = vi.hoisted(() => ({
   analyzeRecording: vi.fn(),
   extractActionItems: vi.fn(),
   extractActionItemsGrounded: vi.fn(),
 }));
 
-vi.mock("@/lib/tauri", () => ({
-  analyzeRecording: tauriMocks.analyzeRecording,
-  extractActionItems: tauriMocks.extractActionItems,
-  extractActionItemsGrounded: tauriMocks.extractActionItemsGrounded,
+vi.mock("@/lib/backend", () => ({
+  analyzeRecording: backendMocks.analyzeRecording,
+  extractActionItems: backendMocks.extractActionItems,
+  extractActionItemsGrounded: backendMocks.extractActionItemsGrounded,
 }));
 
 function deferred<T>() {
@@ -27,7 +27,7 @@ function deferred<T>() {
 describe("AiAnalysisPanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    tauriMocks.analyzeRecording.mockResolvedValue({
+    backendMocks.analyzeRecording.mockResolvedValue({
       query: "summary",
       response: "Grounded summary",
       citations: [
@@ -42,8 +42,8 @@ describe("AiAnalysisPanel", () => {
       model: "test-model",
       processingTimeMs: 950,
     });
-    tauriMocks.extractActionItems.mockResolvedValue([]);
-    tauriMocks.extractActionItemsGrounded.mockResolvedValue({
+    backendMocks.extractActionItems.mockResolvedValue([]);
+    backendMocks.extractActionItemsGrounded.mockResolvedValue({
       items: [
         {
           task: "Ship the release",
@@ -71,7 +71,7 @@ describe("AiAnalysisPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /action items/i }));
 
     await waitFor(() => {
-      expect(tauriMocks.extractActionItemsGrounded).toHaveBeenCalledWith("r1");
+      expect(backendMocks.extractActionItemsGrounded).toHaveBeenCalledWith("r1");
     });
 
     expect(screen.getByText("Ship the release")).toBeInTheDocument();
@@ -164,7 +164,7 @@ describe("AiAnalysisPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
 
     await waitFor(() => {
-      expect(tauriMocks.analyzeRecording).toHaveBeenCalledWith(
+      expect(backendMocks.analyzeRecording).toHaveBeenCalledWith(
         "r1",
         expect.stringContaining("Conversation so far:")
       );
@@ -190,7 +190,7 @@ describe("AiAnalysisPanel", () => {
       processingTimeMs: number;
     }>();
     const onChatMessagesChange = vi.fn();
-    tauriMocks.analyzeRecording.mockReturnValueOnce(pending.promise);
+    backendMocks.analyzeRecording.mockReturnValueOnce(pending.promise);
 
     const { rerender } = render(
       <AiAnalysisPanel
@@ -222,7 +222,7 @@ describe("AiAnalysisPanel", () => {
     });
 
     await waitFor(() => {
-      expect(tauriMocks.analyzeRecording).toHaveBeenCalledWith(
+      expect(backendMocks.analyzeRecording).toHaveBeenCalledWith(
         "r1",
         expect.stringContaining("What slipped?")
       );

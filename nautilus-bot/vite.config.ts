@@ -3,7 +3,8 @@ import react from "@vitejs/plugin-react";
 import path from "path";
 
 // https://vitejs.dev/config/
-export default defineConfig(() => ({
+export default defineConfig(({ command }) => ({
+  base: command === "build" ? "./" : "/",
   plugins: [react()],
   resolve: {
     alias: {
@@ -15,13 +16,17 @@ export default defineConfig(() => ({
     port: 1420,
     strictPort: true,
     watch: {
-      ignored: ["**/src-tauri/**"],
+      ignored: ["**/rust-sidecar/**"],
     },
   },
-  envPrefix: ["VITE_", "TAURI_"],
+  envPrefix: ["VITE_"],
   build: {
-    target: process.env.TAURI_PLATFORM == "windows" ? "chrome105" : "safari15",
-    minify: (process.env.TAURI_DEBUG ? false : "esbuild") as false | "esbuild" | "terser",
-    sourcemap: !!process.env.TAURI_DEBUG,
+    target: "chrome120",
+    minify: "esbuild" as const,
+    sourcemap: false,
+    outDir: "dist",
+  },
+  optimizeDeps: {
+    include: ["react", "react-dom"],
   },
 }));

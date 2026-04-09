@@ -2,12 +2,12 @@
 
 Status: BLOCKED
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Generated: 2026-04-09T16:08:53.831Z
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Current Local Observation
+- DMG helper path passes locally and produced `release/Nautilus-1.0.0-arm64.dmg`.
+- Fresh-install execution was not performed manually from the packaged DMG in this pass.
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+## Blocking Detail
+- Local packaging is using the `Nautilus Local Dev` identity, not a release-notarized identity.
+- This row still needs a real install walkthrough and evidence capture from the packaged DMG.

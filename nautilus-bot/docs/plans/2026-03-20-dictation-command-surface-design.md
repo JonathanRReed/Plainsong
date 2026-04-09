@@ -94,8 +94,8 @@ Items Nautilus already exceeds:
 
 - popup tests for the refreshed action bar and read-aloud
 - dictation view/history tests for read-aloud entry points
-- full `npm test`
-- `npm run build`
+- full `bun run test`
+- `bun run build`
 - rerun Rust tests only if backend APIs change
 
 ## Success Bar

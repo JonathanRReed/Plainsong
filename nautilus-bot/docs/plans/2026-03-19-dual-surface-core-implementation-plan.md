@@ -53,7 +53,7 @@ Note: the `writing-plans` skill referenced by the brainstorming workflow is not 
 
 - frontend tests for settings, hero modes, and surface behavior
 - Rust tests for lifecycle and route behavior where applicable
-- build verification for web and Tauri
+- build verification for web and Electron
 - packaged QA still required separately before release claims
 
 ## First Work Slice For This Turn
