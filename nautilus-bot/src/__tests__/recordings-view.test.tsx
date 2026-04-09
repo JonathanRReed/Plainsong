@@ -80,13 +80,14 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("@tauri-apps/api/event", () => ({
+vi.mock("@/lib/electron", () => ({
   listen: vi.fn(async (eventName: string, handler: (event: { payload: any }) => void) => {
     mocks.eventListeners.set(eventName, handler);
     return () => {
       mocks.eventListeners.delete(eventName);
     };
   }),
+  invoke: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-recordings", () => ({
@@ -192,7 +193,7 @@ vi.mock("@/components/ai-analysis-panel", () => ({
   ),
 }));
 
-vi.mock("@/lib/tauri", () => ({
+vi.mock("@/lib/backend", () => ({
   getRecording: mocks.getRecording,
   getRecordingWaveform: mocks.getRecordingWaveform,
   openRecordingAudio: vi.fn(),

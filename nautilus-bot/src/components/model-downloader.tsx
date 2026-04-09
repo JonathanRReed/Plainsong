@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "@/lib/electron";
 import { cn } from "@/lib/utils";
 import type { AsrProviderType } from "@/types/asr";
-import { downloadPlatformAssets, refreshAsrRuntimeProbes } from "@/lib/tauri";
+import { downloadPlatformAssets, refreshAsrRuntimeProbes } from "@/lib/backend";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";

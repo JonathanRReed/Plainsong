@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageHeader } from "@/components/ui/page-header";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
@@ -8,8 +9,8 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { useProjects } from "@/hooks/use-projects";
 import { useRecordings } from "@/hooks/use-recordings";
-import { analyzeRecordings, askMemory, getRelationshipMemory, searchTranscripts, validateLicense } from "@/lib/tauri";
-import type { CompanyMemoryProfile, LicenseInfo, MeetingChatMessage, PersonMemoryProfile, RelationshipMemory } from "@/lib/tauri";
+import { analyzeRecordings, askMemory, getRelationshipMemory, searchTranscripts, validateLicense } from "@/lib/backend";
+import type { CompanyMemoryProfile, LicenseInfo, MeetingChatMessage, PersonMemoryProfile, RelationshipMemory } from "@/lib/backend";
 import { deriveEntitlement } from "@/hooks/use-license-features";
 import { useSetupStatus } from "@/hooks/use-setup-status";
 import { requestMainView } from "@/lib/navigation";
@@ -19,7 +20,6 @@ import {
   Folder,
   FileAudio,
   Clock,
-  Activity,
   Brain,
   Loader2,
   Mic,
@@ -31,8 +31,33 @@ import {
   Send,
   Users,
   Building2,
+  Zap,
 } from "lucide-react";
+import { AnimatedGradientText } from "@/components/ui/animated-gradient-text";
 import { TierBadge } from "@/components/tier-badge";
+
+const QUICK_STATS = [
+  {
+    label: "Projects",
+    icon: Folder,
+    accentClass: "bg-primary/10 text-primary",
+  },
+  {
+    label: "Meetings",
+    icon: FileAudio,
+    accentClass: "bg-info/10 text-info",
+  },
+  {
+    label: "Duration",
+    icon: Clock,
+    accentClass: "bg-warning/10 text-warning",
+  },
+  {
+    label: "Dictation Speed",
+    icon: Zap,
+    accentClass: "bg-success/10 text-success",
+  },
+] as const;
 
 export function DashboardView() {
   const { projects } = useProjects();
@@ -222,31 +247,133 @@ export function DashboardView() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="border-b px-6 py-5">
-        <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight">Home</h1>
-          <Badge variant="outline" className="text-[10px] font-medium uppercase tracking-widest">
-            Voice workspace
-          </Badge>
-        </div>
-        <p className="mt-1 text-sm text-muted-foreground">Dictation, meetings, and follow-through in one place</p>
-      </div>
-      
+      <PageHeader
+        title="Home"
+        subtitle="Dictation, meetings, and follow-through in one place"
+        actions={
+          <Button onClick={() => requestMainView("dictation")}>
+            <Mic className="mr-2 h-4 w-4" />
+            Start Dictation
+          </Button>
+        }
+      />
+
       <ScrollArea className="flex-1">
-        <div className="p-6 space-y-6">
-          <Card className="border-cyan-500/20 bg-cyan-500/5">
+        <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-6 py-6 lg:px-8">
+          {/* Quick Stats */}
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            {QUICK_STATS.map((stat) => {
+              const Icon = stat.icon;
+              const value =
+                stat.label === "Projects"
+                  ? String(projects.length)
+                  : stat.label === "Meetings"
+                    ? String(recordings.length)
+                    : stat.label === "Duration"
+                      ? `${Math.floor(totalDuration / 3600)}h ${Math.floor((totalDuration % 3600) / 60)}m`
+                      : (
+                          <AnimatedGradientText colorFrom="#34d399" colorTo="#10b981" className="text-2xl font-bold">
+                            4x faster
+                          </AnimatedGradientText>
+                        );
+              const supportingCopy = stat.label === "Dictation Speed" ? "than typing" : null;
+              return (
+                <Card
+                  key={stat.label}
+                  variant="interactive"
+                  className="overflow-hidden border-border/80 bg-linear-to-br from-card via-card to-muted/30"
+                >
+                  <CardContent className="flex min-h-40 flex-col gap-6 p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground">
+                        {stat.label}
+                      </p>
+                      <div className={cn("flex size-10 items-center justify-center rounded-2xl", stat.accentClass)}>
+                        <Icon className="h-4 w-4" />
+                      </div>
+                    </div>
+                    <div className="mt-auto min-w-0">
+                      <p className="text-3xl font-semibold tracking-tight text-card-foreground">{value}</p>
+                      {supportingCopy && (
+                        <p className="mt-1 text-sm text-muted-foreground">{supportingCopy}</p>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+
+          {/* Setup Status */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card className={cn(
+              "transition-colors hover-lift border-border/80 bg-card",
+              dictationReady ? "shadow-[0_0_0_1px_hsl(var(--success)/0.12)]" : "shadow-[0_0_0_1px_hsl(var(--warning)/0.16)]"
+            )}>
+              <CardContent className="flex min-h-32 flex-col gap-4 p-5 sm:flex-row sm:items-center">
+                <div className={cn(
+                  "flex size-12 shrink-0 items-center justify-center rounded-2xl",
+                  dictationReady ? "bg-success/15 text-success" : "bg-warning/15 text-warning"
+                )}>
+                  {setupLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : dictationReady ? <CheckCircle2 className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-base font-medium text-card-foreground">Dictation</p>
+                  <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                    {setupLoading ? "Checking…" : dictationReady ? "Ready to go" : "Needs setup"}
+                  </p>
+                </div>
+                {!setupLoading && !dictationReady && (
+                  <Button size="sm" variant="outline" onClick={() => requestOnboarding("dictation")}>
+                    Fix
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+            <Card className={cn(
+              "transition-colors hover-lift border-border/80 bg-card",
+              meetingReady ? "shadow-[0_0_0_1px_hsl(var(--success)/0.12)]" : "shadow-[0_0_0_1px_hsl(var(--warning)/0.16)]"
+            )}>
+              <CardContent className="flex min-h-32 flex-col gap-4 p-5 sm:flex-row sm:items-center">
+                <div className={cn(
+                  "flex size-12 shrink-0 items-center justify-center rounded-2xl",
+                  meetingReady ? "bg-success/15 text-success" : "bg-warning/15 text-warning"
+                )}>
+                  {setupLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : meetingReady ? <CheckCircle2 className="h-5 w-5" /> : <FileAudio className="h-5 w-5" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <p className="text-base font-medium text-card-foreground">Meetings</p>
+                    {meetingReady && <Badge variant="success" size="sm">Ready</Badge>}
+                    {!setupLoading && !meetingReady && <Badge variant="warning" size="sm">Setup needed</Badge>}
+                  </div>
+                  <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                    {setupLoading ? "Checking…" : meetingReady ? "Ready to go" : "Needs setup"}
+                  </p>
+                </div>
+                {!setupLoading && !meetingReady && (
+                  <Button size="sm" variant="outline" onClick={() => requestOnboarding("meetings")}>
+                    Fix
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Daily Cockpit */}
+          <Card variant="default" className="hover-lift border-border/80">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <Sparkles className="h-5 w-5 text-cyan-300" />
-                Daily cockpit
+                <Sparkles className="h-5 w-5 text-primary" />
+                Daily Cockpit
               </CardTitle>
             </CardHeader>
-            <CardContent className="space-y-4">
+            <CardContent className="flex flex-col gap-4">
               <div className="grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)]">
-                <div className="space-y-3">
+                <div className="flex min-w-0 flex-col gap-4">
                   <div>
-                    <p className="text-lg font-semibold">{setupHeadline}</p>
-                    <p className="mt-1 text-sm text-muted-foreground">
+                    <p className="text-xl font-semibold tracking-tight text-card-foreground">{setupHeadline}</p>
+                    <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
                       Open dictation, meetings, or setup from one place.
                     </p>
                   </div>
@@ -265,20 +392,20 @@ export function DashboardView() {
                     </Button>
                   </div>
                 </div>
-                <div className="rounded-xl border bg-background/70 p-4 space-y-3">
+                <div className="flex flex-col gap-3 rounded-2xl border border-border/70 bg-muted/25 p-4">
                   <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
                     Typical workflow
                   </p>
                   <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
-                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                    <div className="rounded-xl border border-border/70 bg-background/70 px-3 py-3">
                       <p className="text-sm font-medium">1. Capture</p>
                       <p className="mt-1 text-xs text-muted-foreground">Dictate anywhere or run a meeting with notes live.</p>
                     </div>
-                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                    <div className="rounded-xl border border-border/70 bg-background/70 px-3 py-3">
                       <p className="text-sm font-medium">2. Review</p>
                       <p className="mt-1 text-xs text-muted-foreground">Use summaries, action items, memory, and edits to confirm the result.</p>
                     </div>
-                    <div className="rounded-md border bg-muted/20 px-3 py-3">
+                    <div className="rounded-xl border border-border/70 bg-background/70 px-3 py-3">
                       <p className="text-sm font-medium">3. Share</p>
                       <p className="mt-1 text-xs text-muted-foreground">Copy the follow-up, task list, or next agenda before context fades.</p>
                     </div>
@@ -287,88 +414,14 @@ export function DashboardView() {
               </div>
             </CardContent>
           </Card>
-
-          <div className="grid gap-3 md:grid-cols-2">
-            <Card className={cn(
-              "transition-colors",
-              dictationReady ? "border-emerald-500/20" : "border-amber-500/20"
-            )}>
-              <CardContent className="flex items-center gap-4 pt-6">
-                <div className={cn(
-                  "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl",
-                  dictationReady ? "bg-emerald-500/10 text-emerald-500" : "bg-amber-500/10 text-amber-500"
-                )}>
-                  {setupLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : dictationReady ? <CheckCircle2 className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium">Dictation</p>
-                  <p className="text-xs text-muted-foreground">
-                    {setupLoading ? "Checking…" : dictationReady ? "Ready to go" : "Needs setup"}
-                  </p>
-                </div>
-                {!setupLoading && !dictationReady && (
-                  <Button size="sm" variant="outline" onClick={() => requestOnboarding("dictation")}>
-                    Fix
-                  </Button>
-                )}
-              </CardContent>
-            </Card>
-            <Card className={cn(
-              "transition-colors",
-              meetingReady ? "border-emerald-500/20" : "border-amber-500/20"
-            )}>
-              <CardContent className="flex items-center gap-4 pt-6">
-                <div className={cn(
-                  "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl",
-                  meetingReady ? "bg-emerald-500/10 text-emerald-500" : "bg-amber-500/10 text-amber-500"
-                )}>
-                  {setupLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : meetingReady ? <CheckCircle2 className="h-5 w-5" /> : <FileAudio className="h-5 w-5" />}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium">Meetings</p>
-                  <p className="text-xs text-muted-foreground">
-                    {setupLoading ? "Checking…" : meetingReady ? "Ready to go" : "Needs setup"}
-                  </p>
-                </div>
-                {!setupLoading && !meetingReady && (
-                  <Button size="sm" variant="outline" onClick={() => requestOnboarding("meetings")}>
-                    Fix
-                  </Button>
-                )}
-              </CardContent>
-            </Card>
-          </div>
-
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {[
-              { label: "Projects", value: String(projects.length), icon: Folder, color: "text-blue-500", bg: "bg-blue-500/10" },
-              { label: "Meetings", value: String(recordings.length), icon: FileAudio, color: "text-violet-500", bg: "bg-violet-500/10" },
-              { label: "Duration", value: `${Math.floor(totalDuration / 3600)}h ${Math.floor((totalDuration % 3600) / 60)}m`, icon: Clock, color: "text-amber-500", bg: "bg-amber-500/10" },
-              { label: "Processing", value: "Local", icon: Activity, color: "text-emerald-500", bg: "bg-emerald-500/10" },
-            ].map((stat) => {
-              const Icon = stat.icon;
-              return (
-                <Card key={stat.label}>
-                  <CardContent className="pt-5 pb-4">
-                    <div className="flex items-center justify-between">
-                      <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{stat.label}</p>
-                      <div className={cn("flex h-7 w-7 items-center justify-center rounded-lg", stat.bg)}>
-                        <Icon className={cn("h-3.5 w-3.5", stat.color)} />
-                      </div>
-                    </div>
-                    <p className="mt-2 text-2xl font-bold tracking-tight">{stat.value}</p>
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </div>
           
-          <Card className={cn(!entitlement.proEnabled && "opacity-60", "border-violet-500/10")}>
+          {/* Second Brain - Memory */}
+          <Card className={cn(!entitlement.proEnabled && "opacity-60", "border-primary/20 hover-lift")}>
             <CardHeader>
               <div className="flex items-center justify-between">
                 <CardTitle className="flex items-center gap-2">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/10">
-                    <Brain className="h-4 w-4 text-violet-500" />
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+                    <Brain className="h-4 w-4 text-primary" />
                   </div>
                   Second Brain
                   <TierBadge required="pro" unlocked={entitlement.proEnabled} />
@@ -397,44 +450,39 @@ export function DashboardView() {
                   value={memoryQuery}
                   onChange={(e: ChangeEvent<HTMLInputElement>) => setMemoryQuery(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter") void runMemoryQuery(); }}
-                  placeholder={entitlement.proEnabled ? "What did we decide about the Q3 budget?" : "Requires Pro license or trial"}
-                  disabled={!entitlement.proEnabled || memoryLoading}
-                  className="bg-muted/30"
+                  placeholder="Ask about your meetings..."
+                  disabled={!entitlement.proEnabled}
                 />
                 <Button
+                  aria-label="Send"
                   onClick={() => void runMemoryQuery()}
                   disabled={!entitlement.proEnabled || memoryLoading || !memoryQuery.trim()}
-                  size="icon"
-                  className="shrink-0"
-                  aria-label="Send"
                 >
                   {memoryLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                 </Button>
               </div>
-              {memoryError && <p className="text-sm text-destructive">{memoryError}</p>}
+              {memoryError && (
+                <div className="p-3 rounded-md bg-destructive/10 text-destructive text-sm">
+                  {memoryError}
+                </div>
+              )}
               {memoryMessages.length > 0 && (
-                <div className="space-y-3 rounded-lg border bg-muted/10 p-4 text-sm">
+                <div className="space-y-3 max-h-96 overflow-y-auto">
                   {memoryMessages.map((message) => (
-                    <div key={message.id} className="space-y-2">
-                      <div
-                        className={cn(
-                          "rounded-lg px-3 py-2.5",
-                          message.role === "assistant"
-                            ? "border-l-2 border-l-violet-500/40 bg-muted/60"
-                            : "border bg-background"
-                        )}
-                      >
-                        <p className="mb-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-                          {message.role === "assistant" ? "Nautilus" : "You"}
-                        </p>
-                        <p className="whitespace-pre-wrap leading-relaxed">{message.content}</p>
-                      </div>
-                      {message.role === "assistant" && message.citations.length > 0 && (
-                        <div className="ml-3 space-y-1 border-l border-violet-500/20 pl-3">
-                          {message.citations.map((citation, index) => (
-                            <p key={`${message.id}-${index}`} className="text-xs text-muted-foreground">
-                              [{citation.recordingId ?? "recording"}] {citation.startTime?.toFixed(1)}s–{citation.endTime?.toFixed(1)}s: {citation.text}
-                            </p>
+                    <div
+                      key={message.id}
+                      className={cn(
+                        "p-3 rounded-lg",
+                        message.role === "user" ? "bg-primary/10 ml-8" : "bg-muted/30 mr-8"
+                      )}
+                    >
+                      <p className="text-sm">{message.content}</p>
+                      {message.citations && message.citations.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {message.citations.map((citation, idx) => (
+                            <div key={idx} className="text-xs text-muted-foreground border-l-2 border-primary/30 pl-2">
+                              {citation.text}
+                            </div>
                           ))}
                         </div>
                       )}
@@ -445,11 +493,11 @@ export function DashboardView() {
             </CardContent>
           </Card>
 
-          <Card>
+          <Card className="hover-lift">
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-cyan-500/10">
-                  <Users className="h-4 w-4 text-cyan-500" />
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+                  <Users className="h-4 w-4 text-primary" />
                 </div>
                 Relationship Memory
               </CardTitle>

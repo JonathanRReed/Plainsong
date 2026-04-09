@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { LicenseInfo, LicenseTier } from "@/lib/tauri";
+import type { LicenseInfo, LicenseTier } from "@/lib/backend";
 
 export interface FeatureFlags {
   whisperLargeModel: boolean;

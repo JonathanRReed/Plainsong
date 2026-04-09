@@ -52,22 +52,13 @@ const popupMocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("@/lib/electron", () => ({
   invoke: popupMocks.invoke,
-}));
-
-vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (eventName: string, handler: (event: { payload: any }) => void) => {
     popupMocks.listeners.set(eventName, handler);
     return () => popupMocks.listeners.delete(eventName);
   }),
-}));
-
-vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => popupMocks.windowHandle,
-}));
-
-vi.mock("@tauri-apps/api/dpi", () => ({
   LogicalSize: class LogicalSize {
     width: number;
     height: number;
@@ -79,7 +70,7 @@ vi.mock("@tauri-apps/api/dpi", () => ({
   },
 }));
 
-vi.mock("@/lib/tauri", () => ({
+vi.mock("@/lib/backend", () => ({
   getRecording: popupMocks.getRecording,
   getWaveformData: popupMocks.getWaveformData,
   stopRecording: popupMocks.stopRecording,

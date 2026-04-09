@@ -11,7 +11,7 @@ import {
   validateLicense,
   type UpdateStatusInfo,
   type LicenseInfo,
-} from "@/lib/tauri";
+} from "@/lib/backend";
 
 export function UpdateStatusWidget() {
   const [license, setLicense] = useState<LicenseInfo | null>(null);

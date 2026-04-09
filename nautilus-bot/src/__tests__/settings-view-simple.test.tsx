@@ -93,7 +93,7 @@ vi.mock("@/components/theme-provider", () => ({
   }),
 }));
 
-vi.mock("@/lib/tauri", () => ({
+vi.mock("@/lib/backend", () => ({
   createBackupDefault: vi.fn(),
   createSettingsBackupDefault: vi.fn(),
   clearProviderSecret: vi.fn(),
@@ -226,30 +226,61 @@ describe("SettingsView performance behavior", () => {
   });
 
   it("lazy-loads heavy security/storage data by tab", async () => {
-    const tauri = await import("@/lib/tauri");
+    const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
-    expect(tauri.getSettings).toHaveBeenCalledTimes(1);
-    expect(tauri.getBackupConfig).toHaveBeenCalledTimes(1);
-    expect(tauri.listBackups).not.toHaveBeenCalled();
-    expect(tauri.getPermissionDiagnostics).not.toHaveBeenCalled();
-    expect(tauri.getSecurityStatus).not.toHaveBeenCalled();
+    expect(backend.getSettings).toHaveBeenCalledTimes(1);
+    expect(backend.getBackupConfig).toHaveBeenCalledTimes(1);
+    expect(backend.getPermissionDiagnostics).toHaveBeenCalledTimes(1);
+    expect(backend.listBackups).not.toHaveBeenCalled();
+    expect(backend.getSecurityStatus).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByText("Privacy & Security"));
     await waitFor(() => {
-      expect(tauri.getPermissionDiagnostics).toHaveBeenCalledTimes(1);
-      expect(tauri.getSecurityStatus).toHaveBeenCalledTimes(1);
+      expect(backend.getSecurityStatus).toHaveBeenCalledTimes(1);
     });
 
     fireEvent.click(screen.getByText("Storage"));
     await waitFor(() => {
-      expect(tauri.listBackups).toHaveBeenCalledTimes(1);
+      expect(backend.listBackups).toHaveBeenCalledTimes(1);
     });
   });
 
+  it("shows dictation readiness instead of blaming the mic for local routes", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      transcription: {
+        ...baseSettings.transcription,
+        defaultProvider: "moonshine",
+        selectedModelId: "moonshine-tiny",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+    vi.mocked(backend.getPermissionDiagnostics).mockResolvedValue({
+      microphoneReady: true,
+      microphonePermissionReady: true,
+      speechRecognitionReady: false,
+      accessibilityReady: true,
+      cursorInsertionReady: true,
+      automationReady: true,
+      notes: [],
+    });
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await waitFor(() => {
+      expect(backend.getPermissionDiagnostics).toHaveBeenCalled();
+    });
+
+    expect(screen.getAllByText(/^Dictation$/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/^Ready$/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/^Mic$/)).not.toBeInTheDocument();
+  });
+
   it("debounces rapid settings changes into a single save", async () => {
-    const tauri = await import("@/lib/tauri");
+    const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
@@ -265,11 +296,11 @@ describe("SettingsView performance behavior", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(tauri.saveSettings).toHaveBeenCalledTimes(1);
+    expect(backend.saveSettings).toHaveBeenCalledTimes(1);
   });
 
   it("flushes text-field saves immediately on blur", async () => {
-    const tauri = await import("@/lib/tauri");
+    const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
@@ -283,12 +314,12 @@ describe("SettingsView performance behavior", () => {
     fireEvent.blur(exportRootInput);
 
     await waitFor(() => {
-      expect(tauri.saveSettings).toHaveBeenCalledTimes(1);
+      expect(backend.saveSettings).toHaveBeenCalledTimes(1);
     });
   });
 
   it("shows personal profile sync actions and can restore the latest profile snapshot", async () => {
-    const tauri = await import("@/lib/tauri");
+    const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
@@ -302,13 +333,13 @@ describe("SettingsView performance behavior", () => {
     fireEvent.click(screen.getByRole("button", { name: "Restore Latest Profile Snapshot" }));
 
     await waitFor(() => {
-      expect(tauri.restoreBackupDefault).toHaveBeenCalledWith("settings_20260314_120000");
+      expect(backend.restoreBackupDefault).toHaveBeenCalledWith("settings_20260314_120000");
     });
   });
 
   it("shows only basic color schemes for trial users", async () => {
-    const tauri = await import("@/lib/tauri");
-    vi.mocked(tauri.validateLicense).mockResolvedValue({
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.validateLicense).mockResolvedValue({
       key: "",
       instanceId: "",
       tier: "none",
@@ -335,8 +366,8 @@ describe("SettingsView performance behavior", () => {
   });
 
   it("persists selected color scheme for paid users", async () => {
-    const tauri = await import("@/lib/tauri");
-    vi.mocked(tauri.validateLicense).mockResolvedValue({
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.validateLicense).mockResolvedValue({
       key: "pro-license",
       instanceId: "instance",
       tier: "pro",
@@ -369,14 +400,14 @@ describe("SettingsView performance behavior", () => {
       await Promise.resolve();
     });
 
-    expect(tauri.saveSettings).toHaveBeenCalled();
-    const calls = vi.mocked(tauri.saveSettings).mock.calls;
+    expect(backend.saveSettings).toHaveBeenCalled();
+    const calls = vi.mocked(backend.saveSettings).mock.calls;
     const lastCall = calls[calls.length - 1];
     expect(lastCall?.[0]?.ui?.colorScheme).toBe("rose-pine");
   });
 
   it("persists the always-on-top toggle from desktop settings", async () => {
-    const tauri = await import("@/lib/tauri");
+    const backend = await import("@/lib/backend");
 
     render(
       <ToastProvider>
@@ -398,8 +429,8 @@ describe("SettingsView performance behavior", () => {
       await Promise.resolve();
     });
 
-    expect(tauri.saveSettings).toHaveBeenCalled();
-    const calls = vi.mocked(tauri.saveSettings).mock.calls;
+    expect(backend.saveSettings).toHaveBeenCalled();
+    const calls = vi.mocked(backend.saveSettings).mock.calls;
     const lastCall = calls[calls.length - 1];
     expect(lastCall?.[0]?.ui?.alwaysOnTop).toBe(true);
   });
@@ -457,7 +488,7 @@ describe("SettingsView performance behavior", () => {
   });
 
   it("persists the dictation active language set from transcription settings", async () => {
-    const tauri = await import("@/lib/tauri");
+    const backend = await import("@/lib/backend");
 
     render(
       <ToastProvider>
@@ -476,10 +507,10 @@ describe("SettingsView performance behavior", () => {
     );
 
     await waitFor(() => {
-      expect(tauri.saveSettings).toHaveBeenCalled();
+      expect(backend.saveSettings).toHaveBeenCalled();
     });
 
-    const saveCalls = vi.mocked(tauri.saveSettings).mock.calls;
+    const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
     const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
     expect(latestSettings?.transcription.dictationActiveLanguages).toEqual(["fr"]);
   });

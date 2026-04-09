@@ -35,8 +35,8 @@ Scope:
 
 Deliverables:
 
-- `src-tauri/src/events/`
-- `src-tauri/src/store/`
+- `rust-sidecar/src/events/`
+- `rust-sidecar/src/store/`
 - initial event types and persistence layer
 - SQLite migrations for events and artifacts
 
@@ -59,7 +59,7 @@ Scope:
 
 Deliverables:
 
-- `src-tauri/src/capture/`
+- `rust-sidecar/src/capture/`
 - extracted dictation and meeting capture controllers
 - shared permission and environment diagnostics
 
@@ -82,7 +82,7 @@ Scope:
 
 Deliverables:
 
-- `src-tauri/src/context/`
+- `rust-sidecar/src/context/`
 - immutable `ContextSnapshot`
 - context capture policy resolution
 
@@ -106,7 +106,7 @@ Scope:
 
 Deliverables:
 
-- `src-tauri/src/insertion/`
+- `rust-sidecar/src/insertion/`
 - reusable insertion outcome types
 - insertion policy resolver
 - snippet and command services extracted from orchestration code
@@ -131,7 +131,7 @@ Scope:
 
 Deliverables:
 
-- `src-tauri/src/transcription/`
+- `rust-sidecar/src/transcription/`
 - provider plan resolver
 - transcript artifact builder
 - shared partial/final transcription event emitters
@@ -154,7 +154,7 @@ Scope:
 
 Deliverables:
 
-- `src-tauri/src/workflows/meetings/`
+- `rust-sidecar/src/workflows/meetings/`
 - `MeetingArtifact`
 - meeting-scoped knowledge and analysis services
 - note and transcript regeneration rules
@@ -201,8 +201,8 @@ Scope:
 
 Deliverables:
 
-- `src-tauri/src/integrations/`
-- `src-tauri/src/governance/`
+- `rust-sidecar/src/integrations/`
+- `rust-sidecar/src/governance/`
 - policy snapshot enforcement
 
 Success checks:
@@ -228,8 +228,8 @@ Tasks:
 
 Exit criteria:
 
-- `npm test`
-- `npm run build`
+- `bun run test`
+- `bun run build`
 - `cargo check --all-targets`
 
 ### Phase 1: Extract Runtime Foundations
@@ -381,23 +381,23 @@ Sequence:
 
 Start by shrinking:
 
-- `src-tauri/src/lib.rs`
+- `rust-sidecar/src/lib.rs`
 
 Extract into:
 
-- `src-tauri/src/events/mod.rs`
-- `src-tauri/src/store/mod.rs`
-- `src-tauri/src/capture/mod.rs`
-- `src-tauri/src/context/mod.rs`
-- `src-tauri/src/insertion/mod.rs`
-- `src-tauri/src/transcription/mod.rs`
-- `src-tauri/src/workflows/dictation/mod.rs`
-- `src-tauri/src/workflows/meetings/mod.rs`
-- `src-tauri/src/governance/mod.rs`
+- `rust-sidecar/src/events/mod.rs`
+- `rust-sidecar/src/store/mod.rs`
+- `rust-sidecar/src/capture/mod.rs`
+- `rust-sidecar/src/context/mod.rs`
+- `rust-sidecar/src/insertion/mod.rs`
+- `rust-sidecar/src/transcription/mod.rs`
+- `rust-sidecar/src/workflows/dictation/mod.rs`
+- `rust-sidecar/src/workflows/meetings/mod.rs`
+- `rust-sidecar/src/governance/mod.rs`
 
 Keep `lib.rs` as:
 
-- Tauri command registration
+- backend command registration
 - state wiring
 - thin orchestration entry points
 
@@ -422,8 +422,8 @@ Target:
 
 Always run:
 
-- `npm test`
-- `npm run build`
+- `bun run test`
+- `bun run build`
 - `cargo check --all-targets`
 
 Add per capability:

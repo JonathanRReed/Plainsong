@@ -40,7 +40,7 @@ Nautilus is a local-first desktop app for recording, transcribing, and auditing 
 
 ### Prerequisites
 
-- Node.js 18+
+- Bun
 - Rust toolchain (stable)
 - Ollama installed and running for AI analysis flows
 - macOS or Windows (Linux may work but is not a GA target in this launch audit)
@@ -49,8 +49,8 @@ Nautilus is a local-first desktop app for recording, transcribing, and auditing 
 
 ```bash
 cd nautilus-bot
-npm install
-npm run tauri dev
+bun install
+bun run dev
 ```
 
 ### Optional AI Setup
@@ -63,17 +63,27 @@ ollama pull llama3.2
 ## Verification Commands
 
 ```bash
-npm test
-npx tsc --noEmit
-npm run build
-cd src-tauri
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo check --all-targets
-cargo test --lib
-cargo test --tests
-node ../scripts/live-cloud-asr-smoke.mjs
+bun run lint
+bun run test
+bun run typecheck
+bun run electron:compile
+bun run electron:build
+bun run electron:build:mac
+bun run electron:build:win
+bun run gate:release:local
+bun run gate:blockers:refresh
+cargo build --manifest-path rust-sidecar/Cargo.toml --bin nautilus-sidecar --release
+cargo fmt --manifest-path rust-sidecar/Cargo.toml --check
+cargo clippy --manifest-path rust-sidecar/Cargo.toml --all-targets -- -D warnings
+cargo check --manifest-path rust-sidecar/Cargo.toml --all-targets
+cargo test --manifest-path rust-sidecar/Cargo.toml --lib
+cargo test --manifest-path rust-sidecar/Cargo.toml --tests
 ```
+
+Use `bun run test`, not `bun test`. The repo test runner is Vitest.
+Use `bun run gate:release:local` for the current-platform local release verification pass.
+Use `bun run gate:blockers:refresh` to regenerate the blocker JSON and packaged QA evidence bundle from the current repo state.
+Use `bun run electron:build:mac` only on macOS, and `bun run electron:build:win` only on Windows.
 
 ## Security Notes
 
@@ -95,6 +105,8 @@ node ../scripts/live-cloud-asr-smoke.mjs
 ```text
 nautilus-bot/
   src/          # React + TypeScript UI
-  src-tauri/    # Rust backend and Tauri commands
+  rust-sidecar/ # Rust backend (sidecar binary)
+  electron/     # Electron main process
+  build-resources/
   README.md
 ```

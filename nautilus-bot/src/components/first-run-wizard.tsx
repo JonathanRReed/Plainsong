@@ -31,7 +31,7 @@ import {
   verifyMeetingSetup,
   type PermissionDiagnostics,
   type SetupVerificationResult,
-} from "@/lib/tauri";
+} from "@/lib/backend";
 import {
   defaultDictationShortcut,
   dictationInstruction,
@@ -179,6 +179,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [permsLoading, setPermsLoading] = useState(false);
   const [permissionRequestBusy, setPermissionRequestBusy] = useState(false);
   const [permissionRequestError, setPermissionRequestError] = useState<string | null>(null);
+  const [permissionRequestStatus, setPermissionRequestStatus] = useState<string | null>(null);
   const [autoRequestPermissions, setAutoRequestPermissions] = useState(true);
 
   const [modelState, setModelState] = useState<"idle" | "downloading" | "done" | "error">("idle");
@@ -349,13 +350,40 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const requestPermissionsNow = useCallback(async () => {
     setPermissionRequestBusy(true);
     setPermissionRequestError(null);
+    setPermissionRequestStatus(null);
     try {
       const diagnostics = await requestDictationPermissions();
       setPerms(diagnostics);
+      setPermissionRequestStatus("Requested macOS permissions and refreshed Nautilus readiness.");
     } catch (error) {
       setPermissionRequestError(error instanceof Error ? error.message : String(error));
     } finally {
       setPermissionRequestBusy(false);
+    }
+  }, []);
+
+  const openPermissionSettingsFromWizard = useCallback(
+    async (section: "microphone" | "speech" | "accessibility" | "automation", label: string) => {
+      setPermissionRequestError(null);
+      setPermissionRequestStatus(null);
+      try {
+        await openPermissionSettings(section);
+        setPermissionRequestStatus(`Opened macOS ${label} settings.`);
+      } catch (error) {
+        setPermissionRequestError(error instanceof Error ? error.message : String(error));
+      }
+    },
+    []
+  );
+
+  const openInstalledAppFromWizard = useCallback(async () => {
+    setPermissionRequestError(null);
+    setPermissionRequestStatus(null);
+    try {
+      await openInstalledNautilusApp();
+      setPermissionRequestStatus("Opened the installed Nautilus app from /Applications.");
+    } catch (error) {
+      setPermissionRequestError(error instanceof Error ? error.message : String(error));
     }
   }, []);
 
@@ -530,10 +558,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
-      <div className="relative flex w-full max-w-2xl flex-col gap-6 rounded-2xl border border-border bg-card p-8 shadow-2xl">
+      <div className="relative flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col gap-6 overflow-y-auto rounded-2xl border border-border bg-card/95 p-8 text-card-foreground shadow-2xl">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-xl font-semibold">
+            <h2 className="text-xl font-semibold text-card-foreground">
               {mode === "meetings" ? "Set Up Meetings" : mode === "dictation" ? "Fix Dictation Setup" : "Getting Started"}
             </h2>
             <p className="text-sm text-muted-foreground">{subtitle}</p>
@@ -566,8 +594,13 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             autoRequestPermissions={autoRequestPermissions}
             onAutoRequestPermissionsChange={setAutoRequestPermissions}
             onRequestNow={() => void requestPermissionsNow()}
+            onOpenPermissionSettings={(section, label) =>
+              void openPermissionSettingsFromWizard(section, label)
+            }
+            onOpenInstalledApp={() => void openInstalledAppFromWizard()}
             requestBusy={permissionRequestBusy}
             requestError={permissionRequestError}
+            requestStatus={permissionRequestStatus}
           />
         ) : null}
 
@@ -731,8 +764,11 @@ function PermissionsStep({
   autoRequestPermissions,
   onAutoRequestPermissionsChange,
   onRequestNow,
+  onOpenPermissionSettings,
+  onOpenInstalledApp,
   requestBusy,
   requestError,
+  requestStatus,
 }: {
   perms: PermissionDiagnostics | null;
   loading: boolean;
@@ -740,8 +776,14 @@ function PermissionsStep({
   autoRequestPermissions: boolean;
   onAutoRequestPermissionsChange(next: boolean): void;
   onRequestNow(): void;
+  onOpenPermissionSettings(
+    section: "microphone" | "speech" | "accessibility" | "automation",
+    label: string
+  ): void;
+  onOpenInstalledApp(): void;
   requestBusy: boolean;
   requestError: string | null;
+  requestStatus: string | null;
 }) {
   return (
     <div className="space-y-4">
@@ -751,13 +793,15 @@ function PermissionsStep({
 
       {perms?.runningFromDiskImage ? (
         <div className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 space-y-2">
-          <p className="text-sm font-medium text-amber-100">You are running the DMG copy</p>
-          <p className="text-xs text-amber-100/90">
+          <p className="text-sm font-medium text-amber-900 dark:text-amber-100">
+            You are running the DMG copy
+          </p>
+          <p className="text-xs text-amber-800 dark:text-amber-100/90">
             macOS permissions granted to the installed app do not apply to the disk image copy. Move Nautilus into
             /Applications and reopen that installed app.
           </p>
           <div className="flex flex-wrap gap-2">
-            <Button variant="outline" size="sm" onClick={() => void openInstalledNautilusApp()}>
+            <Button variant="outline" size="sm" onClick={onOpenInstalledApp}>
               Open installed app
             </Button>
             <Button variant="outline" size="sm" onClick={onRefresh}>
@@ -773,28 +817,28 @@ function PermissionsStep({
           icon={<Mic className="h-4 w-4" />}
           ready={perms?.microphonePermissionReady ?? perms?.microphoneReady}
           loading={loading}
-          onFix={() => void openPermissionSettings("microphone")}
+          onFix={() => onOpenPermissionSettings("microphone", "Microphone")}
         />
         <PermRow
           label="Speech recognition"
           icon={<Brain className="h-4 w-4" />}
           ready={perms?.speechRecognitionReady}
           loading={loading || requestBusy}
-          onFix={() => void openPermissionSettings("speech")}
+          onFix={() => onOpenPermissionSettings("speech", "Speech Recognition")}
         />
         <PermRow
           label="Accessibility"
           icon={<ShieldCheck className="h-4 w-4" />}
           ready={perms?.accessibilityReady}
           loading={loading || requestBusy}
-          onFix={() => void openPermissionSettings("accessibility")}
+          onFix={() => onOpenPermissionSettings("accessibility", "Accessibility")}
         />
         <PermRow
           label="Keyboard fallback"
           icon={<Shield className="h-4 w-4" />}
           ready={perms?.automationReady}
           loading={loading || requestBusy}
-          onFix={() => void openPermissionSettings("automation")}
+          onFix={() => onOpenPermissionSettings("automation", "Automation")}
         />
       </div>
 
@@ -821,7 +865,16 @@ function PermissionsStep({
             Re-check permissions
           </Button>
         </div>
-        {requestError ? <p className="text-xs text-destructive">{requestError}</p> : null}
+        {requestStatus ? (
+          <p className="text-xs text-muted-foreground" role="status" aria-live="polite">
+            {requestStatus}
+          </p>
+        ) : null}
+        {requestError ? (
+          <p className="text-xs text-destructive" role="alert">
+            {requestError}
+          </p>
+        ) : null}
       </div>
 
       {perms?.notes?.map((note, index) => (
@@ -860,7 +913,13 @@ function PermRow({
         ) : (
           <>
             <XCircle className="h-4 w-4 text-amber-500" />
-            <Button variant="outline" size="sm" onClick={onFix} className="h-7 text-xs">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onFix}
+              className="h-7 text-xs"
+              aria-label={`Fix ${label}`}
+            >
               Fix
             </Button>
           </>
@@ -980,8 +1039,15 @@ function HotkeyStep({
       </p>
 
       <div className="space-y-2 rounded-lg border border-border p-3">
-        <label className="text-xs font-medium text-muted-foreground">Dictation shortcut</label>
+        <label
+          htmlFor="first-run-dictation-shortcut"
+          className="text-xs font-medium text-muted-foreground"
+        >
+          Dictation shortcut
+        </label>
         <Input
+          id="first-run-dictation-shortcut"
+          aria-label="Dictation shortcut"
           value={displayShortcut}
           readOnly
           onKeyDown={(event) => {
@@ -1187,8 +1253,15 @@ function MeetingSetupStep({
       <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-3">
         <p className="text-xs font-medium">Meeting storage defaults</p>
         <div className="space-y-2">
-          <label className="text-xs text-muted-foreground">Meeting audio storage</label>
+          <label
+            htmlFor="first-run-meeting-audio-storage"
+            className="text-xs text-muted-foreground"
+          >
+            Meeting audio storage
+          </label>
           <select
+            id="first-run-meeting-audio-storage"
+            aria-label="Meeting audio storage"
             className="w-full rounded-md border border-border bg-background p-2 text-sm"
             value={meetingAudioStorageMode}
             onChange={(event) =>
@@ -1201,8 +1274,12 @@ function MeetingSetupStep({
         </div>
 
         <div className="space-y-2">
-          <label className="text-xs text-muted-foreground">Meeting retention</label>
+          <label htmlFor="first-run-meeting-retention" className="text-xs text-muted-foreground">
+            Meeting retention
+          </label>
           <select
+            id="first-run-meeting-retention"
+            aria-label="Meeting retention"
             className="w-full rounded-md border border-border bg-background p-2 text-sm"
             value={meetingRetentionPreset}
             onChange={(event) =>
@@ -1221,8 +1298,15 @@ function MeetingSetupStep({
 
         {meetingRetentionPreset === "custom" ? (
           <div className="space-y-2">
-            <label className="text-xs text-muted-foreground">Custom retention months</label>
+            <label
+              htmlFor="first-run-custom-retention-months"
+              className="text-xs text-muted-foreground"
+            >
+              Custom retention months
+            </label>
             <Input
+              id="first-run-custom-retention-months"
+              aria-label="Custom retention months"
               type="number"
               min={1}
               value={meetingRetentionCustomMonths}
@@ -1234,8 +1318,15 @@ function MeetingSetupStep({
         ) : null}
 
         <div className="space-y-2">
-          <label className="text-xs text-muted-foreground">Retention delete mode</label>
+          <label
+            htmlFor="first-run-retention-delete-mode"
+            className="text-xs text-muted-foreground"
+          >
+            Retention delete mode
+          </label>
           <select
+            id="first-run-retention-delete-mode"
+            aria-label="Retention delete mode"
             className="w-full rounded-md border border-border bg-background p-2 text-sm"
             value={meetingRetentionDeleteMode}
             onChange={(event) =>

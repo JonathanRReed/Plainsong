@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildSnapshot } from "@/hooks/use-setup-status";
-import type { PermissionDiagnostics } from "@/lib/tauri";
+import type { PermissionDiagnostics } from "@/lib/backend";
 import type { AsrProviderInfo } from "@/types";
 import type { Settings } from "@/types/settings";
 
@@ -31,6 +31,29 @@ function createProviders(): AsrProviderInfo[] {
       runtimeMessage: "ready",
       selectedModelId: "distil-large-v3",
       modelOptions: [{ id: "distil-large-v3", label: "Large V3" }],
+    },
+    {
+      providerType: "parakeet",
+      name: "Parakeet",
+      inferenceEnabled: true,
+      runtimeStatus: "ready",
+      runtimeMessage: "ready",
+      selectedModelId: "parakeet-ctc-0.6b",
+      modelOptions: [{ id: "parakeet-ctc-0.6b", label: "CTC 0.6B" }],
+    },
+  ] as AsrProviderInfo[];
+}
+
+function createLocalProviders(): AsrProviderInfo[] {
+  return [
+    {
+      providerType: "moonshine",
+      name: "UsefulSensors Moonshine",
+      inferenceEnabled: true,
+      runtimeStatus: "ready",
+      runtimeMessage: "ready",
+      selectedModelId: "moonshine-tiny",
+      modelOptions: [{ id: "moonshine-tiny", label: "Moonshine Tiny" }],
     },
     {
       providerType: "parakeet",
@@ -100,6 +123,36 @@ describe("buildSnapshot", () => {
     expect(snapshot.dictationReady).toBe(true);
     expect(snapshot.dictationBlockers).not.toContain(
       "Cursor insertion is still required for the current dictation mode."
+    );
+  });
+
+  it("does not block local dictation on speech recognition permission", () => {
+    const snapshot = buildSnapshot(
+      {
+        transcription: {
+          useSharedAsrSelection: false,
+          defaultProvider: "moonshine",
+          dictationProvider: "moonshine",
+          dictationModelId: "moonshine-tiny",
+          meetingProvider: "parakeet",
+          meetingModelId: "parakeet-ctc-0.6b",
+          selectedModelId: "moonshine-tiny",
+          dictationRoutePreference: "local",
+          meetingRoutePolicy: "prefer_local",
+          dictationInsertionMode: "clipboard_only",
+        },
+      } as Settings,
+      createLocalProviders(),
+      createPermissions({
+        speechRecognitionReady: false,
+      }),
+      false,
+      null
+    );
+
+    expect(snapshot.dictationReady).toBe(true);
+    expect(snapshot.dictationBlockers).not.toContain(
+      "Speech Recognition permission is still required for Apple Native dictation."
     );
   });
 });

@@ -42,32 +42,48 @@ const latencyScale = valueFor("--latency-scale", "1.0");
 const buildVersion = valueFor("--build-version", "nautilus-dev");
 const generatedAt = valueFor("--generated-at", new Date().toISOString());
 const runId = valueFor("--run-id", `dictation-parity-${Date.now()}`);
+const buildCommitOverride = valueFor("--build-commit");
 
 if (!fs.existsSync(fixturesPath)) {
   console.error(`Fixture file not found: ${fixturesPath}`);
   process.exit(1);
 }
 
-const commit = run("git", ["rev-parse", "--short", "HEAD"]).stdout.trim() || "unknown";
-const platformOs = process.platform === "darwin" ? "macOS" : process.platform === "win32" ? "Windows" : process.platform;
+const commit =
+  buildCommitOverride ??
+  run("git", ["rev-parse", "--short", "HEAD"]).stdout.trim() ??
+  "unknown";
+const platformOs =
+  valueFor(
+    "--platform-os",
+    process.platform === "darwin"
+      ? "macOS"
+      : process.platform === "win32"
+        ? "Windows"
+        : process.platform
+  ) ?? "unknown";
 const platformVersion =
-  process.platform === "darwin"
-    ? run("sw_vers", ["-productVersion"]).stdout.trim()
-    : process.platform === "win32"
-      ? os.release()
-      : os.release();
+  valueFor(
+    "--platform-version",
+    process.platform === "darwin"
+      ? run("sw_vers", ["-productVersion"]).stdout.trim()
+      : os.release()
+  ) ?? "unknown";
 const device =
-  process.platform === "darwin"
-    ? run("sysctl", ["-n", "machdep.cpu.brand_string"]).stdout.trim().replace(/\s+/g, " ")
-    : `${os.type()} ${os.arch()}`;
+  valueFor(
+    "--device",
+    process.platform === "darwin"
+      ? run("sysctl", ["-n", "machdep.cpu.brand_string"]).stdout.trim().replace(/\s+/g, " ")
+      : `${os.type()} ${os.arch()}`
+  ) ?? "unknown";
 
 run(
   "cargo",
   [
     "run",
     "--manifest-path",
-    "src-tauri/Cargo.toml",
-    "--example",
+    "rust-sidecar/Cargo.toml",
+    "--bin",
     "dictation-parity-benchmark",
     "--",
     "--fixtures",

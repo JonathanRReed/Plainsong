@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { listen } from "@tauri-apps/api/event";
-import { getRecordings } from "@/lib/tauri";
+import { listen } from "@/lib/electron";
+import { getRecordings } from "@/lib/backend";
 import { useDataCache } from "@/hooks/data-cache-context";
 import type { Recording } from "@/types";
 

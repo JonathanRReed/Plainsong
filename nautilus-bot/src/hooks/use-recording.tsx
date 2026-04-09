@@ -8,15 +8,15 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { invoke, listen } from "@/lib/electron";
 import {
   type DictationStartOptions,
-  startDictation as tauriStartDictation,
-  startRecording as tauriStartRecording,
-  stopDictation as tauriStopDictation,
-  stopRecording as tauriStopRecording,
-} from "@/lib/tauri";
+  startDictation,
+  startRecording,
+  stopDictation,
+  stopRecording,
+} from "@/lib/backend";
+import { logger } from "@/lib/logger";
 
 interface RecordingState {
   isRecording: boolean;
@@ -110,26 +110,36 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     }, 1000);
   }, [clearTimer]);
 
-  const startDictation = useCallback(async (options?: DictationStartOptions) => {
+  const startDictationFn = useCallback(async (options?: DictationStartOptions) => {
     try {
-      await tauriStartDictation(options);
+      await startDictation(options);
     } catch (error) {
-      console.error("Failed to start dictation:", error);
+      logger.error("Failed to start dictation:", error);
       const message = error instanceof Error ? error.message : String(error);
+      // Add actionable suggestions based on common errors
+      if (message.includes("ASR provider") || message.includes("model")) {
+        throw new Error(`${message}. Please check your ASR provider settings in Settings > AI & Models.`);
+      }
+      if (message.includes("audio") || message.includes("microphone")) {
+        throw new Error(`${message}. Please check your microphone permissions in System Settings.`);
+      }
       throw new Error(message);
     }
   }, []);
 
-  const stopDictation = useCallback(async () => {
+  const stopDictationFn = useCallback(async () => {
     try {
-      const text = await tauriStopDictation();
+      const text = await stopDictation();
       clearTimer();
       setState(INITIAL_STATE);
       return text;
     } catch (error) {
-      console.error("Failed to stop dictation:", error);
+      logger.error("Failed to stop dictation:", error);
       clearTimer();
       const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("timeout") || message.includes("busy")) {
+        throw new Error(`${message}. Please wait a moment and try again.`);
+      }
       throw new Error(message);
     }
   }, [clearTimer]);
@@ -144,7 +154,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       consentPromptShown?: boolean;
     }) => {
       try {
-        const recordingId = await tauriStartRecording(options);
+        const recordingId = await startRecording(options);
         setState({
           isRecording: true,
           recordingId,
@@ -157,6 +167,12 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       } catch (error) {
         console.error("Failed to start meeting:", error);
         const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("audio") || message.includes("microphone")) {
+          throw new Error(`${message}. Please check your microphone permissions in System Settings.`);
+        }
+        if (message.includes("screen") || message.includes("system")) {
+          throw new Error(`${message}. Please check screen recording permissions in System Settings.`);
+        }
         throw new Error(message);
       }
     },
@@ -168,12 +184,17 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     if (!currentId) return;
 
     try {
-      await tauriStopRecording(currentId);
+      await stopRecording(currentId);
       clearTimer();
       setState(INITIAL_STATE);
     } catch (error) {
-      console.error("Failed to stop meeting:", error);
+      logger.error("Failed to stop meeting:", error);
       clearTimer();
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("timeout") || message.includes("busy")) {
+        throw new Error(`${message}. Please wait a moment and try again.`);
+      }
+      throw new Error(message);
     }
   }, [clearTimer]);
 
@@ -390,12 +411,12 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     () => ({
       ...state,
       formattedDuration,
-      startDictation,
-      stopDictation,
+      startDictation: startDictationFn,
+      stopDictation: stopDictationFn,
       startMeeting,
       stopMeeting,
     }),
-    [formattedDuration, startDictation, startMeeting, state, stopDictation, stopMeeting]
+    [formattedDuration, startDictationFn, startMeeting, state, stopDictationFn, stopMeeting]
   );
 
   return <RecordingContext.Provider value={value}>{children}</RecordingContext.Provider>;

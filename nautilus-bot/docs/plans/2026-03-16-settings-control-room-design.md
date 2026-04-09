@@ -230,7 +230,7 @@ Recommended fields:
 - dictation input override enabled + selected device
 - meeting input override enabled + selected device
 
-### Tauri Commands
+### Backend Commands
 
 Add commands to:
 
@@ -300,9 +300,9 @@ Wrap `AsrProviderManager` in a stronger layout and likely refactor parts of it s
 ### Validation
 
 - targeted test runs for touched files first
-- `npm test`
+- `bun run test`
 - `cargo test --lib`
-- `npm run build`
+- `bun run build`
 
 ## Non-Goals
 

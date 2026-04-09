@@ -15,15 +15,12 @@ const buttonWithText = (scope: ReturnType<typeof within> | typeof screen, text: 
   return button as HTMLButtonElement;
 };
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("@/lib/electron", () => ({
   invoke: (...args: unknown[]) => invokeMock(...args),
-}));
-
-vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => {}),
 }));
 
-vi.mock("@/lib/tauri", () => ({
+vi.mock("@/lib/backend", () => ({
   refreshAsrRuntimeProbes: vi.fn(async () => {}),
   repairLocalModelCache: vi.fn(async () => ({ repairedCount: 0, removedPaths: [], notes: [] })),
   getAsrProviderInventory: vi.fn(async () => invokeMock("get_asr_provider_inventory")),

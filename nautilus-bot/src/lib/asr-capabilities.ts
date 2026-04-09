@@ -224,7 +224,15 @@ export function providerCapabilityLabel(providerType: AsrProviderType) {
   return "General";
 }
 
-export function providerHostingLabel(providerType: AsrProviderType) {
+export function providerHostingLabel(
+  providerType: AsrProviderType,
+  modelId?: string | null,
+): string {
+  // Handle providers that can be either local or cloud based on model
+  if (providerType === "voxtral" && (modelId ?? "").trim() === "voxtral-cloud") {
+    return "Cloud";
+  }
+
   return isCloudProvider(providerType) ? "Cloud" : "Local";
 }
 

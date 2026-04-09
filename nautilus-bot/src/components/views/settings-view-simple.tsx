@@ -62,15 +62,15 @@ import {
   syncBackupToCloud,
   unlockVault,
   verifyBackupCloudConnection,
-} from "@/lib/tauri";
+} from "@/lib/backend";
 import type {
   BackupConfig,
   BackupInfo,
   CloudSetupReport,
   SecurityStatus,
   LicenseInfo,
-} from "@/lib/tauri";
-import type { PermissionDiagnostics } from "@/lib/tauri";
+} from "@/lib/backend";
+import type { PermissionDiagnostics } from "@/lib/backend";
 import {
   validateLicense,
   activateLicense,
@@ -78,12 +78,12 @@ import {
   isDiarizationModelAvailable,
   downloadDiarizationModel,
   listDiarizationModels,
-} from "@/lib/tauri";
-import type { DiarizationModelOption } from "@/lib/tauri";
+} from "@/lib/backend";
+import type { DiarizationModelOption } from "@/lib/backend";
 import type {
   AudioInputDeviceInfo,
   AudioInputDeviceInventory,
-} from "@/lib/tauri";
+} from "@/lib/backend";
 import {
   isFeatureAllowed,
   canUseFormattingAssistant,
@@ -267,27 +267,6 @@ function markSettingsPerf(markName: string) {
   console.debug(`[perf] ${markName}`);
 }
 
-function AdvancedToggle({
-  checked,
-  onCheckedChange,
-}: {
-  checked: boolean;
-  onCheckedChange: (checked: boolean) => void;
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <Label className="text-xs text-muted-foreground font-normal cursor-pointer">
-        Power user details
-      </Label>
-      <Switch
-        checked={checked}
-        onCheckedChange={onCheckedChange}
-        className="scale-75 data-[state=checked]:bg-amber-600"
-      />
-    </div>
-  );
-}
-
 function deviceTransportLabel(device: AudioInputDeviceInfo) {
   switch (device.transportType) {
     case "builtin":
@@ -326,6 +305,74 @@ function resolveDictationHotkeyBehavior(
   return settings?.transcription.dictationPushToTalk
     ? "hold_to_talk"
     : "toggle";
+}
+
+type ReadinessChipState = {
+  label: string;
+  status: string;
+  tone: boolean | "neutral";
+};
+
+function resolveDictationReadinessChip(
+  settings: Settings | null,
+  permissionDiagnostics: PermissionDiagnostics | null,
+): ReadinessChipState {
+  if (!permissionDiagnostics) {
+    return {
+      label: "Dictation",
+      status: "Checking",
+      tone: "neutral",
+    };
+  }
+
+  const microphoneReady =
+    permissionDiagnostics.microphonePermissionReady ??
+    permissionDiagnostics.microphoneReady ??
+    false;
+  const useSharedSelection =
+    settings?.transcription.useSharedAsrSelection ?? true;
+  const dictationProvider = useSharedSelection
+    ? settings?.transcription.defaultProvider
+    : settings?.transcription.dictationProvider ??
+      settings?.transcription.defaultProvider;
+  const usesAppleSpeech = dictationProvider === "macos_apple_speech";
+  const insertionMode = settings?.transcription.dictationInsertionMode ?? "auto";
+  const cursorInsertionReady =
+    insertionMode === "clipboard_only"
+      ? true
+      : permissionDiagnostics.cursorInsertionReady ??
+        permissionDiagnostics.accessibilityReady ??
+        true;
+
+  if (!microphoneReady) {
+    return {
+      label: "Mic",
+      status: "Needs setup",
+      tone: false,
+    };
+  }
+
+  if (usesAppleSpeech && !permissionDiagnostics.speechRecognitionReady) {
+    return {
+      label: "Speech",
+      status: "Needs setup",
+      tone: false,
+    };
+  }
+
+  if (!cursorInsertionReady) {
+    return {
+      label: "Insert",
+      status: "Needs setup",
+      tone: false,
+    };
+  }
+
+  return {
+    label: "Dictation",
+    status: "Ready",
+    tone: true,
+  };
 }
 
 export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
@@ -396,15 +443,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const [licenseError, setLicenseError] = useState<string | null>(null);
   const [capturingShortcut, setCapturingShortcut] =
     useState<ShortcutFieldKey | null>(null);
-  const [advancedTabs, setAdvancedTabs] = useState<Record<TabId, boolean>>({
-    asr: true,
-    general: true,
-    security: true,
-    storage: true,
-    ai: true,
-    updates: true,
-    license: true,
-  });
   const mountedRef = useRef(true);
   const saveSchedulerRef = useRef<SettingsSaveScheduler>({
     nextVersion: 0,
@@ -428,6 +466,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     permissionDiagnostics?.microphonePermissionReady ??
     permissionDiagnostics?.microphoneReady ??
     false;
+  const dictationReadinessChip = useMemo(
+    () => resolveDictationReadinessChip(settings, permissionDiagnostics),
+    [settings, permissionDiagnostics],
+  );
   const dictationShortcutBehavior = resolveDictationHotkeyBehavior(settings);
   const dictationShortcutBehaviorHint = settings?.transcription
     .dictationHandsFreeEnabled
@@ -684,6 +726,33 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   }, [activeTab]);
 
   useEffect(() => {
+    if (permissionDiagnostics) {
+      return;
+    }
+
+    let mounted = true;
+    const loadPermissionDiagnostics = async () => {
+      try {
+        const permissions = await getPermissionDiagnostics();
+        if (mounted) {
+          setPermissionDiagnostics(permissions);
+        }
+      } catch (e) {
+        if (mounted) {
+          setError(
+            e instanceof Error ? e.message : "Failed to load permission status",
+          );
+        }
+      }
+    };
+
+    void loadPermissionDiagnostics();
+    return () => {
+      mounted = false;
+    };
+  }, [permissionDiagnostics]);
+
+  useEffect(() => {
     if (activeTab !== "security" || hasLoadedSecurityTab) {
       return;
     }
@@ -692,12 +761,8 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     markSettingsPerf("settings-security-load-start");
     const loadSecurity = async () => {
       try {
-        const [permissions, security] = await Promise.all([
-          getPermissionDiagnostics(),
-          getSecurityStatus(),
-        ]);
+        const security = await getSecurityStatus();
         if (mounted) {
-          setPermissionDiagnostics(permissions);
           setSecurityStatus(security);
           setHasLoadedSecurityTab(true);
           markSettingsPerf("settings-security-load-complete");
@@ -1052,8 +1117,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       : "Synced";
   const activeTabConfig =
     SETTINGS_TABS.find((tab) => tab.id === activeTab) ?? SETTINGS_TABS[0];
-  const readyChipTone = (ready: boolean) =>
-    ready
+  const readyChipTone = (state: boolean | "neutral") =>
+    state === "neutral"
+      ? "border-border bg-muted/30 text-muted-foreground"
+      : state
       ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
       : "border-amber-400/30 bg-amber-400/10 text-amber-100";
 
@@ -2012,7 +2079,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         setApiKey("");
                         setHasApiKey(true);
                       } catch (e) {
-                        console.error("Failed to save key on refresh", e);
+                        toast(
+                          `Failed to save key: ${e instanceof Error ? e.message : 'Unknown error'}`,
+                          'error',
+                        );
                       } finally {
                         setSavingApiKey(false);
                       }
@@ -2331,7 +2401,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       void (async () => {
                         try {
                           const { reindexEmbeddings } =
-                            await import("@/lib/tauri");
+                            await import("@/lib/backend");
                           const result = await reindexEmbeddings();
                           toast(
                             `Indexed ${result.segments} segments from ${result.recordings} recordings${result.errors > 0 ? ` (${result.errors} errors)` : ""}`,
@@ -2415,11 +2485,13 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 <div className="space-y-4 px-4 py-4 sm:px-5 sm:py-5">
                   <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4 lg:grid-cols-2">
                     <div
-                      className={`rounded-2xl border p-3 ${readyChipTone(microphonePermissionReady)}`}
+                      className={`rounded-2xl border p-3 ${readyChipTone(dictationReadinessChip.tone)}`}
                     >
-                      <p className="text-current/70">Mic</p>
+                      <p className="text-current/70">
+                        {dictationReadinessChip.label}
+                      </p>
                       <p className="mt-1 font-medium">
-                        {microphonePermissionReady ? "Ready" : "Needs setup"}
+                        {dictationReadinessChip.status}
                       </p>
                     </div>
                     <div
@@ -2502,13 +2574,13 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       </div>
                       <div className="grid grid-cols-2 gap-2 text-xs lg:w-[280px]">
                         <div
-                          className={`rounded-2xl border p-3 ${readyChipTone(microphonePermissionReady)}`}
+                          className={`rounded-2xl border p-3 ${readyChipTone(dictationReadinessChip.tone)}`}
                         >
-                          <p className="text-current/70">Mic</p>
+                          <p className="text-current/70">
+                            {dictationReadinessChip.label}
+                          </p>
                           <p className="mt-1 font-medium">
-                            {microphonePermissionReady
-                              ? "Ready"
-                              : "Needs setup"}
+                            {dictationReadinessChip.status}
                           </p>
                         </div>
                         <div
@@ -2631,25 +2703,15 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 <div className="space-y-6 px-4 py-5 sm:px-6 sm:py-6">
                   {activeTab === "asr" && (
                     <div className="space-y-5">
-                      <div className="flex flex-col gap-3 border-b border-border/60 pb-4 sm:flex-row sm:items-start sm:justify-between">
-                        <div className="space-y-1">
-                          <h3 className="text-lg font-semibold text-foreground">
-                            Transcription
-                          </h3>
-                          <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
-                            Choose how Nautilus transcribes dictation and
-                            meetings, then tune language, audio, and speaker
-                            labeling.
-                          </p>
-                        </div>
-                        <div className="self-start">
-                          <AdvancedToggle
-                            checked={advancedTabs.asr}
-                            onCheckedChange={(c) =>
-                              setAdvancedTabs((prev) => ({ ...prev, asr: c }))
-                            }
-                          />
-                        </div>
+                      <div className="border-b border-border/60 pb-4">
+                        <h3 className="text-lg font-semibold text-foreground">
+                          Transcription
+                        </h3>
+                        <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
+                          Choose how Nautilus transcribes dictation and
+                          meetings, then tune language, audio, and speaker
+                          labeling.
+                        </p>
                       </div>
                       <div className="space-y-5">
                         <div className="space-y-3">
@@ -3246,17 +3308,15 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           </div>
                         </div>
 
-                        {advancedTabs.asr && (
-                          <div className="space-y-5 border-t pt-4">
-                            <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
-                              Power user
-                            </h3>
-                            {renderSharedDictationControls({
-                              includeMeetingAutoName: true,
-                              includeAudioTuning: true,
-                            })}
-                          </div>
-                        )}
+                        <div className="space-y-5 border-t pt-4">
+                          <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                            Power user
+                          </h3>
+                          {renderSharedDictationControls({
+                            includeMeetingAutoName: true,
+                            includeAudioTuning: true,
+                          })}
+                        </div>
                       </div>
                     </div>
                   )}
@@ -3264,18 +3324,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   {activeTab === "general" && (
                     <Card>
                       <CardHeader>
-                        <div className="flex items-center justify-between">
-                          <CardTitle>General</CardTitle>
-                          <AdvancedToggle
-                            checked={advancedTabs.general}
-                            onCheckedChange={(c) =>
-                              setAdvancedTabs((prev) => ({
-                                ...prev,
-                                general: c,
-                              }))
-                            }
-                          />
-                        </div>
+                        <CardTitle>General</CardTitle>
                         <CardDescription>
                           Appearance, shortcuts, overlays, and everyday app
                           behavior
@@ -3467,36 +3516,34 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           </div>
                         </div>
 
-                        {advancedTabs.general && (
-                          <div className="pt-4 border-t space-y-5">
-                            <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
-                              Power user
-                            </h3>
-                            <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
-                              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                                <div>
-                                  <p className="text-sm font-medium text-foreground">
-                                    Dictation defaults live in Transcription
-                                  </p>
-                                  <p className="text-sm text-muted-foreground">
-                                    Keep the recording shell clean here and
-                                    manage Smart Format, prompts, routing, and
-                                    audio behavior from the dedicated
-                                    Transcription workspace.
-                                  </p>
-                                </div>
-                                <Button
-                                  variant="secondary"
-                                  onClick={() => setActiveTab("asr")}
-                                >
-                                  Open Transcription
-                                </Button>
+                        <div className="pt-4 border-t space-y-5">
+                          <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                            Power user
+                          </h3>
+                          <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
+                            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                              <div>
+                                <p className="text-sm font-medium text-foreground">
+                                  Dictation defaults live in Transcription
+                                </p>
+                                <p className="text-sm text-muted-foreground">
+                                  Keep the recording shell clean here and
+                                  manage Smart Format, prompts, routing, and
+                                  audio behavior from the dedicated
+                                  Transcription workspace.
+                                </p>
                               </div>
+                              <Button
+                                variant="secondary"
+                                onClick={() => setActiveTab("asr")}
+                              >
+                                Open Transcription
+                              </Button>
                             </div>
-
-                            {renderShortcutsSection()}
                           </div>
-                        )}
+
+                          {renderShortcutsSection()}
+                        </div>
                       </CardContent>
                     </Card>
                   )}
@@ -3504,18 +3551,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   {activeTab === "security" && (
                     <Card>
                       <CardHeader>
-                        <div className="flex items-center justify-between">
-                          <CardTitle>Privacy & Security</CardTitle>
-                          <AdvancedToggle
-                            checked={advancedTabs.security}
-                            onCheckedChange={(c) =>
-                              setAdvancedTabs((prev) => ({
-                                ...prev,
-                                security: c,
-                              }))
-                            }
-                          />
-                        </div>
+                        <CardTitle>Privacy & Security</CardTitle>
                         <CardDescription>
                           Local-first defaults with explicit remote opt-in
                         </CardDescription>
@@ -3569,11 +3605,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           />
                         </div>
 
-                        {advancedTabs.security && (
-                          <div className="pt-4 border-t space-y-5">
-                            <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
-                              Power user
-                            </h3>
+                        <div className="pt-4 border-t space-y-5">
+                          <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                            Power user
+                          </h3>
                             {renderSharedDictationControls({
                               includeCoreControls: false,
                               includePermissions: true,
@@ -3691,7 +3726,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                               includeCloudSync: true,
                             })}
                           </div>
-                        )}
                       </CardContent>
                     </Card>
                   )}
@@ -3699,18 +3733,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   {activeTab === "storage" && (
                     <Card>
                       <CardHeader>
-                        <div className="flex items-center justify-between">
-                          <CardTitle>Storage</CardTitle>
-                          <AdvancedToggle
-                            checked={advancedTabs.storage}
-                            onCheckedChange={(c) =>
-                              setAdvancedTabs((prev) => ({
-                                ...prev,
-                                storage: c,
-                              }))
-                            }
-                          />
-                        </div>
+                        <CardTitle>Storage</CardTitle>
                         <CardDescription>
                           Retention, backups, export paths, and cleanup tools
                         </CardDescription>
@@ -4177,7 +4200,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           </DialogContent>
                         </Dialog>
 
-                        {advancedTabs.storage && backupConfig && (
+                        {backupConfig && (
                           <div className="pt-4 border-t space-y-5">
                             <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
                               Power user
@@ -4728,15 +4751,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   {activeTab === "ai" && (
                     <Card>
                       <CardHeader>
-                        <div className="flex items-center justify-between">
-                          <CardTitle>AI & Keys</CardTitle>
-                          <AdvancedToggle
-                            checked={advancedTabs.ai}
-                            onCheckedChange={(c) =>
-                              setAdvancedTabs((prev) => ({ ...prev, ai: c }))
-                            }
-                          />
-                        </div>
+                        <CardTitle>AI & Keys</CardTitle>
                         <CardDescription>
                           Choose the default analysis provider, model, and API
                           credentials
@@ -5061,11 +5076,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           </div>
                         )}
 
-                        {advancedTabs.ai && (
-                          <div className="pt-4 border-t space-y-5">
-                            <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
-                              Power user
-                            </h3>
+                        <div className="pt-4 border-t space-y-5">
+                          <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                            Power user
+                          </h3>
                             <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
                               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                                 <div>
@@ -5095,7 +5109,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                               includeMemory: true,
                             })}
                           </div>
-                        )}
                       </CardContent>
                     </Card>
                   )}
@@ -5253,7 +5266,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                 <Input
                                   placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                                   value={licenseKeyInput}
-                                  onChange={(e: any) => {
+                                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
                                     setLicenseError(null);
                                     setLicenseKeyInput(e.target.value);
                                   }}
@@ -5362,7 +5375,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                 <Input
                                   placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                                   value={licenseKeyInput}
-                                  onChange={(e: any) => {
+                                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
                                     setLicenseError(null);
                                     setLicenseKeyInput(e.target.value);
                                   }}

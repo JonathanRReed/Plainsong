@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
   Mic,
   AudioWaveform,
-  FileOutput,
   FileText,
+  FileOutput,
   Settings,
   Folder,
   PanelLeftClose,
@@ -14,9 +14,11 @@ import {
   Clock,
   KeyRound,
   Sparkles,
+  MoreHorizontal,
+  ChevronRight,
 } from "lucide-react";
 import type { ViewId } from "@/App";
-import { getSettings, type LicenseInfo } from "@/lib/tauri";
+import { getSettings, type LicenseInfo } from "@/lib/backend";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
@@ -34,16 +36,19 @@ interface SidebarProps {
 }
 
 const primaryNavItems = [
-  { id: "dashboard", label: "Home", icon: FileText },
-  { id: "dictation", label: "Dictation", icon: Mic },
-  { id: "recordings", label: "Meetings", icon: AudioWaveform },
-  { id: "projects", label: "Projects", icon: Folder },
+  { id: "dashboard", label: "Home", icon: FileText, shortcut: "⌘+H" },
+  { id: "dictation", label: "Dictation", icon: Mic, shortcut: "⌘+D" },
+  { id: "recordings", label: "Meetings", icon: AudioWaveform, shortcut: "⌘+M" },
 ];
 
-const utilityNavItems = [
+const secondaryNavItems = [
+  { id: "projects", label: "Projects", icon: Folder, shortcut: "⌘+P" },
+  { id: "settings", label: "Settings", icon: Settings, shortcut: "⌘+," },
+];
+
+const moreNavItems = [
   { id: "setup", label: "Setup", icon: Sparkles },
   { id: "exports", label: "Exports", icon: FileOutput },
-  { id: "settings", label: "Settings", icon: Settings },
 ];
 
 interface LocalModeStatus {
@@ -92,7 +97,7 @@ function LicenseBadge({
 }: {
   license: LicenseInfo | null | undefined;
   isCollapsed: boolean;
-  onActivateClick?(): void;
+  onActivateClick?: () => void;
 }) {
   if (!license) return null;
 
@@ -156,6 +161,7 @@ function LicenseBadge({
           <button
             type="button"
             onClick={onActivateClick}
+            aria-label="Activate license"
             className={cn(
               "flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400 hover:underline cursor-pointer",
               isCollapsed && "justify-center"
@@ -173,6 +179,8 @@ function LicenseBadge({
   return null;
 }
 
+const MemoizedLicenseBadge = React.memo(LicenseBadge);
+
 export function Sidebar({
   activeView,
   onViewChange,
@@ -183,6 +191,8 @@ export function Sidebar({
 }: SidebarProps) {
   const { isRecording, formattedDuration, recordingMode } = useRecording();
   const [localModeStatus, setLocalModeStatus] = useState<LocalModeStatus>(DEFAULT_LOCAL_MODE_STATUS);
+  const isMoreView = moreNavItems.some((item) => item.id === activeView);
+  const [showMoreItems, setShowMoreItems] = useState(isMoreView);
 
   useEffect(() => {
     let mounted = true;
@@ -217,18 +227,32 @@ export function Sidebar({
     };
   }, []);
 
+  useEffect(() => {
+    if (isMoreView) {
+      setShowMoreItems(true);
+    }
+  }, [isMoreView]);
+
   return (
     <TooltipProvider>
       <div
         className={cn(
           "flex flex-col h-full border-r bg-background transition-all duration-300",
-          isCollapsed ? "w-16" : "w-64"
+          isCollapsed ? "w-16" : "w-72"
         )}
       >
-        <div className="p-4 flex items-center justify-between">
-          <div className={cn(isCollapsed && "hidden")}>
+        <div
+          className={cn(
+            "flex items-start justify-between gap-3 px-5 pb-5 pt-14",
+            !isCollapsed && "pl-12",
+            isCollapsed && "items-center px-3 pb-3 pt-10"
+          )}
+        >
+          <div className={cn("min-w-0", isCollapsed && "hidden")}>
             <h1 className="font-semibold text-lg tracking-tight">Nautilus</h1>
-            <p className="mt-0.5 text-[11px] font-medium tracking-wide text-muted-foreground/70">Voice workspace</p>
+            <p className="mt-1 text-[11px] font-medium tracking-[0.14em] text-muted-foreground">
+              Voice workspace
+            </p>
           </div>
           {onToggleCollapse && (
             <Button
@@ -249,9 +273,15 @@ export function Sidebar({
 
         <Separator />
 
-        <ScrollArea className="flex-1 px-2 py-4">
-          <nav className="space-y-4">
-            <div className="space-y-1">
+        <ScrollArea className="flex-1 px-3 py-5">
+          <nav className="flex flex-col gap-6">
+            {/* Primary Navigation */}
+            <div className="flex flex-col gap-1">
+              {!isCollapsed && (
+                <p className="mb-2 px-3 text-[10px] font-medium uppercase tracking-[0.2em] text-muted-foreground">
+                  Primary
+                </p>
+              )}
               {primaryNavItems.map((item) => {
                 const Icon = item.icon;
                 const isActive = activeView === item.id;
@@ -259,74 +289,141 @@ export function Sidebar({
                   <Tooltip key={item.id} delayDuration={0}>
                     <TooltipTrigger asChild>
                       <Button
-                        variant={isActive ? "secondary" : "ghost"}
+                        variant="ghost"
                         className={cn(
-                          "w-full justify-start border border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-                          isActive && "border-border bg-muted text-foreground shadow-none",
-                          isCollapsed && "justify-center px-2"
+                          "h-10 w-full justify-start rounded-xl border-l-2 border-transparent px-3.5 text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-all duration-200",
+                          isActive && "border-l-primary bg-primary/8 text-foreground font-medium shadow-sm",
+                          isCollapsed && "justify-center px-2 border-l-0"
                         )}
                         onClick={() => onViewChange(item.id as ViewId)}
                       >
                         <Icon className="h-4 w-4 shrink-0" />
-                        {!isCollapsed && <span className="ml-3">{item.label}</span>}
+                        {!isCollapsed && (
+                          <>
+                            <span className="ml-3 min-w-0 flex-1 text-left">{item.label}</span>
+                            <span className="text-[10px] text-muted-foreground/70">{item.shortcut}</span>
+                          </>
+                        )}
                       </Button>
                     </TooltipTrigger>
                     {isCollapsed && (
-                      <TooltipContent side="right">{item.label}</TooltipContent>
+                      <TooltipContent side="right">
+                        <div className="flex items-center gap-2">
+                          <span>{item.label}</span>
+                          <span className="text-muted-foreground">{item.shortcut}</span>
+                        </div>
+                      </TooltipContent>
                     )}
                   </Tooltip>
                 );
               })}
             </div>
-            <div className="space-y-1">
+
+            {/* Secondary Navigation */}
+            <div className="flex flex-col gap-1">
               {!isCollapsed && (
-                <p className="px-3 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-                  Utilities
+                <p className="mb-2 px-3 text-[10px] font-medium uppercase tracking-[0.2em] text-muted-foreground">
+                  Secondary
                 </p>
               )}
-              {utilityNavItems.map((item) => {
+              {secondaryNavItems.map((item) => {
                 const Icon = item.icon;
                 const isActive = activeView === item.id;
                 return (
                   <Tooltip key={item.id} delayDuration={0}>
                     <TooltipTrigger asChild>
                       <Button
-                        variant={isActive ? "secondary" : "ghost"}
+                        variant="ghost"
                         className={cn(
-                          "w-full justify-start border border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-                          isActive && "border-border bg-muted text-foreground shadow-none",
-                          isCollapsed && "justify-center px-2"
+                          "h-10 w-full justify-start rounded-xl border-l-2 border-transparent px-3.5 text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-all duration-200",
+                          isActive && "border-l-primary bg-primary/8 text-foreground font-medium shadow-sm",
+                          isCollapsed && "justify-center px-2 border-l-0"
                         )}
                         onClick={() => onViewChange(item.id as ViewId)}
                       >
                         <Icon className="h-4 w-4 shrink-0" />
-                        {!isCollapsed && <span className="ml-3">{item.label}</span>}
+                        {!isCollapsed && (
+                          <>
+                            <span className="ml-3 min-w-0 flex-1 text-left">{item.label}</span>
+                            <span className="text-[10px] text-muted-foreground/70">{item.shortcut}</span>
+                          </>
+                        )}
                       </Button>
                     </TooltipTrigger>
                     {isCollapsed && (
-                      <TooltipContent side="right">{item.label}</TooltipContent>
+                      <TooltipContent side="right">
+                        <div className="flex items-center gap-2">
+                          <span>{item.label}</span>
+                          <span className="text-muted-foreground">{item.shortcut}</span>
+                        </div>
+                      </TooltipContent>
                     )}
                   </Tooltip>
                 );
               })}
             </div>
+
+            {/* More Menu */}
+            {!isCollapsed && (
+              <div className="flex flex-col gap-1 pt-2">
+                <Button
+                  variant="ghost"
+                  className="h-10 w-full justify-start rounded-xl px-3.5 text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-all duration-200"
+                  onClick={() => setShowMoreItems((value) => !value)}
+                  aria-expanded={showMoreItems}
+                  aria-controls="sidebar-more-items"
+                >
+                  <MoreHorizontal className="h-4 w-4 shrink-0" />
+                  <span className="ml-3">More</span>
+                  <ChevronRight
+                    className={cn(
+                      "ml-auto h-3 w-3 opacity-50 transition-transform duration-200",
+                      showMoreItems && "rotate-90"
+                    )}
+                  />
+                </Button>
+                <div
+                  id="sidebar-more-items"
+                  className={cn("ml-2 flex flex-col gap-1", !showMoreItems && "hidden")}
+                >
+                  {moreNavItems.map((item) => {
+                    const Icon = item.icon;
+                    const isActive = activeView === item.id;
+                    return (
+                      <Button
+                        key={item.id}
+                        variant="ghost"
+                        className={cn(
+                          "h-10 w-full justify-start rounded-xl border-l-2 border-transparent px-3.5 text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-all duration-200",
+                          isActive && "border-l-primary bg-primary/8 text-foreground font-medium shadow-sm"
+                        )}
+                        onClick={() => onViewChange(item.id as ViewId)}
+                      >
+                        <Icon className="h-4 w-4 shrink-0" />
+                        <span className="ml-3 min-w-0 flex-1 text-left">{item.label}</span>
+                      </Button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </nav>
         </ScrollArea>
 
         <Separator />
 
-        <div className="p-4 space-y-3">
+        <div className="flex flex-col gap-3 p-4">
           {isRecording && (
             <div
               className={cn(
-                "flex items-center gap-2 rounded-md border border-border bg-muted/60 px-2 py-1 text-xs",
+                "flex items-center gap-2 rounded-md border border-border bg-muted/60 px-2 py-1 text-xs transition-all duration-200",
                 isCollapsed && "justify-center"
               )}
             >
               <div className="relative h-2 w-2">
-              <div className="absolute inset-0 rounded-full bg-red-500 animate-ping opacity-40" />
-              <div className="relative h-2 w-2 rounded-full bg-red-500" />
-            </div>
+                <div className="absolute inset-0 rounded-full bg-red-500 animate-ping opacity-40" />
+                <div className="relative h-2 w-2 rounded-full bg-red-500" />
+              </div>
               {!isCollapsed && (
                 <span className="font-medium text-foreground">
                   {recordingMode === "meeting" ? "Meeting" : "Dictation"} {formattedDuration}
@@ -335,8 +432,8 @@ export function Sidebar({
             </div>
           )}
 
-          <LicenseBadge
-            license={license}
+          <MemoizedLicenseBadge
+            license={license ?? undefined}
             isCollapsed={isCollapsed}
             onActivateClick={onActivateClick}
           />
@@ -350,14 +447,14 @@ export function Sidebar({
             <TooltipTrigger asChild>
               <div
                 className={cn(
-                  "flex items-center gap-2 text-xs text-muted-foreground",
+                  "flex items-center gap-2 text-xs text-muted-foreground cursor-help",
                   isCollapsed && "justify-center"
                 )}
               >
                 <div
                   className={cn(
-                    "h-2 w-2 rounded-full",
-                    localModeStatus.active ? "bg-green-500" : "bg-amber-500"
+                    "h-2 w-2 rounded-full transition-colors duration-200",
+                    localModeStatus.active ? "bg-success" : "bg-warning"
                   )}
                 />
                 {!isCollapsed && <span>{localModeStatus.label}</span>}

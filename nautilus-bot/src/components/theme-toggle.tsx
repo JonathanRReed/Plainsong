@@ -1,4 +1,5 @@
 import { Moon, Sun, Monitor } from "lucide-react";
+import * as React from "react";
 import { useTheme } from "@/components/theme-provider";
 import { Button } from "@/components/ui/button";
 import {
@@ -10,7 +11,7 @@ import {
 
 type Theme = "light" | "dark" | "system";
 
-export function ThemeToggle() {
+function ThemeToggleComponent() {
   const { theme, setTheme, isDark } = useTheme();
 
   const getIcon = () => {
@@ -49,3 +50,5 @@ export function ThemeToggle() {
     </DropdownMenu>
   );
 }
+
+export const ThemeToggle = React.memo(ThemeToggleComponent);

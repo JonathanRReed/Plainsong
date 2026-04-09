@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "@/lib/electron";
 import {
   getRecording,
   getMeetingTranscriptDetails,
   getRecordingWaveform,
   getSpeakers,
   getTranscript,
-} from "@/lib/tauri";
+} from "@/lib/backend";
 import { useScopedRequestGuard } from "@/hooks/use-scoped-request-guard";
 import type {
   MeetingTranscriptDetails,

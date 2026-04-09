@@ -175,7 +175,7 @@ function getMeetingVerificationResult() {
   };
 }
 
-vi.mock("@/lib/tauri", () => ({
+vi.mock("@/lib/backend", () => ({
   checkSystemAudioAvailability: vi.fn(async () => true),
   downloadWhisperModel: vi.fn(async () => {}),
   getAsrProviders: vi.fn(async () => providers),
@@ -234,8 +234,8 @@ describe("FirstRunWizard", () => {
 
   it("completes the full onboarding in dictation-only mode", async () => {
     const onComplete = vi.fn();
-    const tauri = await import("@/lib/tauri");
-    const saveSettings = vi.mocked(tauri.saveSettings);
+    const backend = await import("@/lib/backend");
+    const saveSettings = vi.mocked(backend.saveSettings);
 
     render(<FirstRunWizard onComplete={onComplete} />);
 
@@ -326,5 +326,57 @@ describe("FirstRunWizard", () => {
         meetingsCompleted: false,
       });
     });
+  });
+
+  it("opens the matching macOS permission settings from the wizard", async () => {
+    const backend = await import("@/lib/backend");
+    const getPermissionDiagnostics = vi.mocked(backend.getPermissionDiagnostics);
+    const openPermissionSettings = vi.mocked(backend.openPermissionSettings);
+
+    getPermissionDiagnostics.mockResolvedValueOnce({
+      microphoneReady: true,
+      microphonePermissionReady: true,
+      speechRecognitionReady: false,
+      accessibilityReady: true,
+      automationReady: true,
+      notes: [],
+      runningFromDiskImage: false,
+    });
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Fix Speech recognition" }));
+
+    await waitFor(() => {
+      expect(openPermissionSettings).toHaveBeenCalledWith("speech");
+    });
+    expect(screen.getByText("Opened macOS Speech Recognition settings.")).toBeInTheDocument();
+  });
+
+  it("opens the installed app when the wizard detects the DMG copy", async () => {
+    const backend = await import("@/lib/backend");
+    const getPermissionDiagnostics = vi.mocked(backend.getPermissionDiagnostics);
+    const openInstalledNautilusApp = vi.mocked(backend.openInstalledNautilusApp);
+
+    getPermissionDiagnostics.mockResolvedValueOnce({
+      microphoneReady: true,
+      microphonePermissionReady: true,
+      speechRecognitionReady: true,
+      accessibilityReady: true,
+      automationReady: true,
+      notes: [],
+      runningFromDiskImage: true,
+    });
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open installed app" }));
+
+    await waitFor(() => {
+      expect(openInstalledNautilusApp).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      screen.getByText("Opened the installed Nautilus app from /Applications.")
+    ).toBeInTheDocument();
   });
 });

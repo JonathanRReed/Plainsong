@@ -1,3 +1,5 @@
+import type { KeyboardShortcuts } from "@/types/settings";
+
 export type DictationShortcutMode = "hold_to_talk" | "toggle" | "hands_free";
 
 export function isMacPlatform(): boolean {
@@ -72,4 +74,52 @@ export function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean
 
   const eventKey = event.key.length === 1 ? event.key.toLowerCase() : event.key.toLowerCase();
   return eventKey === key;
+}
+
+// Common system shortcuts that should be avoided
+const SYSTEM_SHORTCUTS = new Set([
+  "Ctrl+C", "Cmd+C", // Copy
+  "Ctrl+V", "Cmd+V", // Paste
+  "Ctrl+X", "Cmd+X", // Cut
+  "Ctrl+Z", "Cmd+Z", // Undo
+  "Ctrl+Y", "Cmd+Y", // Redo
+  "Ctrl+A", "Cmd+A", // Select All
+  "Ctrl+S", "Cmd+S", // Save
+  "Ctrl+P", "Cmd+P", // Print
+  "Ctrl+F", "Cmd+F", // Find
+  "Ctrl+N", "Cmd+N", // New
+  "Ctrl+W", "Cmd+W", // Close
+  "Ctrl+Q", "Cmd+Q", // Quit
+  "Ctrl+T", "Cmd+T", // New Tab
+  "Ctrl+Tab", "Cmd+Tab", // Switch Tab
+  "Alt+Tab", // Switch Window
+  "Ctrl+Alt+Delete", // Task Manager
+  "Cmd+Space", // Spotlight
+  "Ctrl+Space", // Input Method
+]);
+
+export function isSystemShortcut(shortcut: string): boolean {
+  const normalized = normalizeShortcut(shortcut).replace(/\s+/g, "");
+  return SYSTEM_SHORTCUTS.has(normalized);
+}
+
+export function hasShortcutConflict(
+  shortcut: string,
+  existingShortcuts: KeyboardShortcuts,
+  excludeKey?: keyof KeyboardShortcuts,
+): { hasConflict: boolean; conflictWith?: string } {
+  const normalized = normalizeShortcut(shortcut).replace(/\s+/g, "");
+
+  // Check against existing shortcuts
+  for (const [key, value] of Object.entries(existingShortcuts)) {
+    if (key === excludeKey) continue;
+    if (!value) continue;
+
+    const existingNormalized = normalizeShortcut(value).replace(/\s+/g, "");
+    if (existingNormalized === normalized) {
+      return { hasConflict: true, conflictWith: key };
+    }
+  }
+
+  return { hasConflict: false };
 }

@@ -1,0 +1,60 @@
+appId: com.nautilus.bot
+productName: Nautilus
+copyright: Copyright © 2026 NautilusBot
+
+directories:
+  output: release
+  buildResources: build-resources
+
+files:
+  - dist/**
+  - dist-electron/**
+  - "!dist-electron/preload.js.map"
+  - node_modules/**
+
+extraResources:
+  - from: rust-sidecar/target/release/
+    to: sidecar
+    filter:
+      - nautilus-sidecar
+      - nautilus-sidecar.exe
+
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  category: public.app-category.productivity
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build-resources/entitlements.mac.plist
+  entitlementsInherit: build-resources/entitlements.mac.inherit.plist
+  icon: build-resources/icon.icns
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build-resources/icon.ico
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  category: AudioVideo
+  icon: build-resources/icon.png
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
+dmg:
+  sign: false
+
+publish:
+  provider: github
+  owner: nautilusbot
+  repo: nautilus

@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
 import {
   getProjects,
-  createProject as tauriCreateProject,
-} from "@/lib/tauri";
+  createProject as createProjectApi,
+} from "@/lib/backend";
 import { useDataCache } from "@/hooks/data-cache-context";
 import type { Project } from "@/types";
 
@@ -36,7 +36,7 @@ export function useProjects() {
       description?: string;
       parentId?: string;
     }) => {
-      const newProject = await tauriCreateProject(project);
+      const newProject = await createProjectApi(project);
       setProjects((prev) => {
         const next = [...prev, newProject];
         cache.setProjects(next);

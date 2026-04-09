@@ -2,11 +2,12 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useRecordingDetail } from "@/hooks/use-recording-detail";
 
-vi.mock("@tauri-apps/api/event", () => ({
+vi.mock("@/lib/electron", () => ({
   listen: vi.fn(async () => () => {}),
+  invoke: vi.fn(),
 }));
 
-const tauriMocks = vi.hoisted(() => ({
+const backendMocks = vi.hoisted(() => ({
   getRecording: vi.fn(async (recordingId: string) => ({
     id: recordingId,
     title: "Meeting - 2026-03-08 13:57",
@@ -43,12 +44,12 @@ const tauriMocks = vi.hoisted(() => ({
   getSpeakers: vi.fn(async () => []),
 }));
 
-vi.mock("@/lib/tauri", () => ({
-  getRecording: tauriMocks.getRecording,
-  getTranscript: tauriMocks.getTranscript,
-  getMeetingTranscriptDetails: tauriMocks.getMeetingTranscriptDetails,
-  getRecordingWaveform: tauriMocks.getRecordingWaveform,
-  getSpeakers: tauriMocks.getSpeakers,
+vi.mock("@/lib/backend", () => ({
+  getRecording: backendMocks.getRecording,
+  getTranscript: backendMocks.getTranscript,
+  getMeetingTranscriptDetails: backendMocks.getMeetingTranscriptDetails,
+  getRecordingWaveform: backendMocks.getRecordingWaveform,
+  getSpeakers: backendMocks.getSpeakers,
 }));
 
 describe("useRecordingDetail", () => {

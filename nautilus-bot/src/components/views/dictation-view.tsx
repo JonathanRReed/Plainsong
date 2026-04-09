@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { listen } from "@/lib/electron";
 import { cn } from "@/lib/utils";
 import { useRecording } from "@/hooks/use-recording";
 import { useProjects } from "@/hooks/use-projects";
@@ -42,7 +42,7 @@ import {
   getDictationInsights,
   getAsrProviders,
   captureSelectedTextForPlayback,
-} from "@/lib/tauri";
+} from "@/lib/backend";
 import {
   defaultDictationShortcut,
   dictationInstruction,
@@ -60,6 +60,7 @@ import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labe
 import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/ui/page-header";
 import {
   Card,
   CardContent,
@@ -225,6 +226,71 @@ type DictationCustomModeDraft = {
   languageOverride: string;
   livePreviewEnabled: boolean;
 };
+
+type DictationRecoveryState = {
+  tone: "warning" | "attention";
+  title: string;
+  detail: string;
+  hints: string[];
+};
+
+function describeDictationRecoveryState(
+  fallbackStatus: string | null,
+  pasteStatus: string | null,
+): DictationRecoveryState | null {
+  const fallback = fallbackStatus?.trim() ?? "";
+  const paste = pasteStatus?.trim() ?? "";
+  const combined = `${fallback} ${paste}`.toLowerCase();
+
+  if (!fallback && !paste) {
+    return null;
+  }
+
+  if (
+    combined.includes("accessibility") ||
+    combined.includes("cursor insertion") ||
+    combined.includes("clipboard")
+  ) {
+    return {
+      tone: "attention",
+      title: "Insertion needs a safer path",
+      detail:
+        paste || fallback || "Nautilus could not deliver the result into the target app cleanly.",
+      hints: [
+        "Switch to Clipboard only if the target app blocks direct insertion.",
+        "Grant Accessibility or cursor-insertion permissions if you want automatic delivery.",
+      ],
+    };
+  }
+
+  if (
+    combined.includes("provider") ||
+    combined.includes("fallback") ||
+    combined.includes("model") ||
+    combined.includes("route")
+  ) {
+    return {
+      tone: "warning",
+      title: "Transcription route fell back",
+      detail:
+        fallback || paste || "Nautilus used a different transcription route than requested.",
+      hints: [
+        "Download the requested local model or choose a route that is already ready.",
+        "Keep an eye on the provider badge below so you know what actually ran.",
+      ],
+    };
+  }
+
+  return {
+    tone: "attention",
+    title: "Dictation needs attention",
+    detail: fallback || paste,
+    hints: [
+      "Retry once after checking the current route and insertion mode.",
+      "If this keeps happening, switch to the more reliable path for this app.",
+    ],
+  };
+}
 
 type DictationModeSummaryItem = {
   label: string;
@@ -564,6 +630,13 @@ const PROFILE_LABELS = {
 
 const shortcutMode = (pushToTalk: boolean, handsFreeEnabled: boolean) =>
   handsFreeEnabled ? "hands_free" : pushToTalk ? "hold_to_talk" : "toggle";
+
+function formatTimeoutSeconds(seconds: number): string {
+  if (seconds <= 0) return "off";
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.round(seconds / 60);
+  return `${minutes}m`;
+}
 
 function normalizeDictationSilenceTimeoutSeconds(value: number): number {
   if (!Number.isFinite(value) || value <= 0) {
@@ -1661,17 +1734,10 @@ export function DictationView() {
         ),
     [recordings],
   );
-  const pasteNeedsAttention = useMemo(() => {
-    if (!pasteStatus) return false;
-    const normalized = pasteStatus.toLowerCase();
-    if (normalized.includes("pasted")) return false;
-    return (
-      normalized.includes("clipboard") ||
-      normalized.includes("accessibility") ||
-      normalized.includes("blocked") ||
-      normalized.includes("permission")
-    );
-  }, [pasteStatus]);
+  const recoveryState = useMemo(
+    () => describeDictationRecoveryState(fallbackStatus, pasteStatus),
+    [fallbackStatus, pasteStatus],
+  );
 
   const refreshDictationInsights = async () => {
     try {
@@ -3158,84 +3224,30 @@ export function DictationView() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="p-6 border-b">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-semibold">Dictation</h1>
-            <p className="text-muted-foreground">
-              Fast voice capture that inserts text where you work
-            </p>
+      <PageHeader
+        title="Dictation"
+        subtitle="Fast voice capture that inserts text where you work"
+        actions={
+          <div
+            className={cn(
+              "flex items-center gap-2 text-sm px-4 py-2 rounded-lg border transition-all",
+              hotkeyPressed
+                ? "bg-active text-active-foreground border-active scale-105"
+                : "bg-muted",
+            )}
+          >
+            <Keyboard className="h-4 w-4" />
+            <span className="font-mono font-medium">{hotkeyLabel}</span>
+            <span className="text-muted-foreground ml-2">
+              {dictationHandsFreeEnabled
+                ? "hands-free"
+                : dictationPushToTalk
+                  ? "hold to talk"
+                  : "toggle"}
+            </span>
           </div>
-          <div className="flex items-center gap-4">
-            <div
-              className={cn(
-                "flex items-center gap-2 text-sm px-4 py-2 rounded-lg border transition-all",
-                hotkeyPressed
-                  ? "bg-active text-active-foreground border-active scale-105"
-                  : "bg-muted",
-              )}
-            >
-              <Keyboard className="h-4 w-4" />
-              <span className="font-mono font-medium">{hotkeyLabel}</span>
-              <span className="text-muted-foreground ml-2">
-                {dictationHandsFreeEnabled
-                  ? "hands-free"
-                  : dictationPushToTalk
-                    ? "hold to talk"
-                    : "toggle"}
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="saveToInbox"
-                checked={saveToInbox}
-                onChange={(e) => {
-                  const next = e.target.checked;
-                  setSaveToInbox(next);
-                  const nextModePreset = syncModePreset({ saveToInbox: next });
-                  void persistDictationPreferences({
-                    saveToInbox: next,
-                    modePreset: nextModePreset,
-                  });
-                }}
-                className="h-4 w-4"
-              />
-              <label
-                htmlFor="saveToInbox"
-                className="text-sm text-muted-foreground"
-              >
-                Save to Inbox
-              </label>
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="copyToClipboard"
-                checked={dictationCopyToClipboard}
-                onChange={(e) => {
-                  const next = e.target.checked;
-                  setDictationCopyToClipboard(next);
-                  const nextModePreset = syncModePreset({
-                    copyToClipboard: next,
-                  });
-                  void persistDictationPreferences({
-                    copyToClipboard: next,
-                    modePreset: nextModePreset,
-                  });
-                }}
-                className="h-4 w-4"
-              />
-              <label
-                htmlFor="copyToClipboard"
-                className="text-sm text-muted-foreground"
-              >
-                Copy result to clipboard
-              </label>
-            </div>
-          </div>
-        </div>
-      </div>
+        }
+      />
 
       <ScrollArea className="flex-1">
         <div className="p-6 max-w-4xl mx-auto space-y-6">
@@ -4117,7 +4129,7 @@ export function DictationView() {
                           </p>
                         </div>
                         <Button
-                          variant="active"
+                          variant="default"
                           size="lg"
                           onClick={launchDictation}
                           className="mt-4"
@@ -4140,7 +4152,7 @@ export function DictationView() {
                           </p>
                         </div>
                         <Button
-                          variant="active"
+                          variant="default"
                           size="lg"
                           onClick={launchDictation}
                           className="mt-4"
@@ -4199,7 +4211,7 @@ export function DictationView() {
                           </p>
                         </div>
                         <Button
-                          variant="active"
+                          variant="default"
                           size="lg"
                           onClick={launchDictation}
                           className="mt-4"
@@ -4534,9 +4546,7 @@ export function DictationView() {
                   </p>
                   <p className="mt-1 text-sm font-medium">
                     Silence auto-stop{" "}
-                    {dictationSilenceTimeoutSeconds > 0
-                      ? `${dictationSilenceTimeoutSeconds}s`
-                      : "off"}{" "}
+                    {formatTimeoutSeconds(dictationSilenceTimeoutSeconds)}{" "}
                     · Keep warm {dictationKeepWarm}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -4763,14 +4773,26 @@ export function DictationView() {
                     </div>
                   )}
                 </div>
-                {fallbackStatus && (
-                  <div className="mt-3 rounded-md border border-amber-400/50 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-                    {fallbackStatus}
-                  </div>
-                )}
-                {pasteNeedsAttention && (
-                  <div className="mt-3 rounded-md border border-orange-400/50 bg-orange-500/10 px-3 py-2 text-xs text-orange-700 dark:text-orange-300">
-                    {pasteStatus}
+                {recoveryState && (
+                  <div
+                    className={`mt-3 rounded-md border px-3 py-3 text-xs ${
+                      recoveryState.tone === "warning"
+                        ? "border-amber-400/50 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                        : "border-orange-400/50 bg-orange-500/10 text-orange-700 dark:text-orange-300"
+                    }`}
+                  >
+                    <p className="font-medium">{recoveryState.title}</p>
+                    <p className="mt-1">{recoveryState.detail}</p>
+                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-current/90">
+                      {recoveryState.hints.map((hint) => (
+                        <span
+                          key={hint}
+                          className="rounded-full border border-current/20 px-2 py-1"
+                        >
+                          {hint}
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 )}
                 {(lastProvider ||
@@ -5429,7 +5451,10 @@ export function DictationView() {
                             </p>
                             <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
                               <span>
-                                {providerHostingLabel(provider.providerType)}
+                                {providerHostingLabel(
+                                  provider.providerType,
+                                  provider.selectedModelId,
+                                )}
                               </span>
                               <span>
                                 {providerCapabilityLabel(provider.providerType)}

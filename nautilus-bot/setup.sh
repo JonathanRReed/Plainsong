@@ -1,44 +1,40 @@
 #!/bin/bash
 
 echo "====================================="
-echo "Nautilus Bot - Setup Script"
+echo "Nautilus Bot Setup"
 echo "====================================="
 echo ""
 
 # Check prerequisites
 echo "Checking prerequisites..."
 
-if ! command -v node &> /dev/null; then
-    echo "❌ Node.js not found. Please install Node.js 18+ first."
+if ! command -v bun &> /dev/null; then
+    echo "Bun not found. Install Bun first:"
+    echo "  curl -fsSL https://bun.sh/install | bash"
     exit 1
 fi
-echo "✓ Node.js found: $(node --version)"
-
-if ! command -v npm &> /dev/null; then
-    echo "❌ npm not found. Please install npm."
-    exit 1
-fi
-echo "✓ npm found: $(npm --version)"
+echo "Bun found: $(bun --version)"
 
 if ! command -v cargo &> /dev/null; then
-    echo "❌ Rust/Cargo not found. Please install Rust first:"
+    echo "Rust/Cargo not found. Install Rust first:"
     echo "   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
     exit 1
 fi
-echo "✓ Cargo found: $(cargo --version)"
+echo "Cargo found: $(cargo --version)"
 
 echo ""
 echo "Installing dependencies..."
-npm install
+bun install
 
 if [ $? -ne 0 ]; then
-    echo "❌ Failed to install npm dependencies"
+    echo "Failed to install dependencies"
     exit 1
 fi
 
 echo ""
-echo "Setting up Tauri CLI..."
-npm install -D @tauri-apps/cli
+echo "Compiling Electron and sidecar entry points..."
+bun run electron:compile
+cargo build --manifest-path rust-sidecar/Cargo.toml --bin nautilus-sidecar
 
 echo ""
 echo "====================================="
@@ -46,8 +42,8 @@ echo "Setup complete!"
 echo "====================================="
 echo ""
 echo "To run the app in development mode:"
-echo "  npm run tauri dev"
+echo "  bun run dev"
 echo ""
 echo "To build for production:"
-echo "  npm run tauri build"
+echo "  bun run build"
 echo ""

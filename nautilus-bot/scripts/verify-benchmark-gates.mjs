@@ -30,6 +30,7 @@ const outputPath = valueFor("--out")
 const commandMin = Number(valueFor("--command-min", "0.95"));
 const snippetMin = Number(valueFor("--snippet-min", "0.99"));
 const latencyImprovementMin = Number(valueFor("--latency-improvement-min", "0.25"));
+const FLOAT_TOLERANCE = 1e-9;
 
 if (!Number.isFinite(commandMin) || !Number.isFinite(snippetMin) || !Number.isFinite(latencyImprovementMin)) {
   console.error("Invalid thresholds supplied. command/snippet/latency values must be numeric.");
@@ -56,6 +57,10 @@ function runSchemaValidation(filePath) {
     if (result.stderr.trim()) process.stderr.write(`${result.stderr}\n`);
     process.exit(result.status ?? 1);
   }
+}
+
+function passesMinimum(actual, required) {
+  return actual > required || Math.abs(actual - required) <= FLOAT_TOLERANCE;
 }
 
 assertFileExists(schemaPath, "Schema");
@@ -109,21 +114,21 @@ const latencyImprovement = (baselineP50 - candidateP50) / baselineP50;
 const checks = [
   {
     id: "cp13-command-success",
-    pass: commandSuccessRate >= commandMin,
+    pass: passesMinimum(commandSuccessRate, commandMin),
     actual: commandSuccessRate,
     required: commandMin,
     comparator: ">=",
   },
   {
     id: "cp14-snippet-success",
-    pass: snippetSuccessRate >= snippetMin,
+    pass: passesMinimum(snippetSuccessRate, snippetMin),
     actual: snippetSuccessRate,
     required: snippetMin,
     comparator: ">=",
   },
   {
     id: "cp15-latency-improvement",
-    pass: latencyImprovement >= latencyImprovementMin,
+    pass: passesMinimum(latencyImprovement, latencyImprovementMin),
     actual: latencyImprovement,
     required: latencyImprovementMin,
     comparator: ">=",

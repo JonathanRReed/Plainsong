@@ -18,7 +18,7 @@ const mockProjects = [
   },
 ];
 
-vi.mock("@/lib/tauri", () => ({
+vi.mock("@/lib/backend", () => ({
   getProjects: vi.fn(() => Promise.resolve(mockProjects)),
   createProject: vi.fn((project: { name: string }) =>
     Promise.resolve({
@@ -70,7 +70,7 @@ describe("useProjects", () => {
   });
 
   it("deduplicates in-flight fetches across hooks", async () => {
-    const { getProjects } = await import("@/lib/tauri");
+    const { getProjects } = await import("@/lib/backend");
     const mockedGetProjects = vi.mocked(getProjects);
 
     const { result } = renderHook(

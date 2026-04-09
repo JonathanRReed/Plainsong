@@ -1,5 +1,5 @@
 import { useEffect, useCallback } from "react";
-import { checkForUpdates, getUpdateStatus, type UpdateStatusInfo } from "@/lib/tauri";
+import { checkForUpdates, getUpdateStatus, type UpdateStatusInfo } from "@/lib/backend";
 
 interface UseUpdateCheckOptions {
   enabled?: boolean;

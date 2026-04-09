@@ -61,7 +61,7 @@ vi.mock("@/lib/onboarding", () => ({
   requestOnboarding: vi.fn(),
 }));
 
-vi.mock("@/lib/tauri", () => ({
+vi.mock("@/lib/backend", () => ({
   analyzeRecordings: vi.fn(),
   askMemory,
   getRelationshipMemory,
@@ -149,14 +149,14 @@ describe("DashboardView memory chat", () => {
 
     render(<DashboardView />);
 
-    const memoryInput = await screen.findByPlaceholderText("What did we decide about the Q3 budget?");
+    const memoryInput = await screen.findByPlaceholderText("Ask about your meetings...");
     fireEvent.change(memoryInput, { target: { value: "What did we decide about pricing?" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await screen.findByText("You agreed to hold pricing at the current plan for Q3.");
     expect(askMemory).toHaveBeenNthCalledWith(1, "What did we decide about pricing?");
 
-    fireEvent.change(screen.getByPlaceholderText("What did we decide about the Q3 budget?"), {
+    fireEvent.change(screen.getByPlaceholderText("Ask about your meetings..."), {
       target: { value: "What was still unresolved?" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));

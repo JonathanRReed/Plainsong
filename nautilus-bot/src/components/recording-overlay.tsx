@@ -7,7 +7,7 @@ import {
   getLoopbackDeviceName,
   getMeetingConsentAutomationStatus,
   type MeetingConsentAutomationStatus,
-} from "@/lib/tauri";
+} from "@/lib/backend";
 import { MEETING_CONSENT_NOTICE_TEXT } from "@/lib/meeting-consent";
 import { getMeetingTemplateOption, MEETING_TEMPLATES } from "@/lib/meeting-templates";
 

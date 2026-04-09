@@ -6,7 +6,7 @@ import {
   getPermissionDiagnostics,
   getSettings,
   type PermissionDiagnostics,
-} from "@/lib/tauri";
+} from "@/lib/backend";
 import {
   isMeetingEligibleProvider,
   isMeetingEligibleModel,
@@ -181,6 +181,8 @@ export function buildSnapshot(
   const dictationReady = Boolean(
     permissions?.microphoneReady && dictationRoute.ready && cursorInsertionReady
   );
+  const speechRecognitionRequiredForDictation =
+    dictationRoute.providerType === "macos_apple_speech";
   const meetingReady = Boolean(
     permissions?.microphoneReady &&
       meetingRoute.ready &&
@@ -188,6 +190,7 @@ export function buildSnapshot(
   );
   const dictationBlockers = [
     !permissions?.microphoneReady ? "Microphone permission is still required." : null,
+    speechRecognitionRequiredForDictation &&
     !(permissions?.speechRecognitionReady ?? true)
       ? "Speech Recognition permission is still required for Apple Native dictation."
       : null,

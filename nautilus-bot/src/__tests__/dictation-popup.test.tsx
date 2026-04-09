@@ -68,24 +68,15 @@ const popupMocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("@tauri-apps/api/core", () => ({
+vi.mock("@/lib/electron", () => ({
   invoke: popupMocks.invoke,
-}));
-
-vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(
     async (eventName: string, handler: (event: { payload: any }) => void) => {
       popupMocks.listeners.set(eventName, handler);
       return () => popupMocks.listeners.delete(eventName);
     },
   ),
-}));
-
-vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => popupMocks.windowHandle,
-}));
-
-vi.mock("@tauri-apps/api/dpi", () => ({
   LogicalSize: class LogicalSize {
     width: number;
     height: number;
@@ -97,7 +88,7 @@ vi.mock("@tauri-apps/api/dpi", () => ({
   },
 }));
 
-vi.mock("@/lib/tauri", () => ({
+vi.mock("@/lib/backend", () => ({
   getSettings: popupMocks.getSettings,
   getDictationAudioLevel: popupMocks.getDictationAudioLevel,
   startDictation: popupMocks.startDictation,
@@ -177,9 +168,8 @@ describe("DictationPopup", () => {
     expect(
       (await screen.findAllByText("Slack Replies")).length,
     ).toBeGreaterThan(0);
-    expect(screen.getByText(/Targeting Slack/i)).toBeInTheDocument();
-    expect(screen.getByText(/Paste at cursor/i)).toBeInTheDocument();
-    expect(screen.getByText(/Auto for slack/i)).toBeInTheDocument();
+    // New minimal UI shows app target as "Sending to X"
+    expect(screen.getByText(/Sending to Slack/i)).toBeInTheDocument();
   });
 
   it("renders the popup immediately without waiting for settings to load", async () => {
@@ -205,8 +195,10 @@ describe("DictationPopup", () => {
     expect((await screen.findAllByText("Slack & Chat")).length).toBeGreaterThan(
       0,
     );
-    expect(screen.getByText(/Targeting Codex/i)).toBeInTheDocument();
-    expect(screen.getByText(/App context/i)).toBeInTheDocument();
+    // New minimal UI shows app target in status line
+    expect(screen.getByText(/Sending to Codex/i)).toBeInTheDocument();
+    // Phase shown in header (recording = "Listening")
+    expect(screen.getByText(/Listening/i)).toBeInTheDocument();
 
     await act(async () => {
       pendingSettings.resolve({
@@ -301,8 +293,9 @@ describe("DictationPopup", () => {
       render(<DictationPopup />);
     });
 
+    // New minimal UI shows app target or context detail
     expect(
-      await screen.findByText(/Pause speaking to stop automatically\./i),
+      await screen.findByText(/Sending to Codex/i),
     ).toBeInTheDocument();
   });
 
@@ -458,7 +451,7 @@ describe("DictationPopup", () => {
     });
 
     expect(await screen.findByText("Ready")).toBeInTheDocument();
-    expect(screen.getByText("--:--")).toBeInTheDocument();
+    expect(screen.getByText("00:00")).toBeInTheDocument();
   });
 
   it("dismisses the overlay instead of only hiding the webview locally", async () => {
@@ -466,7 +459,7 @@ describe("DictationPopup", () => {
       render(<DictationPopup />);
     });
 
-    fireEvent.click(await screen.findByRole("button", { name: "Hide popup" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Hide" }));
 
     await waitFor(() => {
       expect(popupMocks.invoke).toHaveBeenCalledWith(
