@@ -2,7 +2,7 @@
 
 Status: BLOCKED
 Owner: qa-windows
-Generated: 2026-04-09T22:43:47.406Z
+Generated: 2026-04-18T22:56:38.154Z
 
 ## Current Local Observation
 - Windows release scripts and packaging configuration are present in the repo.

@@ -20,6 +20,8 @@ The launch bar is not "the code exists." The launch bar is:
 - backup and restore do not risk customer data
 - release evidence matches reality
 
+The CTO-owned proof boundary and release gate definitions live in `docs/technical-proof-boundaries.md`. When this execution plan and the proof boundary differ, the proof boundary controls launch interpretation and public-claim eligibility.
+
 ## Priority Model
 
 - `P0`: stop-ship, must close before launch

@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nautilusbot.app/schemas/ci/packaged-ux-evidence-bundle.schema.json",
+  "title": "Packaged UX Evidence Bundle",
+  "type": "object",
+  "required": ["generatedAt", "sourceBundle", "status", "summary", "productReadiness", "uxGates", "blockers", "nextActions"],
+  "properties": {
+    "generatedAt": { "type": "string", "minLength": 1 },
+    "sourceBundle": { "type": "string", "minLength": 1 },
+    "status": { "type": "string", "enum": ["PASS", "FAIL", "BLOCKED", "PENDING"] },
+    "summary": {
+      "type": "object",
+      "required": ["total", "pass", "fail", "blocked", "pending"],
+      "properties": {
+        "total": { "type": "number", "minimum": 1 },
+        "pass": { "type": "number", "minimum": 0 },
+        "fail": { "type": "number", "minimum": 0 },
+        "blocked": { "type": "number", "minimum": 0 },
+        "pending": { "type": "number", "minimum": 0 }
+      }
+    },
+    "productReadiness": {
+      "type": "object",
+      "required": ["status", "posture", "sourceDocs", "blockers", "laterReleaseBlockers", "optionalBacklog"],
+      "properties": {
+        "status": { "type": "string", "enum": ["PASS", "FAIL", "BLOCKED", "PENDING"] },
+        "posture": { "type": "string", "minLength": 1 },
+        "sourceDocs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "blockers": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "laterReleaseBlockers": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "optionalBacklog": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "uxGates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "status", "owner", "acceptance", "summary", "evidence"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["PASS", "FAIL", "BLOCKED", "PENDING"] },
+          "owner": { "type": "string", "minLength": 1 },
+          "acceptance": { "type": "string", "minLength": 1 },
+          "summary": { "type": "object" },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["area", "testCase", "status", "evidence", "owner", "platform"],
+              "properties": {
+                "area": { "type": "string", "minLength": 1 },
+                "testCase": { "type": "string", "minLength": 1 },
+                "status": { "type": "string", "enum": ["PASS", "FAIL", "BLOCKED", "PENDING"] },
+                "evidence": { "type": "string", "minLength": 1 },
+                "owner": { "type": "string", "minLength": 1 },
+                "platform": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "nextActions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}

@@ -853,6 +853,28 @@ describe("RecordingsView", () => {
     });
   });
 
+  it("explains transcript-only retention when meeting audio is not saved", async () => {
+    mocks.recordings = [
+      {
+        ...mocks.recordings[0],
+        audioPath: "",
+      },
+    ] as Recording[];
+    mocks.getRecording.mockResolvedValue(mocks.recordings[0]);
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("Meeting notes");
+
+    expect(await screen.findByText("Transcript-only")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Audio is not saved or has already been removed by retention. Transcript, notes, summary, and action items remain available until this meeting is deleted."
+      )
+    ).toBeInTheDocument();
+  });
+
   it("ignores stale meeting chat loads after switching recordings", async () => {
     mocks.recordings = [
       {

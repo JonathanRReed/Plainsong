@@ -3,6 +3,7 @@ export type DictationBaseModePreset =
   | "messages"
   | "email"
   | "notes"
+  | "translate_english"
   | "meeting_follow_up";
 
 export interface Settings {
@@ -101,6 +102,7 @@ export interface TranscriptionSettings {
     | "messages"
     | "email"
     | "notes"
+    | "translate_english"
     | "meeting_follow_up"
     | "custom";
   dictationSelectedCustomModeId?: string | null;

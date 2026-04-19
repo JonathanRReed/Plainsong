@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, type ChangeEvent } from "react";
 import { listen } from "@/lib/electron";
 import { cn } from "@/lib/utils";
 import { useRecording } from "@/hooks/use-recording";
@@ -9,6 +9,7 @@ import {
   saveSettings,
   getTranscript,
   reprocessDictationText,
+  transcribeAudioFileBytes,
   deleteRecording,
   listDictationDictionaryEntries,
   createDictationDictionaryEntry,
@@ -36,6 +37,7 @@ import {
   type DictationSnippet,
   type DictationCommandPreset,
   type DictationReprocessResult,
+  type AudioFileTranscriptionResult,
   type DictationHistoryDetails,
   type DictationInsights,
   getDictationHistoryDetails,
@@ -182,6 +184,7 @@ type DictationModePreset =
   | "messages"
   | "email"
   | "notes"
+  | "translate_english"
   | "meeting_follow_up"
   | "custom";
 type DictationBaseModePreset = Exclude<DictationModePreset, "custom">;
@@ -535,6 +538,15 @@ const SOLO_LANES: SoloLane[] = [
     emphasis: "Best for post-call writing",
   },
   {
+    id: "translate",
+    title: "Translate",
+    description:
+      "Speak in any supported capture language and receive English output.",
+    icon: Languages,
+    modeId: "translate_english",
+    emphasis: "Best for multilingual notes",
+  },
+  {
     id: "coding",
     title: "Coding",
     description:
@@ -608,6 +620,10 @@ const COMMAND_PRESET_FIELDS: Array<{
 
 const DEFAULT_DICTATION_MODE: DictationModePreset = "voice";
 const DEFAULT_BASE_MODE: DictationBaseModePreset = "voice";
+const MAX_AUDIO_FILE_TRANSCRIPTION_BYTES = 200 * 1024 * 1024;
+const AUDIO_FILE_TRANSCRIPTION_MAX_MB = Math.round(
+  MAX_AUDIO_FILE_TRANSCRIPTION_BYTES / 1024 / 1024,
+);
 
 const INSERTION_MODE_LABELS: Record<DictationInsertionMode, string> = {
   auto: "Recommended",
@@ -706,6 +722,18 @@ const DICTATION_MODE_DEFINITIONS: DictationModeDefinition[] = [
     saveToInbox: true,
     copyToClipboard: true,
     commandModeEnabled: true,
+  },
+  {
+    id: "translate_english",
+    label: "Translate to English",
+    description:
+      "Translate supported spoken languages into clean English text.",
+    profile: "power_rewrite",
+    insertionMode: "paste",
+    contextSource: "none",
+    saveToInbox: true,
+    copyToClipboard: true,
+    commandModeEnabled: false,
   },
   {
     id: "meeting_follow_up",
@@ -883,6 +911,7 @@ function coerceBaseModePreset(
     case "messages":
     case "email":
     case "notes":
+    case "translate_english":
     case "meeting_follow_up":
       return modePreset;
     default:
@@ -1097,6 +1126,41 @@ function languageTrustLabel(
   return "Auto";
 }
 
+function fileTranscriptionTransformMode(
+  modePreset: DictationModePreset,
+): Exclude<DictationModePreset, "voice" | "notes" | "custom"> | null {
+  switch (modePreset) {
+    case "messages":
+    case "email":
+    case "translate_english":
+    case "meeting_follow_up":
+      return modePreset;
+    default:
+      return null;
+  }
+}
+
+function validateAudioFileForTranscription(file: File): string | null {
+  const name = file.name.trim().toLowerCase();
+  const type = file.type.trim().toLowerCase();
+  const isWavFile =
+    name.endsWith(".wav") || type === "audio/wav" || type === "audio/x-wav";
+
+  if (!isWavFile) {
+    return "Choose a WAV audio file to transcribe.";
+  }
+
+  if (file.size <= 0) {
+    return "Choose a WAV audio file that contains audio.";
+  }
+
+  if (file.size > MAX_AUDIO_FILE_TRANSCRIPTION_BYTES) {
+    return `Choose a WAV audio file under ${AUDIO_FILE_TRANSCRIPTION_MAX_MB} MB.`;
+  }
+
+  return null;
+}
+
 export function DictationView() {
   const { formattedDuration, startDictation, stopDictation } = useRecording();
   const { projects } = useProjects();
@@ -1111,6 +1175,16 @@ export function DictationView() {
   );
   const [hotkeyShortcut, setHotkeyShortcut] = useState(defaultShortcut);
   const [transcribedText, setTranscribedText] = useState("");
+  const [fileTranscriptionResult, setFileTranscriptionResult] =
+    useState<AudioFileTranscriptionResult | null>(null);
+  const [fileTranscriptionName, setFileTranscriptionName] = useState<
+    string | null
+  >(null);
+  const [fileTranscriptionError, setFileTranscriptionError] = useState<
+    string | null
+  >(null);
+  const [fileTranscriptionBusy, setFileTranscriptionBusy] = useState(false);
+  const fileTranscriptionInputRef = useRef<HTMLInputElement | null>(null);
   const [lastProvider, setLastProvider] = useState<string | null>(null);
   const [lastModelId, setLastModelId] = useState<string | null>(null);
   const [lastRoutePreference, setLastRoutePreference] =
@@ -1396,6 +1470,8 @@ export function DictationView() {
         return "messages";
       case "meeting_follow_up":
         return "follow_up";
+      case "translate_english":
+        return "translate";
       case "email":
       case "notes":
         return "writing";
@@ -3191,6 +3267,59 @@ export function DictationView() {
     }
   };
 
+  const handleAudioFileSelected = async (
+    event: ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+
+    setFileTranscriptionError(null);
+    setFileTranscriptionResult(null);
+    setFileTranscriptionName(file.name);
+
+    const validationError = validateAudioFileForTranscription(file);
+    if (validationError) {
+      setFileTranscriptionError(validationError);
+      return;
+    }
+
+    setFileTranscriptionBusy(true);
+
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const result = await transcribeAudioFileBytes(bytes);
+      const transformMode = fileTranscriptionTransformMode(dictationModePreset);
+      const transformedResult =
+        transformMode && result.text.trim()
+          ? await reprocessDictationText(result.text, transformMode, null)
+          : null;
+      const displayResult =
+        transformedResult?.outputText.trim()
+          ? {
+              ...result,
+              text: transformedResult.outputText,
+              actualProvider: transformedResult.provider ?? result.actualProvider,
+              modelId: transformedResult.modelId ?? result.modelId,
+            }
+          : result;
+
+      setFileTranscriptionResult(displayResult);
+      setTranscribedText(displayResult.text);
+      setLastProvider(displayResult.actualProvider);
+      setLastModelId(displayResult.modelId);
+      setLatencyMs(result.processingTimeMs);
+      setFallbackStatus(result.fallbackReason ?? null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setFileTranscriptionError(message);
+    } finally {
+      setFileTranscriptionBusy(false);
+    }
+  };
+
   const handleCopyHistoryTranscript = async (recordingId: string) => {
     try {
       const transcript = await getTranscript(recordingId);
@@ -3258,6 +3387,71 @@ export function DictationView() {
               </CardContent>
             </Card>
           )}
+
+          <Card>
+            <CardHeader>
+              <CardTitle>File Transcription</CardTitle>
+              <CardDescription>
+                Drop a WAV export through the active dictation route without
+                starting a live capture.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <input
+                ref={fileTranscriptionInputRef}
+                type="file"
+                accept=".wav,audio/wav"
+                className="hidden"
+                aria-label="Audio file for transcription"
+                onChange={(event) => void handleAudioFileSelected(event)}
+              />
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <p className="text-sm font-medium">
+                    {fileTranscriptionName ?? "Choose a WAV audio file"}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Uses the active provider, model, and transform profile for
+                    files up to {AUDIO_FILE_TRANSCRIPTION_MAX_MB} MB.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => fileTranscriptionInputRef.current?.click()}
+                  disabled={fileTranscriptionBusy}
+                >
+                  <Upload className="mr-2 h-4 w-4" />
+                  {fileTranscriptionBusy ? "Transcribing..." : "Upload WAV"}
+                </Button>
+              </div>
+              {fileTranscriptionError ? (
+                <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {fileTranscriptionError}
+                </div>
+              ) : null}
+              {fileTranscriptionResult ? (
+                <div className="rounded-lg border bg-muted/30 p-3">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    <span>{fileTranscriptionResult.actualProvider}</span>
+                    <span>{fileTranscriptionResult.modelId}</span>
+                    <span>
+                      {(fileTranscriptionResult.processingTimeMs / 1000).toFixed(
+                        1,
+                      )}
+                      s
+                    </span>
+                    <span>
+                      {fileTranscriptionResult.language || "language unknown"}
+                    </span>
+                  </div>
+                  <p className="mt-2 line-clamp-3 text-sm">
+                    {fileTranscriptionResult.text}
+                  </p>
+                </div>
+              ) : null}
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader>

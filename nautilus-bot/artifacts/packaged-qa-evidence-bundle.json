@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-04-09T22:43:47.467Z",
-  "matrixPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/packaged-app-qa-matrix.md",
+  "generatedAt": "2026-04-19T00:04:39.091Z",
+  "matrixPath": "/Users/jonathan/.paperclip/instances/default/companies/c595500a-757a-40cf-bcbd-1af50ba5bdf6/audit-work/repos/NautilusBot/nautilus-bot/docs/packaged-app-qa-matrix.md",
   "summary": {
-    "total": 49,
+    "total": 53,
     "pass": 0,
     "fail": 0,
-    "blocked": 49,
+    "blocked": 53,
     "pending": 0
   },
   "rows": [
@@ -126,6 +126,20 @@
       "testCase": "Whisper transcription end-to-end",
       "status": "BLOCKED",
       "evidence": "artifacts/qa/macos/transcription-whisper-e2e.md",
+      "owner": "qa-macos"
+    },
+    {
+      "area": "Transcription",
+      "testCase": "Translate to English dictation profile end-to-end",
+      "status": "BLOCKED",
+      "evidence": "artifacts/qa/macos/transcription-translate-english.md",
+      "owner": "qa-macos"
+    },
+    {
+      "area": "Transcription",
+      "testCase": "WAV file transcription through active dictation route",
+      "status": "BLOCKED",
+      "evidence": "artifacts/qa/macos/transcription-file-wav.md",
       "owner": "qa-macos"
     },
     {
@@ -294,6 +308,20 @@
       "testCase": "Whisper transcription end-to-end",
       "status": "BLOCKED",
       "evidence": "artifacts/qa/windows/transcription-whisper-e2e.md",
+      "owner": "qa-windows"
+    },
+    {
+      "area": "Transcription",
+      "testCase": "Translate to English dictation profile end-to-end",
+      "status": "BLOCKED",
+      "evidence": "artifacts/qa/windows/transcription-translate-english.md",
+      "owner": "qa-windows"
+    },
+    {
+      "area": "Transcription",
+      "testCase": "WAV file transcription through active dictation route",
+      "status": "BLOCKED",
+      "evidence": "artifacts/qa/windows/transcription-file-wav.md",
       "owner": "qa-windows"
     },
     {

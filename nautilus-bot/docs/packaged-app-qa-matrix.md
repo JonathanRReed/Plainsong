@@ -28,6 +28,8 @@ Use this matrix to record packaged-build validation evidence before launch.
 | Retention | Meeting retention `audio_only` clears file/path but keeps transcript | BLOCKED | artifacts/qa/macos/retention-audio-only.md | qa-macos |
 | Retention | Meeting retention `audio_and_transcript` deletes full entity | BLOCKED | artifacts/qa/macos/retention-audio-and-transcript.md | qa-macos |
 | Transcription | Whisper transcription end-to-end | BLOCKED | artifacts/qa/macos/transcription-whisper-e2e.md | qa-macos |
+| Transcription | Translate to English dictation profile end-to-end | BLOCKED | artifacts/qa/macos/transcription-translate-english.md | qa-macos |
+| Transcription | WAV file transcription through active dictation route | BLOCKED | artifacts/qa/macos/transcription-file-wav.md | qa-macos |
 | AI | Local analysis (Ollama) flow | BLOCKED | artifacts/qa/macos/ai-ollama-local.md | qa-macos |
 | Backup | Create backup / restore backup | BLOCKED | artifacts/qa/macos/backup-create-restore.md | qa-macos |
 | Backup | Cloud provider setup + sync + restore (at least one provider) | BLOCKED | artifacts/qa/macos/backup-cloud-sync.md | qa-macos |
@@ -57,6 +59,8 @@ Use this matrix to record packaged-build validation evidence before launch.
 | Retention | Meeting retention `audio_only` clears file/path but keeps transcript | BLOCKED | artifacts/qa/windows/retention-audio-only.md | qa-windows |
 | Retention | Meeting retention `audio_and_transcript` deletes full entity | BLOCKED | artifacts/qa/windows/retention-audio-and-transcript.md | qa-windows |
 | Transcription | Whisper transcription end-to-end | BLOCKED | artifacts/qa/windows/transcription-whisper-e2e.md | qa-windows |
+| Transcription | Translate to English dictation profile end-to-end | BLOCKED | artifacts/qa/windows/transcription-translate-english.md | qa-windows |
+| Transcription | WAV file transcription through active dictation route | BLOCKED | artifacts/qa/windows/transcription-file-wav.md | qa-windows |
 | AI | Local/remote analysis configured paths | BLOCKED | artifacts/qa/windows/ai-analysis-paths.md | qa-windows |
 | Backup | Create backup / restore backup | BLOCKED | artifacts/qa/windows/backup-create-restore.md | qa-windows |
 | Backup | Cloud provider setup + sync + restore (at least one provider) | BLOCKED | artifacts/qa/windows/backup-cloud-sync.md | qa-windows |
@@ -72,4 +76,3 @@ Use this matrix to record packaged-build validation evidence before launch.
 - Date: ____________________
 - Overall Result: `PASS` / `FAIL`
 - Notes:
-

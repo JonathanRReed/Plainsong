@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-04-09T22:43:47.406Z",
+  "generatedAt": "2026-04-18T22:56:38.154Z",
   "strictReady": false,
   "blockers": [
     {
@@ -30,7 +30,7 @@
       "gate": "packaged-qa-matrix",
       "status": "BLOCKED",
       "evidence": "artifacts/packaged-qa-evidence-bundle.json",
-      "reason": "Packaged QA matrix remains 49 BLOCKED / 0 PASS."
+      "reason": "Packaged QA matrix remains 53 BLOCKED / 0 PASS."
     }
   ],
   "observations": {
@@ -38,10 +38,10 @@
     "localBenchmarkGatesPass": true,
     "packagedBenchmarkEvidenceReady": false,
     "qaSummary": {
-      "total": 49,
+      "total": 53,
       "pass": 0,
       "fail": 0,
-      "blocked": 49,
+      "blocked": 53,
       "pending": 0
     },
     "codesignVerified": true,

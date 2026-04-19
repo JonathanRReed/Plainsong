@@ -1,7 +1,7 @@
 # Packaged Dictation Benchmark Evidence (Blocked)
 
 Status: BLOCKED
-Generated: 2026-04-09T22:43:47.406Z
+Generated: 2026-04-18T22:56:38.154Z
 
 ## Current Local Observation
 - `docs/evals/benchmark-run-baseline.json` exists, but it is still tagged as a local baseline artifact.
