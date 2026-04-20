@@ -45,11 +45,14 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Lint
-        run: bun run lint
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Rust format
+        run: cargo fmt --manifest-path rust-sidecar/Cargo.toml --check
+
+      - name: Rust clippy
+        run: cargo clippy --locked --manifest-path rust-sidecar/Cargo.toml --all-targets --no-default-features --features asr-all,sqlcipher -- -D warnings
 
       - name: Test
         run: bun run test
-
-      - name: Rust check
-        run: cargo check --locked --manifest-path rust-sidecar/Cargo.toml --all-targets
