@@ -51,9 +51,14 @@ fn get_or_create_session(
     let session = Session::builder()
         .context("Failed to create ONNX session builder")?
         .with_optimization_level(GraphOptimizationLevel::Level3)
-        .context("Failed to set opt level")?
+        .map_err(|error| anyhow::anyhow!("Failed to set opt level: {}", error))?
         .commit_from_file(onnx_path)
-        .context("Failed to load Parakeet ONNX — ensure encoder.onnx is a valid NeMo CTC export")?;
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "Failed to load Parakeet ONNX, ensure encoder.onnx is a valid NeMo CTC export: {}",
+                error
+            )
+        })?;
 
     *cache = Some(session);
 

@@ -153,14 +153,15 @@ fn load_embedding_session(model_path: &Path) -> Result<Session> {
     let session = Session::builder()
         .context("Failed to create ONNX session builder")?
         .with_optimization_level(GraphOptimizationLevel::Level3)
-        .context("Failed to configure ONNX optimization level")?
+        .map_err(|error| anyhow!("Failed to configure ONNX optimization level: {}", error))?
         .with_intra_threads(1)
-        .context("Failed to configure ONNX intra-op threads")?
+        .map_err(|error| anyhow!("Failed to configure ONNX intra-op threads: {}", error))?
         .commit_from_file(model_path)
-        .with_context(|| {
-            format!(
-                "Failed to load diarization model from {}",
-                model_path.display()
+        .map_err(|error| {
+            anyhow!(
+                "Failed to load diarization model from {}: {}",
+                model_path.display(),
+                error
             )
         })?;
 
