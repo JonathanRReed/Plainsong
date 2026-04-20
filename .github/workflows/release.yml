@@ -32,9 +32,9 @@ jobs:
       channel: ${{ steps.version.outputs.channel }}
       is_beta: ${{ steps.version.outputs.is_beta }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -103,7 +103,7 @@ jobs:
 
       - name: Upload cloud smoke artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cloud-asr-smoke
           path: artifacts/cloud-asr-smoke.json
@@ -112,9 +112,9 @@ jobs:
     needs: prepare
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -145,7 +145,7 @@ jobs:
 
       - name: Upload preflight artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: asr-preflight-macos
           path: artifacts/asr-preflight-macos.json
@@ -154,9 +154,9 @@ jobs:
     needs: prepare
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -189,7 +189,7 @@ jobs:
 
       - name: Upload preflight artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: asr-preflight-windows
           path: artifacts/asr-preflight-windows.json
@@ -200,9 +200,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -392,7 +392,7 @@ jobs:
 
       - name: Upload macOS artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-artifacts
           path: |
@@ -414,9 +414,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -567,7 +567,7 @@ jobs:
 
       - name: Upload Windows artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-artifacts
           path: |
@@ -590,9 +590,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -648,7 +648,7 @@ jobs:
           releaseDraft: false
           prerelease: ${{ needs.prepare.outputs.is_beta == 'true' }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-artifacts
           path: |
@@ -659,23 +659,23 @@ jobs:
     needs: [prepare, build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: macos-artifacts
           path: artifacts/macos
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: windows-artifacts
           path: artifacts/windows
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: linux-artifacts
@@ -703,7 +703,7 @@ jobs:
               --github-url "$GH_BASE"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: update-manifests
           path: manifests/
