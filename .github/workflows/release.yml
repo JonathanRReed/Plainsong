@@ -103,7 +103,7 @@ jobs:
 
       - name: Upload cloud smoke artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cloud-asr-smoke
           path: artifacts/cloud-asr-smoke.json
@@ -145,7 +145,7 @@ jobs:
 
       - name: Upload preflight artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: asr-preflight-macos
           path: artifacts/asr-preflight-macos.json
@@ -189,7 +189,7 @@ jobs:
 
       - name: Upload preflight artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: asr-preflight-windows
           path: artifacts/asr-preflight-windows.json
@@ -392,7 +392,7 @@ jobs:
 
       - name: Upload macOS artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-artifacts
           path: |
@@ -567,7 +567,7 @@ jobs:
 
       - name: Upload Windows artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-artifacts
           path: |
@@ -648,7 +648,7 @@ jobs:
           releaseDraft: false
           prerelease: ${{ needs.prepare.outputs.is_beta == 'true' }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-artifacts
           path: |
@@ -703,7 +703,7 @@ jobs:
               --github-url "$GH_BASE"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: update-manifests
           path: manifests/
