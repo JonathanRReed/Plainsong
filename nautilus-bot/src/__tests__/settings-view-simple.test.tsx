@@ -339,7 +339,11 @@ describe("SettingsView performance behavior", () => {
     expect(screen.getByRole("button", { name: "Create Profile Snapshot" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sync Latest Profile Snapshot" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Restore Latest Profile Snapshot" }));
+    const restoreButton = screen.getByRole("button", { name: "Restore Latest Profile Snapshot" });
+    await waitFor(() => {
+      expect(restoreButton).toBeEnabled();
+    });
+    fireEvent.click(restoreButton);
 
     await waitFor(() => {
       expect(backend.restoreBackupDefault).toHaveBeenCalledWith("settings_20260314_120000");
