@@ -488,7 +488,7 @@ describe("Platform optimization settings", () => {
     render(<AsrProviderManager />);
 
     expect(await screen.findByText("Current routing")).toBeInTheDocument();
-    expect(screen.getByText("Split")).toBeInTheDocument();
+    expect(await screen.findByText("Split")).toBeInTheDocument();
     expect(screen.getAllByText("Distil-Whisper").length).toBeGreaterThan(0);
   });
 
@@ -516,7 +516,7 @@ describe("Platform optimization settings", () => {
     render(<AsrProviderManager />);
 
     expect(await screen.findByText("Current routing")).toBeInTheDocument();
-    expect(screen.getByText("Split")).toBeInTheDocument();
+    expect(await screen.findByText("Split")).toBeInTheDocument();
     expect(screen.getAllByText("Distil-Whisper").length).toBeGreaterThan(0);
   });
 
