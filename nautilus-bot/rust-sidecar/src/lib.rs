@@ -5131,7 +5131,7 @@ async fn unlock_vault_runtime(state: &AppState, password: &str) -> Result<(), St
             .map_err(|e| format!("Invalid vault salt in settings: {}", e))?
     } else {
         let mut generated = [0u8; VAULT_RECORDING_KEY_SALT_LEN];
-        rand::thread_rng().fill_bytes(&mut generated);
+        rand::rng().fill_bytes(&mut generated);
         generated
     };
 
@@ -5194,7 +5194,7 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
             .map_err(|e| format!("Invalid vault salt in settings: {}", e))?
     } else {
         let mut generated = [0u8; VAULT_RECORDING_KEY_SALT_LEN];
-        rand::thread_rng().fill_bytes(&mut generated);
+        rand::rng().fill_bytes(&mut generated);
         generated
     };
 
@@ -5226,7 +5226,7 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
 
     if !already_initialized {
         let mut db_key_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut db_key_bytes);
+        rand::rng().fill_bytes(&mut db_key_bytes);
         let db_key = hex::encode(db_key_bytes);
 
         #[cfg(feature = "sqlcipher")]

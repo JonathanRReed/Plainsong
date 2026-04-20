@@ -166,12 +166,16 @@ fn bluetooth_advisory_for_device(
     }
 }
 
+fn device_name(device: &cpal::Device) -> Result<String, cpal::DeviceNameError> {
+    Ok(device.description()?.name().to_string())
+}
+
 fn build_audio_input_device_info(
     device: &cpal::Device,
     is_default: bool,
     index: usize,
 ) -> Option<AudioInputDeviceInfo> {
-    let device_name = device.name().ok()?.trim().to_string();
+    let device_name = device_name(device).ok()?.trim().to_string();
     if device_name.is_empty() {
         return None;
     }
@@ -185,7 +189,7 @@ fn build_audio_input_device_info(
         is_available: true,
         is_bluetooth_like: transport_type == "bluetooth",
         channel_count: config.as_ref().map(|value| value.channels()),
-        sample_rate: config.as_ref().map(|value| value.sample_rate().0),
+        sample_rate: config.as_ref().map(|value| value.sample_rate()),
     })
 }
 
@@ -263,7 +267,7 @@ impl AudioCapture {
         let default_name = self
             .host
             .default_input_device()
-            .and_then(|device| device.name().ok());
+            .and_then(|device| device_name(&device).ok());
         let devices = self
             .host
             .input_devices()
@@ -272,7 +276,7 @@ impl AudioCapture {
         for (index, device) in devices.enumerate() {
             let is_default = default_name
                 .as_deref()
-                .map(|name| device.name().ok().as_deref() == Some(name))
+                .map(|name| device_name(&device).ok().as_deref() == Some(name))
                 .unwrap_or(false);
             if let Some(info) = build_audio_input_device_info(&device, is_default, index) {
                 inventory.push(info);
@@ -288,9 +292,9 @@ impl AudioCapture {
         let default_name = self
             .host
             .default_input_device()
-            .and_then(|device| device.name().ok());
+            .and_then(|device| device_name(&device).ok());
         let default_device_info = self.host.default_input_device().and_then(|device| {
-            let name = device.name().ok()?;
+            let name = device_name(&device).ok()?;
             let transport_type = infer_transport_type(&name);
             Some(ResolvedAudioInputDevice {
                 device_id: format!("default-{}", name.to_ascii_lowercase()),
@@ -311,7 +315,7 @@ impl AudioCapture {
         for (index, device) in devices.enumerate() {
             let is_default = default_name
                 .as_deref()
-                .map(|name| device.name().ok().as_deref() == Some(name))
+                .map(|name| device_name(&device).ok().as_deref() == Some(name))
                 .unwrap_or(false);
             if let Some(info) = build_audio_input_device_info(&device, is_default, index) {
                 candidates.push((device, info));
@@ -338,7 +342,8 @@ impl AudioCapture {
 
         if let Some(default_device) = self.host.default_input_device() {
             let name = default_device
-                .name()
+                .description()
+                .map(|description| description.name().to_string())
                 .unwrap_or_else(|_| "Default microphone".to_string());
             let transport_type = infer_transport_type(&name);
             let advisory = match preference {
@@ -403,7 +408,7 @@ impl AudioCapture {
         let (device, resolved_device) = self.resolve_input_device(preference)?;
 
         let config = device.default_input_config()?;
-        let sample_rate = config.sample_rate().0;
+        let sample_rate = config.sample_rate();
         let channels = config.channels();
         self.dictation_sample_rate = sample_rate;
         self.dictation_channels = channels;
@@ -1079,8 +1084,7 @@ impl AudioCapture {
                 .resolve_input_device_by_id(options.preferred_input_device_id.as_deref())?
                 .0
                 .default_input_config()?
-                .sample_rate()
-                .0;
+                .sample_rate();
 
             // Spawn writer thread
             let writer_handle = std::thread::spawn(move || {
@@ -1373,9 +1377,16 @@ fn join_thread_with_timeout(handle: JoinHandle<()>, timeout: Duration, label: &s
 fn compute_file_hash(path: &PathBuf) -> Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     let result = hasher.finalize();
-    Ok(format!("{:x}", result))
+    Ok(hex::encode(result))
 }
 
 fn boost_quiet_audio(samples: &mut [f32]) {

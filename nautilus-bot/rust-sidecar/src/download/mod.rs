@@ -792,7 +792,7 @@ async fn calculate_sha256(path: &PathBuf) -> Result<String> {
     hasher.update(&data);
     let result = hasher.finalize();
 
-    Ok(format!("{:x}", result))
+    Ok(hex::encode(result))
 }
 
 fn min_expected_model_bytes(size_mb: f64) -> u64 {

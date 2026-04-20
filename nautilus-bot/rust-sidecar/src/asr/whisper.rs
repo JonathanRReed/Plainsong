@@ -95,7 +95,7 @@ impl WhisperProvider {
         }
 
         let ctx = Arc::new(
-            whisper_rs::WhisperContext::new_with_params(&self.model_path.to_string_lossy(), params)
+            whisper_rs::WhisperContext::new_with_params(&self.model_path, params)
                 .context("Failed to load Whisper model")?,
         );
 
@@ -246,9 +246,7 @@ impl AsrProvider for WhisperProvider {
             .full(params, &audio_data)
             .context("Failed to run Whisper transcription")?;
 
-        let num_segments = state
-            .full_n_segments()
-            .context("Failed to get segment count")?;
+        let num_segments = state.full_n_segments();
 
         tracing::info!("Whisper produced {} segments", num_segments);
 
@@ -257,26 +255,23 @@ impl AsrProvider for WhisperProvider {
 
         for i in 0..num_segments {
             let segment = state
-                .full_get_segment_text(i)
-                .context("Failed to get segment text")?;
-            let start = state
-                .full_get_segment_t0(i)
-                .context("Failed to get segment start time")?;
-            let end = state
-                .full_get_segment_t1(i)
-                .context("Failed to get segment end time")?;
+                .get_segment(i)
+                .ok_or_else(|| anyhow::anyhow!("Failed to get Whisper segment {}", i))?;
+            let text = segment.to_str().context("Failed to get segment text")?;
+            let start = segment.start_timestamp();
+            let end = segment.end_timestamp();
 
             segments.push(TranscriptSegment {
                 start_time: start as f64 / 100.0, // Convert from centiseconds to seconds
                 end_time: end as f64 / 100.0,
-                text: segment.trim().to_string(),
+                text: text.trim().to_string(),
                 confidence: 0.9, // whisper-rs doesn't provide per-segment confidence
             });
 
             if !full_text.is_empty() {
                 full_text.push(' ');
             }
-            full_text.push_str(segment.trim());
+            full_text.push_str(text.trim());
         }
 
         let processing_time = start_time.elapsed().as_millis() as u64;
