@@ -64,4 +64,4 @@ jobs:
       - name: Rust clippy
         env:
           WHISPER_NATIVE: "OFF"
-        run: cargo clippy --locked --manifest-path rust-sidecar/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --locked --manifest-path rust-sidecar/Cargo.toml --all-targets --no-default-features --features asr-whisper,ndarray,rustfft,sqlcipher -- -D warnings
