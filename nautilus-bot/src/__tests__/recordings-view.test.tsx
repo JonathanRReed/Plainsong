@@ -550,7 +550,7 @@ describe("RecordingsView", () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
-    await screen.findByText("Review workflow");
+    await screen.findByDisplayValue("Canonical meeting summary");
 
     fireEvent.click(screen.getByRole("button", { name: "Read Follow-up" }));
 

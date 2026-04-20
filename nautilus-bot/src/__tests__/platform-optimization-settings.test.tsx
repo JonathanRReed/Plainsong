@@ -310,7 +310,9 @@ describe("Platform optimization settings", () => {
     render(<AsrProviderManager />);
 
     expect(await screen.findByText("Apple Native setup")).toBeInTheDocument();
-    expect(screen.getAllByText("Built into macOS").length).toBeGreaterThan(0);
+    await waitFor(() => {
+      expect(screen.getAllByText("Built into macOS").length).toBeGreaterThan(0);
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "Show tools" }));
 
