@@ -211,6 +211,17 @@ vi.mock("@/lib/backend", () => ({
     nagRequired: false,
     trialActive: true,
   })),
+  activateLicense: vi.fn(async () => ({
+    tier: "pro",
+    valid: true,
+    lsStatus: "active",
+    activationsLimit: 5,
+    activationsUsage: 1,
+    lastValidatedAt: "",
+    trialDaysRemaining: 0,
+    nagRequired: false,
+    trialActive: false,
+  })),
   deactivateLicense: vi.fn(async () => { }),
 }));
 
@@ -398,6 +409,43 @@ describe("SettingsView performance behavior", () => {
     const calls = vi.mocked(backend.saveSettings).mock.calls;
     const lastCall = calls[calls.length - 1];
     expect(lastCall?.[0]?.ui?.colorScheme).toBe("rose-pine");
+  });
+
+  it("explains expired-trial reminders, lockout state, and activation options", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.validateLicense).mockResolvedValueOnce({
+      tier: "none",
+      valid: false,
+      lsStatus: "",
+      activationsLimit: 5,
+      activationsUsage: 0,
+      lastValidatedAt: "",
+      trialDaysRemaining: 0,
+      nagRequired: true,
+      trialActive: false,
+    });
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("License"));
+
+    expect(await screen.findByText("Trial expired · reminders active")).toBeInTheDocument();
+    expect(screen.getByText("Updates locked")).toBeInTheDocument();
+    expect(screen.getByText("Free local access")).toBeInTheDocument();
+    expect(screen.getByText("Activation reminders enabled")).toBeInTheDocument();
+    expect(screen.getByText("0 of 5 used")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The 30-day trial has ended. Updates and paid Pro/Friends Club features are locked until a valid license is activated."
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Buy Pro" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Friends Club/i })).toBeInTheDocument();
   });
 
   it("persists the always-on-top toggle from desktop settings", async () => {

@@ -176,6 +176,7 @@ function areaStatus({ blockers = [], checks = [], summary = null, allowPartial =
 
 const releaseBlockers = readJson("artifacts/release-blockers.json");
 const qaBundle = readJson("artifacts/packaged-qa-evidence-bundle.json");
+const uxBundle = readJson("artifacts/packaged-ux-evidence-bundle.json");
 const macBenchmarkGate = readJson("artifacts/benchmark-gates-macos.json");
 const windowsBenchmarkGate = readJson("artifacts/benchmark-gates-windows.json");
 const parityEvidence = readJson("artifacts/dictation-parity-evidence.json");
@@ -239,6 +240,8 @@ const claimsStatus = areaStatus({
   ],
 });
 
+const uxEvidenceStatus = uxBundle?.status ?? "BLOCKED";
+
 const report = {
   generatedAt,
   status: releaseBlockers?.strictReady ? "GO" : "NO-GO",
@@ -269,17 +272,32 @@ const report = {
       appMatrixSummary,
       languageMatrixSummary,
     },
+    uxEvidence: {
+      status: uxEvidenceStatus,
+      summary: uxBundle?.summary ?? null,
+      gateCount: uxBundle?.uxGates?.length ?? 0,
+      blockedGateCount: uxBundle?.uxGates?.filter((gate) => gate.status === "BLOCKED").length ?? 0,
+    },
+    productQuality: {
+      status: uxBundle?.productReadiness?.status ?? "BLOCKED",
+      posture:
+        uxBundle?.productReadiness?.posture ??
+        "Product quality and competitor parity evidence must pass before release signing work is useful.",
+      blockerCount: uxBundle?.productReadiness?.blockers?.length ?? 0,
+    },
   },
   blockers: activeBlockers,
   nextActions: [
-    "Provision Apple signing and notarization credentials, then execute the macOS packaged QA rows.",
-    "Provision the Windows signing certificate, then execute the Windows packaged QA rows.",
-    "Capture packaged dictation benchmark evidence and update the launch app matrix from PENDING to verified statuses.",
-    "Freeze public launch claims to the verified app and language set only.",
+    "Treat CP-01 through CP-15 and the dictation parity scorecard as the immediate product-quality backlog before release signing work.",
+    "Capture or implement evidence for dictation reliability, app-matrix insertion, command/snippet success, latency trend, provider routing, and recovery UX.",
+    "Replace BLOCKED UX stubs with PASS or FAIL notes that link screenshots, videos, logs, and defect IDs.",
+    "Defer Apple notarization, Windows signing, and signed updater validation until product-quality gates are credible.",
   ],
   evidence: {
     releaseBlockers: "artifacts/release-blockers.json",
     qaBundle: "artifacts/packaged-qa-evidence-bundle.json",
+    uxBundle: "artifacts/packaged-ux-evidence-bundle.json",
+    uxBundleMarkdown: "docs/packaged-ux-evidence-bundle.md",
     benchmarkMacos: "artifacts/benchmark-gates-macos.json",
     benchmarkWindows: "artifacts/benchmark-gates-windows.json",
     dictationParity: "artifacts/dictation-parity-evidence.json",
@@ -312,6 +330,8 @@ This dashboard is the single repo-side control surface for launch readiness agai
 | Meetings | \`${report.areas.meetings.status}\` | Packaged meeting QA remains ${report.areas.meetings.qaSummary.blocked} blocked rows out of ${report.areas.meetings.qaSummary.total}. |
 | Trust | \`${report.areas.trust.status}\` | Internal hardening is in place, but release credentials and packaged trust evidence are still incomplete. |
 | Launch claims | \`${report.areas.launchClaims.status}\` | App and language claims still exceed the packaged evidence currently checked into the repo. |
+| Product quality | \`${report.areas.productQuality.status}\` | Core app and competitor-parity evidence are not ready; ${report.areas.productQuality.blockerCount} product blockers are called out in the UX bundle. |
+| UX evidence | \`${report.areas.uxEvidence.status}\` | Packaged UX bundle covers ${report.areas.uxEvidence.gateCount} P0 gates, with ${report.areas.uxEvidence.blockedGateCount} still blocked. |
 
 ## Dictation
 
@@ -333,6 +353,19 @@ This dashboard is the single repo-side control surface for launch readiness agai
 - Cloud smoke ready: \`${report.areas.trust.cloudSmokeReady ? "PASS" : "BLOCKED"}\`
 - Apple release signing ready: \`${report.areas.trust.appleReleaseSigningReady ? "PASS" : "BLOCKED"}\`
 - Windows release signing ready: \`${report.areas.trust.windowsReleaseSigningReady ? "PASS" : "BLOCKED"}\`
+
+## UX Evidence
+
+- Packaged UX bundle: \`${report.areas.uxEvidence.status}\`
+- UX gates covered: ${report.areas.uxEvidence.gateCount}
+- Blocked UX gates: ${report.areas.uxEvidence.blockedGateCount}
+- UX evidence rows: ${report.areas.uxEvidence.summary?.total ?? 0}
+
+## Product Quality
+
+- Product quality status: \`${report.areas.productQuality.status}\`
+- Current posture: ${report.areas.productQuality.posture}
+- Product blockers called out: ${report.areas.productQuality.blockerCount}
 
 ## Launch Claims
 

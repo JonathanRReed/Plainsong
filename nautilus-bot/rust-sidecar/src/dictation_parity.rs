@@ -403,7 +403,7 @@ pub fn apply_dictation_dictionary(
     let mut output = input.to_string();
     let mut applied_total = 0usize;
     let mut ordered = rules.to_vec();
-    ordered.sort_by(|a, b| b.spoken_form.len().cmp(&a.spoken_form.len()));
+    ordered.sort_by_key(|rule| std::cmp::Reverse(rule.spoken_form.len()));
 
     for rule in ordered {
         if !rule.enabled {
@@ -450,7 +450,7 @@ pub fn apply_dictation_snippets(
     let mut output = input.to_string();
     let mut applied_total = 0usize;
     let mut ordered = snippets.to_vec();
-    ordered.sort_by(|a, b| b.trigger.len().cmp(&a.trigger.len()));
+    ordered.sort_by_key(|snippet| std::cmp::Reverse(snippet.trigger.len()));
 
     for snippet in ordered {
         if !snippet.enabled {

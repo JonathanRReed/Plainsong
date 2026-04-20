@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-04-09T22:43:47.521Z",
+  "generatedAt": "2026-04-18T23:14:44.576Z",
   "status": "NO-GO",
   "areas": {
     "dictation": {
@@ -9,10 +9,10 @@
       "parityFixturesPass": true,
       "promptEvalPass": true,
       "qaSummary": {
-        "total": 19,
+        "total": 23,
         "pass": 0,
         "fail": 0,
-        "blocked": 19,
+        "blocked": 23,
         "pending": 0
       },
       "appMatrixSummary": {
@@ -63,6 +63,23 @@
         "packagedPass": 0,
         "packagedPending": 10
       }
+    },
+    "uxEvidence": {
+      "status": "BLOCKED",
+      "summary": {
+        "total": 53,
+        "pass": 0,
+        "fail": 0,
+        "blocked": 53,
+        "pending": 0
+      },
+      "gateCount": 12,
+      "blockedGateCount": 12
+    },
+    "productQuality": {
+      "status": "BLOCKED",
+      "posture": "Do not prioritize signing/notarization work until core app quality, competitor parity, and packaged UX evidence are credible.",
+      "blockerCount": 4
     }
   },
   "blockers": [
@@ -94,18 +111,20 @@
       "gate": "packaged-qa-matrix",
       "status": "BLOCKED",
       "evidence": "artifacts/packaged-qa-evidence-bundle.json",
-      "reason": "Packaged QA matrix remains 49 BLOCKED / 0 PASS."
+      "reason": "Packaged QA matrix remains 53 BLOCKED / 0 PASS."
     }
   ],
   "nextActions": [
-    "Provision Apple signing and notarization credentials, then execute the macOS packaged QA rows.",
-    "Provision the Windows signing certificate, then execute the Windows packaged QA rows.",
-    "Capture packaged dictation benchmark evidence and update the launch app matrix from PENDING to verified statuses.",
-    "Freeze public launch claims to the verified app and language set only."
+    "Treat CP-01 through CP-15 and the dictation parity scorecard as the immediate product-quality backlog before release signing work.",
+    "Capture or implement evidence for dictation reliability, app-matrix insertion, command/snippet success, latency trend, provider routing, and recovery UX.",
+    "Replace BLOCKED UX stubs with PASS or FAIL notes that link screenshots, videos, logs, and defect IDs.",
+    "Defer Apple notarization, Windows signing, and signed updater validation until product-quality gates are credible."
   ],
   "evidence": {
     "releaseBlockers": "artifacts/release-blockers.json",
     "qaBundle": "artifacts/packaged-qa-evidence-bundle.json",
+    "uxBundle": "artifacts/packaged-ux-evidence-bundle.json",
+    "uxBundleMarkdown": "docs/packaged-ux-evidence-bundle.md",
     "benchmarkMacos": "artifacts/benchmark-gates-macos.json",
     "benchmarkWindows": "artifacts/benchmark-gates-windows.json",
     "dictationParity": "artifacts/dictation-parity-evidence.json",

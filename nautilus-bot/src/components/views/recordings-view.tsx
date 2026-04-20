@@ -469,6 +469,30 @@ function formatMeetingReviewState(status: Recording["status"] | undefined): stri
   }
 }
 
+function describeMeetingAssetRetention(recording: Recording | null): {
+  audioLabel: string;
+  detail: string;
+  deleteWarning: string;
+} {
+  if (recording?.audioPath) {
+    return {
+      audioLabel: "Audio saved",
+      detail:
+        "Audio is available for playback. Transcript, notes, summary, and action items remain attached to this meeting.",
+      deleteWarning:
+        "This permanently removes the meeting, transcript, notes, summary, action items, and saved audio file.",
+    };
+  }
+
+  return {
+    audioLabel: "Transcript-only",
+    detail:
+      "Audio is not saved or has already been removed by retention. Transcript, notes, summary, and action items remain available until this meeting is deleted.",
+    deleteWarning:
+      "This permanently removes the meeting, transcript, notes, summary, and action items. No saved audio file is attached.",
+  };
+}
+
 function qualityToneClasses(tone: "good" | "warn" | "muted"): string {
   switch (tone) {
     case "good":
@@ -1889,6 +1913,14 @@ export function RecordingsView() {
       ),
     [liveMeetingSystemAudio, recordingId, selectedRecording, selectedTranscriptDetails]
   );
+  const selectedMeetingAssetRetention = useMemo(
+    () => describeMeetingAssetRetention(selectedRecording),
+    [selectedRecording]
+  );
+  const deleteConfirmationRetention = useMemo(
+    () => describeMeetingAssetRetention(showDeleteConfirm),
+    [showDeleteConfirm]
+  );
   const selectedMeetingActionItems = useMemo(
     () => actionItemsFromText(meetingActionItemsText),
     [meetingActionItemsText]
@@ -2744,7 +2776,7 @@ export function RecordingsView() {
                         ) : null}
                       </div>
                     </div>
-                    <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
                       <div className="rounded-lg border bg-muted/30 p-3">
                         <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                           Workspace
@@ -2784,6 +2816,17 @@ export function RecordingsView() {
                             {selectedMeetingConsent.message}
                           </p>
                         ) : null}
+                      </div>
+                      <div className="rounded-lg border bg-muted/30 p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Retention
+                        </p>
+                        <p className="mt-2 text-sm font-medium">
+                          {selectedMeetingAssetRetention.audioLabel}
+                        </p>
+                        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                          {selectedMeetingAssetRetention.detail}
+                        </p>
                       </div>
                     </div>
                     <div className="mt-4 rounded-lg border border-active/20 bg-active/5 p-4">
@@ -4066,8 +4109,11 @@ export function RecordingsView() {
                       <div className="p-3 bg-muted rounded-lg text-sm">
                         <span className="text-muted-foreground">Audio:</span>{" "}
                         <span className="font-medium">
-                          {selectedRecording?.audioPath ? "Available" : "Not saved"}
+                          {selectedMeetingAssetRetention.audioLabel}
                         </span>
+                        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                          {selectedMeetingAssetRetention.detail}
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -4087,8 +4133,8 @@ export function RecordingsView() {
           <DialogHeader>
             <DialogTitle>Delete Recording</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete &ldquo;{showDeleteConfirm?.title}&rdquo;? This will
-              permanently remove the meeting, its transcript, and audio file.
+              Are you sure you want to delete &ldquo;{showDeleteConfirm?.title}&rdquo;?{" "}
+              {deleteConfirmationRetention.deleteWarning}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

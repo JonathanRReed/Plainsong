@@ -66,8 +66,8 @@ Status values:
 | Bring your own API keys | Superwhisper markets own-API-key support | Nautilus settings already manage provider secrets for ASR and analysis providers | PARITY |
 | File sync or cloud sync | Superwhisper markets FileSync | Nautilus has backup plus cloud sync plumbing, but packaged QA evidence is still blocked | PARTIAL |
 | 100+ language breadth | Superwhisper publicly markets 100+ languages and dialects | Nautilus currently certifies a narrower frozen launch-language set with truthful evidence | BEHIND |
-| Translate any spoken language to English | Superwhisper changelog publicly advertises this option | Nautilus does not ship an explicit equivalent launch feature or audit evidence today | BEHIND |
-| User-facing file transcription | Superwhisper homepage markets file transcription | Nautilus has file-transcription-capable backend pieces, but no clear user-facing launch path in the app surface | BEHIND |
+| Translate any spoken language to English | Superwhisper changelog publicly advertises this option | Nautilus now exposes a Translate to English dictation profile backed by the existing mode-transform pipeline; packaged multilingual evidence is still required before public parity claims. | PARTIAL |
+| User-facing file transcription | Superwhisper homepage markets file transcription | Nautilus now exposes a WAV file transcription surface in Dictation that uses the active dictation route; packaged evidence and broader audio-format coverage are still required before public parity claims. | PARTIAL |
 | Mouse shortcut control | Superwhisper documents mouse-button shortcut support on macOS | Nautilus currently exposes keyboard-first controls, not a mouse-button shortcut product path | BEHIND |
 
 ## Verdict
@@ -93,8 +93,8 @@ Nautilus is already stronger than Superwhisper in several product areas that mat
 Nautilus is still behind Superwhisper on a few marketed surface-area items:
 
 - public 100+ language breadth claim
-- explicit translate-any-language-to-English mode
-- clear user-facing file transcription workflow
+- packaged evidence for translate-any-language-to-English mode
+- packaged evidence and broader format support for user-facing file transcription
 - mouse-button shortcut controls
 
 ## Launch Recommendation
@@ -102,5 +102,5 @@ Nautilus is still behind Superwhisper on a few marketed surface-area items:
 Use this comparison for launch messaging:
 
 - Claim parity-or-better for core dictation workflow, local-first flexibility, and meeting depth.
-- Do not claim parity on 100+ languages, translate-to-English, or file transcription until the product surface and packaged evidence exist.
+- Do not claim parity on 100+ languages, translate-to-English, or file transcription until packaged evidence exists and the remaining launch scope is explicit.
 - Treat mouse-button shortcuts as optional backlog work, not a launch blocker.
