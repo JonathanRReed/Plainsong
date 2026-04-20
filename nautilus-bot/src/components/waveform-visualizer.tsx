@@ -141,7 +141,7 @@ export function RecordingWaveform({
   className,
 }: RecordingWaveformProps) {
   const [waveformData, setWaveformData] = useState<number[]>([]);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (!isRecording) return;
