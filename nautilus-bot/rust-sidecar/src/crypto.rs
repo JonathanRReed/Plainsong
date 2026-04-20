@@ -26,7 +26,7 @@ impl ProjectKeyManager {
     /// Generate a new random salt for key derivation
     pub fn generate_salt() -> [u8; SALT_LEN] {
         let mut salt = [0u8; SALT_LEN];
-        rand::thread_rng().fill_bytes(&mut salt);
+        rand::rng().fill_bytes(&mut salt);
         salt
     }
 
@@ -45,10 +45,11 @@ impl ProjectKeyManager {
     /// Encrypt data with AES-256-GCM.
     /// Format: [nonce (12 bytes)] [ciphertext+tag]
     pub fn encrypt(data: &[u8], key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
-        let cipher = Aes256Gcm::new_from_slice(key).context("Invalid AES key")?;
+        let cipher =
+            Aes256Gcm::new_from_slice(key).map_err(|_| anyhow::anyhow!("Invalid AES key"))?;
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext = cipher
@@ -67,7 +68,8 @@ impl ProjectKeyManager {
             return Err(anyhow::anyhow!("Invalid encrypted payload"));
         }
 
-        let cipher = Aes256Gcm::new_from_slice(key).context("Invalid AES key")?;
+        let cipher =
+            Aes256Gcm::new_from_slice(key).map_err(|_| anyhow::anyhow!("Invalid AES key"))?;
 
         let (nonce_bytes, ciphertext) = encrypted.split_at(NONCE_LEN);
         let nonce = Nonce::from_slice(nonce_bytes);

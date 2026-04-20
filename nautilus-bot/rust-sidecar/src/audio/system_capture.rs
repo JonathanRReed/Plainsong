@@ -8,6 +8,10 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+fn device_name(device: &cpal::Device) -> Result<String, cpal::DeviceNameError> {
+    Ok(device.description()?.name().to_string())
+}
+
 /// System audio capture session helper
 pub struct SystemAudioCapture {
     host: cpal::Host,
@@ -57,7 +61,7 @@ impl SystemAudioCapture {
         ];
 
         for device in devices {
-            if let Ok(name) = device.name() {
+            if let Ok(name) = device_name(&device) {
                 let name_lower = name.to_lowercase();
                 if loopback_keywords.iter().any(|&kw| name_lower.contains(kw)) {
                     tracing::info!("Found loopback device: {}", name);
@@ -71,7 +75,7 @@ impl SystemAudioCapture {
 
     pub fn get_loopback_device_name(&self) -> Result<Option<String>> {
         match self.find_loopback_device()? {
-            Some(device) => Ok(Some(device.name()?)),
+            Some(device) => Ok(Some(device_name(&device)?)),
             None => Ok(None),
         }
     }
@@ -150,7 +154,7 @@ impl MixedAudioCapture {
                         .or_else(|| host.default_input_device())
                         .context("No microphone available")?;
                     let config = device.default_input_config()?;
-                    mic_sample_rate = Some(config.sample_rate().0);
+                    mic_sample_rate = Some(config.sample_rate());
                     let mic_buf = Arc::clone(&mic_buffer);
                     let is_cap = Arc::clone(&is_capturing);
                     let dropped_samples_f32 = Arc::clone(&dropped_mic_samples);
@@ -217,7 +221,7 @@ impl MixedAudioCapture {
                         .ok_or_else(|| anyhow::anyhow!("Loopback device not found"))?;
 
                     let config = loopback_device.default_input_config()?;
-                    system_sample_rate = Some(config.sample_rate().0);
+                    system_sample_rate = Some(config.sample_rate());
                     let sys_buf = Arc::clone(&system_buffer);
                     let is_cap = Arc::clone(&is_capturing);
                     let dropped_samples_f32 = Arc::clone(&dropped_system_samples);
