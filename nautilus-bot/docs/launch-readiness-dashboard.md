@@ -1,6 +1,6 @@
 # Launch Readiness Dashboard
 
-Generated: 2026-04-09T22:43:47.521Z
+Generated: 2026-04-18T23:14:44.576Z
 Overall status: `NO-GO`
 
 This dashboard is the single repo-side control surface for launch readiness against the practical bar set by Wispr Flow, FreeFlow, Granola, and OpenOats.
@@ -13,6 +13,8 @@ This dashboard is the single repo-side control surface for launch readiness agai
 | Meetings | `BLOCKED` | Packaged meeting QA remains 22 blocked rows out of 22. |
 | Trust | `BLOCKED` | Internal hardening is in place, but release credentials and packaged trust evidence are still incomplete. |
 | Launch claims | `BLOCKED` | App and language claims still exceed the packaged evidence currently checked into the repo. |
+| Product quality | `BLOCKED` | Core app and competitor-parity evidence are not ready; 4 product blockers are called out in the UX bundle. |
+| UX evidence | `BLOCKED` | Packaged UX bundle covers 12 P0 gates, with 12 still blocked. |
 
 ## Dictation
 
@@ -35,6 +37,19 @@ This dashboard is the single repo-side control surface for launch readiness agai
 - Apple release signing ready: `BLOCKED`
 - Windows release signing ready: `BLOCKED`
 
+## UX Evidence
+
+- Packaged UX bundle: `BLOCKED`
+- UX gates covered: 12
+- Blocked UX gates: 12
+- UX evidence rows: 53
+
+## Product Quality
+
+- Product quality status: `BLOCKED`
+- Current posture: Do not prioritize signing/notarization work until core app quality, competitor parity, and packaged UX evidence are credible.
+- Product blockers called out: 4
+
 ## Launch Claims
 
 - Verified launch apps ready for marketing: 0 of 16
@@ -46,11 +61,11 @@ This dashboard is the single repo-side control surface for launch readiness agai
 - `benchmark-gates-packaged`: Benchmark gate artifacts are still local or fixture-tagged runs; packaged dictation benchmark evidence is still missing. (artifacts/benchmark-packaged.blocked.md)
 - `apple-release-signing`: Gatekeeper still rejects the local dev-signed app; release signing and notarization are not configured. (artifacts/qa/macos/security-gatekeeper.md)
 - `windows-release-signing`: Windows signing and SmartScreen validation have not been executed from a Windows release host. (artifacts/qa/windows/security-authenticode.md)
-- `packaged-qa-matrix`: Packaged QA matrix remains 49 BLOCKED / 0 PASS. (artifacts/packaged-qa-evidence-bundle.json)
+- `packaged-qa-matrix`: Packaged QA matrix remains 53 BLOCKED / 0 PASS. (artifacts/packaged-qa-evidence-bundle.json)
 
 ## Next Actions
 
-1. Provision Apple signing and notarization credentials, then execute the macOS packaged QA rows.
-2. Provision the Windows signing certificate, then execute the Windows packaged QA rows.
-3. Capture packaged dictation benchmark evidence and update the launch app matrix from PENDING to verified statuses.
-4. Freeze public launch claims to the verified app and language set only.
+1. Treat CP-01 through CP-15 and the dictation parity scorecard as the immediate product-quality backlog before release signing work.
+2. Capture or implement evidence for dictation reliability, app-matrix insertion, command/snippet success, latency trend, provider routing, and recovery UX.
+3. Replace BLOCKED UX stubs with PASS or FAIL notes that link screenshots, videos, logs, and defect IDs.
+4. Defer Apple notarization, Windows signing, and signed updater validation until product-quality gates are credible.

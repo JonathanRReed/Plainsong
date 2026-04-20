@@ -13,6 +13,25 @@ const backendMocks = vi.hoisted(() => ({
   refetchDictationHistory: vi.fn(),
   startDictation: vi.fn(async () => {}),
   stopDictation: vi.fn(async () => ""),
+  transcribeAudioFileBytes: vi.fn(async () => ({
+    text: "Imported file transcript",
+    language: "en",
+    confidence: 0.93,
+    processingTimeMs: 1200,
+    modelName: "Moonshine Base",
+    modelId: "moonshine-base",
+    requestedProvider: "moonshine",
+    actualProvider: "moonshine",
+    fallbackReason: null,
+  })),
+  reprocessDictationText: vi.fn(async () => ({
+    inputText: "Imported file transcript",
+    outputText: "Translated imported file transcript",
+    modePreset: "translate_english",
+    usedAi: true,
+    provider: "ollama",
+    modelId: "llama3.2",
+  })),
   getSettings: vi.fn(async () => ({
   audio: {
     sampleRate: 16000,
@@ -204,7 +223,8 @@ vi.mock("@/lib/backend", () => ({
       },
     },
   ]),
-  reprocessDictationText: vi.fn(),
+  transcribeAudioFileBytes: backendMocks.transcribeAudioFileBytes,
+  reprocessDictationText: backendMocks.reprocessDictationText,
   listDictationDictionaryEntries: vi.fn(async () => []),
   createDictationDictionaryEntry: vi.fn(),
   updateDictationDictionaryEntry: vi.fn(),
@@ -305,8 +325,12 @@ describe("DictationView modes", () => {
     expect(screen.getByRole("button", { name: /flow profile: general/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /flow profile: slack & chat/i })).toBeInTheDocument();
     expect(
+      screen.getByRole("button", { name: /flow profile: translate to english/i })
+    ).toBeInTheDocument();
+    expect(
       screen.getByRole("button", { name: /flow profile: meeting follow-up/i })
     ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /solo lane: translate/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /solo lane: follow-up/i })).toBeInTheDocument();
   });
 
@@ -331,6 +355,116 @@ describe("DictationView modes", () => {
     expect(latestSettings.transcription.dictationSaveToInbox).toBe(false);
     expect(latestSettings.transcription.dictationCopyToClipboard).toBe(true);
     expect(latestSettings.transcription.dictationCommandModeEnabled).toBe(false);
+  });
+
+  it("applies Translate to English mode defaults and persists them", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("Flow Profiles");
+    fireEvent.click(
+      screen.getByRole("button", { name: /flow profile: translate to english/i })
+    );
+
+    await waitFor(() => {
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
+    });
+
+    const saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+    const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
+    expect(latestSettings.transcription.dictationModePreset).toBe("translate_english");
+    expect(latestSettings.transcription.dictationProfile).toBe("power_rewrite");
+    expect(latestSettings.transcription.dictationInsertionMode).toBe("paste");
+    expect(latestSettings.transcription.dictationContextSource).toBe("none");
+    expect(latestSettings.transcription.dictationSaveToInbox).toBe(true);
+    expect(latestSettings.transcription.dictationCopyToClipboard).toBe(true);
+    expect(latestSettings.transcription.dictationCommandModeEnabled).toBe(false);
+  });
+
+  it("transcribes an uploaded WAV file through the active dictation route", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("File Transcription");
+    const file = new File([new Uint8Array([1, 2, 3, 4])], "sample.wav", {
+      type: "audio/wav",
+    });
+    fireEvent.change(screen.getByLabelText("Audio file for transcription"), {
+      target: { files: [file] },
+    });
+
+    await waitFor(() => {
+      expect(backendMocks.transcribeAudioFileBytes).toHaveBeenCalled();
+    });
+
+    expect(
+      (await screen.findAllByText("Imported file transcript")).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText("moonshine-base")).toBeInTheDocument();
+    expect(backendMocks.reprocessDictationText).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-WAV audio uploads before calling the native bridge", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("File Transcription");
+    const file = new File([new Uint8Array([1, 2, 3, 4])], "notes.mp3", {
+      type: "audio/mpeg",
+    });
+    fireEvent.change(screen.getByLabelText("Audio file for transcription"), {
+      target: { files: [file] },
+    });
+
+    expect(
+      await screen.findByText("Choose a WAV audio file to transcribe."),
+    ).toBeInTheDocument();
+    expect(backendMocks.transcribeAudioFileBytes).not.toHaveBeenCalled();
+    expect(backendMocks.reprocessDictationText).not.toHaveBeenCalled();
+  });
+
+  it("rejects empty WAV uploads before calling the native bridge", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("File Transcription");
+    const file = new File([], "empty.wav", {
+      type: "audio/wav",
+    });
+    fireEvent.change(screen.getByLabelText("Audio file for transcription"), {
+      target: { files: [file] },
+    });
+
+    expect(
+      await screen.findByText("Choose a WAV audio file that contains audio."),
+    ).toBeInTheDocument();
+    expect(backendMocks.transcribeAudioFileBytes).not.toHaveBeenCalled();
+    expect(backendMocks.reprocessDictationText).not.toHaveBeenCalled();
+  });
+
+  it("applies the active Translate to English mode to uploaded WAV transcription", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("Flow Profiles");
+    fireEvent.click(
+      screen.getByRole("button", { name: /flow profile: translate to english/i })
+    );
+
+    const file = new File([new Uint8Array([1, 2, 3, 4])], "spanish.wav", {
+      type: "audio/wav",
+    });
+    fireEvent.change(screen.getByLabelText("Audio file for transcription"), {
+      target: { files: [file] },
+    });
+
+    await waitFor(() => {
+      expect(backendMocks.reprocessDictationText).toHaveBeenCalledWith(
+        "Imported file transcript",
+        "translate_english",
+        null,
+      );
+    });
+
+    expect(
+      (await screen.findAllByText("Translated imported file transcript")).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByText("llama3.2")).toBeInTheDocument();
   });
 
   it("saves the current setup as a reusable custom mode", async () => {

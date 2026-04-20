@@ -1806,7 +1806,7 @@ fn push_relationship_evidence(
     next: models::RelationshipMemoryEvidence,
 ) {
     evidence.push(next);
-    evidence.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    evidence.sort_by_key(|item| std::cmp::Reverse(item.created_at));
     evidence.truncate(3);
 }
 
@@ -2718,7 +2718,7 @@ async fn reprocess_dictation_text_impl(
     let formatting_hint = resolve_dictation_formatting_hint(app_target.as_deref(), None, None);
 
     let (output_text, used_ai, provider, model_id) = match effective_mode.as_str() {
-        "messages" | "email" | "meeting_follow_up" => {
+        "messages" | "email" | "translate_english" | "meeting_follow_up" => {
             let prompt = dictation_mode_transform_prompt(&effective_mode)
                 .ok_or_else(|| "No transform prompt is configured for this mode.".to_string())?;
             match run_custom_dictation_transform_with_selected_provider(state, input, prompt).await
@@ -2732,7 +2732,7 @@ async fn reprocess_dictation_text_impl(
                 Err(error) => {
                     let fallback = match effective_mode.as_str() {
                         "messages" => rewrite_shorter_text(input),
-                        "email" => rewrite_professional_text(input),
+                        "email" | "translate_english" => rewrite_professional_text(input),
                         "meeting_follow_up" => rewrite_professional_text(input),
                         _ => input.to_string(),
                     };
@@ -4444,6 +4444,9 @@ fn dictation_mode_transform_prompt(mode_preset: &str) -> Option<&'static str> {
         "email" => Some(
             "Rewrite the user's text into polished email-ready prose. Keep the meaning, improve structure, punctuation, and professionalism. Return only the final text.",
         ),
+        "translate_english" => Some(
+            "Translate the user's text into natural English. Preserve names, numbers, formatting, code terms, and intent. If the text is already English, lightly clean punctuation only. Return only the final English text.",
+        ),
         "meeting_follow_up" => Some(
             "Turn the user's text into a concise professional meeting follow-up. Keep action items, owners, and next steps clear. Return only the final follow-up text.",
         ),
@@ -4472,6 +4475,7 @@ fn normalize_dictation_base_mode_preset(value: &str) -> &'static str {
         "messages" => "messages",
         "email" => "email",
         "notes" => "notes",
+        "translate_english" => "translate_english",
         "meeting_follow_up" => "meeting_follow_up",
         _ => "voice",
     }
@@ -7019,6 +7023,7 @@ mod tests {
     fn dictation_mode_transform_prompts_cover_reprocess_modes() {
         assert!(dictation_mode_transform_prompt("messages").is_some());
         assert!(dictation_mode_transform_prompt("email").is_some());
+        assert!(dictation_mode_transform_prompt("translate_english").is_some());
         assert!(dictation_mode_transform_prompt("meeting_follow_up").is_some());
         assert!(dictation_mode_transform_prompt("voice").is_none());
     }
@@ -7879,6 +7884,7 @@ fn dictation_mode_label(
         "messages" => "Messages".to_string(),
         "email" => "Email".to_string(),
         "notes" => "Notes".to_string(),
+        "translate_english" => "Translate to English".to_string(),
         "meeting_follow_up" => "Meeting Follow-up".to_string(),
         "custom" => selected_custom_mode_id
             .and_then(|selected_id| {
@@ -7980,6 +7986,7 @@ fn normalize_dictation_mode_preset(value: &str) -> &'static str {
         "messages" => "messages",
         "email" => "email",
         "notes" => "notes",
+        "translate_english" => "translate_english",
         "meeting_follow_up" => "meeting_follow_up",
         "custom" => "custom",
         _ => "voice",
@@ -13837,7 +13844,7 @@ async fn stop_dictation_for_sidecar(
 
     if !final_text.is_empty() && command_applied.is_none() {
         match effective_mode.as_str() {
-            "messages" | "email" | "meeting_follow_up" => {
+            "messages" | "email" | "translate_english" | "meeting_follow_up" => {
                 if let Some(prompt) = dictation_mode_transform_prompt(&effective_mode) {
                     match run_custom_dictation_transform_with_selected_provider(
                         state,
@@ -13863,7 +13870,7 @@ async fn stop_dictation_for_sidecar(
                             );
                             final_text = match effective_mode.as_str() {
                                 "messages" => rewrite_shorter_text(final_text.as_str()),
-                                "email" | "meeting_follow_up" => {
+                                "email" | "translate_english" | "meeting_follow_up" => {
                                     rewrite_professional_text(final_text.as_str())
                                 }
                                 _ => final_text,
@@ -15876,6 +15883,26 @@ pub async fn dispatch_command(
             persist_benchmark_results(state.as_ref(), &results).await;
             serde_json::to_value(results).map_err(|e| e.to_string())
         }
+        "transcribe_audio_file_bytes" => {
+            let audio_bytes: Vec<u8> =
+                serde_json::from_value(params["audioBytes"].clone()).map_err(|e| e.to_string())?;
+            if audio_bytes.is_empty() {
+                return Err("Audio file is empty.".to_string());
+            }
+            let (provider_type, model_id) = {
+                let settings = state.settings_manager.lock().await.settings().clone();
+                resolve_transcription_provider_and_model(
+                    &settings.transcription,
+                    TranscriptionScope::Dictation,
+                )
+            };
+            let result = state
+                .asr_manager
+                .transcribe_bytes_for_dictation(provider_type, &audio_bytes, Some(&model_id))
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
         "set_default_asr_provider" => {
             let provider_type: asr::AsrProviderType =
                 serde_json::from_value(params["providerType"].clone())
@@ -16737,11 +16764,10 @@ pub async fn dispatch_command(
                 }
             }
             insights.active_days = active_days.len() as u64;
-            insights.average_words_per_dictation = if insights.total_dictations > 0 {
-                insights.dictated_words / insights.total_dictations
-            } else {
-                0
-            };
+            insights.average_words_per_dictation = insights
+                .dictated_words
+                .checked_div(insights.total_dictations)
+                .unwrap_or(0);
             if let Some((app_target, count)) = app_target_counts.into_iter().max_by_key(|(_, c)| *c)
             {
                 insights.top_app_target = Some(app_target);

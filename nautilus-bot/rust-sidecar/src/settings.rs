@@ -192,7 +192,7 @@ pub struct TranscriptionSettings {
     pub dictation_live_preview_enabled: bool,
     /// Dictation: Smart Format — LLM polishes text before insert
     pub dictation_ai_formatting: bool,
-    /// Dictation mode preset: voice, messages, email, notes, meeting_follow_up, custom
+    /// Dictation mode preset: voice, messages, email, notes, translate_english, meeting_follow_up, custom
     pub dictation_mode_preset: String,
     /// Selected saved custom dictation mode id, if any.
     pub dictation_selected_custom_mode_id: Option<String>,
@@ -753,6 +753,7 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
                 "messages" => Some("messages"),
                 "email" => Some("email"),
                 "notes" => Some("notes"),
+                "translate_english" => Some("translate_english"),
                 "meeting_follow_up" => Some("meeting_follow_up"),
                 "voice" => Some("voice"),
                 _ => None,

@@ -140,6 +140,54 @@ type SettingsSaveScheduler = {
   flushing: boolean;
 };
 
+function describeLicenseAccess(license: LicenseInfo) {
+  if (license.valid) {
+    const isFriends = license.tier === "friends_club";
+    return {
+      label: isFriends ? "Friends Club" : "Pro",
+      summary: isFriends
+        ? "Friends Club license active"
+        : "Pro license active",
+      detail: isFriends
+        ? "Updates, Pro features, cloud sync, and priority support are available on this device."
+        : "Updates and Pro features are available on this device. Friends Club-only features stay gated.",
+      reminder: "No trial reminders",
+      updateAccess: "Updates enabled",
+      featureAccess: isFriends ? "Pro + Friends Club" : "Pro",
+    };
+  }
+
+  if (license.trialActive && license.trialDaysRemaining > 0) {
+    const daysLabel =
+      license.trialDaysRemaining === 1
+        ? "1 day remaining"
+        : `${license.trialDaysRemaining} days remaining`;
+    return {
+      label: "Free trial",
+      summary: `Free trial · ${daysLabel}`,
+      detail:
+        "Trial access includes updates and the current Pro feature set. Friends Club-only features stay gated.",
+      reminder: "No trial reminders",
+      updateAccess: "Updates enabled during trial",
+      featureAccess: "Trial Pro access",
+    };
+  }
+
+  return {
+    label: "Trial expired",
+    summary: license.nagRequired
+      ? "Trial expired · reminders active"
+      : "Trial expired",
+    detail:
+      "The 30-day trial has ended. Updates and paid Pro/Friends Club features are locked until a valid license is activated.",
+    reminder: license.nagRequired
+      ? "Activation reminders enabled"
+      : "Activation reminders paused",
+    updateAccess: "Updates locked",
+    featureAccess: "Free local access",
+  };
+}
+
 type ShortcutFieldKey =
   | "toggleRecording"
   | "toggleDictation"
@@ -441,6 +489,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const [licenseKeyInput, setLicenseKeyInput] = useState("");
   const [licenseActivating, setLicenseActivating] = useState(false);
   const [licenseError, setLicenseError] = useState<string | null>(null);
+  const licenseAccess = useMemo(
+    () => (licenseInfo ? describeLicenseAccess(licenseInfo) : null),
+    [licenseInfo],
+  );
   const [capturingShortcut, setCapturingShortcut] =
     useState<ShortcutFieldKey | null>(null);
   const mountedRef = useRef(true);
@@ -1121,6 +1173,49 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       : state
       ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
       : "border-amber-400/30 bg-amber-400/10 text-amber-100";
+
+  const renderLicenseAccessSummary = () => {
+    if (!licenseInfo || !licenseAccess) return null;
+
+    return (
+      <div className="rounded-lg border border-border bg-muted/20 p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Current access
+            </p>
+            <p className="text-sm font-semibold">{licenseAccess.summary}</p>
+            <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
+              {licenseAccess.detail}
+            </p>
+          </div>
+          <span className="shrink-0 rounded-full border border-border bg-background px-2.5 py-1 text-xs font-medium">
+            {licenseAccess.label}
+          </span>
+        </div>
+        <div className="mt-4 grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
+          <div>
+            <p className="text-muted-foreground">Updates</p>
+            <p className="font-medium">{licenseAccess.updateAccess}</p>
+          </div>
+          <div>
+            <p className="text-muted-foreground">Paid features</p>
+            <p className="font-medium">{licenseAccess.featureAccess}</p>
+          </div>
+          <div>
+            <p className="text-muted-foreground">Activation reminders</p>
+            <p className="font-medium">{licenseAccess.reminder}</p>
+          </div>
+          <div>
+            <p className="text-muted-foreground">Device slots</p>
+            <p className="font-medium">
+              {licenseInfo.activationsUsage} of {licenseInfo.activationsLimit} used
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   const handleSettingsTextBlur = useCallback(() => {
     void flushPendingSettingsSave();
@@ -5150,6 +5245,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           </div>
                         ) : licenseInfo.valid ? (
                           <>
+                            {renderLicenseAccessSummary()}
                             <div
                               className={`rounded-lg border p-4 space-y-3 ${
                                 licenseInfo.tier === "friends_club"
@@ -5237,6 +5333,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           </>
                         ) : licenseInfo.trialDaysRemaining > 0 ? (
                           <div className="space-y-4">
+                            {renderLicenseAccessSummary()}
                             <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-2">
                               <div className="flex items-center gap-2 text-sm font-medium">
                                 <XCircle className="h-4 w-4 text-muted-foreground" />
@@ -5353,6 +5450,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           </div>
                         ) : (
                           <div className="space-y-4">
+                            {renderLicenseAccessSummary()}
                             <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800 p-4 space-y-3">
                               <p className="text-sm text-amber-700 dark:text-amber-400 font-medium">
                                 Trial expired

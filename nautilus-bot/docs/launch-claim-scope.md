@@ -7,6 +7,7 @@ This file defines what Nautilus may and may not claim publicly from the current 
 
 ## Source Of Truth
 
+- Technical proof boundary: `docs/technical-proof-boundaries.md`
 - Launch dashboard: `docs/launch-readiness-dashboard.md`
 - Machine-readable launch state: `artifacts/launch-readiness-report.json`
 - Frozen app matrix: `docs/dictation-app-compatibility-matrix.md`

@@ -148,12 +148,32 @@ export interface DictationReprocessResult {
   modelId: string | null;
 }
 
+export interface AudioFileTranscriptionResult {
+  text: string;
+  language: string;
+  confidence: number;
+  processingTimeMs: number;
+  modelName: string;
+  modelId: string;
+  requestedProvider: string;
+  actualProvider: string;
+  fallbackReason?: string | null;
+}
+
 export async function reprocessDictationText(
   text: string,
   modePreset: string,
   appTarget?: string | null
 ): Promise<DictationReprocessResult> {
   return await invoke("reprocess_dictation_text", { text, modePreset, appTarget });
+}
+
+export async function transcribeAudioFileBytes(
+  audioBytes: Uint8Array
+): Promise<AudioFileTranscriptionResult> {
+  return await invoke("transcribe_audio_file_bytes", {
+    audioBytes: Array.from(audioBytes),
+  });
 }
 
 export async function getDictationHistoryDetails(

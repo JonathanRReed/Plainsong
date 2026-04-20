@@ -71,6 +71,12 @@ function normalizeTranscriptForViewer(
 type RecordingStatusChangedEvent = {
   recordingId: string;
   status: Recording["status"];
+  message?: string | null;
+  progress?: number | null;
+  updatedAt?: string | null;
+  meetingProcessingStartedAt?: string | null;
+  transcriptFirstAvailableAt?: string | null;
+  consentPromptShown?: boolean | null;
 };
 
 type UseRecordingDetailOptions = {
@@ -91,6 +97,7 @@ export function useRecordingDetail({
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const detailRequestGuard = useScopedRequestGuard<string | null>();
+  const selectedRecordingId = selectedRecording?.id ?? null;
 
   const applyLatestRecording = useCallback(
     (recording: Recording) => {
@@ -279,7 +286,7 @@ export function useRecordingDetail({
   }, [detailRequestGuard]);
 
   useEffect(() => {
-    if (!isOpen || !selectedRecording) {
+    if (!isOpen || !selectedRecordingId) {
       return;
     }
 
@@ -291,10 +298,10 @@ export function useRecordingDetail({
       unlistenAnalysis = await listen<{ recordingId: string }>(
         "recording-analysis-ready",
         (event) => {
-          if (event.payload?.recordingId === selectedRecording.id) {
-            void refreshSelectedRecording(selectedRecording.id);
-            void refreshTranscript(selectedRecording.id);
-            void refreshTranscriptDetails(selectedRecording.id);
+          if (event.payload?.recordingId === selectedRecordingId) {
+            void refreshSelectedRecording(selectedRecordingId);
+            void refreshTranscript(selectedRecordingId);
+            void refreshTranscriptDetails(selectedRecordingId);
           }
         }
       );
@@ -305,17 +312,17 @@ export function useRecordingDetail({
       }>("recording-title-updated", (event) => {
         if (
           event.payload?.status === "ok" &&
-          event.payload.recordingId === selectedRecording.id
+          event.payload.recordingId === selectedRecordingId
         ) {
-          void refreshSelectedRecording(selectedRecording.id);
-          void refreshTranscriptDetails(selectedRecording.id);
+          void refreshSelectedRecording(selectedRecordingId);
+          void refreshTranscriptDetails(selectedRecordingId);
         }
       });
 
       unlistenStatus = await listen<RecordingStatusChangedEvent>(
         "recording-status-changed",
         (event) => {
-          if (event.payload?.recordingId !== selectedRecording.id) {
+          if (event.payload?.recordingId !== selectedRecordingId) {
             return;
           }
 
@@ -323,13 +330,21 @@ export function useRecordingDetail({
             current ? { ...current, status: event.payload.status } : current
           );
 
+          if (event.payload.status === "processing") {
+            setSelectedTranscript(null);
+            setSelectedTranscriptDetails(null);
+            void refreshSelectedRecording(selectedRecordingId);
+            void refreshTranscriptDetails(selectedRecordingId);
+            return;
+          }
+
           if (
             event.payload.status === "completed" ||
             event.payload.status === "error"
           ) {
-            void refreshSelectedRecording(selectedRecording.id);
-            void refreshTranscript(selectedRecording.id);
-            void refreshTranscriptDetails(selectedRecording.id);
+            void refreshSelectedRecording(selectedRecordingId);
+            void refreshTranscript(selectedRecordingId);
+            void refreshTranscriptDetails(selectedRecordingId);
           }
         }
       );
@@ -346,7 +361,7 @@ export function useRecordingDetail({
     refreshSelectedRecording,
     refreshTranscript,
     refreshTranscriptDetails,
-    selectedRecording,
+    selectedRecordingId,
   ]);
 
   useEffect(() => {

@@ -108,6 +108,7 @@ type DictationModePreset =
   | "messages"
   | "email"
   | "notes"
+  | "translate_english"
   | "meeting_follow_up"
   | "custom";
 
@@ -140,6 +141,11 @@ const MODE_META: Record<
     label: "Notes",
     icon: StickyNote,
     accent: "text-violet-200 bg-violet-400/10 border-violet-400/30",
+  },
+  translate_english: {
+    label: "Translate to English",
+    icon: Wand2,
+    accent: "text-sky-200 bg-sky-400/10 border-sky-400/30",
   },
   meeting_follow_up: {
     label: "Meeting Follow-up",
@@ -215,6 +221,10 @@ function normalizePopupModeLabel(label: string | null): string | null {
       return "Slack & Chat";
     case "email":
       return "Writing";
+    case "translate english":
+    case "translate to english":
+    case "translate_english":
+      return "Translate to English";
     case "follow-up":
     case "meeting follow-up":
       return "Meeting Follow-up";

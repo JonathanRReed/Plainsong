@@ -38,6 +38,8 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - uses: oven-sh/setup-bun@v2
+
       - name: Extract version
         id: version
         run: |
@@ -79,7 +81,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: nautilus-bot
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Run live cloud ASR smoke gate
         id: cloud_smoke
@@ -115,12 +117,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: nautilus-bot/package-lock.json
+
+      - uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
         working-directory: nautilus-bot
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: ASR asset + runtime preflight
         id: asr_preflight
@@ -157,12 +159,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: nautilus-bot/package-lock.json
+
+      - uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
         working-directory: nautilus-bot
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: ASR asset + runtime preflight
         id: asr_preflight
@@ -203,8 +205,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: nautilus-bot/package-lock.json
+
+      - uses: oven-sh/setup-bun@v2
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -213,7 +215,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: nautilus-bot
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Inject updater public key
         working-directory: nautilus-bot
@@ -417,8 +419,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: nautilus-bot/package-lock.json
+
+      - uses: oven-sh/setup-bun@v2
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -427,7 +429,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: nautilus-bot
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Inject updater public key
         working-directory: nautilus-bot
@@ -593,8 +595,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: nautilus-bot/package-lock.json
+
+      - uses: oven-sh/setup-bun@v2
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -614,7 +616,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: nautilus-bot
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Inject updater public key
         working-directory: nautilus-bot
