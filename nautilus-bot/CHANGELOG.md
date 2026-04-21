@@ -14,6 +14,7 @@ All notable changes to NautilusBot are documented in this file.
 - Updated competitor parity command docs to use npm commands.
 - Updated release/prelaunch readiness docs with current gate status and blockers.
 - Improved artifact validator support for `date-time` formats and regex `pattern`.
+- Stabilized the recordings view cross-meeting recall test so it waits for the recall button before clicking ([PR #9](https://github.com/JonathanRReed/NautilusBot/pull/9)).
 
 ### Security
 - Updated lockfile dependencies to remediate Rollup path traversal advisory.
