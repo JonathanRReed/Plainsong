@@ -566,7 +566,7 @@ describe("RecordingsView", () => {
     fireEvent.click(screen.getByText("Weekly sync"));
 
     expect(await screen.findByText("Cross-meeting Recall")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Jon cared about across recent meetings/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Jon cared about across recent meetings/i }));
 
     await waitFor(() => {
       expect(mocks.askMemory).toHaveBeenCalledWith(
