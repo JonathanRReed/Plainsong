@@ -65,7 +65,7 @@ reqwest = { version = "0.13", features = ["json", "stream", "multipart"] }
 futures-util = "0.3"
 sha2 = "0.11"
 ring = "0.17"
-rand = "0.9"
+rand = "0.10"
 async-trait = "0.1"
 hex = "0.4"
 argon2 = "0.5"
@@ -75,7 +75,7 @@ keyring = "3.6"
 regex = "1.11"
 urlencoding = "2.1"
 hostname = "0.4"
-zip = { version = "7.2", default-features = false, features = ["deflate"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 walkdir = "2.5"
 
 # Optional progress bars
