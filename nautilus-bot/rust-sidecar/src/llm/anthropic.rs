@@ -28,11 +28,6 @@ impl AnthropicClient {
         }
     }
 
-    /// Check if Anthropic is available (has API key)
-    pub fn is_available(&self) -> bool {
-        self.api_key.is_some()
-    }
-
     /// List available models from Anthropic API
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let Some(ref key) = self.api_key else {

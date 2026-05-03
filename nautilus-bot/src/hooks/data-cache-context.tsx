@@ -23,7 +23,7 @@ function createEntry<T>(): CacheEntry<T> {
   };
 }
 
-export class DataCacheStore {
+class DataCacheStore {
   private readonly projects = createEntry<Project[]>();
 
   private readonly recordings = new Map<string, CacheEntry<Recording[]>>();

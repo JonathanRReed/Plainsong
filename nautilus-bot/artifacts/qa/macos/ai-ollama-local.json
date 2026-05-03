@@ -1,0 +1,112 @@
+{
+  "generatedAt": "2026-05-02T20:57:56.954Z",
+  "appPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app",
+  "sidecarPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar",
+  "dbPath": "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db",
+  "recordingId": "qa-ollama-1777755476929",
+  "model": "gpt-oss:20b",
+  "pass": true,
+  "timedOut": false,
+  "dbRestored": true,
+  "originalDbHashes": {
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db": "6c9702024cef227f674b5b90ff872cfca5dc7810aa07b1dd11b263cd29647a30",
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db-wal": null,
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db-shm": null
+  },
+  "restoredDbHashes": {
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db": "6c9702024cef227f674b5b90ff872cfca5dc7810aa07b1dd11b263cd29647a30",
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db-wal": null,
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db-shm": null
+  },
+  "checks": {
+    "summaryHasCitation": true,
+    "summaryMentionsFixture": true,
+    "actionItemsHaveCitations": true,
+    "actionItemsMentionOwners": true
+  },
+  "stderr": {
+    "length": 337,
+    "tail": "[sidecar] ready\n2026-05-02T20:57:57.013642Z  INFO nautilus_bot_lib::llm::ollama: Ollama returned 9 models\n2026-05-02T20:57:57.015239Z  INFO nautilus_bot_lib: Running analysis with provider 'ollama' and model 'gpt-oss:20b'\n2026-05-02T20:58:11.561187Z  INFO nautilus_bot_lib: Running analysis with provider 'ollama' and model 'gpt-oss:20b'"
+  },
+  "ollama": {
+    "available": true,
+    "models": [
+      "gemma4:e2b",
+      "qwen3.5:9b",
+      "nomic-embed-text:latest",
+      "devstral-small-2:latest",
+      "ministral-3:latest",
+      "nemotron-mini:latest",
+      "functiongemma:latest",
+      "gpt-oss:20b",
+      "gemma3:12b"
+    ],
+    "selectedModelPresent": true
+  },
+  "summary": {
+    "citations": [
+      {
+        "certainty": 1,
+        "endTime": 6,
+        "recordingId": "qa-ollama-1777755476929",
+        "startTime": 0,
+        "text": "Maya decided the launch readiness report must stay no go until signing is complete."
+      },
+      {
+        "certainty": 1,
+        "endTime": 12,
+        "recordingId": "qa-ollama-1777755476929",
+        "startTime": 6,
+        "text": "Jon will prepare the QA evidence bundle today."
+      },
+      {
+        "certainty": 1,
+        "endTime": 18,
+        "recordingId": "qa-ollama-1777755476929",
+        "startTime": 12,
+        "text": "Priya owns the Windows installer validation next week."
+      }
+    ],
+    "model": "gpt-oss:20b",
+    "processingTimeMs": 14542,
+    "summary": "Work completed: none reported.\nWork planned: Jon will prepare the QA evidence bundle today; Priya will validate the Windows installer next week.\nBlocker: The launch readiness report must stay no‑go until signing is complete.\nOwners: Maya (decision on launch readiness), Jon (QA evidence bundle), Priya (Windows installer validation)."
+  },
+  "actionItems": {
+    "items": [
+      {
+        "assignee": "Jon",
+        "citations": [
+          {
+            "certainty": 1,
+            "endTime": 12,
+            "recordingId": "qa-ollama-1777755476929",
+            "startTime": 6,
+            "text": "Jon will prepare the QA evidence bundle today."
+          }
+        ],
+        "deadline": "today",
+        "task": "Prepare the QA evidence bundle"
+      },
+      {
+        "assignee": "Priya",
+        "citations": [
+          {
+            "certainty": 1,
+            "endTime": 18,
+            "recordingId": "qa-ollama-1777755476929",
+            "startTime": 12,
+            "text": "Priya owns the Windows installer validation next week."
+          }
+        ],
+        "deadline": "next week",
+        "task": "Windows installer validation"
+      }
+    ],
+    "model": "gpt-oss:20b",
+    "processingTimeMs": 12326
+  },
+  "sidecarExit": {
+    "code": 0,
+    "signal": null
+  }
+}

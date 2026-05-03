@@ -1,4 +1,4 @@
-export interface SpeakTextOptions {
+interface SpeakTextOptions {
   onEnd?: () => void;
   onError?: () => void;
   rate?: number;

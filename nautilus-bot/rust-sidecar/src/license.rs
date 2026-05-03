@@ -1,6 +1,6 @@
 //! Lemon Squeezy License API integration for Nautilus.
 //!
-//! Uses the LS License API (no private API key required – the license key itself
+//! Uses the LS License API (no private API key required, the license key itself
 //! is the credential). State is persisted to a JSON file in the app data directory.
 //!
 //! State file: `<data_dir>/NautilusBot/nautilus_license.json`
@@ -51,7 +51,7 @@ pub struct LicenseState {
     /// The stored LS license key (empty if none).
     #[serde(default, skip_serializing)]
     pub key: String,
-    /// The instance ID returned by the LS activate endpoint — stored to avoid
+    /// The instance ID returned by the LS activate endpoint, stored to avoid
     /// burning extra activation slots on repeated launches.
     #[serde(default, skip_serializing)]
     pub instance_id: String,
@@ -411,6 +411,9 @@ fn trial_status(state: &LicenseState, valid: bool) -> (i64, bool) {
         return (0, true);
     };
     let days_elapsed = (chrono::Utc::now() - first_run).num_days();
+    if days_elapsed < 0 {
+        return (0, true);
+    }
     let remaining = (TRIAL_DAYS - days_elapsed).max(0);
     let nag = remaining == 0;
     (remaining, nag)
@@ -718,6 +721,56 @@ mod tests {
     }
 
     #[test]
+    fn active_license_over_activation_limit_is_invalid() {
+        let mut state = sample_state("active", 1);
+        state.activations_limit = 5;
+        state.activations_usage = 6;
+        assert!(!is_license_state_valid(&state));
+    }
+
+    #[test]
+    fn active_license_without_effective_activation_limit_is_invalid() {
+        let mut state = sample_state("active", 1);
+        state.tier = Tier::None;
+        state.activations_limit = 0;
+        state.activations_usage = 0;
+        assert!(!is_license_state_valid(&state));
+    }
+
+    #[test]
+    fn trial_status_active_during_first_thirty_days() {
+        let mut state = sample_state("inactive", 1);
+        state.key.clear();
+        state.first_run_at = (chrono::Utc::now() - chrono::Duration::days(12)).to_rfc3339();
+
+        let (remaining, nag) = trial_status(&state, false);
+        assert_eq!(remaining, 18);
+        assert!(!nag);
+    }
+
+    #[test]
+    fn trial_status_expires_after_thirty_days() {
+        let mut state = sample_state("inactive", 1);
+        state.key.clear();
+        state.first_run_at = (chrono::Utc::now() - chrono::Duration::days(TRIAL_DAYS)).to_rfc3339();
+
+        let (remaining, nag) = trial_status(&state, false);
+        assert_eq!(remaining, 0);
+        assert!(nag);
+    }
+
+    #[test]
+    fn future_first_run_timestamp_fails_closed() {
+        let mut state = sample_state("inactive", 1);
+        state.key.clear();
+        state.first_run_at = (chrono::Utc::now() + chrono::Duration::days(10)).to_rfc3339();
+
+        let (remaining, nag) = trial_status(&state, false);
+        assert_eq!(remaining, 0);
+        assert!(nag);
+    }
+
+    #[test]
     fn malformed_first_run_timestamp_expires_trial() {
         let state = LicenseState {
             key: String::new(),
@@ -800,6 +853,13 @@ mod tests {
         assert!(!ent.experimental_enabled);
         assert!(!ent.can_update);
         assert_eq!(ent.tier, "free");
+    }
+
+    #[test]
+    fn tier_activation_limits_match_product_matrix() {
+        assert_eq!(get_tier_activation_limit(&Tier::None), 0);
+        assert_eq!(get_tier_activation_limit(&Tier::Pro), 5);
+        assert_eq!(get_tier_activation_limit(&Tier::FriendsClub), 10);
     }
 
     #[test]

@@ -12,9 +12,12 @@ use std::sync::{
 use tokio::sync::{mpsc, Mutex};
 
 /// Streaming transcription session
-#[allow(dead_code)]
 pub struct StreamingSession {
     /// Session ID
+    #[expect(
+        dead_code,
+        reason = "session id is retained in the handle for stream diagnostics"
+    )]
     pub id: String,
     /// Audio buffer (circular/ring buffer for continuous recording)
     buffer: Arc<Mutex<AudioBuffer>>,
@@ -270,7 +273,10 @@ impl StreamingTranscriber {
     }
 
     /// Stop a streaming session without finalizing
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "explicit stop remains part of the streaming session control surface"
+    )]
     pub async fn stop_session(&self, session_id: &str) -> Result<()> {
         let mut sessions = self.sessions.lock().await;
 
@@ -284,7 +290,10 @@ impl StreamingTranscriber {
     }
 
     /// Check if a session is active
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "activity query remains part of the streaming session control surface"
+    )]
     pub async fn is_session_active(&self, session_id: &str) -> bool {
         let sessions = self.sessions.lock().await;
         sessions.contains_key(session_id)

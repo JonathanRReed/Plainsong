@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-04-18T22:56:38.154Z",
+  "generatedAt": "2026-05-03T15:52:37.638Z",
   "strictReady": false,
   "blockers": [
     {
@@ -12,7 +12,13 @@
       "gate": "benchmark-gates-packaged",
       "status": "BLOCKED",
       "evidence": "artifacts/benchmark-packaged.blocked.md",
-      "reason": "Benchmark gate artifacts are still local or fixture-tagged runs; packaged dictation benchmark evidence is still missing."
+      "reason": "macOS packaged dictation benchmark evidence is present and passing; Windows packaged benchmark evidence is still missing."
+    },
+    {
+      "gate": "dictation-app-matrix",
+      "status": "BLOCKED",
+      "evidence": "artifacts/dictation-app-matrix-gate.json",
+      "reason": "Frozen app matrix is not launch-ready: 1/16 ready, 15 pending, 8 missing packaged benchmark evidence, 15 missing insertion evidence, 6 open blocked-app entries, 1 rejected insertion evidence artifacts."
     },
     {
       "gate": "apple-release-signing",
@@ -30,26 +36,46 @@
       "gate": "packaged-qa-matrix",
       "status": "BLOCKED",
       "evidence": "artifacts/packaged-qa-evidence-bundle.json",
-      "reason": "Packaged QA matrix remains 53 BLOCKED / 0 PASS."
+      "reason": "Non-external packaged QA remains 21 BLOCKED / 21 PASS. External distribution QA remains 10 BLOCKED / 0 PASS and is tracked separately."
     }
   ],
   "observations": {
     "localReleasePass": true,
     "localBenchmarkGatesPass": true,
     "packagedBenchmarkEvidenceReady": false,
+    "packagedMacosBenchmarkReady": true,
+    "packagedWindowsBenchmarkReady": false,
     "qaSummary": {
-      "total": 53,
+      "total": 52,
+      "pass": 21,
+      "fail": 0,
+      "blocked": 31,
+      "pending": 0
+    },
+    "productQaSummary": {
+      "total": 42,
+      "pass": 21,
+      "fail": 0,
+      "blocked": 21,
+      "pending": 0
+    },
+    "externalDistributionQaSummary": {
+      "total": 10,
       "pass": 0,
       "fail": 0,
-      "blocked": 53,
+      "blocked": 10,
       "pending": 0
+    },
+    "qaEvidenceSummary": {
+      "missingEvidence": 0,
+      "mismatchedEvidenceStatus": 0
     },
     "codesignVerified": true,
     "electronBuildPassed": true,
     "dmgHelperPassed": true,
     "localSizeGate": {
       "target": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app",
-      "sizeMb": 403.22,
+      "sizeMb": 403.29,
       "maxMb": 450,
       "pass": true
     }

@@ -22,6 +22,8 @@ import {
   refreshAsrRuntimeProbes,
   repairLocalModelCache,
   getAsrProviderInventory,
+} from "@/lib/backend/asr";
+import {
   getSettings,
   saveSettings,
   getPermissionDiagnostics,
@@ -30,7 +32,7 @@ import {
   requestDictationPermissions,
   repairCursorInsertPermissions,
   type PermissionDiagnostics,
-} from "@/lib/backend";
+} from "@/lib/backend/settings";
 import { invoke, listen } from "@/lib/electron";
 import {
   Card,
@@ -840,7 +842,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   const providerSetupCommand = (providerType: AsrProviderType): string => {
     switch (providerType) {
       case "parakeet":
-        return "Use the Download button to fetch the selected Parakeet model. CTC 0.6B is the stable default; larger and legacy variants are available on demand.";
+        return "Use the Download button to fetch the selected Parakeet model. TDT 0.6B v3 is the recommended multilingual default; CTC, larger, and legacy variants are available on demand.";
       case "whisper_candle":
         return "Use the Download button to fetch Whisper Large V3 Turbo for the native Candle runtime. This path is experimental and best used for dictation.";
       case "distil_whisper":
@@ -2772,7 +2774,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             <CardContent>
               <div className="space-y-4 text-sm">
                 <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">🌍 Whisper (Enabled)</p>
+                  <p className="font-medium mb-1">Whisper (Enabled)</p>
                   <p className="text-muted-foreground">
                     Production local transcription provider. Supports model
                     selection including turbo variants.
@@ -2780,7 +2782,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">
                   <p className="font-medium mb-1">
-                    ⚡ Parakeet (Enabled when runtime ready)
+                    Parakeet (Enabled when runtime ready)
                   </p>
                   <p className="text-muted-foreground">
                     Uses a local NeMo runtime bridge. Provider becomes
@@ -2790,7 +2792,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">
                   <p className="font-medium mb-1">
-                    🏎️ Distil Whisper (Enabled)
+                    Distil Whisper (Enabled)
                   </p>
                   <p className="text-muted-foreground">
                     Native local Distil runtime using model artifacts from
@@ -2799,7 +2801,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">
                   <p className="font-medium mb-1">
-                    🧪 Whisper Candle (Experimental)
+                    Whisper Candle (Experimental)
                   </p>
                   <p className="text-muted-foreground">
                     Uses Whisper Large V3 Turbo through the native Candle

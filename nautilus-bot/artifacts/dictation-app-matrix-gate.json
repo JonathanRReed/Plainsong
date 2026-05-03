@@ -1,0 +1,307 @@
+{
+  "generatedAt": "2026-05-03T15:52:36.192Z",
+  "pass": false,
+  "matrixPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/dictation-app-compatibility-matrix.md",
+  "blockedRegisterPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/dictation-blocked-app-register.md",
+  "packagedBenchmarks": {
+    "macOS": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/evals/benchmark-run-packaged-macos.json",
+    "Windows": null
+  },
+  "insertionEvidence": {
+    "macOS": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos",
+    "Windows": null
+  },
+  "summary": {
+    "total": 16,
+    "ready": 1,
+    "pending": 15,
+    "clipboardOnly": 0,
+    "unsupported": 0,
+    "missingPackagedEvidence": 8,
+    "missingInsertionEvidence": 15,
+    "openBlockedEntries": 6,
+    "rejectedInsertionEvidence": 1
+  },
+  "evidenceViolations": [],
+  "rejectedInsertionEvidence": [
+    {
+      "path": "artifacts/qa/macos/app-matrix-insertion-slack.json",
+      "status": "BLOCKED",
+      "targetApp": "Slack",
+      "pass": false,
+      "reason": "pass is not true, status is BLOCKED, sidecar command did not complete, frontmost app did not match target, paste was not reported, manual observation was not accepted, scratch target is a placeholder, manual observation result is missing"
+    }
+  ],
+  "rows": [
+    {
+      "platform": "macOS",
+      "app": "Apple Notes",
+      "status": "SUPPORTED",
+      "modeUsed": "auto",
+      "notes": "Packaged insertion verified in `artifacts/qa/macos/app-matrix-insertion-apple-notes.md`.",
+      "supportedStatus": true,
+      "packagedEvidenceReady": true,
+      "packagedScenarioIds": [
+        "basic-notes"
+      ],
+      "insertionEvidenceReady": true,
+      "insertionEvidence": [
+        {
+          "path": "artifacts/qa/macos/app-matrix-insertion-apple-notes.json",
+          "targetApp": "Apple Notes",
+          "scratchTarget": "Apple Notes QA scratch note body",
+          "sampleText": "Nautilus app matrix smoke 2026-05-03T12-45-53-981Z",
+          "observed": "exact",
+          "generatedAt": "2026-05-03T12:45:53.981Z"
+        }
+      ],
+      "openBlockedEntries": [],
+      "launchReady": true
+    },
+    {
+      "platform": "macOS",
+      "app": "Google Docs (Chrome)",
+      "status": "PENDING",
+      "modeUsed": "auto",
+      "notes": "High-value browser editor; validate cursor focus recovery after hotkey release.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": true,
+      "packagedScenarioIds": [
+        "command-newline",
+        "command-paragraph",
+        "it-google-docs-brief"
+      ],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [],
+      "launchReady": false
+    },
+    {
+      "platform": "macOS",
+      "app": "Slack",
+      "status": "PENDING",
+      "modeUsed": "auto",
+      "notes": "High-frequency chat target; validate snippet expansions and punctuation consistency.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": true,
+      "packagedScenarioIds": [
+        "command-rewrite-shorter",
+        "snippet-positive-slack",
+        "nl-slack-check-in"
+      ],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [],
+      "launchReady": false
+    },
+    {
+      "platform": "macOS",
+      "app": "Notion",
+      "status": "PENDING",
+      "modeUsed": "auto",
+      "notes": "High-frequency notes workspace; validate multiline insert behavior.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": true,
+      "packagedScenarioIds": [
+        "snippet-negative-notion",
+        "ja-notion-brief"
+      ],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [],
+      "launchReady": false
+    },
+    {
+      "platform": "macOS",
+      "app": "VS Code",
+      "status": "PENDING",
+      "modeUsed": "clipboard_only",
+      "notes": "High-value operator/founder target; direct insert remains lower confidence today.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": true,
+      "packagedScenarioIds": [
+        "command-delete-last-sentence",
+        "command-bulletize-selection",
+        "zh-vscode-checklist"
+      ],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [
+        "DA-001"
+      ],
+      "launchReady": false
+    },
+    {
+      "platform": "macOS",
+      "app": "Cursor",
+      "status": "PENDING",
+      "modeUsed": "clipboard_only",
+      "notes": "AI editor target; validate command mode and snippet coexistence.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": true,
+      "packagedScenarioIds": [
+        "command-undo",
+        "command-rewrite-professional",
+        "ko-cursor-comment"
+      ],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [
+        "DA-002"
+      ],
+      "launchReady": false
+    },
+    {
+      "platform": "macOS",
+      "app": "Messages",
+      "status": "PENDING",
+      "modeUsed": "auto",
+      "notes": "Short-utterance chat baseline.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": true,
+      "packagedScenarioIds": [
+        "safety-no-command-center"
+      ],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [],
+      "launchReady": false
+    },
+    {
+      "platform": "macOS",
+      "app": "HubSpot (Chrome)",
+      "status": "PENDING",
+      "modeUsed": "clipboard_only",
+      "notes": "Launch-problematic CRM target for sales workflows; capture rich-text field limitations.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": true,
+      "packagedScenarioIds": [
+        "de-hubspot-call-log"
+      ],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [
+        "DA-003"
+      ],
+      "launchReady": false
+    },
+    {
+      "platform": "Windows",
+      "app": "Notepad",
+      "status": "PENDING",
+      "modeUsed": "clipboard_only",
+      "notes": "Low-complexity text field baseline; current runtime defaults to clipboard fallback.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": false,
+      "packagedScenarioIds": [],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [],
+      "launchReady": false
+    },
+    {
+      "platform": "Windows",
+      "app": "Word",
+      "status": "PENDING",
+      "modeUsed": "clipboard_only",
+      "notes": "High-value document target; validate formatting retention.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": false,
+      "packagedScenarioIds": [],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [
+        "DA-004"
+      ],
+      "launchReady": false
+    },
+    {
+      "platform": "Windows",
+      "app": "Google Docs (Edge/Chrome)",
+      "status": "PENDING",
+      "modeUsed": "clipboard_only",
+      "notes": "Browser editor baseline; validate focus and paste behavior.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": false,
+      "packagedScenarioIds": [],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [],
+      "launchReady": false
+    },
+    {
+      "platform": "Windows",
+      "app": "Slack",
+      "status": "PENDING",
+      "modeUsed": "clipboard_only",
+      "notes": "High-frequency chat target; validate snippet triggers and punctuation.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": false,
+      "packagedScenarioIds": [],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [],
+      "launchReady": false
+    },
+    {
+      "platform": "Windows",
+      "app": "Notion",
+      "status": "PENDING",
+      "modeUsed": "clipboard_only",
+      "notes": "High-frequency notes workspace; validate multiline behavior.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": false,
+      "packagedScenarioIds": [],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [],
+      "launchReady": false
+    },
+    {
+      "platform": "Windows",
+      "app": "VS Code",
+      "status": "PENDING",
+      "modeUsed": "clipboard_only",
+      "notes": "High-value operator/founder target; validate long utterances.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": false,
+      "packagedScenarioIds": [],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [],
+      "launchReady": false
+    },
+    {
+      "platform": "Windows",
+      "app": "Cursor",
+      "status": "PENDING",
+      "modeUsed": "clipboard_only",
+      "notes": "AI editor target; validate command handling behavior.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": false,
+      "packagedScenarioIds": [],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [
+        "DA-006"
+      ],
+      "launchReady": false
+    },
+    {
+      "platform": "Windows",
+      "app": "Outlook",
+      "status": "PENDING",
+      "modeUsed": "clipboard_only",
+      "notes": "Launch-problematic sales target; capture rich-text compose limitations.",
+      "supportedStatus": false,
+      "packagedEvidenceReady": false,
+      "packagedScenarioIds": [],
+      "insertionEvidenceReady": false,
+      "insertionEvidence": [],
+      "openBlockedEntries": [
+        "DA-005"
+      ],
+      "launchReady": false
+    }
+  ]
+}

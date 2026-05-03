@@ -17,16 +17,18 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import {
   downloadAsrModels,
-  openPermissionSettings,
   refreshAsrRuntimeProbes,
-  repairCursorInsertPermissions,
   repairLocalModelCache,
+} from "@/lib/backend/asr";
+import { smokeTestCursorInsert } from "@/lib/backend/dictation";
+import {
+  openPermissionSettings,
+  repairCursorInsertPermissions,
   requestDictationPermissions,
-  smokeTestCursorInsert,
   verifyDictationSetup,
   verifyMeetingSetup,
   verifySystemAudioSetup,
-} from "@/lib/backend";
+} from "@/lib/backend/settings";
 import {
   isCloudProvider,
   isDownloadableProvider,

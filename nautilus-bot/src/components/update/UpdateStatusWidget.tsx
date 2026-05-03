@@ -8,10 +8,9 @@ import {
   installUpdate,
   getUpdateStatus,
   getUpdateLockReason,
-  validateLicense,
   type UpdateStatusInfo,
-  type LicenseInfo,
-} from "@/lib/backend";
+} from "@/lib/backend/updates";
+import { validateLicense, type LicenseInfo } from "@/lib/backend/license";
 
 export function UpdateStatusWidget() {
   const [license, setLicense] = useState<LicenseInfo | null>(null);

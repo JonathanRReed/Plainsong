@@ -8,7 +8,7 @@ import {
   setUpdateChannel,
   canUseBetaChannel,
   type UpdateChannel,
-} from "@/lib/backend";
+} from "@/lib/backend/updates";
 
 interface BetaChannelToggleProps {
   disabled?: boolean;
@@ -44,14 +44,14 @@ export function BetaChannelToggle({ disabled }: BetaChannelToggleProps) {
       <div className="flex items-center justify-between rounded-md border p-4 opacity-60">
         <div className="space-y-0.5">
           <div className="flex items-center gap-2">
-            <Label className="text-sm font-medium">Beta Channel</Label>
-            <Badge variant="secondary" className="text-xs">⭐ Friends Club</Badge>
+            <Label htmlFor="beta-channel-toggle" className="text-sm font-medium">Beta Channel</Label>
+            <Badge variant="secondary" className="text-xs">Friends Club</Badge>
           </div>
           <p className="text-sm text-muted-foreground">
             Get early access to new features and improvements
           </p>
         </div>
-        <Switch disabled checked={false} />
+        <Switch id="beta-channel-toggle" disabled checked={false} />
       </div>
     );
   }
@@ -60,8 +60,8 @@ export function BetaChannelToggle({ disabled }: BetaChannelToggleProps) {
     <div className="flex items-center justify-between rounded-md border p-4">
       <div className="space-y-0.5">
         <div className="flex items-center gap-2">
-          <Label className="text-sm font-medium">Beta Channel</Label>
-          <Badge variant="secondary" className="bg-amber-100 text-amber-800 text-xs">⭐ Friends Club</Badge>
+          <Label htmlFor="beta-channel-toggle" className="text-sm font-medium">Beta Channel</Label>
+          <Badge variant="secondary" className="bg-amber-100 text-amber-800 text-xs">Friends Club</Badge>
         </div>
         <p className="text-sm text-muted-foreground">
           Get early access to new features and improvements
@@ -74,6 +74,7 @@ export function BetaChannelToggle({ disabled }: BetaChannelToggleProps) {
         )}
       </div>
       <Switch
+        id="beta-channel-toggle"
         checked={channel === "beta"}
         onCheckedChange={handleToggle}
         disabled={disabled || isLoading}

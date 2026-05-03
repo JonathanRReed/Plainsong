@@ -1,13 +1,21 @@
-# Onboarding: Normal user onboarding completes and persists baseline settings
+# Onboarding: Normal user baseline settings
 
-Status: BLOCKED
+Status: PASS
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Evidence: artifacts/qa/macos/onboarding-settings.json
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Command
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+`bun run qa:packaged:macos:onboarding`
+
+## Verification
+
+- Launched the packaged sidecar from `release/mac-arm64/Nautilus.app`.
+- Saved the normal onboarding profile through the packaged `save_settings` command.
+- Read persisted settings back through packaged `get_settings`.
+- Verified dark theme, meeting template, shared Distil-Whisper route, normal dictation profile, paste insertion, local-only privacy, and never-retain defaults.
+- Restored the original raw settings file bytes after the sidecar exited.
+
+## Result
+
+The packaged app persisted every normal-profile setting check and restored the original settings file hash.

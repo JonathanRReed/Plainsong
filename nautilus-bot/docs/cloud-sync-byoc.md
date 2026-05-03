@@ -1,4 +1,4 @@
-# Cloud Sync — Bring Your Own Cloud (BYOC)
+# Cloud Sync, Bring Your Own Cloud (BYOC)
 
 Nautilus is **local-first**: recordings, transcripts, and local secrets stay on your machine by default. Cloud sync is optional, uses *your* storage, and is not a hosted Nautilus cloud service.
 
@@ -28,7 +28,7 @@ Current product note:
 3. Enable **Auto-export** so new transcripts are written there automatically.
 4. Your recordings and transcripts sync across any Mac with the same cloud folder.
 
-> **Encryption note**: If you have Vault encryption enabled, exported files are encrypted at rest. The encryption key is stored in your macOS Keychain — you must transfer it manually to other machines via `security export` or by re-entering your Vault passphrase.
+> **Encryption note**: If you have Vault encryption enabled, exported files are encrypted at rest. The encryption key is stored in your macOS Keychain. You must transfer it manually to other machines via `security export` or by re-entering your Vault passphrase.
 
 ## S3-Compatible Storage (Advanced)
 

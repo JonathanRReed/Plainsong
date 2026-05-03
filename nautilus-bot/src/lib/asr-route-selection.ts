@@ -29,7 +29,7 @@ export interface AsrRouteSelectionState {
 type RouteSelectableProvider = Pick<AsrProviderInfo, "providerType" | "modelOptions">;
 type RouteSelectableInventory = RouteSelectableProvider | AsrProviderInventory;
 
-export type AsrRouteSelectionUpdate = Partial<AsrRouteSelectionState>;
+type AsrRouteSelectionUpdate = Partial<AsrRouteSelectionState>;
 
 const DEFAULT_PROVIDER: AsrProviderType = "distil_whisper";
 const DEFAULT_MODEL_ID = "distil-large-v3.5";

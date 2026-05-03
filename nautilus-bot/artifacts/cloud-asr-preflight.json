@@ -1,0 +1,31 @@
+{
+  "generatedAt": "2026-05-03T15:54:57.236Z",
+  "status": "BLOCKED",
+  "pass": false,
+  "command": "bun run qa:cloud-asr:smoke",
+  "liveSmokeOutput": "artifacts/cloud-asr-smoke.json",
+  "liveSmokeVerifier": "scripts/verify-cloud-asr-smoke.mjs",
+  "fixture": "scripts/fixtures/live-cloud-smoke.wav",
+  "fixtureSha256": "cb9568ee93b04dba4a309580b45a0369e486682e2e57305ac8f302630bb8e2ea",
+  "fixtureExists": true,
+  "requiredEnv": [
+    {
+      "name": "OPENAI_API_KEY",
+      "present": false
+    },
+    {
+      "name": "ELEVENLABS_API_KEY",
+      "present": false
+    },
+    {
+      "name": "MISTRAL_API_KEY",
+      "present": false
+    }
+  ],
+  "missingEnv": [
+    "OPENAI_API_KEY",
+    "ELEVENLABS_API_KEY",
+    "MISTRAL_API_KEY"
+  ],
+  "secretPolicy": "Only key names and boolean presence are recorded. Secret values are never written."
+}

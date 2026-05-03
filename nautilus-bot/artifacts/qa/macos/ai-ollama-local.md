@@ -1,13 +1,21 @@
 # AI: Local analysis (Ollama) flow
 
-Status: BLOCKED
+Status: PASS
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Generated: 2026-05-02T20:57:56.954Z
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Command
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+`bun run qa:packaged:macos:ollama`
+
+## Evidence
+
+- Packaged sidecar launched from `release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar`.
+- Ollama was available and the selected local model `gpt-oss:20b` was installed.
+- Grounded summary returned transcript citations for signing, QA evidence, and Windows installer validation.
+- Grounded action-item extraction returned owner/deadline items for Jon and Priya with transcript citations.
+- Temporary QA database fixture was removed and the original database hash was restored.
+
+## Artifact
+
+`artifacts/qa/macos/ai-ollama-local.json`

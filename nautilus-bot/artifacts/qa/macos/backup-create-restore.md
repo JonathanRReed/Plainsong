@@ -1,13 +1,27 @@
 # Backup: Create backup / restore backup
 
-Status: BLOCKED
+Status: PASS
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Evidence: artifacts/qa/macos/backup-create-restore.json
+Generated: 2026-05-02T22:42:51.955Z
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Command
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+`bun run qa:packaged:macos:backup`
+
+## Verification
+
+- Launched the packaged sidecar from `release/mac-arm64/Nautilus.app`.
+- Saved an isolated backup config pointing to `artifacts/qa/macos/backup-create-restore-workdir`.
+- Created a settings-only backup through packaged `create_settings_backup_default`.
+- Verified the backup directory contains `settings.json` and `manifest.json` with the `settings` component.
+- Mutated the live settings file through packaged `save_settings`.
+- Restored the created backup through packaged `restore_backup_default`.
+- Verified the restored settings file hash matched the backup settings hash.
+- Verified packaged `list_backups` included the created backup id.
+- Restored the original raw settings file bytes and original backup config file state after the sidecar exited.
+- Removed the temporary backup workdir after hashing the restore evidence.
+
+## Result
+
+The packaged app created and restored a settings backup successfully without leaving user settings or backup config drift.

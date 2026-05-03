@@ -9,8 +9,20 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { useProjects } from "@/hooks/use-projects";
 import { useRecordings } from "@/hooks/use-recordings";
-import { analyzeRecordings, askMemory, getRelationshipMemory, searchTranscripts, validateLicense } from "@/lib/backend";
-import type { CompanyMemoryProfile, LicenseInfo, MeetingChatMessage, PersonMemoryProfile, RelationshipMemory } from "@/lib/backend";
+import {
+  analyzeRecordings,
+  askMemory,
+  getRelationshipMemory,
+  searchTranscripts,
+} from "@/lib/backend/ai";
+import { validateLicense } from "@/lib/backend/license";
+import type {
+  CompanyMemoryProfile,
+  MeetingChatMessage,
+  PersonMemoryProfile,
+  RelationshipMemory,
+} from "@/lib/backend/ai";
+import type { LicenseInfo } from "@/lib/backend/license";
 import { deriveEntitlement } from "@/hooks/use-license-features";
 import { useSetupStatus } from "@/hooks/use-setup-status";
 import { requestMainView } from "@/lib/navigation";

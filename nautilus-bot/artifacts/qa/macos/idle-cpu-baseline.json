@@ -1,0 +1,819 @@
+{
+  "generatedAt": "2026-05-02T23:06:49.771Z",
+  "appPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app",
+  "appExecutablePath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus",
+  "rootPid": 69564,
+  "thresholds": {
+    "warmupMs": 30000,
+    "sampleCount": 20,
+    "sampleIntervalMs": 1000,
+    "maxAverageCpuPct": 1
+  },
+  "processTree": [
+    69564,
+    69586,
+    69587,
+    69588,
+    69589
+  ],
+  "samples": [
+    {
+      "index": 0,
+      "sampledAt": "2026-05-02T23:07:19.882Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "sampledAt": "2026-05-02T23:07:20.991Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0.6,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0.6,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "sampledAt": "2026-05-02T23:07:22.100Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "sampledAt": "2026-05-02T23:07:23.211Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "sampledAt": "2026-05-02T23:07:24.317Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "sampledAt": "2026-05-02T23:07:25.419Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 6,
+      "sampledAt": "2026-05-02T23:07:26.510Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 7,
+      "sampledAt": "2026-05-02T23:07:27.602Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 8,
+      "sampledAt": "2026-05-02T23:07:28.693Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 9,
+      "sampledAt": "2026-05-02T23:07:29.785Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0.1,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0.1,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 10,
+      "sampledAt": "2026-05-02T23:07:30.882Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0.1,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0.1,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 11,
+      "sampledAt": "2026-05-02T23:07:31.996Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 12,
+      "sampledAt": "2026-05-02T23:07:33.095Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 13,
+      "sampledAt": "2026-05-02T23:07:34.199Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 14,
+      "sampledAt": "2026-05-02T23:07:35.296Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 15,
+      "sampledAt": "2026-05-02T23:07:36.385Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 16,
+      "sampledAt": "2026-05-02T23:07:37.479Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 1.2,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 1.2,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 17,
+      "sampledAt": "2026-05-02T23:07:38.571Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 18,
+      "sampledAt": "2026-05-02T23:07:39.662Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    },
+    {
+      "index": 19,
+      "sampledAt": "2026-05-02T23:07:40.754Z",
+      "pids": [
+        69564,
+        69586,
+        69587,
+        69588,
+        69589
+      ],
+      "totalCpuPct": 0.1,
+      "processes": [
+        {
+          "pid": 69564,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus"
+        },
+        {
+          "pid": 69586,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69587,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper.app/Contents/MacOS/Nautilus Helper"
+        },
+        {
+          "pid": 69588,
+          "cpuPct": 0,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar"
+        },
+        {
+          "pid": 69589,
+          "cpuPct": 0.1,
+          "command": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Frameworks/Nautilus Helper (Renderer).app/Contents/MacOS/Nautilus Helper (Renderer)"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "averageTotalCpuPct": 0.11,
+    "maxTotalCpuPct": 1.2,
+    "p95TotalCpuPct": 0.6
+  },
+  "pass": true,
+  "appExit": {
+    "code": 0,
+    "signal": null
+  },
+  "stdout": {
+    "length": 318,
+    "tail": "[sidecar] spawning: /Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar\n[sidecar] connected\n[shortcuts] registered dictation shortcut {\n  reason: 'startup',\n  dictationShortcut: 'Command+Shift+Space',\n  usesPressOnlyElectronFallback: true\n}"
+  },
+  "stderr": {
+    "length": 1799,
+    "tail": "[sidecar] [sidecar] ready\n[69564:0502/180650.435417:INFO:CONSOLE:2] \"[main] Bootstrap starting\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-ByZMi9aF.js (2)\n[69564:0502/180650.435446:INFO:CONSOLE:2] \"[main] Root element: [object HTMLDivElement]\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-ByZMi9aF.js (2)\n[69564:0502/180650.435752:INFO:CONSOLE:2] \"[main] Root created\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-ByZMi9aF.js (2)\n[69564:0502/180650.435774:INFO:CONSOLE:2] \"[main] Loading App\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-ByZMi9aF.js (2)\n[69564:0502/180650.441584:INFO:CONSOLE:2] \"[main] App loaded\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-ByZMi9aF.js (2)\n[69564:0502/180650.441866:INFO:CONSOLE:2] \"[main] App rendered\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-ByZMi9aF.js (2)\n[sidecar] 2026-05-02T23:07:06.639272Z  INFO nautilus_bot_lib::audio::system_capture: Found loopback device: BlackHole 2ch\n[sidecar] 2026-05-02T23:07:06.659469Z  INFO nautilus_bot_lib::audio::system_capture: Found loopback device: BlackHole 2ch\n[sidecar] 2026-05-02T23:07:40.862030Z  INFO nautilus_sidecar: Received shutdown command, exiting\n[sidecar] exited: code=0 signal=null"
+  }
+}

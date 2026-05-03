@@ -1,11 +1,11 @@
-export type DictationShortcutBehavior = "hold_to_talk" | "toggle" | "hands_free";
-export type DictationShortcutSignal =
+type DictationShortcutBehavior = "hold_to_talk" | "toggle" | "hands_free";
+type DictationShortcutSignal =
   | "pressed"
   | "released"
   | "emergency_stop"
   | "watchdog_timeout";
-export type DictationShortcutCapability = "press_only" | "press_and_release";
-export type DictationShortcutPhase =
+type DictationShortcutCapability = "press_only" | "press_and_release";
+type DictationShortcutPhase =
   | "idle"
   | "recording"
   | "stopping"
@@ -13,9 +13,9 @@ export type DictationShortcutPhase =
   | "delivering"
   | "done"
   | "error";
-export type DictationShortcutAction = "start" | "stop" | "ignore";
+type DictationShortcutAction = "start" | "stop" | "ignore";
 
-export type DictationShortcutDecision = {
+type DictationShortcutDecision = {
   action: DictationShortcutAction;
   stopReason: string | null;
   usesPressOnlyFallback: boolean;

@@ -51,14 +51,9 @@ fn get_or_create_session(
     let session = Session::builder()
         .context("Failed to create ONNX session builder")?
         .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|error| anyhow::anyhow!("Failed to set opt level: {}", error))?
+        .map_err(|error| anyhow::anyhow!("Failed to set opt level: {error}"))?
         .commit_from_file(onnx_path)
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "Failed to load Parakeet ONNX, ensure encoder.onnx is a valid NeMo CTC export: {}",
-                error
-            )
-        })?;
+        .context("Failed to load Parakeet ONNX, ensure encoder.onnx is a valid NeMo CTC export")?;
 
     *cache = Some(session);
 
@@ -164,7 +159,7 @@ pub struct ParakeetProvider {
 impl ParakeetProvider {
     pub fn new(selected_model_id: Option<&str>) -> Self {
         let model_id =
-            normalize_parakeet_model_id(selected_model_id.unwrap_or(PARAKEET_CTC_06B_MODEL_ID));
+            normalize_parakeet_model_id(selected_model_id.unwrap_or(PARAKEET_CTC_06B_V3_MODEL_ID));
         let models_root = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Nautilus")
@@ -614,13 +609,13 @@ impl AsrProvider for ParakeetProvider {
     fn description(&self) -> &str {
         match self.model_id.as_str() {
             PARAKEET_LEGACY_MODEL_ID => {
-                "NVIDIA Parakeet TDT CTC 110M legacy path — native ONNX inference with local artifacts."
+                "NVIDIA Parakeet TDT CTC 110M legacy path, native ONNX inference with local artifacts."
             }
             PARAKEET_CTC_11B_MODEL_ID => {
-                "NVIDIA Parakeet CTC 1.1B — experimental managed Python runtime path using official Hugging Face weights."
+                "NVIDIA Parakeet CTC 1.1B, experimental managed Python runtime path using official Hugging Face weights."
             }
             _ => {
-                "NVIDIA Parakeet CTC 0.6B — managed Python runtime path using official Hugging Face weights."
+                "NVIDIA Parakeet CTC 0.6B, managed Python runtime path using official Hugging Face weights."
             }
         }
     }

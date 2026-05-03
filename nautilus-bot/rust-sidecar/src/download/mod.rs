@@ -19,11 +19,14 @@ pub struct DownloadManager {
 
 /// Download progress information
 #[derive(Debug, Clone)]
+#[expect(
+    dead_code,
+    reason = "progress speed is exposed to downloader callbacks even when current callers ignore it"
+)]
 pub struct DownloadProgress {
     pub bytes_downloaded: u64,
     pub total_bytes: u64,
     pub percentage: f64,
-    #[allow(dead_code)]
     pub speed_mbps: f64,
 }
 
@@ -46,7 +49,10 @@ impl DownloadManager {
     }
 
     /// Download a file with progress tracking
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "generic resumable downloader kept for model sources not covered by specialized helpers"
+    )]
     pub async fn download_file(
         &self,
         url: &str,
@@ -384,7 +390,10 @@ impl DownloadManager {
     }
 
     /// Check if diarization model is downloaded
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "diarization settings can query this capability independently from downloads"
+    )]
     pub fn is_diarization_model_downloaded(&self) -> bool {
         self.models_dir
             .join("diarization")
@@ -688,7 +697,6 @@ pub struct DownloadedModel {
 pub struct WhisperModelInfo {
     pub name: String,
     pub file_name: String,
-    #[allow(dead_code)]
     pub size_mb: f64,
     pub url: String,
     pub sha256: Option<String>,
@@ -823,7 +831,6 @@ async fn validate_whisper_artifact(path: &PathBuf, min_expected_bytes: u64) -> b
     first[0] != b'<' && first[0] != b'{'
 }
 
-#[allow(dead_code)]
 fn extract_sha256_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers
         .get("x-linked-etag")

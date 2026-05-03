@@ -1,0 +1,14 @@
+{
+  "generatedAt": "2026-05-03T15:52:36.087Z",
+  "pass": true,
+  "scanRoots": [
+    "README.md",
+    "src",
+    "docs/launch-claim-scope.md",
+    "docs/launch-readiness-dashboard.md",
+    "docs/launch-completion-audit.md",
+    "docs/final-ship-checklist.md"
+  ],
+  "findingCount": 0,
+  "findings": []
+}

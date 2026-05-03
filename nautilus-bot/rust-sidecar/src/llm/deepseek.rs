@@ -3,8 +3,6 @@
 //! DeepSeek uses an OpenAI-compatible API with competitive pricing
 //! Offers V3 for general chat and R1 for advanced reasoning
 
-#![allow(dead_code)]
-
 use crate::llm::{ActionItem, AnalysisResult, Citation};
 use anyhow::{Context, Result};
 
@@ -27,10 +25,6 @@ impl DeepSeekClient {
             api_key: resolved_api_key,
             client: reqwest::Client::new(),
         }
-    }
-
-    pub fn is_available(&self) -> bool {
-        self.api_key.is_some()
     }
 
     /// List available models from DeepSeek API

@@ -1,0 +1,226 @@
+{
+  "generatedAt": "2026-05-02T21:24:18.183Z",
+  "appPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app",
+  "sidecarPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar",
+  "dbPath": "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db",
+  "settingsPath": "/Users/jonathanreed/Library/Application Support/Nautilus/settings.json",
+  "workDir": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos/retention-workdir",
+  "pass": true,
+  "originalDbHashes": {
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db": "6c9702024cef227f674b5b90ff872cfca5dc7810aa07b1dd11b263cd29647a30",
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db-wal": null,
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db-shm": null
+  },
+  "restoredDbHashes": {
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db": "6c9702024cef227f674b5b90ff872cfca5dc7810aa07b1dd11b263cd29647a30",
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db-wal": null,
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db-shm": null
+  },
+  "originalSettingsHash": "b4d4473a368d706a0e019bd62a8bc7960451953c0a0f92729e408d3c66895f0a",
+  "restoredSettingsHash": "b4d4473a368d706a0e019bd62a8bc7960451953c0a0f92729e408d3c66895f0a",
+  "dbRestored": true,
+  "settingsRestored": true,
+  "workDirCleaned": true,
+  "scenarios": {
+    "transcriptOnly": {
+      "recordingId": "qa-retention-transcript-only-1777757058179",
+      "audioPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos/retention-workdir/qa-retention-transcript-only-1777757058179.wav",
+      "createdAt": "2026-05-02T21:24:18.186Z",
+      "pass": true,
+      "checks": {
+        "audioFileRemoved": true,
+        "recordingPreserved": true,
+        "transcriptPreserved": true,
+        "audioPathCleared": true,
+        "maintenanceCountedClear": true
+      },
+      "maintenance": {
+        "dictationRetention": {
+          "deletedAudioFiles": 0,
+          "deletedRecordings": 0
+        },
+        "meetingRetention": {
+          "audioPathsCleared": 0,
+          "deletedAudioFiles": 0,
+          "deletedRecordings": 0
+        },
+        "transcriptOnly": {
+          "audioPathsCleared": 1,
+          "deletedAudioFiles": 1
+        }
+      },
+      "stderr": {
+        "length": 129,
+        "tail": "[sidecar] ready\n2026-05-02T21:24:18.331281Z  INFO nautilus_bot_lib::db: Audit log: [info] meeting_transcript_only_storage_cleanup"
+      },
+      "sidecarExit": {
+        "code": 0,
+        "signal": null
+      },
+      "recordingAfter": {
+        "actionItems": null,
+        "audioPath": "",
+        "consentNoticeMessage": "QA fixture consent notice",
+        "consentNoticeMode": "manual",
+        "consentNoticeSurface": "qa",
+        "consentNoticeUpdatedAt": "2026-05-02T21:24:18.186Z",
+        "consentPromptShown": true,
+        "createdAt": "2026-05-02T21:24:18.186Z",
+        "duration": 18,
+        "id": "qa-retention-transcript-only-1777757058179",
+        "meetingCaptureMode": "mic",
+        "meetingNotes": "QA fixture for packaged retention validation.",
+        "meetingTemplateId": "standup",
+        "notesUpdatedAt": "2026-05-02T21:24:18.186Z",
+        "projectId": "inbox",
+        "sourceType": "meeting",
+        "status": "completed",
+        "summary": null,
+        "title": "QA Transcript Only Storage Fixture",
+        "updatedAt": "2026-05-02T21:24:18.330224Z"
+      },
+      "transcriptAfter": {
+        "actualProvider": "qa-fixture",
+        "confidence": 0.98,
+        "createdAt": "2026-05-02T21:24:18.186Z",
+        "fullText": "The transcript-only fixture must remove audio and preserve transcript text.",
+        "id": "qa-retention-transcript-only-1777757058179-transcript",
+        "language": "en",
+        "model": "qa-fixture",
+        "modelId": "qa-fixture",
+        "recordingId": "qa-retention-transcript-only-1777757058179",
+        "requestedProvider": "qa-fixture",
+        "segments": [
+          {
+            "confidence": 0.98,
+            "endTime": 18,
+            "id": "qa-retention-transcript-only-1777757058179-seg-1",
+            "speakerId": "speaker-1",
+            "startTime": 0,
+            "text": "The transcript-only fixture must remove audio and preserve transcript text."
+          }
+        ]
+      },
+      "timedOut": false
+    },
+    "audioOnly": {
+      "recordingId": "qa-retention-audio-only-1777757058179",
+      "audioPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos/retention-workdir/qa-retention-audio-only-1777757058179.wav",
+      "createdAt": "2026-01-22T21:24:18.343Z",
+      "pass": true,
+      "checks": {
+        "audioFileRemoved": true,
+        "recordingPreserved": true,
+        "transcriptPreserved": true,
+        "audioPathCleared": true,
+        "maintenanceCountedClear": true
+      },
+      "maintenance": {
+        "dictationRetention": {
+          "deletedAudioFiles": 0,
+          "deletedRecordings": 0
+        },
+        "meetingRetention": {
+          "audioPathsCleared": 1,
+          "deletedAudioFiles": 1,
+          "deletedRecordings": 0
+        },
+        "transcriptOnly": {
+          "audioPathsCleared": 0,
+          "deletedAudioFiles": 0
+        }
+      },
+      "stderr": {
+        "length": 115,
+        "tail": "[sidecar] ready\n2026-05-02T21:24:18.361378Z  INFO nautilus_bot_lib::db: Audit log: [info] meeting_retention_cleanup"
+      },
+      "sidecarExit": {
+        "code": 0,
+        "signal": null
+      },
+      "recordingAfter": {
+        "actionItems": null,
+        "audioPath": "",
+        "consentNoticeMessage": "QA fixture consent notice",
+        "consentNoticeMode": "manual",
+        "consentNoticeSurface": "qa",
+        "consentNoticeUpdatedAt": "2026-01-22T21:24:18.343Z",
+        "consentPromptShown": true,
+        "createdAt": "2026-01-22T21:24:18.343Z",
+        "duration": 18,
+        "id": "qa-retention-audio-only-1777757058179",
+        "meetingCaptureMode": "mic",
+        "meetingNotes": "QA fixture for packaged retention validation.",
+        "meetingTemplateId": "standup",
+        "notesUpdatedAt": "2026-01-22T21:24:18.343Z",
+        "projectId": "inbox",
+        "sourceType": "meeting",
+        "status": "completed",
+        "summary": null,
+        "title": "QA Audio Only Retention Fixture",
+        "updatedAt": "2026-05-02T21:24:18.360384Z"
+      },
+      "transcriptAfter": {
+        "actualProvider": "qa-fixture",
+        "confidence": 0.98,
+        "createdAt": "2026-01-22T21:24:18.343Z",
+        "fullText": "The audio-only retention fixture must keep transcript text and clear audio.",
+        "id": "qa-retention-audio-only-1777757058179-transcript",
+        "language": "en",
+        "model": "qa-fixture",
+        "modelId": "qa-fixture",
+        "recordingId": "qa-retention-audio-only-1777757058179",
+        "requestedProvider": "qa-fixture",
+        "segments": [
+          {
+            "confidence": 0.98,
+            "endTime": 18,
+            "id": "qa-retention-audio-only-1777757058179-seg-1",
+            "speakerId": "speaker-1",
+            "startTime": 0,
+            "text": "The audio-only retention fixture must keep transcript text and clear audio."
+          }
+        ]
+      },
+      "timedOut": false
+    },
+    "audioAndTranscript": {
+      "recordingId": "qa-retention-audio-and-transcript-1777757058179",
+      "audioPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos/retention-workdir/qa-retention-audio-and-transcript-1777757058179.wav",
+      "createdAt": "2026-01-22T21:24:18.370Z",
+      "pass": true,
+      "checks": {
+        "audioFileRemoved": true,
+        "recordingRemoved": true,
+        "transcriptRemoved": true,
+        "maintenanceCountedDeletion": true
+      },
+      "maintenance": {
+        "dictationRetention": {
+          "deletedAudioFiles": 0,
+          "deletedRecordings": 0
+        },
+        "meetingRetention": {
+          "audioPathsCleared": 0,
+          "deletedAudioFiles": 1,
+          "deletedRecordings": 1
+        },
+        "transcriptOnly": {
+          "audioPathsCleared": 0,
+          "deletedAudioFiles": 0
+        }
+      },
+      "stderr": {
+        "length": 115,
+        "tail": "[sidecar] ready\n2026-05-02T21:24:18.397864Z  INFO nautilus_bot_lib::db: Audit log: [info] meeting_retention_cleanup"
+      },
+      "sidecarExit": {
+        "code": 0,
+        "signal": null
+      },
+      "recordingAfter": null,
+      "transcriptAfter": null,
+      "timedOut": false
+    }
+  }
+}

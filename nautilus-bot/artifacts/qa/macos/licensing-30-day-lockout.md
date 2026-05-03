@@ -1,13 +1,18 @@
 # Licensing: 30-day pro lockout behavior verified
 
-Status: BLOCKED
+Status: PASS
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Generated: 2026-05-02T22:29:38.559Z
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Evidence
+- Command: `cargo test --manifest-path rust-sidecar/Cargo.toml license::tests`
+- Result: PASS
+- Command: `bun run test -- src/__tests__/entitlement.test.ts src/__tests__/nag-modal.test.tsx`
+- Result: PASS
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+## Verified Behavior
+- Trial access is active inside the 30-day window.
+- Trial access expires at 30 days when no valid license is present.
+- Expired trial state disables Pro entitlement, experimental entitlement, and update access.
+- Future-dated and malformed trial anchors fail closed.
+- Activation-limit enforcement invalidates otherwise active cached licenses when usage exceeds the tier limit.

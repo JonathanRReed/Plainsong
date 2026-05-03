@@ -12,7 +12,7 @@ use crate::models::RecordingOptions;
 use crate::settings;
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use crossbeam::channel::{bounded, Receiver, Sender, TrySendError};
+use crossbeam::channel::{bounded, Receiver, TrySendError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -80,18 +80,6 @@ pub struct AudioCapture {
     dictation_start: Arc<std::sync::Mutex<Option<Instant>>>,
 }
 
-#[allow(dead_code)]
-pub struct RecordingSession {
-    pub id: String,
-    pub started_at: Instant,
-    pub audio_path: PathBuf,
-    pub options: RecordingOptions,
-    pub stop_sender: Sender<()>,
-    pub samples_sender: Sender<Vec<f32>>,
-    pub samples_receiver: Receiver<Vec<f32>>,
-    pub waveform_buffer: Arc<crossbeam::queue::SegQueue<f32>>,
-}
-
 struct ActiveRecordingSession {
     id: String,
     audio_path: PathBuf,
@@ -111,6 +99,10 @@ struct ActiveRecordingSession {
     dropped_writer_chunks: Arc<AtomicU64>,
 }
 
+#[expect(
+    dead_code,
+    reason = "stop result includes launch QA counters returned across command boundaries"
+)]
 pub struct RecordingStopResult {
     pub audio_path: String,
     pub mic_audio_path: Option<String>,
@@ -207,12 +199,6 @@ fn resolve_device_preference<'a>(
                 .find(|(_, info)| info.device_name == preference.device_name)
         })
         .map(|(device, info)| (device, info))
-}
-
-#[allow(dead_code)]
-pub struct WaveformData {
-    pub samples: Vec<f32>,
-    pub sample_rate: u32,
 }
 
 impl AudioCapture {
@@ -786,36 +772,6 @@ impl AudioCapture {
         raw.sqrt()
     }
 
-    /// Get the current silence duration in seconds (time since last speech detected)
-    pub fn get_silence_duration_seconds(&self) -> f32 {
-        let start_guard = self.dictation_start.lock().unwrap();
-        let start = match start_guard.as_ref() {
-            Some(s) => s,
-            None => return 0.0,
-        };
-        let current_ms = start.elapsed().as_millis() as u64;
-        let last_speech_ms = self.last_speech_ms.load(Ordering::SeqCst);
-        drop(start_guard);
-
-        if last_speech_ms == 0 {
-            return 0.0;
-        }
-
-        if current_ms > last_speech_ms {
-            (current_ms - last_speech_ms) as f32 / 1000.0
-        } else {
-            0.0
-        }
-    }
-
-    /// Check if silence timeout has been exceeded and auto-stop should trigger
-    pub fn should_auto_stop_on_silence(&self, timeout_seconds: f32) -> bool {
-        if timeout_seconds <= 0.0 {
-            return false;
-        }
-        self.get_silence_duration_seconds() >= timeout_seconds
-    }
-
     pub fn start_recording(&mut self, options: RecordingOptions) -> Result<String> {
         if self.active_recording.is_some() {
             return Err(anyhow::anyhow!("A recording session is already active"));
@@ -1218,18 +1174,6 @@ impl AudioCapture {
         Some((Arc::clone(&session.streaming_queue), session.sample_rate))
     }
 
-    pub fn get_dictation_stream_queue(
-        &self,
-    ) -> Option<(Arc<crossbeam::queue::SegQueue<Vec<f32>>>, u32)> {
-        if !self.is_dictating.load(Ordering::SeqCst) {
-            return None;
-        }
-        Some((
-            Arc::clone(&self.dictation_stream_queue),
-            self.dictation_sample_rate,
-        ))
-    }
-
     pub fn get_waveform_data(&self, recording_id: &str) -> Option<Vec<f32>> {
         let session = self.active_recording.as_ref()?;
         if session.id != recording_id {
@@ -1276,13 +1220,6 @@ impl AudioCapture {
         self.noise_suppression_enabled
     }
 
-    /// Generate waveform for a recording file
-    #[allow(dead_code)]
-    pub fn generate_waveform(&self, recording_path: &str) -> Result<waveform::WaveformData> {
-        waveform::generate_waveform_from_file(recording_path, 200)
-    }
-
-    #[allow(dead_code)]
     pub fn is_dictating(&self) -> bool {
         self.is_dictating.load(Ordering::SeqCst)
     }

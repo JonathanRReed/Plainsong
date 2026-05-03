@@ -1,13 +1,20 @@
-# Retention: Transcript-only storage deletes audio and keeps transcript accessible
+# Retention: Transcript-only storage
 
-Status: BLOCKED
+Status: PASS
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Generated: 2026-05-02T21:24:18.183Z
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Command
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+`bun run qa:packaged:macos:retention`
+
+## Evidence
+
+- Packaged sidecar launched from `release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar`.
+- Seeded completed meeting with `meetingAudioStorageMode` set to `transcript_only`.
+- Maintenance removed the fixture audio file, cleared `recording.audioPath`, and preserved the recording and transcript.
+- Live database and settings files were restored to their original hashes after the run.
+
+## Artifact
+
+`artifacts/qa/macos/retention-policies.json`

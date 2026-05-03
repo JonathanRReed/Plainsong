@@ -361,6 +361,7 @@ describe("RecordingsView", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Weekly sync")).toBeInTheDocument();
+      expect(screen.getAllByText("Processing").length).toBeGreaterThan(1);
     });
   });
 

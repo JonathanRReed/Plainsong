@@ -133,7 +133,6 @@ impl AsrProviderType {
         ]
     }
 
-    #[allow(dead_code)]
     pub fn display_name(&self) -> &'static str {
         match self {
             AsrProviderType::Whisper => "OpenAI Whisper",
@@ -155,7 +154,7 @@ impl AsrProviderType {
     pub fn default_model_id(&self) -> &'static str {
         match self {
             AsrProviderType::Whisper => "base.en",
-            AsrProviderType::Parakeet => "parakeet-ctc-0.6b",
+            AsrProviderType::Parakeet => "parakeet-tdt-0.6b-v3",
             AsrProviderType::WhisperCandle => "whisper-large-v3-turbo",
             AsrProviderType::DistilWhisper => "distil-large-v3.5",
             AsrProviderType::MlxAudio => mlx_audio::default_model_id(),

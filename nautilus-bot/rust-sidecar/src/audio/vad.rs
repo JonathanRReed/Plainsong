@@ -2,8 +2,6 @@
 //!
 //! Uses energy-based detection with adaptive thresholds
 //! to identify speech vs silence segments.
-#![allow(dead_code)]
-
 /// VAD configuration
 #[derive(Debug, Clone)]
 pub struct VadConfig {
@@ -36,6 +34,10 @@ impl Default for VadConfig {
 
 /// A detected speech segment
 #[derive(Debug, Clone)]
+#[expect(
+    dead_code,
+    reason = "VAD segment metadata is retained for diagnostics and future serialized QA evidence"
+)]
 pub struct SpeechSegment {
     /// Start time in seconds
     pub start: f64,
@@ -167,17 +169,6 @@ impl VoiceActivityDetector {
 
         segments
     }
-
-    /// Get current adaptive threshold
-    pub fn current_threshold(&self) -> f32 {
-        self.adaptive_threshold
-    }
-
-    /// Reset adaptive threshold
-    pub fn reset(&mut self) {
-        self.energy_history.clear();
-        self.adaptive_threshold = -40.0;
-    }
 }
 
 /// Calculate energy in dB for a frame
@@ -262,39 +253,6 @@ pub fn trim_silence(samples: &[f32], sample_rate: u32, threshold_db: f32) -> Vec
     }
 
     samples[start_sample..end_sample].to_vec()
-}
-
-/// Split audio into speech chunks based on silence
-pub fn split_on_silence(
-    samples: &[f32],
-    sample_rate: u32,
-    min_chunk_duration: f32,
-    silence_threshold_db: f32,
-) -> Vec<Vec<f32>> {
-    let mut vad = VoiceActivityDetector::new(VadConfig {
-        sample_rate,
-        threshold_db: Some(silence_threshold_db),
-        min_speech_duration: min_chunk_duration,
-        min_silence_duration: 0.5, // Split on 0.5s silence
-        padding_seconds: 0.1,
-        ..Default::default()
-    });
-
-    let segments = vad.detect_speech(samples);
-
-    segments
-        .into_iter()
-        .filter_map(|segment| {
-            let start_sample = (segment.start * sample_rate as f64) as usize;
-            let end_sample = (segment.end * sample_rate as f64) as usize;
-
-            if end_sample > start_sample && end_sample <= samples.len() {
-                Some(samples[start_sample..end_sample].to_vec())
-            } else {
-                None
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import {
   getProjects,
   createProject as createProjectApi,
-} from "@/lib/backend";
+} from "@/lib/backend/projects";
 import { useDataCache } from "@/hooks/data-cache-context";
 import type { Project } from "@/types";
 

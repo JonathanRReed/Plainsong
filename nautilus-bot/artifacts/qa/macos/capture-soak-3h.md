@@ -1,13 +1,51 @@
-# Capture: 3h+ meeting soak (mic + system audio) completes transcript end-to-end
+# Capture: 3h+ Meeting Soak
 
-Status: BLOCKED
+Status: PASS
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Generated: 2026-05-03T08:36:19.203Z
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Command
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+`bun run qa:packaged:macos:meeting:soak`
+
+## Result
+
+- Record duration requested: 10800000 ms
+- Minimum required duration: 10800000 ms
+- System audio requested: yes
+- Recording ID returned: c477bda7-d20d-43e9-b5f6-fd998906b761
+- Recording status: completed
+- Transcript characters: 1348
+- Transcript wait timed out: no
+- Terminal empty transcript: no
+- Audio file bytes: 2815368154
+
+## Checks
+
+- meetingSetupReady: PASS
+- minimumDurationRequested: PASS
+- recordingIdReturned: PASS
+- overlayEnteredRecording: PASS
+- overlayEnteredTranscribing: PASS
+- recordingRowPreserved: PASS
+- recordingSourceMeeting: PASS
+- captureModeMatches: PASS
+- systemAudioFlagMatches: PASS
+- speechFixtureRan: PASS
+- recordingCompleted: PASS
+- transcriptWaitCompleted: PASS
+- transcriptNotTerminalEmpty: PASS
+- transcriptCreated: PASS
+- transcriptHasText: PASS
+- audioPathPersisted: PASS
+- audioFileExists: PASS
+- audioFileHasData: PASS
+- sidecarAudioFilesMatchMode: PASS
+- startEventEmitted: PASS
+- processingEventEmitted: PASS
+- completedEventEmitted: PASS
+- staleMeetingRouteErrorsAbsent: PASS
+- audioFilesCleaned: PASS
+- dbRestored: PASS
+- settingsRestored: PASS
+

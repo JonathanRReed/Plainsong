@@ -23,8 +23,6 @@ pub(crate) fn clear_cached_model(model_id: &str) {
 
 pub struct WhisperProvider {
     model_path: PathBuf,
-    #[allow(dead_code)]
-    models_dir: PathBuf,
     model_id: String,
     ctx: Option<Arc<whisper_rs::WhisperContext>>,
 }
@@ -53,7 +51,6 @@ impl WhisperProvider {
 
         Self {
             model_path,
-            models_dir,
             model_id,
             ctx,
         }

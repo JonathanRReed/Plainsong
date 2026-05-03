@@ -3,22 +3,52 @@
   "$id": "https://nautilusbot.app/schemas/ci/cloud-asr-smoke.schema.json",
   "title": "Cloud ASR Smoke Gate Artifact",
   "type": "object",
-  "required": ["fixture", "generatedAt", "medianLatencyMs", "thresholdMs", "results"],
+  "required": [
+    "pass",
+    "fixture",
+    "fixtureSha256",
+    "generatedAt",
+    "medianLatencyMs",
+    "thresholdMs",
+    "providerCount",
+    "requiredProviders",
+    "secretPolicy",
+    "results"
+  ],
   "properties": {
-    "fixture": { "type": "string", "minLength": 1 },
+    "pass": { "const": true },
+    "fixture": { "const": "scripts/fixtures/live-cloud-smoke.wav" },
+    "fixtureSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "generatedAt": { "type": "string", "minLength": 1 },
     "medianLatencyMs": { "type": "number", "minimum": 0 },
-    "thresholdMs": { "type": "number", "exclusiveMinimum": 0 },
+    "thresholdMs": { "const": 6000 },
+    "providerCount": { "const": 3 },
+    "requiredProviders": {
+      "type": "array",
+      "prefixItems": [
+        { "const": "openai" },
+        { "const": "elevenlabs" },
+        { "const": "mistral" }
+      ],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "secretPolicy": {
+      "type": "string",
+      "pattern": "Secret values and transcript text are never written"
+    },
     "results": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 3,
+      "maxItems": 3,
       "items": {
         "type": "object",
-        "required": ["provider", "elapsedMs", "textLength"],
+        "required": ["provider", "elapsedMs", "textLength", "transcriptSha256"],
         "properties": {
-          "provider": { "type": "string", "minLength": 1 },
+          "provider": { "enum": ["openai", "elevenlabs", "mistral"] },
           "elapsedMs": { "type": "number", "minimum": 0 },
-          "textLength": { "type": "number", "minimum": 1 }
+          "textLength": { "type": "number", "minimum": 1 },
+          "transcriptSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
         }
       }
     }

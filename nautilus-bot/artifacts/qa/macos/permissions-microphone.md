@@ -1,13 +1,22 @@
-# Permissions: Microphone permission flow
+# Permissions: Microphone Permission Flow
 
-Status: BLOCKED
+Status: PASS
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Generated: 2026-05-02T19:42:15.603Z
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Evidence
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+- Command: `bun run qa:packaged:macos:smoke`
+- Packaged app: `release/mac-arm64/Nautilus.app`
+- Evidence artifact: `artifacts/qa/macos/packaged-smoke.json`
+
+## Result
+
+- `microphoneReady`: `true`
+- `microphonePermissionReady`: `true`
+- Dictation setup summary: `Dictation route, microphone, and insertion permissions are ready.`
+- Meeting setup summary: `Meeting route and system audio are ready for full meeting capture.`
+
+## Scope
+
+This validates the packaged app's ready-permission path on this macOS host. It does not validate first-time system prompt wording on a clean macOS account.

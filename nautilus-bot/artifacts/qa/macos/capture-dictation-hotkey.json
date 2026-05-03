@@ -1,0 +1,99 @@
+{
+  "generatedAt": "2026-05-02T22:17:58.744Z",
+  "appPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app",
+  "appExecutablePath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/MacOS/Nautilus",
+  "sidecarPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar",
+  "dbPath": "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db",
+  "settingsPath": "/Users/jonathanreed/Library/Application Support/Nautilus/settings.json",
+  "recordMs": 2600,
+  "settleMs": 2500,
+  "pass": true,
+  "previousRecordingId": "39dd3750-a005-4d4a-b7ec-8cb7cb494b55",
+  "newRecording": {
+    "id": "89dc47ef-225d-4696-b08a-164724aa6e7c",
+    "title": "Dictation - 2026-05-02 17:18",
+    "sourceType": "dictation",
+    "status": "completed",
+    "duration": 92204,
+    "createdAt": "2026-05-02T22:18:09.969656+00:00",
+    "transcriptText": "",
+    "modelId": "base.en",
+    "requestedProvider": "whisper",
+    "actualProvider": "whisper"
+  },
+  "insertionAction": {
+    "recordingId": "89dc47ef-225d-4696-b08a-164724aa6e7c",
+    "requestedMode": "clipboard_only",
+    "actualMode": "clipboard_only",
+    "pasted": 0,
+    "copied": 0,
+    "failed": 0,
+    "error": null,
+    "createdAt": "2026-05-02T22:18:09.969656+00:00"
+  },
+  "originalDbHashes": {
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db": "2eb3e9e2471c483b7a09bec155e1bcd860312c41dac4cb77578b0320b3cbddd3",
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db-wal": null,
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db-shm": null
+  },
+  "restoredDbHashes": {
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db": "2eb3e9e2471c483b7a09bec155e1bcd860312c41dac4cb77578b0320b3cbddd3",
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db-wal": null,
+    "/Users/jonathanreed/Library/Application Support/Nautilus/nautilus.db-shm": null
+  },
+  "originalSettingsHash": "d24b68c82291bddd83cc71dce43cc5d622aa77e02b9e42bb2207b595b24f0231",
+  "restoredSettingsHash": "d24b68c82291bddd83cc71dce43cc5d622aa77e02b9e42bb2207b595b24f0231",
+  "dbRestored": true,
+  "settingsRestored": true,
+  "checks": {
+    "dictationSetupReady": true,
+    "shortcutRegistered": true,
+    "shortcutStartInvoked": true,
+    "shortcutStopInvoked": true,
+    "recordingCreated": true,
+    "recordingIsNew": true,
+    "recordingSourceDictation": true,
+    "recordingCompleted": true,
+    "transcriptPersisted": true,
+    "insertionActionPersisted": true,
+    "clipboardOnlyMode": true,
+    "copiedOrEmptyOutcome": true,
+    "overlayIpcAllowed": true,
+    "staleDictationRouteErrorsAbsent": true,
+    "dbRestored": true,
+    "settingsRestored": true
+  },
+  "appExit": {
+    "code": 0,
+    "signal": null
+  },
+  "appStdout": {
+    "length": 501,
+    "tail": "[sidecar] spawning: /Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar\n[sidecar] connected\n[shortcuts] registered dictation shortcut {\n  reason: 'startup',\n  dictationShortcut: 'Command+Shift+Space',\n  usesPressOnlyElectronFallback: false\n}\n[qa] dictation shortcut start_dictation { phase: 'idle', behavior: 'toggle' }\n[qa] dictation shortcut stop_dictation { phase: 'recording', behavior: 'toggle', stopReason: 'toggle' }"
+  },
+  "appStderr": {
+    "length": 10486,
+    "tail": "[sidecar] [sidecar] ready\n[10577:0502/171804.227268:INFO:CONSOLE:2] \"[main] Bootstrap starting\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-DBxrTFek.js (2)\n[10577:0502/171804.227295:INFO:CONSOLE:2] \"[main] Root element: [object HTMLDivElement]\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-DBxrTFek.js (2)\n[10577:0502/171804.227580:INFO:CONSOLE:2] \"[main] Root created\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-DBxrTFek.js (2)\n[10577:0502/171804.227605:INFO:CONSOLE:2] \"[main] Loading App\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-DBxrTFek.js (2)\n[10577:0502/171804.236748:INFO:CONSOLE:2] \"[main] App loaded\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-DBxrTFek.js (2)\n[10577:0502/171804.237309:INFO:CONSOLE:2] \"[main] App rendered\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-DBxrTFek.js (2)\n[sidecar] 2026-05-02T22:18:08.378015Z  INFO nautilus_bot_lib::audio::system_capture: Found loopback device: BlackHole 2ch\n[sidecar] 2026-05-02T22:18:08.430855Z  INFO nautilus_bot_lib::audio::system_capture: Found loopback device: BlackHole 2ch\n[sidecar] 2026-05-02T22:18:08.496612Z  INFO nautilus_bot_lib: Captured pending dictation target at hotkey press: app=Some(\"Zen\"), bundle_id=Some(\"app.zen-browser.zen\"), browser_url=None\n[10577:0502/171808.603404:INFO:CONSOLE:2] \"[main] Bootstrap starting\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-DBxrTFek.js (2)\n[10577:0502/171808.603437:INFO:CONSOLE:2] \"[main] Root element: [object HTMLDivElement]\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-DBxrTFek.js (2)\n[10577:0502/171808.603768:INFO:CONSOLE:2] \"[main] Root created\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-DBxrTFek.js (2)\n[10577:0502/171808.603792:INFO:CONSOLE:2] \"[main] Loading overlay root\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-DBxrTFek.js (2)\n[10577:0502/171808.608462:INFO:CONSOLE:2] \"[main] Overlay root loaded\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-DBxrTFek.js (2)\n[10577:0502/171808.608488:INFO:CONSOLE:2] \"[main] Overlay rendered\", source: file:///Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/app.asar/dist/assets/index-DBxrTFek.js (2)\n[sidecar] 2026-05-02T22:18:08.691827Z  INFO nautilus_bot_lib::audio: Starting dictation capture on 'MacBook Pro Microphone' : 1 channels, 48000 Hz, format: F32\n2026-05-02T22:18:08.789048Z  INFO nautilus_bot_lib::audio: Dictation audio stream started successfully\n2026-05-02T22:18:08.789057Z  INFO nautilus_bot_lib::audio: Dictation started (stream confirmed live)\n[sidecar] 2026-05-02T22:18:09.629579Z  INFO nautilus_bot_lib::audio: Stopping dictation capture...\n[sidecar] 2026-05-02T22:18:09.762285Z  INFO nautilus_bot_lib::audio: Dictation audio stream stopping\n[sidecar] 2026-05-02T22:18:09.768486Z  INFO nautilus_bot_lib::audio: Collected 46080 samples from dictation buffer (sample rate: 48000 Hz)\n2026-05-02T22:18:09.768524Z  INFO nautilus_bot_lib::audio: Audio stats: peak=0.00639674, rms=0.0021183763, duration=960ms\n[sidecar] 2026-05-02T22:18:09.768748Z  INFO nautilus_bot_lib::audio: Dictation stopped: 46080 mono samples at 48000 Hz (after processing)\n[sidecar] 2026-05-02T22:18:09.768789Z  INFO nautilus_bot_lib::audio: WAV data size: 92204 bytes\n[sidecar] 2026-05-02T22:18:09.769123Z  INFO nautilus_bot_lib::asr::whisper: Loading Whisper model from \"/Users/jonathanreed/Library/Application Support/Nautilus/models/whisper/ggml-base.en.bin\"\n2026-05-02T22:18:09.769130Z  INFO nautilus_bot_lib::asr::whisper: Whisper: enabling GPU acceleration (Metal/CoreML) with flash attention\nwhisper_init_from_file_with_params_no_state: loading model from '/Users/jonathanreed/Library/Application Support/Nautilus/models/whisper/ggml-base.en.bin'\n[sidecar] whisper_init_with_params_no_state: use gpu    = 1\nwhisper_init_with_params_no_state: flash attn = 1\nwhisper_init_with_params_no_state: gpu_device = 0\nwhisper_init_with_params_no_state: dtw        = 0\n[sidecar] whisper_init_with_params_no_state: devices    = 3\nwhisper_init_with_params_no_state: backends   = 3\nwhisper_model_load: loading model\n[sidecar] whisper_model_load: n_vocab       = 51864\nwhisper_model_load: n_audio_ctx   = 1500\nwhisper_model_load: n_audio_state = 512\nwhisper_model_load: n_audio_head  = 8\nwhisper_model_load: n_audio_layer = 6\nwhisper_model_load: n_text_ctx    = 448\nwhisper_model_load: n_text_state  = 512\nwhisper_model_load: n_text_head   = 8\nwhisper_model_load: n_text_layer  = 6\nwhisper_model_load: n_mels        = 80\nwhisper_model_load: ftype         = 1\nwhisper_model_load: qntvr         = 0\nwhisper_model_load: type          = 2 (base)\n[sidecar] whisper_model_load: adding 1607 extra tokens\n[sidecar] whisper_model_load: n_langs       = 99\n[sidecar] whisper_default_buffer_type: using device Metal (Apple M4 Pro)\nwhisper_model_load:    Metal total size =   147.37 MB\nwhisper_model_load: model size    =  147.37 MB\n2026-05-02T22:18:09.857123Z  INFO nautilus_bot_lib::asr::whisper: Whisper model loaded successfully\n2026-05-02T22:18:09.857129Z  INFO nautilus_bot_lib::asr::whisper: Loading audio file for Whisper: \"/var/folders/ph/7cfrg6mn3bj120hdsfs79d140000gn/T/whisper_a224d317-b81e-44b6-8dca-93f3726cb02f.wav\"\n2026-05-02T22:18:09.857131Z  INFO nautilus_bot_lib::audio::utils: Loading audio file: \"/var/folders/ph/7cfrg6mn3bj120hdsfs79d140000gn/T/whisper_a224d317-b81e-44b6-8dca-93f3726cb02f.wav\"\n2026-05-02T22:18:09.857496Z  INFO nautilus_bot_lib::audio::utils: WAV spec: WavSpec { channels: 1, sample_rate: 48000, bits_per_sample: 16, sample_format: Int }\n2026-05-02T22:18:09.857748Z  INFO nautilus_bot_lib::audio::utils: Loaded 15360 samples at 16kHz\n2026-05-02T22:18:09.857751Z  INFO nautilus_bot_lib::asr::whisper: Whisper audio too short (15360 samples / 960ms), padding to 1100ms\n2026-05-02T22:18:09.857757Z  INFO nautilus_bot_lib::asr::whisper: Whisper received 17600 samples (sample rate 16000, duration 1.10s)\n2026-05-02T22:18:09.857769Z  INFO nautilus_bot_lib::asr::whisper: Whisper audio stats: peak=0.8863, rms=0.2277\nwhisper_backend_init_gpu: using Metal backend\nggml_metal_init: allocating\nggml_metal_init: picking default device: Apple M4 Pro\nggml_metal_init: using embedded metal library\nggml_metal_init: GPU name:   Apple M4 Pro\nggml_metal_init: GPU family: MTLGPUFamilyApple9  (1009)\nggml_metal_init: GPU family: MTLGPUFamilyCommon3 (3003)\nggml_metal_init: GPU family: MTLGPUFamilyMetal4  (5002)\nggml_metal_init: simdgroup reduction   = true\nggml_metal_init: simdgroup matrix mul. = true\nggml_metal_init: has bfloat            = true\nggml_metal_init: use bfloat            = false\nggml_metal_init: hasUnifiedMemory      = true\nggml_metal_init: recommendedMaxWorkingSetSize  = 19069.67 MB\nggml_metal_init: skipping kernel_get_rows_bf16                     (not supported)\nggml_metal_init: skipping kernel_mul_mv_bf16_f32                   (not supported)\nggml_metal_init: skipping kernel_mul_mv_bf16_f32_1row              (not supported)\nggml_metal_init: skipping kernel_mul_mv_bf16_f32_l4                (not supported)\nggml_metal_init: skipping kernel_mul_mv_bf16_bf16                  (not supported)\nggml_metal_init: skipping kernel_mul_mv_id_bf16_f32                (not supported)\nggml_metal_init: skipping kernel_mul_mm_bf16_f32                   (not supported)\nggml_metal_init: skipping kernel_mul_mm_id_bf16_f32                (not supported)\n[sidecar] ggml_metal_init: skipping kernel_flash_attn_ext_bf16_h64           (not supported)\nggml_metal_init: skipping kernel_flash_attn_ext_bf16_h80           (not supported)\nggml_metal_init: skipping kernel_flash_attn_ext_bf16_h96           (not supported)\nggml_metal_init: skipping kernel_flash_attn_ext_bf16_h112          (not supported)\nggml_metal_init: skipping kernel_flash_attn_ext_bf16_h128          (not supported)\nggml_metal_init: skipping kernel_flash_attn_ext_bf16_h256          (not supported)\n[sidecar] ggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h128      (not supported)\nggml_metal_init: skipping kernel_flash_attn_ext_vec_bf16_h256      (not supported)\nggml_metal_init: skipping kernel_cpy_f32_bf16                      (not supported)\nggml_metal_init: skipping kernel_cpy_bf16_f32                      (not supported)\nggml_metal_init: skipping kernel_cpy_bf16_bf16                     (not supported)\nwhisper_backend_init: using BLAS backend\nwhisper_init_state: kv self size  =    6.29 MB\nwhisper_init_state: kv cross size =   18.87 MB\nwhisper_init_state: kv pad  size  =    3.15 MB\nwhisper_init_state: loading Core ML model from '/Users/jonathanreed/Library/Application Support/Nautilus/models/whisper/ggml-base.en-encoder.mlmodelc'\nwhisper_init_state: first run on a device may take a while ...\nwhisper_init_state: failed to load Core ML model from '/Users/jonathanreed/Library/Application Support/Nautilus/models/whisper/ggml-base.en-encoder.mlmodelc'\nwhisper_init_state: compute buffer (conv)   =   17.22 MB\nwhisper_init_state: compute buffer (encode) =   23.08 MB\nwhisper_init_state: compute buffer (cross)  =    4.65 MB\nwhisper_init_state: compute buffer (decode) =   97.27 MB\n2026-05-02T22:18:09.966601Z  INFO nautilus_bot_lib::asr::whisper: Whisper produced 0 segments\n2026-05-02T22:18:09.966612Z  INFO nautilus_bot_lib::asr::whisper: Whisper transcription completed: '' (0 segments in 109ms)\nggml_metal_free: deallocating\n2026-05-02T22:18:09.972632Z  INFO nautilus_bot_lib::db: Audit log: [info] dictation_completed"
+  },
+  "setupSidecarExit": {
+    "code": 0,
+    "signal": null
+  },
+  "setupSidecarStderr": {
+    "length": 102,
+    "tail": "[sidecar] ready\n2026-05-02T22:18:03.262560Z  INFO nautilus_sidecar: Received shutdown command, exiting"
+  },
+  "dictationSetup": {
+    "details": [
+      "Microphone: ready",
+      "Cursor insert: not needed (clipboard only)",
+      "Route preference: local",
+      "Resolved route: NVIDIA Parakeet / parakeet-ctc-0.6b (local)",
+      "Dictation route 'UsefulSensors Moonshine' / 'moonshine-tiny' was not ready. Using 'NVIDIA Parakeet' / 'parakeet-ctc-0.6b' for this capture."
+    ],
+    "ok": true,
+    "summary": "Dictation route and microphone are ready. Clipboard-only delivery does not need cursor insertion.",
+    "title": "Dictation verification"
+  },
+  "shortcutRegistered": true
+}

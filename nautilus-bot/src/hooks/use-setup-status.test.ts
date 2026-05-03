@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildSnapshot } from "@/hooks/use-setup-status";
-import type { PermissionDiagnostics } from "@/lib/backend";
+import type { PermissionDiagnostics } from "@/lib/backend/settings";
 import type { AsrProviderInfo } from "@/types";
 import type { Settings } from "@/types/settings";
 

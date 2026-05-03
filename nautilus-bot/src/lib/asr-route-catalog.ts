@@ -13,15 +13,15 @@ import type {
 } from "@/types";
 
 export type AsrRouteLane = "shared" | "dictation" | "meeting";
-export type MeetingRoutePolicy = "prefer_local" | "best_available";
-export type AsrRouteHosting = "local" | "cloud" | "platform";
-export type AsrRouteReadiness =
+type MeetingRoutePolicy = "prefer_local" | "best_available";
+type AsrRouteHosting = "local" | "cloud" | "platform";
+type AsrRouteReadiness =
   | "ready"
   | "needs_download"
   | "requires_key"
   | "missing_runtime"
   | "unavailable";
-export type AsrRouteAction =
+type AsrRouteAction =
   | "download"
   | "connect_api_key"
   | "open_system_setup"
@@ -318,7 +318,7 @@ function routeProviderRank(
   return index === -1 ? order.length : index;
 }
 
-export function sortRoutesForLane(
+function sortRoutesForLane(
   routes: AsrRouteCatalogEntry[],
   lane: AsrRouteLane,
   meetingRoutePolicy: MeetingRoutePolicy,

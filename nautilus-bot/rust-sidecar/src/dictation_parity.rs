@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_COMMAND_PREFIX: &str = "command";
@@ -102,7 +100,8 @@ pub struct DictationBenchmarkScenario {
     pub timestamp: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DictationBenchmarkContext {
     pub run_id: String,
     pub generated_at: String,

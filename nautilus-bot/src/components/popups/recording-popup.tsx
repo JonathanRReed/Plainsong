@@ -19,7 +19,7 @@ import {
   getWaveformData,
   stopRecording,
   updateRecordingNotes,
-} from "@/lib/backend";
+} from "@/lib/backend/recordings";
 import {
   describeMeetingConsent,
   MEETING_CONSENT_NOTICE_TEXT,

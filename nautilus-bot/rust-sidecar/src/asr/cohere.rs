@@ -1,7 +1,7 @@
 //! Cohere Transcribe ASR Provider - Cloud speech-to-text via Cohere API
 //!
 //! Uses the OpenAI-compatible endpoint at api.cohere.com.
-//! Model: cohere-transcribe-03-2026 — low WER, 14 languages, up to 25 MB audio.
+//! Model: cohere-transcribe-03-2026, low WER, 14 languages, up to 25 MB audio.
 
 use super::{
     AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult,

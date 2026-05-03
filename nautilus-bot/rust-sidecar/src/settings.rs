@@ -190,7 +190,7 @@ pub struct TranscriptionSettings {
     pub dictation_keep_warm: String,
     /// Dictation: show live partial text in popup/inline surfaces.
     pub dictation_live_preview_enabled: bool,
-    /// Dictation: Smart Format — LLM polishes text before insert
+    /// Dictation: Smart Format, LLM polishes text before insert
     pub dictation_ai_formatting: bool,
     /// Dictation mode preset: voice, messages, email, notes, translate_english, meeting_follow_up, custom
     pub dictation_mode_preset: String,
@@ -608,12 +608,11 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             _ => "base.en".to_string(),
         },
         "parakeet" => match model_id.trim() {
-            "parakeet-ctc-0.6b" | "parakeet-tdt-0.6b-v2" | "parakeet-tdt-0.6b-v3" => {
-                "parakeet-ctc-0.6b".to_string()
-            }
+            "parakeet-tdt-0.6b-v2" | "parakeet-tdt-0.6b-v3" => "parakeet-tdt-0.6b-v3".to_string(),
+            "parakeet-ctc-0.6b" => "parakeet-ctc-0.6b".to_string(),
             "parakeet-ctc-1.1b" => "parakeet-ctc-1.1b".to_string(),
             "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => "parakeet-tdt-ctc-110m".to_string(),
-            _ => "parakeet-ctc-0.6b".to_string(),
+            _ => "parakeet-tdt-0.6b-v3".to_string(),
         },
         "whisper_candle" => "whisper-large-v3-turbo".to_string(),
         "distil_whisper" => "distil-large-v3.5".to_string(),
@@ -932,7 +931,6 @@ impl SettingsManager {
     }
 
     /// Reset to defaults
-    #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.settings = Settings::default();
     }

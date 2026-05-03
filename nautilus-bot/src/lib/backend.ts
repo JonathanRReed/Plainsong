@@ -3,19 +3,14 @@ import type {
   Recording,
   Project,
   Transcript,
-  AuditLogEntry,
   AsrProviderInfo,
-  AsrModelOption,
   AsrProviderInventory,
-  AsrRuntimeDiagnostics,
   AsrProviderType,
-  BenchmarkResult,
   LlmAnalysisResult,
   ActionItem,
   GroundedSummaryResult,
   GroundedActionItemsResult,
   SearchHit,
-  AsrBenchmarkEntry,
   MeetingTranscriptDetails,
 } from "@/types";
 import type { Settings } from "@/types/settings";
@@ -74,7 +69,7 @@ export interface DictationInsights {
   topAppTargetCount: number;
 }
 
-export interface MeetingChatCitation {
+interface MeetingChatCitation {
   text: string;
   startTime?: number | null;
   endTime?: number | null;
@@ -91,7 +86,7 @@ export interface MeetingChatMessage {
   createdAt: string;
 }
 
-export interface RelationshipMemoryEvidence {
+interface RelationshipMemoryEvidence {
   recordingId: string;
   recordingTitle: string;
   createdAt: string;
@@ -186,11 +181,7 @@ export async function getDictationInsights(): Promise<DictationInsights> {
   return await invoke("get_dictation_insights");
 }
 
-export async function forceStopDictation(): Promise<string> {
-  return await invoke("force_stop_dictation");
-}
-
-export interface CursorInsertSmokeTestResult {
+interface CursorInsertSmokeTestResult {
   text: string;
   targetApp?: string | null;
   targetBundleId?: string | null;
@@ -360,19 +351,7 @@ export async function setRecordingSourceType(
   await invoke("set_recording_source_type", { recordingId, sourceType });
 }
 
-export async function deleteProject(projectId: string): Promise<void> {
-  await invoke("delete_project", { projectId });
-}
-
-export async function exportRecording(
-  recordingId: string,
-  format: "markdown" | "pdf" | "json",
-  target?: string
-): Promise<string> {
-  return await invoke("export_recording", { recordingId, format, target });
-}
-
-export interface ExportResult {
+interface ExportResult {
   format: string;
   redactionLevel: "none" | "basic" | "strict" | string;
   preview: boolean;
@@ -380,9 +359,9 @@ export interface ExportResult {
   content: string | null;
 }
 
-export type EvidenceVerificationStatus = "pass" | "fail";
+type EvidenceVerificationStatus = "pass" | "fail";
 
-export interface EvidenceVerificationCheck {
+interface EvidenceVerificationCheck {
   id: string;
   label: string;
   status: EvidenceVerificationStatus;
@@ -420,13 +399,6 @@ export async function verifyEvidenceBundle(targetPath: string): Promise<Evidence
   return await invoke("verify_evidence_bundle", { targetPath });
 }
 
-export interface ExportTemplateField {
-  id: string;
-  label: string;
-  type: string;
-  required: boolean;
-}
-
 export interface ExportTemplate {
   id: string;
   name: string;
@@ -439,7 +411,7 @@ export interface ExportTemplate {
   customFields: Record<string, string>;
 }
 
-export interface TemplateExportResult {
+interface TemplateExportResult {
   templateId: string;
   preview: boolean;
   exportPath: string | null;
@@ -489,7 +461,7 @@ export interface DictationDictionaryEntry {
   updatedAt: string;
 }
 
-export interface CreateDictationDictionaryEntryRequest {
+interface CreateDictationDictionaryEntryRequest {
   spokenForm: string;
   replacement: string;
   appScope?: string | null;
@@ -497,7 +469,7 @@ export interface CreateDictationDictionaryEntryRequest {
   enabled?: boolean;
 }
 
-export interface UpdateDictationDictionaryEntryRequest {
+interface UpdateDictationDictionaryEntryRequest {
   spokenForm?: string;
   replacement?: string;
   appScope?: string | null;
@@ -505,7 +477,7 @@ export interface UpdateDictationDictionaryEntryRequest {
   enabled?: boolean;
 }
 
-export interface LearnDictationCorrectionRequest {
+interface LearnDictationCorrectionRequest {
   originalText: string;
   correctedText: string;
   appTarget?: string | null;
@@ -559,7 +531,7 @@ export interface DictationSnippet {
   updatedAt: string;
 }
 
-export interface CreateDictationSnippetRequest {
+interface CreateDictationSnippetRequest {
   trigger: string;
   expansion: string;
   appScope?: string | null;
@@ -567,7 +539,7 @@ export interface CreateDictationSnippetRequest {
   enabled?: boolean;
 }
 
-export interface UpdateDictationSnippetRequest {
+interface UpdateDictationSnippetRequest {
   trigger?: string;
   expansion?: string;
   appScope?: string | null;
@@ -584,7 +556,7 @@ export interface DictationCommandPreset {
   updatedAt: string;
 }
 
-export interface UpsertDictationCommandPresetRequest {
+interface UpsertDictationCommandPresetRequest {
   commandKey: string;
   systemPrompt: string;
   enabled?: boolean;
@@ -682,10 +654,6 @@ export async function deleteDictationCommandPreset(commandKey: string): Promise<
   await invoke("delete_dictation_command_preset", { commandKey });
 }
 
-export async function getAuditLog(): Promise<AuditLogEntry[]> {
-  return await invoke("get_audit_log");
-}
-
 // ASR Provider APIs
 export async function getAsrProviders(): Promise<AsrProviderInfo[]> {
   return await invoke("get_asr_providers");
@@ -695,54 +663,11 @@ export async function getAsrProviderInventory(): Promise<AsrProviderInventory[]>
   return await invoke("get_asr_provider_inventory");
 }
 
-export async function getAsrRuntimeDiagnostics(
-  providerType: AsrProviderType
-): Promise<AsrRuntimeDiagnostics> {
-  return await invoke("get_asr_runtime_diagnostics", { providerType });
-}
-
-export async function getDefaultAsrProvider(): Promise<AsrProviderType> {
-  return await invoke("get_default_asr_provider");
-}
-
-export async function setDefaultAsrProvider(providerType: AsrProviderType): Promise<void> {
-  await invoke("set_default_asr_provider", { providerType });
-}
-
-export async function getAsrProviderModel(providerType: AsrProviderType): Promise<string> {
-  return await invoke("get_asr_provider_model", { providerType });
-}
-
-export async function setAsrProviderModel(
-  providerType: AsrProviderType,
-  modelId: string
-): Promise<void> {
-  await invoke("set_asr_provider_model", { providerType, modelId });
-}
-
-export async function getAsrProviderModelOptions(
-  providerType: AsrProviderType
-): Promise<AsrModelOption[]> {
-  return await invoke("get_asr_provider_model_options", { providerType });
-}
-
-export async function listOpenAiAsrModels(): Promise<string[]> {
-  return await invoke("list_openai_asr_models");
-}
-
-export async function listElevenlabsAsrModels(): Promise<string[]> {
-  return await invoke("list_elevenlabs_asr_models");
-}
-
 export async function downloadAsrModels(providerType: AsrProviderType): Promise<void> {
   await invoke("download_asr_models", { providerType });
 }
 
-export async function downloadPlatformAssets(engine: string): Promise<string> {
-  return await invoke("download_platform_assets", { engine });
-}
-
-export interface LocalModelRepairReport {
+interface LocalModelRepairReport {
   repairedCount: number;
   removedPaths: string[];
   notes: string[];
@@ -754,18 +679,6 @@ export async function refreshAsrRuntimeProbes(): Promise<void> {
 
 export async function repairLocalModelCache(): Promise<LocalModelRepairReport> {
   return await invoke("repair_local_model_cache");
-}
-
-export async function benchmarkAsrProviders(testAudioPath: string): Promise<BenchmarkResult[]> {
-  return await invoke("benchmark_asr_providers", { testAudioPath });
-}
-
-export async function benchmarkAsrProvidersBytes(audioBytes: Uint8Array): Promise<BenchmarkResult[]> {
-  return await invoke("benchmark_asr_providers_bytes", { audioBytes: Array.from(audioBytes) });
-}
-
-export async function listAsrBenchmarks(limit = 50): Promise<AsrBenchmarkEntry[]> {
-  return await invoke("list_asr_benchmarks", { limit });
 }
 
 // LLM / AI Analysis APIs
@@ -783,13 +696,6 @@ export async function analyzeRecordings(
   model?: string
 ): Promise<LlmAnalysisResult> {
   return await invoke("analyze_recordings", { recordingIds, query, model });
-}
-
-export async function summarizeRecording(
-  recordingId: string,
-  model?: string
-): Promise<string> {
-  return await invoke("summarize_recording", { recordingId, model });
 }
 
 export async function summarizeRecordingGrounded(
@@ -834,12 +740,7 @@ export async function getOllamaStatus(): Promise<boolean> {
   return await invoke("get_ollama_status");
 }
 
-export interface EmbeddingStatus {
-  embeddingCount: number;
-  ollamaAvailable: boolean;
-}
-
-export interface ReindexResult {
+interface ReindexResult {
   recordings: number;
   segments: number;
   errors: number;
@@ -847,10 +748,6 @@ export interface ReindexResult {
 
 export async function reindexEmbeddings(): Promise<ReindexResult> {
   return await invoke("reindex_embeddings");
-}
-
-export async function getEmbeddingStatus(): Promise<EmbeddingStatus> {
-  return await invoke("get_embedding_status");
 }
 
 export async function listOllamaModels(): Promise<string[]> {
@@ -944,25 +841,12 @@ export async function repairCursorInsertPermissions(): Promise<PermissionDiagnos
   return await invoke("repair_cursor_insert_permissions");
 }
 
-// Model Download APIs
-export async function downloadWhisperModel(modelName: string): Promise<string> {
-  return await invoke("download_whisper_model", { modelName });
-}
-
 export async function listDownloadedModels(): Promise<DownloadedModel[]> {
   return await invoke("list_downloaded_models");
 }
 
-export async function deleteModel(path: string): Promise<void> {
-  await invoke("delete_model", { path });
-}
-
-export async function getAvailableSpace(): Promise<number> {
-  return await invoke("get_available_space");
-}
-
 // Types for model downloads
-export interface DownloadedModel {
+interface DownloadedModel {
   name: string;
   provider: string;
   path: string;
@@ -971,21 +855,21 @@ export interface DownloadedModel {
 }
 
 // Diarization types
-export interface Speaker {
+interface Speaker {
   id: string;
   name: string | null;
   color: string;
   sampleCount: number;
 }
 
-export interface SpeakerSegment {
+interface SpeakerSegment {
   startTime: number;
   endTime: number;
   speakerId: string;
   confidence: number;
 }
 
-export interface DiarizationResult {
+interface DiarizationResult {
   segments: SpeakerSegment[];
   speakers: Speaker[];
   duration: number;
@@ -1031,7 +915,7 @@ export async function getSettings(): Promise<Settings> {
   return await invoke("get_settings");
 }
 
-export interface ResetAppStateResult {
+interface ResetAppStateResult {
   deletedRecordings: number;
   deletedAudioFiles: number;
   failedAudioFileDeletions: string[];
@@ -1045,15 +929,6 @@ export async function resetAppState(): Promise<ResetAppStateResult> {
 
 export async function saveSettings(settings: Settings): Promise<void> {
   await invoke("save_settings", { settings });
-}
-
-export interface ShortcutApplyStatus {
-  ok: boolean;
-  message: string;
-}
-
-export async function applyGlobalShortcutsNow(): Promise<ShortcutApplyStatus> {
-  return await invoke("apply_global_shortcuts_now");
 }
 
 export async function hasProviderSecret(provider: string): Promise<boolean> {
@@ -1094,7 +969,7 @@ export async function migrateToEncryptedStorage(password: string): Promise<void>
   await invoke("migrate_to_encrypted_storage", { password });
 }
 
-export type CloudProvider = "one_drive" | "google_drive" | "proton_drive" | "i_cloud";
+type CloudProvider = "one_drive" | "google_drive" | "proton_drive" | "i_cloud";
 
 export interface BackupConfig {
   enabled: boolean;
@@ -1116,9 +991,9 @@ export interface BackupInfo {
   backupType: "full" | "incremental" | "settings";
 }
 
-export type SetupCheckStatus = "pass" | "fail";
+type SetupCheckStatus = "pass" | "fail";
 
-export interface CloudSetupCheck {
+interface CloudSetupCheck {
   id: string;
   label: string;
   status: SetupCheckStatus;
@@ -1168,14 +1043,10 @@ export async function syncBackupToCloud(backupId: string): Promise<void> {
   await invoke("sync_backup_to_cloud", { backupId });
 }
 
-export async function exportBackupArchive(backupId: string, targetPath: string): Promise<void> {
-  await invoke("export_backup_archive", { backupId, targetPath });
-}
-
 // ── License ───────────────────────────────────────────────────────────────────
 
 export type LicenseTier = "none" | "pro" | "friends_club";
-export type LicenseLsStatus = "active" | "inactive" | "expired" | "disabled" | "";
+type LicenseLsStatus = "active" | "inactive" | "expired" | "disabled" | "";
 
 export interface LicenseInfo {
   tier: LicenseTier;
@@ -1204,24 +1075,10 @@ export async function deactivateLicense(): Promise<void> {
   await invoke("deactivate_license");
 }
 
-export interface EntitlementInfo {
-  trialActive: boolean;
-  licenseValid: boolean;
-  tier: "free" | "pro" | "friends";
-  proEnabled: boolean;
-  experimentalEnabled: boolean;
-  canUpdate: boolean;
-}
-
-/** Get current entitlement (no network call, reads cached license state). */
-export async function getEntitlement(): Promise<EntitlementInfo> {
-  return await invoke("get_entitlement");
-}
-
 // ── Update System ─────────────────────────────────────────────────────────────
 
 export type UpdateChannel = "stable" | "beta";
-export type UpdateStatus =
+type UpdateStatus =
   | "unknown"
   | "checking"
   | "upToDate"
@@ -1231,7 +1088,7 @@ export type UpdateStatus =
   | "error"
   | "locked";
 
-export interface UpdateInfo {
+interface UpdateInfo {
   version: string;
   notes: string;
   pubDate: string;

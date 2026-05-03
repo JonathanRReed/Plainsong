@@ -4,7 +4,7 @@
 //! This module handles resampling, format conversion, and normalization.
 
 use anyhow::{Context, Result};
-use hound::{WavReader, WavSpec};
+use hound::WavReader;
 use std::path::Path;
 
 /// Load and preprocess audio file for ASR
@@ -163,38 +163,12 @@ fn resample(input: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
     Ok(output)
 }
 
-/// Save audio data to WAV file
-#[allow(dead_code)]
-pub fn save_wav_file(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-
-    let mut writer = hound::WavWriter::create(path, spec).context("Failed to create WAV writer")?;
-
-    for sample in samples {
-        let int_sample = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
-        writer
-            .write_sample(int_sample)
-            .context("Failed to write sample")?;
-    }
-
-    writer.finalize().context("Failed to finalize WAV file")?;
-
-    Ok(())
-}
-
-/// Normalize audio to target dB level
-#[allow(dead_code)]
-pub fn normalize(samples: &mut [f32], target_db: f32) {
+#[cfg(test)]
+fn normalize(samples: &mut [f32], target_db: f32) {
     if samples.is_empty() {
         return;
     }
 
-    // Find current RMS
     let sum_squares: f32 = samples.iter().map(|s| s * s).sum();
     let rms = (sum_squares / samples.len() as f32).sqrt();
 
@@ -208,22 +182,7 @@ pub fn normalize(samples: &mut [f32], target_db: f32) {
     }
 }
 
-/// Apply pre-emphasis filter (high-pass)
-/// Helps with ASR accuracy by boosting high frequencies
-#[allow(dead_code)]
-pub fn pre_emphasis(samples: &mut [f32], coeff: f32) {
-    if samples.len() < 2 {
-        return;
-    }
-
-    for i in (1..samples.len()).rev() {
-        samples[i] -= coeff * samples[i - 1];
-    }
-}
-
-/// Remove silence from audio (simple energy-based)
-#[allow(dead_code)]
-pub fn remove_silence(
+fn remove_silence(
     samples: &[f32],
     threshold: f32,
     min_silence_ms: u32,

@@ -1,4 +1,4 @@
-export type MeetingTemplateId =
+type MeetingTemplateId =
   | "auto"
   | "1on1"
   | "standup"
@@ -11,7 +11,7 @@ export type MeetingTemplateId =
   | "research"
   | "personal_admin";
 
-export type MeetingTemplateOption = {
+type MeetingTemplateOption = {
   value: MeetingTemplateId;
   label: string;
   description: string;

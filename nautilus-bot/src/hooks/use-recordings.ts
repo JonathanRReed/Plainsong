@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { listen } from "@/lib/electron";
-import { getRecordings } from "@/lib/backend";
+import { getRecordings } from "@/lib/backend/recordings";
 import { useDataCache } from "@/hooks/data-cache-context";
 import type { Recording } from "@/types";
 

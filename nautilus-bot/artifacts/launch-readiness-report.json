@@ -1,47 +1,132 @@
 {
-  "generatedAt": "2026-04-18T23:14:44.576Z",
+  "generatedAt": "2026-05-03T15:52:37.829Z",
   "status": "NO-GO",
   "areas": {
     "dictation": {
       "status": "BLOCKED",
       "benchmarkMacosPass": true,
       "benchmarkWindowsPass": true,
+      "packagedBenchmarkMacosPass": true,
+      "packagedBenchmarkWindowsPass": false,
       "parityFixturesPass": true,
       "promptEvalPass": true,
+      "appMatrixPass": false,
+      "appMatrixEvidenceViolations": [],
+      "appMatrixRejectedInsertionEvidence": [
+        {
+          "path": "artifacts/qa/macos/app-matrix-insertion-slack.json",
+          "status": "BLOCKED",
+          "targetApp": "Slack",
+          "pass": false,
+          "reason": "pass is not true, status is BLOCKED, sidecar command did not complete, frontmost app did not match target, paste was not reported, manual observation was not accepted, scratch target is a placeholder, manual observation result is missing"
+        }
+      ],
       "qaSummary": {
-        "total": 23,
-        "pass": 0,
+        "total": 19,
+        "pass": 10,
         "fail": 0,
-        "blocked": 23,
+        "blocked": 9,
         "pending": 0
       },
       "appMatrixSummary": {
         "total": 16,
-        "supported": 0,
+        "supported": 1,
         "partial": 0,
         "clipboardOnly": 0,
         "unsupported": 0,
-        "pending": 16
+        "pending": 15,
+        "ready": 1,
+        "missingPackagedEvidence": 8,
+        "missingInsertionEvidence": 15,
+        "openBlockedEntries": 6,
+        "rejectedInsertionEvidence": 1
       }
     },
     "meetings": {
       "status": "BLOCKED",
       "qaSummary": {
         "total": 22,
-        "pass": 0,
+        "pass": 11,
         "fail": 0,
-        "blocked": 22,
+        "blocked": 11,
         "pending": 0
       }
     },
     "trust": {
       "status": "BLOCKED",
       "qaSummary": {
-        "total": 22,
-        "pass": 0,
+        "total": 12,
+        "pass": 5,
         "fail": 0,
-        "blocked": 22,
+        "blocked": 7,
         "pending": 0
+      },
+      "qaEvidenceSummary": {
+        "missingEvidence": 0,
+        "mismatchedEvidenceStatus": 0,
+        "missingPlatform": 0,
+        "byPlatform": {
+          "macOS": {
+            "total": 27,
+            "pass": 21,
+            "fail": 0,
+            "blocked": 6,
+            "pending": 0
+          },
+          "Windows": {
+            "total": 25,
+            "pass": 0,
+            "fail": 0,
+            "blocked": 25,
+            "pending": 0
+          }
+        },
+        "product": {
+          "total": 42,
+          "pass": 21,
+          "fail": 0,
+          "blocked": 21,
+          "pending": 0
+        },
+        "externalDistribution": {
+          "total": 10,
+          "pass": 0,
+          "fail": 0,
+          "blocked": 10,
+          "pending": 0
+        },
+        "productByPlatform": {
+          "macOS": {
+            "total": 22,
+            "pass": 21,
+            "fail": 0,
+            "blocked": 1,
+            "pending": 0
+          },
+          "Windows": {
+            "total": 20,
+            "pass": 0,
+            "fail": 0,
+            "blocked": 20,
+            "pending": 0
+          }
+        },
+        "externalDistributionByPlatform": {
+          "macOS": {
+            "total": 5,
+            "pass": 0,
+            "fail": 0,
+            "blocked": 5,
+            "pending": 0
+          },
+          "Windows": {
+            "total": 5,
+            "pass": 0,
+            "fail": 0,
+            "blocked": 5,
+            "pending": 0
+          }
+        }
       },
       "localReleasePass": true,
       "cloudSmokeReady": false,
@@ -52,34 +137,22 @@
       "status": "BLOCKED",
       "appMatrixSummary": {
         "total": 16,
-        "supported": 0,
+        "supported": 1,
         "partial": 0,
         "clipboardOnly": 0,
         "unsupported": 0,
-        "pending": 16
+        "pending": 15,
+        "ready": 1,
+        "missingPackagedEvidence": 8,
+        "missingInsertionEvidence": 15,
+        "openBlockedEntries": 6,
+        "rejectedInsertionEvidence": 1
       },
       "languageMatrixSummary": {
         "total": 10,
-        "packagedPass": 0,
-        "packagedPending": 10
+        "packagedPass": 10,
+        "packagedPending": 0
       }
-    },
-    "uxEvidence": {
-      "status": "BLOCKED",
-      "summary": {
-        "total": 53,
-        "pass": 0,
-        "fail": 0,
-        "blocked": 53,
-        "pending": 0
-      },
-      "gateCount": 12,
-      "blockedGateCount": 12
-    },
-    "productQuality": {
-      "status": "BLOCKED",
-      "posture": "Do not prioritize signing/notarization work until core app quality, competitor parity, and packaged UX evidence are credible.",
-      "blockerCount": 4
     }
   },
   "blockers": [
@@ -93,8 +166,22 @@
       "gate": "benchmark-gates-packaged",
       "status": "BLOCKED",
       "evidence": "artifacts/benchmark-packaged.blocked.md",
-      "reason": "Benchmark gate artifacts are still local or fixture-tagged runs; packaged dictation benchmark evidence is still missing."
+      "reason": "macOS packaged dictation benchmark evidence is present and passing; Windows packaged benchmark evidence is still missing."
     },
+    {
+      "gate": "dictation-app-matrix",
+      "status": "BLOCKED",
+      "evidence": "artifacts/dictation-app-matrix-gate.json",
+      "reason": "Frozen app matrix is not launch-ready: 1/16 ready, 15 pending, 8 missing packaged benchmark evidence, 15 missing insertion evidence, 6 open blocked-app entries, 1 rejected insertion evidence artifacts."
+    },
+    {
+      "gate": "packaged-qa-matrix",
+      "status": "BLOCKED",
+      "evidence": "artifacts/packaged-qa-evidence-bundle.json",
+      "reason": "Non-external packaged QA remains 21 BLOCKED / 21 PASS. External distribution QA remains 10 BLOCKED / 0 PASS and is tracked separately."
+    }
+  ],
+  "externalBlockers": [
     {
       "gate": "apple-release-signing",
       "status": "BLOCKED",
@@ -106,30 +193,29 @@
       "status": "BLOCKED",
       "evidence": "artifacts/qa/windows/security-authenticode.md",
       "reason": "Windows signing and SmartScreen validation have not been executed from a Windows release host."
-    },
-    {
-      "gate": "packaged-qa-matrix",
-      "status": "BLOCKED",
-      "evidence": "artifacts/packaged-qa-evidence-bundle.json",
-      "reason": "Packaged QA matrix remains 53 BLOCKED / 0 PASS."
     }
   ],
   "nextActions": [
-    "Treat CP-01 through CP-15 and the dictation parity scorecard as the immediate product-quality backlog before release signing work.",
-    "Capture or implement evidence for dictation reliability, app-matrix insertion, command/snippet success, latency trend, provider routing, and recovery UX.",
-    "Replace BLOCKED UX stubs with PASS or FAIL notes that link screenshots, videos, logs, and defect IDs.",
-    "Defer Apple notarization, Windows signing, and signed updater validation until product-quality gates are credible."
+    "Execute the remaining non-signing macOS packaged QA rows that require live credentials.",
+    "Use docs/windows-packaged-qa-handoff.md and scripts/windows-packaged-qa-runner.ps1 on a Windows release host, then execute the Windows packaged QA rows.",
+    "Capture packaged app-matrix evidence on macOS and Windows, then update the launch app matrix from PENDING to verified statuses.",
+    "Keep signing and publishing blockers tracked separately until product readiness is green."
   ],
   "evidence": {
     "releaseBlockers": "artifacts/release-blockers.json",
     "qaBundle": "artifacts/packaged-qa-evidence-bundle.json",
-    "uxBundle": "artifacts/packaged-ux-evidence-bundle.json",
-    "uxBundleMarkdown": "docs/packaged-ux-evidence-bundle.md",
     "benchmarkMacos": "artifacts/benchmark-gates-macos.json",
     "benchmarkWindows": "artifacts/benchmark-gates-windows.json",
+    "packagedBenchmarkMacos": "artifacts/benchmark-gates-packaged-macos.json",
+    "packagedBenchmarkWindows": "artifacts/benchmark-packaged.blocked.md",
     "dictationParity": "artifacts/dictation-parity-evidence.json",
     "dictationPromptEval": "artifacts/dictation-prompt-eval.json",
+    "appMatrixGate": "artifacts/dictation-app-matrix-gate.json",
     "appMatrix": "docs/dictation-app-compatibility-matrix.md",
+    "completionAudit": "docs/launch-completion-audit.md",
+    "launchUnblockerPack": "docs/launch-unblocker-pack.md",
+    "windowsQaHandoff": "docs/windows-packaged-qa-handoff.md",
+    "windowsQaRunner": "scripts/windows-packaged-qa-runner.ps1",
     "languageMatrix": "docs/evals/dictation-language-certification-matrix.md"
   }
 }

@@ -24,6 +24,14 @@ function readJson(relativePath) {
   return JSON.parse(fs.readFileSync(path.join(repoRoot, relativePath), "utf8"));
 }
 
+function readJsonIfExists(relativePath) {
+  const fullPath = path.join(repoRoot, relativePath);
+  if (!fs.existsSync(fullPath)) {
+    return null;
+  }
+  return JSON.parse(fs.readFileSync(fullPath, "utf8"));
+}
+
 function writeText(relativePath, body) {
   const outputPath = path.join(repoRoot, relativePath);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -123,11 +131,35 @@ const macosBenchmark = readJson("docs/evals/benchmark-run-latest-macos.json");
 const windowsBenchmark = readJson("docs/evals/benchmark-run-latest-windows.json");
 const macosGate = readJson("artifacts/benchmark-gates-macos.json");
 const windowsGate = readJson("artifacts/benchmark-gates-windows.json");
+const packagedMacosBenchmark = readJsonIfExists("docs/evals/benchmark-run-packaged-macos.json");
+const packagedMacosGate = readJsonIfExists("artifacts/benchmark-gates-packaged-macos.json");
 const languageFixture = readJson("docs/evals/dictation-language-certification-fixture.json");
 const macosMatrix = parseMatrix("docs/dictation-app-compatibility-matrix.md").slice(0, 8);
 const windowsMatrix = parseMatrix("docs/dictation-app-compatibility-matrix.md").slice(8);
 const blockedApps = parseBlockedRegister();
 const benchmarkRows = [...macosBenchmark.rows, ...windowsBenchmark.rows];
+const packagedLanguageRows = packagedMacosBenchmark?.rows ?? [];
+const packagedLanguages = new Set(
+  packagedLanguageRows
+    .filter((row) => {
+      const outcome = String(row.insertionOutcome ?? "");
+      return outcome === "pasted" || outcome === "copied" || outcome === "command_only";
+    })
+    .map((row) => row.language)
+    .filter(Boolean)
+);
+const packagedLanguageEvidencePass = Boolean(
+  packagedMacosBenchmark?.summary?.sampleCount > 0 &&
+    packagedMacosBenchmark?.summary?.insertionSuccessRate === 1 &&
+    packagedMacosGate?.pass
+);
+
+function packagedEvidenceStatusForLanguage(languageCode, fallbackStatus) {
+  if (packagedLanguageEvidencePass && packagedLanguages.has(languageCode)) {
+    return "PASS";
+  }
+  return fallbackStatus;
+}
 
 writeText(
   "docs/evals/dictation-command-corpus-log.md",
@@ -250,7 +282,7 @@ writeText(
 
 Generated: ${generatedAt}
 
-This matrix freezes the current launch-language guidance. It is truthful about the current state: provider guidance exists and the local benchmark corpus now exercises every frozen launch language, but packaged benchmark and insertion evidence is still pending.
+This matrix freezes the current launch-language guidance. Provider guidance exists, the local benchmark corpus exercises every frozen launch language, and macOS packaged benchmark evidence now covers every frozen launch language. Target-app insertion claims remain governed by the app compatibility matrix.
 
 ${renderTable(
     ["Code", "Language", "Tier", "Local corpus", "Dictation", "Meetings", "Fallback", "Packaged evidence"],
@@ -262,7 +294,7 @@ ${renderTable(
       item.recommendedDictationProvider,
       item.recommendedMeetingProvider,
       item.fallbackProvider,
-      item.packagedEvidenceStatus,
+      packagedEvidenceStatusForLanguage(item.code, item.packagedEvidenceStatus),
     ])
   )}
 `

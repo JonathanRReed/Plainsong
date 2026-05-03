@@ -23,7 +23,7 @@ export interface Recording {
   consentNoticeUpdatedAt?: string | null;
 }
 
-export interface RecordingMetadata {
+interface RecordingMetadata {
   deviceName?: string;
   sampleRate: number;
   channels: number;
@@ -80,14 +80,6 @@ export interface Project {
   encrypted: boolean;
   keySalt?: string | null;
   keyHint?: string | null;
-}
-
-export interface AuditLogEntry {
-  id: string;
-  timestamp: string;
-  event: string;
-  details: Record<string, unknown>;
-  severity: "info" | "warning" | "error" | string;
 }
 
 // ASR Types

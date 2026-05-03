@@ -1,0 +1,117 @@
+{
+  "generatedAt": "2026-05-02T22:42:51.955Z",
+  "appPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app",
+  "sidecarPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar",
+  "workDir": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos/backup-create-restore-workdir",
+  "settingsPath": "/Users/jonathanreed/Library/Application Support/Nautilus/settings.json",
+  "backupConfigPath": "/Users/jonathanreed/Library/Application Support/Nautilus/backup-config.json",
+  "pass": true,
+  "timedOut": false,
+  "rawSettingsRestored": true,
+  "rawBackupConfigRestored": true,
+  "workDirCleaned": true,
+  "originalSettingsHash": "d24b68c82291bddd83cc71dce43cc5d622aa77e02b9e42bb2207b595b24f0231",
+  "restoredSettingsHash": "d24b68c82291bddd83cc71dce43cc5d622aa77e02b9e42bb2207b595b24f0231",
+  "originalBackupConfigHash": null,
+  "restoredBackupConfigHash": null,
+  "checks": {
+    "configSaved": true,
+    "backupCreated": true,
+    "settingsMutatedBeforeRestore": true,
+    "restoreMatchedBackup": true,
+    "listBackupsIncludesCreated": true,
+    "cloudSetupReady": true,
+    "cloudBackupSynced": true,
+    "cloudRestoreMatchedSyncedBackup": true
+  },
+  "cloud": {
+    "root": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos/backup-create-restore-workdir/icloud-root",
+    "folder": "NautilusQaCloudBackups",
+    "setup": {
+      "checkedAt": "2026-05-02T22:42:51.988317Z",
+      "checks": [
+        {
+          "id": "cloud_sync_enabled",
+          "label": "Cloud sync enabled",
+          "message": "Cloud backup sync is enabled.",
+          "status": "pass"
+        },
+        {
+          "id": "backup_dir_access",
+          "label": "Backup directory access",
+          "message": "Backup directory is writable: /Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos/backup-create-restore-workdir",
+          "status": "pass"
+        },
+        {
+          "id": "provider_selected",
+          "label": "Cloud provider selected",
+          "message": "Using provider ICloud",
+          "status": "pass"
+        },
+        {
+          "id": "cloud_folder",
+          "label": "Cloud folder configured",
+          "message": "Cloud folder: NautilusQaCloudBackups",
+          "status": "pass"
+        },
+        {
+          "id": "icloud_path_resolved",
+          "label": "iCloud path resolved",
+          "message": "Resolved iCloud path: /Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos/backup-create-restore-workdir/icloud-root",
+          "status": "pass"
+        },
+        {
+          "id": "icloud_path_exists",
+          "label": "iCloud path exists",
+          "message": "iCloud path exists: /Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos/backup-create-restore-workdir/icloud-root",
+          "status": "pass"
+        },
+        {
+          "id": "icloud_write_access",
+          "label": "iCloud write access",
+          "message": "Successfully wrote and removed a probe file.",
+          "status": "pass"
+        }
+      ],
+      "provider": "i_cloud",
+      "ready": true
+    },
+    "connection": null,
+    "backup": {
+      "backupType": "settings",
+      "id": "settings_20260502_224251_541e6799",
+      "itemsCount": 2,
+      "sizeBytes": 5872,
+      "timestamp": "2026-05-02T22:42:51.989196Z"
+    },
+    "syncedPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos/backup-create-restore-workdir/icloud-root/NautilusQaCloudBackups/settings_20260502_224251_541e6799",
+    "syncedSettingsHash": "3e5a5f667d4a42fd1d8c8e348a5dc504dc726d0392ef967347ac96309483ecc1",
+    "restoredHash": "3e5a5f667d4a42fd1d8c8e348a5dc504dc726d0392ef967347ac96309483ecc1"
+  },
+  "stderr": "[sidecar] ready\n2026-05-02T22:42:51.967363Z  INFO nautilus_bot_lib::backup: Backup created: settings_20260502_224251_fae23d42 (5865 bytes)\n2026-05-02T22:42:51.985254Z  INFO nautilus_bot_lib::backup: Backup restored: settings_20260502_224251_fae23d42\n2026-05-02T22:42:52.013241Z  INFO nautilus_bot_lib::backup: Backup synced to iCloud path /Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos/backup-create-restore-workdir/icloud-root/NautilusQaCloudBackups/settings_20260502_224251_541e6799\n2026-05-02T22:42:52.013249Z  INFO nautilus_bot_lib::backup: Backup created: settings_20260502_224251_541e6799 (5872 bytes)\n2026-05-02T22:42:52.016967Z  INFO nautilus_bot_lib::backup: Backup restored: settings_20260502_224251_541e6799",
+  "backup": {
+    "info": {
+      "backupType": "settings",
+      "id": "settings_20260502_224251_fae23d42",
+      "itemsCount": 2,
+      "sizeBytes": 5865,
+      "timestamp": "2026-05-02T22:42:51.966296Z"
+    },
+    "path": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/artifacts/qa/macos/backup-create-restore-workdir/settings_20260502_224251_fae23d42",
+    "settingsHash": "d24b68c82291bddd83cc71dce43cc5d622aa77e02b9e42bb2207b595b24f0231",
+    "manifest": {
+      "id": "settings_20260502_224251_fae23d42",
+      "timestamp": "2026-05-02T22:42:51.966296Z",
+      "backupType": "settings",
+      "components": [
+        "settings"
+      ]
+    }
+  },
+  "mutatedSettingsHash": "0a71f0aa7e697646377afce8db81c7f5e46d2bfb417cbb9f85ea038f08ccd295",
+  "restoredFromBackupHash": "d24b68c82291bddd83cc71dce43cc5d622aa77e02b9e42bb2207b595b24f0231",
+  "sidecarExit": {
+    "code": 0,
+    "signal": null
+  }
+}

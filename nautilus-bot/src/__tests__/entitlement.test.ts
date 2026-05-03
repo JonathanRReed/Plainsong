@@ -4,7 +4,7 @@ import {
   deriveEntitlement,
   getThemeAccessLevel,
 } from "@/hooks/use-license-features";
-import type { LicenseInfo } from "@/lib/backend";
+import type { LicenseInfo } from "@/lib/backend/license";
 
 function makeLicense(
   overrides: Partial<LicenseInfo> = {}

@@ -1,0 +1,237 @@
+{
+  "generatedAt": "2026-05-02T21:37:28.152Z",
+  "appPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app",
+  "sidecarPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar",
+  "pass": true,
+  "timedOut": false,
+  "pendingCommands": [],
+  "checks": {
+    "microphoneReady": true,
+    "accessibilityReady": true,
+    "postEventReady": true,
+    "cursorInsertionReady": true,
+    "dictationSetupOk": true,
+    "meetingSetupOk": true,
+    "systemAudioAvailable": true
+  },
+  "results": {
+    "permissions": {
+      "accessibilityReady": true,
+      "accessibilityTrusted": true,
+      "appBundlePath": null,
+      "automationReady": false,
+      "availableInsertStrategies": [
+        "accessibility_direct_text",
+        "simulated_typing"
+      ],
+      "cursorInsertionObserved": false,
+      "cursorInsertionReady": true,
+      "lastCursorInsertStatus": null,
+      "microphonePermissionReady": true,
+      "microphoneReady": true,
+      "notes": [],
+      "postEventReady": true,
+      "preferredInsertStrategy": "accessibility_direct_text",
+      "recommendedAppBundlePath": "/Applications/Nautilus.app",
+      "runningFromDiskImage": false,
+      "speechRecognitionReady": false
+    },
+    "dictationSetup": {
+      "details": [
+        "Microphone: ready",
+        "Cursor insert: ready",
+        "Route preference: local",
+        "Resolved route: UsefulSensors Moonshine / moonshine-tiny (local)"
+      ],
+      "ok": true,
+      "summary": "Dictation route, microphone, and insertion permissions are ready.",
+      "title": "Dictation verification"
+    },
+    "meetingSetup": {
+      "details": [
+        "Microphone: ready",
+        "System audio: available",
+        "Loopback device: BlackHole 2ch",
+        "Meeting route: MLX Audio / mlx-community/whisper-large-v3-turbo-asr-fp16",
+        "Meeting route 'Distil Whisper' / 'distil-large-v3.5' was not ready. Switched meetings to 'MLX Audio' / 'mlx-community/whisper-large-v3-turbo-asr-fp16'."
+      ],
+      "ok": true,
+      "summary": "Meeting route and system audio are ready for full meeting capture.",
+      "title": "Meeting verification"
+    },
+    "settings": {
+      "audio": {
+        "autoGainControl": true,
+        "captureMicrophone": true,
+        "captureSystemAudio": true,
+        "channels": 1,
+        "dictationInputDevice": null,
+        "dictationInputOverrideEnabled": false,
+        "manualGainDb": 0,
+        "meetingInputDevice": null,
+        "meetingInputOverrideEnabled": false,
+        "noiseSuppression": true,
+        "preferredInputDevice": null,
+        "sampleRate": 16000,
+        "silenceTimeoutSeconds": 300,
+        "voiceActivityDetection": true
+      },
+      "defaultTemplate": "meeting",
+      "export": {
+        "autoExport": false,
+        "defaultFormat": "markdown",
+        "exportDirectory": null,
+        "includeSpeakers": true,
+        "includeTimestamps": true,
+        "openAfterExport": false
+      },
+      "privacy": {
+        "auditLogging": true,
+        "autoDeleteDays": 0,
+        "cloudSync": false,
+        "encryptRecordings": false,
+        "exportRoot": null,
+        "llmModelId": null,
+        "llmProvider": "ollama",
+        "remoteProcessingEnabled": false,
+        "requirePassword": false,
+        "vaultInitialized": false,
+        "vaultSalt": null
+      },
+      "shortcuts": {
+        "focusSearch": "Ctrl+Shift+F",
+        "openWindow": "Ctrl+Shift+N",
+        "quickExport": "Ctrl+Shift+E",
+        "toggleDictation": "Cmd+Shift+Space",
+        "toggleDictationAlternates": [],
+        "toggleRecording": "Ctrl+Shift+R"
+      },
+      "theme": "system",
+      "transcription": {
+        "autoTranscribe": true,
+        "defaultProvider": "moonshine",
+        "diarizationModelId": "ecapa_tdnn_speaker",
+        "dictationActiveLanguages": [],
+        "dictationAiFormatting": false,
+        "dictationAutoLearnCorrections": true,
+        "dictationAutoRequestPermissions": true,
+        "dictationCommandModeEnabled": true,
+        "dictationCommandPrefix": "command",
+        "dictationContextSource": "none",
+        "dictationCopyToClipboard": true,
+        "dictationCustomModes": [
+          {
+            "activationAppMatcher": "Cursor",
+            "activationDomainMatcher": null,
+            "aiModelId": null,
+            "aiProvider": "ollama",
+            "baseModePreset": "messages",
+            "commandModeEnabled": true,
+            "contextSource": "selected_text",
+            "copyToClipboard": true,
+            "customPrompt": "Rewrite the user's dictation for a software development workflow. Preserve code terms, filenames, CLI commands, markdown, and developer jargon exactly when possible. Prefer concise technical phrasing and keep variable names, casing, and product names intact.",
+            "description": "Code-aware dictation for prompts, commits, terminal commands, and editor rewrites.",
+            "dictationModelId": "moonshine-tiny",
+            "dictationProvider": "moonshine",
+            "id": "builtin-coding-copilot",
+            "insertionMode": "paste",
+            "languageOverride": null,
+            "livePreviewEnabled": true,
+            "name": "Coding Copilot",
+            "profile": "normal_speed",
+            "routePreference": "local",
+            "saveToInbox": true
+          }
+        ],
+        "dictationCustomPrompt": null,
+        "dictationHandsFreeEnabled": false,
+        "dictationInsertionMode": "paste",
+        "dictationKeepWarm": "short",
+        "dictationLivePreviewEnabled": true,
+        "dictationMlxEnabled": false,
+        "dictationModePreset": "voice",
+        "dictationModelId": "moonshine-tiny",
+        "dictationProfile": "normal_speed",
+        "dictationProjectId": "inbox",
+        "dictationProvider": "moonshine",
+        "dictationPushToTalk": true,
+        "dictationRetentionCustomHours": 24,
+        "dictationRetentionPreset": "never",
+        "dictationRouteOverrideEnabled": true,
+        "dictationRoutePreference": "local",
+        "dictationSaveToInbox": true,
+        "dictationSelectedCustomModeId": null,
+        "dictationSilenceTimeoutSeconds": 0,
+        "dictationSnippetsEnabled": true,
+        "embeddingModel": "nomic-embed-text",
+        "enableAutoAnalysis": true,
+        "enableDiarization": true,
+        "intelligentPunctuation": true,
+        "language": null,
+        "meetingAudioStorageMode": "always",
+        "meetingAutoNameEnabled": true,
+        "meetingAutoNameModel": null,
+        "meetingCustomPrompt": null,
+        "meetingMlxEnabled": true,
+        "meetingModelId": "distil-large-v3.5",
+        "meetingProvider": "distil_whisper",
+        "meetingRetentionCustomMonths": 1,
+        "meetingRetentionDeleteMode": "audio_only",
+        "meetingRetentionPreset": "3m",
+        "meetingRoutePolicy": "prefer_local",
+        "memorySearchMode": "fts",
+        "mlxAcceleratedProviders": [],
+        "numSpeakers": 0,
+        "platformOptimization": {
+          "fallbackPolicy": "local_only",
+          "macos": {
+            "appleNativeEnabled": false,
+            "mlxEnabled": true
+          },
+          "manualEnginePriority": [],
+          "mode": "auto",
+          "windows": {
+            "foundryEnabled": true,
+            "windowsSdkDictationEnabled": false
+          }
+        },
+        "providerModelIds": {
+          "distil_whisper": "distil-large-v3.5",
+          "elevenlabs_scribe": "scribe_v2",
+          "groq": "whisper-large-v3-turbo",
+          "macos_apple_speech": "macos_apple_speech",
+          "mlx_audio": "mlx-community/whisper-large-v3-turbo-asr-fp16",
+          "moonshine": "moonshine-base",
+          "openai_cloud": "whisper-1",
+          "parakeet": "parakeet-ctc-0.6b",
+          "voxtral": "voxtral-local",
+          "whisper": "large-v3-turbo",
+          "whisper_candle": "whisper-large-v3-turbo",
+          "windows_sdk_dictation": "windows_sdk_dictation"
+        },
+        "saveRawTranscript": false,
+        "selectedModelId": "moonshine-base",
+        "silenceSkipEnabled": false,
+        "speakerNamingMethod": "auto",
+        "useSharedAsrSelection": false
+      },
+      "ui": {
+        "alwaysOnTop": false,
+        "colorScheme": "default",
+        "fontSize": 14,
+        "minimizeToTray": true,
+        "showDictationPopup": true,
+        "showRecordingPopup": true,
+        "windowPosition": null,
+        "windowSize": null
+      },
+      "updates": {
+        "autoCheck": true,
+        "channel": "stable",
+        "lastCheckAt": null,
+        "lastSeenVersion": null
+      }
+    }
+  },
+  "stderr": "[sidecar] ready\n2026-05-02T21:37:11.513734Z  INFO nautilus_bot_lib::audio::system_capture: Found loopback device: BlackHole 2ch\n2026-05-02T21:37:11.562708Z  INFO nautilus_bot_lib::audio::system_capture: Found loopback device: BlackHole 2ch\n2026-05-02T21:37:28.149878Z  INFO nautilus_sidecar: Received shutdown command, exiting"
+}

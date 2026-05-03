@@ -6,8 +6,6 @@
 //! - Medical transcription with specific formatting
 //! - Interview transcripts
 //! - Quick notes
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -62,14 +60,12 @@ impl std::fmt::Display for ExportFormat {
 /// Template manager
 pub struct TemplateManager {
     templates: HashMap<String, ExportTemplate>,
-    default_template: String,
 }
 
 impl TemplateManager {
     pub fn new() -> Self {
         let mut manager = Self {
             templates: HashMap::new(),
-            default_template: "meeting".to_string(),
         };
 
         manager.register_builtin_templates();
@@ -79,20 +75,6 @@ impl TemplateManager {
     /// Get a template by ID
     pub fn get_template(&self, id: &str) -> Option<&ExportTemplate> {
         self.templates.get(id)
-    }
-
-    /// Get default template
-    pub fn default_template(&self) -> &ExportTemplate {
-        self.templates
-            .get(&self.default_template)
-            .expect("Default template must exist")
-    }
-
-    /// Set default template
-    pub fn set_default_template(&mut self, id: &str) {
-        if self.templates.contains_key(id) {
-            self.default_template = id.to_string();
-        }
     }
 
     /// List all available templates
@@ -242,6 +224,10 @@ pub struct RenderData {
 
 /// Speaker information
 pub struct SpeakerInfo {
+    #[expect(
+        dead_code,
+        reason = "speaker id is retained for export template compatibility"
+    )]
     pub id: String,
     pub name: String,
     pub segments: Vec<(f64, f64, String)>, // start, end, text
@@ -254,25 +240,25 @@ const MEETING_TEMPLATE: &str = r#"# {{title}}
 
 ---
 
-## 📝 Meeting Summary
+## Meeting Summary
 
 {{summary}}
 
 ---
 
-## 🎯 Action Items
+## Action Items
 
 {{action_items}}
 
 ---
 
-## 🗣️ Transcript
+## Transcript
 
 {{transcript}}
 
 ---
 
-## 👥 Attendees
+## Attendees
 {{speakers}}
 
 ---

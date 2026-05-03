@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef } from "react";
 
-export type ScopedRequestToken<TScope extends string | null = string | null> = {
+type ScopedRequestToken<TScope extends string | null = string | null> = {
   requestId: number;
   scope: TScope;
 };

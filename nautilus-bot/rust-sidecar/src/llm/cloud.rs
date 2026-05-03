@@ -31,11 +31,6 @@ impl OllamaCloudClient {
         }
     }
 
-    /// Check if Ollama Cloud is available
-    pub async fn is_available(&self) -> bool {
-        self.api_key.is_some()
-    }
-
     /// List available models from Ollama Cloud
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let Some(ref key) = self.api_key else {

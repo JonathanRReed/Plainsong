@@ -10,7 +10,7 @@ export type MainViewId =
 export const OPEN_MAIN_VIEW_EVENT = "nautilus-open-main-view";
 export const OPEN_RECORDING_WORKSPACE_EVENT = "nautilus-open-recording-workspace";
 
-export interface OpenMainViewDetail {
+interface OpenMainViewDetail {
   view: MainViewId;
 }
 
@@ -26,18 +26,6 @@ export function requestMainView(view: MainViewId) {
   window.dispatchEvent(
     new CustomEvent<OpenMainViewDetail>(OPEN_MAIN_VIEW_EVENT, {
       detail: { view },
-    })
-  );
-}
-
-export function requestRecordingWorkspace(recordingId: string) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  window.dispatchEvent(
-    new CustomEvent<OpenRecordingWorkspaceDetail>(OPEN_RECORDING_WORKSPACE_EVENT, {
-      detail: { recordingId },
     })
   );
 }

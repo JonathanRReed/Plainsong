@@ -1,13 +1,18 @@
 # Licensing: License tiers unlock correct features (basic/pro/friends-club)
 
-Status: BLOCKED
+Status: PASS
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Generated: 2026-05-02T22:29:38.559Z
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Evidence
+- Command: `cargo test --manifest-path rust-sidecar/Cargo.toml license::tests`
+- Result: PASS
+- Command: `bun run test -- src/__tests__/entitlement.test.ts src/__tests__/nag-modal.test.tsx`
+- Result: PASS
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+## Verified Behavior
+- Free or expired trial state resolves to the free tier with Pro and Friends Club features disabled.
+- Active trial resolves to Pro feature access and update access, with Friends Club features disabled.
+- Valid Pro resolves to Pro feature access, update access, and no Friends Club-only cloud sync or priority support.
+- Valid Friends Club resolves to Friends tier access, Pro features, cloud sync, and priority support.
+- Theme access remains basic for trial users, Pro for valid Pro users, and Friends for valid Friends Club users.

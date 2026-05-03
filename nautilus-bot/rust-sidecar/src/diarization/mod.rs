@@ -3,8 +3,6 @@
 //! This module intentionally supports only real diarization. If the embedding
 //! model is not available, the API returns an error instead of synthetic output.
 
-#![allow(dead_code)]
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -1,13 +1,24 @@
-# Permissions: Accessibility permission flow
+# Permissions: Accessibility Permission Flow
 
-Status: BLOCKED
+Status: PASS
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Generated: 2026-05-02T19:42:15.603Z
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Evidence
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+- Command: `bun run qa:packaged:macos:smoke`
+- Packaged app: `release/mac-arm64/Nautilus.app`
+- Evidence artifact: `artifacts/qa/macos/packaged-smoke.json`
+
+## Result
+
+- `accessibilityReady`: `true`
+- `accessibilityTrusted`: `true`
+- `postEventReady`: `true`
+- `cursorInsertionReady`: `true`
+- Preferred insertion strategy: `accessibility_direct_text`
+- Available insertion strategies: `accessibility_direct_text`, `simulated_typing`
+
+## Scope
+
+This validates the packaged app's granted-permission path for direct text insertion and native keyboard fallback on this macOS host. It does not validate first-time System Settings prompt wording on a clean macOS account.

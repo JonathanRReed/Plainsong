@@ -25,34 +25,27 @@ export interface AsrProviderInventory {
   downloadStatus: DownloadStatus;
 }
 
-export interface AsrModelOption {
+interface AsrModelOption {
   id: string;
   label: string;
 }
 
-export type AsrRuntimeStatus = "ready" | "missing_runtime" | "missing_model" | "error";
+type AsrRuntimeStatus = "ready" | "missing_runtime" | "missing_model" | "error";
 
-export interface AsrRuntimeDetails {
+interface AsrRuntimeDetails {
   pythonPath?: string;
   modelPath?: string;
   missingFiles?: string[];
   setupAction?: string | null;
 }
 
-export interface AsrRuntimeDiagnostics {
-  providerType: AsrProviderType;
-  runtimeStatus: AsrRuntimeStatus;
-  runtimeMessage?: string;
-  runtimeDetails: AsrRuntimeDetails;
-}
-
-export interface AsrEngineDiagnostics {
+interface AsrEngineDiagnostics {
   activeEngine?: string;
   availableEngines: string[];
   notes: string[];
 }
 
-export interface AsrModelInfo {
+interface AsrModelInfo {
   name: string;
   version: string;
   sizeMb: number;
@@ -130,7 +123,7 @@ export interface GroundedSummaryResult {
   processingTimeMs: number;
 }
 
-export interface GroundedActionItem extends ActionItem {
+interface GroundedActionItem extends ActionItem {
   citations: LlmCitation[];
 }
 

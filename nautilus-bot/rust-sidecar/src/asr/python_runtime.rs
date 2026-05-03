@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 
 fn python_probe_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
@@ -94,7 +94,7 @@ impl PythonAsrWorker {
             .arg("serve")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .env("PYTHONUNBUFFERED", "1");
 
         let mut child = cmd
@@ -157,22 +157,9 @@ impl PythonAsrWorker {
         })?;
 
         if bytes_read == 0 {
-            let stderr = if let Some(mut stderr_pipe) = self.child.stderr.take() {
-                let mut stderr_buf = Vec::new();
-                let _ = stderr_pipe.read_to_end(&mut stderr_buf).await;
-                String::from_utf8_lossy(&stderr_buf).trim().to_string()
-            } else {
-                String::new()
-            };
-            let detail = if stderr.is_empty() {
-                "no stderr output".to_string()
-            } else {
-                stderr
-            };
             return Err(anyhow!(
-                "Python ASR worker '{}' exited unexpectedly: {}",
-                self.provider,
-                detail
+                "Python ASR worker '{}' exited unexpectedly",
+                self.provider
             ));
         }
 
@@ -549,10 +536,48 @@ pub fn find_python_for_provider(provider: &str) -> Option<String> {
 }
 
 fn runner_script_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("python")
-        .join("asr")
-        .join("runner.py")
+    if let Ok(path) = std::env::var("NAUTILUS_ASR_RUNNER") {
+        let candidate = PathBuf::from(path);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("python").join("asr").join("runner.py"));
+            if let Some(resources_dir) = exe_dir.parent() {
+                candidates.push(resources_dir.join("python").join("asr").join("runner.py"));
+            }
+        }
+    }
+
+    candidates.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("python")
+            .join("asr")
+            .join("runner.py"),
+    );
+
+    candidates.push(
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("rust-sidecar")
+            .join("python")
+            .join("asr")
+            .join("runner.py"),
+    );
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.exists())
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("python")
+                .join("asr")
+                .join("runner.py")
+        })
 }
 
 #[derive(Debug, Deserialize)]

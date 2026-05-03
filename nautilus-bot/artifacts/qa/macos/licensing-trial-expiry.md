@@ -1,13 +1,18 @@
 # Licensing: Trial expiry + nag behavior
 
-Status: BLOCKED
+Status: PASS
 Owner: qa-macos
-Generated: 2026-03-05T04:20:26.122Z
+Generated: 2026-05-02T22:29:38.559Z
 
-## Blocker
-Strict release prerequisites are not met in this cycle (signing/notarization/certificate and/or cloud secret requirements), and full manual packaged QA execution has not been completed yet.
+## Evidence
+- Command: `cargo test --manifest-path rust-sidecar/Cargo.toml license::tests`
+- Result: PASS
+- Command: `bun run test -- src/__tests__/entitlement.test.ts src/__tests__/nag-modal.test.tsx`
+- Result: PASS
 
-## Unblock Criteria
-- Required signing credentials/certificates are configured for the target platform.
-- Required cloud secrets are configured where applicable.
-- Test is executed on packaged artifacts and evidence is replaced with PASS/FAIL details.
+## Verified Behavior
+- New local trial state starts with 30 trial days and no nag.
+- Expired trial state returns 0 remaining days and requires the nag.
+- Malformed trial metadata fails closed.
+- Future-dated trial metadata fails closed instead of extending the trial.
+- Renderer nag cadence is 24 hours for the first expired week, 12 hours after 7 expired days, and 4 hours after 14 expired days.

@@ -146,7 +146,22 @@ vi.mock("@/hooks/use-setup-status", () => ({
   useSetupStatus: () => setupStatusMock,
 }));
 
-vi.mock("@/lib/backend", () => backendMocks);
+vi.mock("@/lib/backend/asr", () => ({
+  downloadAsrModels: backendMocks.downloadAsrModels,
+  refreshAsrRuntimeProbes: backendMocks.refreshAsrRuntimeProbes,
+  repairLocalModelCache: backendMocks.repairLocalModelCache,
+}));
+vi.mock("@/lib/backend/dictation", () => ({
+  smokeTestCursorInsert: backendMocks.smokeTestCursorInsert,
+}));
+vi.mock("@/lib/backend/settings", () => ({
+  openPermissionSettings: backendMocks.openPermissionSettings,
+  repairCursorInsertPermissions: backendMocks.repairCursorInsertPermissions,
+  requestDictationPermissions: backendMocks.requestDictationPermissions,
+  verifyDictationSetup: backendMocks.verifyDictationSetup,
+  verifyMeetingSetup: backendMocks.verifyMeetingSetup,
+  verifySystemAudioSetup: backendMocks.verifySystemAudioSetup,
+}));
 vi.mock("@/lib/onboarding", () => onboardingMocks);
 vi.mock("@/lib/navigation", () => navigationMocks);
 

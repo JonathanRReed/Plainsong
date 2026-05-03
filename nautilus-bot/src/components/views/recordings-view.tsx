@@ -18,36 +18,35 @@ import { TranscriptViewer, TranscriptSearch } from "@/components/transcript-view
 import { RecordingWaveform, WaveformVisualizer } from "@/components/waveform-visualizer";
 import { AiAnalysisPanel } from "@/components/ai-analysis-panel";
 import {
-  openRecordingAudio,
-  runDiarization,
-  renameSpeaker,
-  getRecording,
-  deleteRecording,
-  renameRecording,
-  retryMeetingAutoName,
-  setRecordingSourceType,
-  isDiarizationModelAvailable,
-  updateTranscriptSegment,
-  deleteTranscriptSegments,
-  updateRecordingNotes,
-  updateRecordingAnalysis,
-  updateRecordingTemplate,
-  getMeetingChatMessages,
-  updateMeetingChatMessages,
   summarizeRecordingGrounded,
   extractActionItemsGrounded,
   askMemory,
-  exportRecordingV2,
-  openExportPath,
   getRelationshipMemory,
-} from "@/lib/backend";
+} from "@/lib/backend/ai";
+import {
+  deleteRecording,
+  deleteTranscriptSegments,
+  getMeetingChatMessages,
+  getRecording,
+  openRecordingAudio,
+  renameRecording,
+  retryMeetingAutoName,
+  setRecordingSourceType,
+  updateMeetingChatMessages,
+  updateRecordingAnalysis,
+  updateRecordingNotes,
+  updateRecordingTemplate,
+  updateTranscriptSegment,
+} from "@/lib/backend/recordings";
+import { exportRecordingV2, openExportPath } from "@/lib/backend/exports";
+import { isDiarizationModelAvailable, renameSpeaker, runDiarization } from "@/lib/backend/asr";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import type {
   CompanyMemoryProfile,
   MeetingChatMessage,
   PersonMemoryProfile,
   RelationshipMemory,
-} from "@/lib/backend";
+} from "@/lib/backend/ai";
 import type { MeetingTranscriptDetails, Recording } from "@/types";
 import {
   buildMeetingTemplateOutline,

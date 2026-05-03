@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// Distil-Whisper Large v3.5 — native Candle inference, no Python required.
+// Distil-Whisper Large v3.5, native Candle inference, no Python required.
 // Same Whisper encoder-decoder architecture; uses candle-transformers Whisper.
 // ---------------------------------------------------------------------------
 const DISTIL_MODEL_ID: &str = "distil-large-v3.5";
@@ -102,7 +102,7 @@ impl AsrProvider for DistilWhisperProvider {
     }
 
     fn description(&self) -> &str {
-        "Distil-Whisper Large v3.5 — native Candle inference, 6x faster than Whisper Large, no Python."
+        "Distil-Whisper Large v3.5, native Candle inference, 6x faster than Whisper Large, no Python."
     }
 
     fn is_available(&self) -> bool {

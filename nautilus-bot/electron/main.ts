@@ -32,6 +32,12 @@ let dictationPhase = "idle";
 let updaterConfigured = false;
 let updateReadyToInstall = false;
 
+function qaLog(message: string, payload?: unknown): void {
+  if (process.env.NAUTILUS_QA_PACKAGED_HOTKEY === "1") {
+    console.log(`[qa] ${message}`, payload ?? "");
+  }
+}
+
 type UpdateChannel = "stable" | "beta";
 type UpdateInfoPayload = {
   version: string;
@@ -451,11 +457,17 @@ async function handleDictationGlobalShortcut(settings: AppSettings): Promise<voi
   });
 
   if (decision.action === "start") {
+    qaLog("dictation shortcut start_dictation", { phase: dictationPhase, behavior });
     await ipcBridge.invoke("start_dictation", {});
     return;
   }
 
   if (decision.action === "stop") {
+    qaLog("dictation shortcut stop_dictation", {
+      phase: dictationPhase,
+      behavior,
+      stopReason: decision.stopReason ?? "toggle",
+    });
     await ipcBridge.invoke("stop_dictation", {
       stopReason: decision.stopReason ?? "toggle",
     });
