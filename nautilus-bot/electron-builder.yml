@@ -18,6 +18,10 @@ extraResources:
     filter:
       - nautilus-sidecar
       - nautilus-sidecar.exe
+  - from: rust-sidecar/python/
+    to: python
+    filter:
+      - asr/runner.py
 
 mac:
   target:

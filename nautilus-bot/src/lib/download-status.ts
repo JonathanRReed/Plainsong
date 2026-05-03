@@ -1,13 +1,13 @@
 import type { DownloadStatus } from "@/types";
 
-export type NormalizedDownloadStatusKind =
+type NormalizedDownloadStatusKind =
   | "downloaded"
   | "not_downloaded"
   | "downloading"
   | "error"
   | "unknown";
 
-export interface NormalizedDownloadStatus {
+interface NormalizedDownloadStatus {
   kind: NormalizedDownloadStatusKind;
   progress?: number;
   message?: string;

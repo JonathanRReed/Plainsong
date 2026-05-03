@@ -1,6 +1,6 @@
 # Dictation Prompt Eval Report
 
-Generated: 2026-04-09T22:43:41.577Z
+Generated: 2026-05-03T15:52:29.660Z
 
 This report promotes the dictation prompt and text-shaping fixture path into an explicit regression harness. It is the repo-owned answer to prompt-eval drift: command grammar, formatting output, and correction behavior must stay reproducible.
 

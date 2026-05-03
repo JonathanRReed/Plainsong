@@ -15,7 +15,7 @@ interface AudioWaveformProps {
   size?: WaveformSize;
   /** Number of bars (ignored if levels is an array) */
   barCount?: number;
-  /** Bar color — defaults to currentColor */
+  /** Bar color, defaults to currentColor */
   barColor?: string;
   /** Accent color for the active glow */
   glowColor?: string;

@@ -28,11 +28,6 @@ impl GeminiClient {
         }
     }
 
-    /// Check if Gemini is available (has API key)
-    pub fn is_available(&self) -> bool {
-        self.api_key.is_some()
-    }
-
     /// List available models
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let Some(ref key) = self.api_key else {

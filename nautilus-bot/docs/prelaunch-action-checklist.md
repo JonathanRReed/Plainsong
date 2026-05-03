@@ -8,9 +8,9 @@ Execution plan: `docs/launch-execution-plan.md`.
 ## A) Required Secrets
 
 - [ ] Confirm Electron release publishing and signing credentials are set in CI for the active release workflow.
-- [ ] Confirm macOS signing and notarization credentials are set for the Electron packaging flow — BLOCKED (Apple setup unavailable in this cycle).
-- [ ] Confirm Windows signing secrets are set (`WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`) — BLOCKED (Windows cert unavailable in this cycle).
-- [ ] Confirm cloud ASR live-test secrets are set (`OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `MISTRAL_API_KEY`) — BLOCKED (`scripts/live-cloud-asr-smoke.mjs` fails without these).
+- [ ] Confirm macOS signing and notarization credentials are set for the Electron packaging flow, BLOCKED (Apple setup unavailable in this cycle).
+- [ ] Confirm Windows signing secrets are set (`WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`), BLOCKED (Windows cert unavailable in this cycle).
+- [ ] Confirm cloud ASR live-test secrets are set (`OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `MISTRAL_API_KEY`), BLOCKED (`scripts/live-cloud-asr-smoke.mjs` fails without these).
 - [ ] Optional but recommended for deterministic preflight provisioning: set `NAUTILUS_ASR_ASSET_BUNDLE_URL` to a tar/zip bundle that expands into `Nautilus/models/*`.
 
 ## B) Provider Runtime Prerequisites
@@ -21,24 +21,25 @@ Execution plan: `docs/launch-execution-plan.md`.
 ## C) Automated Gates
 
 - [x] Resolve or formally accept the current `bun audit` findings, then refresh `docs/release-gate-evidence.md`. (`wait-on` removed, Vite stack upgraded, remaining Bun-reported `esbuild` advisory documented as local-dev-only residual)
-- [ ] Release workflow `prepare` job passes secret validation + cloud smoke gate. — BLOCKED (missing cloud secrets).
+- [ ] Release workflow `prepare` job passes secret validation + cloud smoke gate, BLOCKED (missing cloud secrets).
 - [x] Rust live cloud integration test gate passes (`asr_live_cloud_integration`).
 - [x] Local ASR performance gate passes (`asr_local_performance_gate`, RTF <= 1.2).
 - [x] Local ASR performance gate runs with fail-fast provider policy (no hidden fallback passes).
 - [x] Cold-start gate passes on M1-class baseline (`scripts/cold-start-gate.mjs`, threshold < 2500ms). (historical evidence in `docs/release-gate-evidence.md`)
 - [x] Bundle size gate passes (`node scripts/size-gate.mjs --app release/mac-arm64/Nautilus.app --max-mb 450`).
 - [x] Current-platform local release sweep passes (`bun run gate:release:local`, artifact `artifacts/local-release-macos.json`).
-- [ ] Benchmark launch gates pass via `scripts/verify-benchmark-gates.mjs` for both `benchmark-run-latest-macos.json` and `benchmark-run-latest-windows.json` against baseline. — BLOCKED (local fixture gates now pass, but packaged benchmark evidence is still missing).
+- [ ] Benchmark launch gates pass via `scripts/verify-benchmark-gates.mjs` for local and packaged macOS and Windows artifacts against baseline, BLOCKED (local fixture gates pass and macOS packaged benchmark passes, but Windows packaged benchmark evidence is still missing).
+- [ ] Frozen app matrix gate passes (`bun run gate:app-matrix`), BLOCKED (`artifacts/dictation-app-matrix-gate.json` reports `1/16` ready).
 - [x] Standard build-quality gates remain green (`bun run lint`, `bun run test`, `bun run build:renderer`, `fmt`, `clippy`, `check`, `test --lib`).
 
 ## D) Packaged QA (Required)
 
-- [ ] Execute full macOS packaged QA matrix and attach evidence. — BLOCKED (rows currently BLOCKED pending credentials/execution).
-- [ ] Execute full Windows packaged QA matrix and attach evidence. — BLOCKED (rows currently BLOCKED pending cert/execution).
-- [ ] Validate updater check/install path on both platforms with signed artifacts. — BLOCKED (signing prerequisites unavailable).
-- [ ] Validate fresh install and upgrade paths on both platforms. — BLOCKED (requires signed packaged artifacts for strict flow).
-- [ ] 3h mic+system meeting soak test passes (record → stop → transcript complete). — BLOCKED (not executed in this cycle).
-- [ ] Idle CPU baseline in packaged app is < 1% while app window is open and not recording. — BLOCKED (not executed in this cycle).
+- [ ] Execute full macOS packaged QA matrix and attach evidence, PARTIAL (macOS rows now include executed PASS evidence for permissions, onboarding, capture, retention, transcription, local AI, backup, cloud sync, exports, licensing fixtures, short meeting-soak preflight, and strict 3-hour meeting soak; remaining rows are blocked by signing, update feed, and live license activation).
+- [ ] Execute full Windows packaged QA matrix and attach evidence, BLOCKED (rows currently BLOCKED pending cert/execution).
+- [ ] Validate updater check/install path on both platforms with signed artifacts, BLOCKED (signing prerequisites unavailable).
+- [ ] Validate fresh install and upgrade paths on both platforms, BLOCKED (requires signed packaged artifacts for strict flow).
+- [x] 3h mic+system meeting soak test passes (record to stop to transcript complete), PASS (`artifacts/qa/macos/capture-soak-3h.md`).
+- [x] Idle CPU baseline in packaged app is < 1% while app window is open and not recording. (`artifacts/qa/macos/idle-cpu-baseline.md`, average 0.11%)
 
 ## E) Competitor Parity Gates (Required)
 

@@ -18,7 +18,8 @@ import {
   ChevronRight,
 } from "lucide-react";
 import type { ViewId } from "@/App";
-import { getSettings, type LicenseInfo } from "@/lib/backend";
+import { getSettings } from "@/lib/backend/settings";
+import type { LicenseInfo } from "@/lib/backend/license";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
@@ -153,7 +154,7 @@ function LicenseBadge({
     );
   }
 
-  // Trial expired — show activate shortcut
+  // Trial expired, show activate shortcut.
   if (onActivateClick) {
     return (
       <Tooltip delayDuration={0}>

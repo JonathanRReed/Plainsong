@@ -2,7 +2,7 @@
 
 Nautilus is a local-first desktop app for dictation and meeting capture.
 
-Launch status on 2026-04-09: `NO-GO`.
+Launch status on 2026-05-02: `NO-GO`.
 
 Launch readiness is tracked in:
 
@@ -41,10 +41,10 @@ The certified launch scope is narrower than the implemented surface and is contr
 
 Current state:
 
-- packaged dictation certification is still pending
-- packaged meeting certification is still pending
+- packaged macOS dictation benchmark evidence passes, but Windows packaged benchmark evidence is still missing
+- packaged meeting certification is partial and still has blocked rows
 - app-specific launch claims are not yet certified
-- language certification is frozen, but packaged evidence is still pending
+- language certification is frozen and macOS packaged benchmark evidence covers the frozen language set
 - cloud providers are optional bring-your-own-key integrations, not fully local workflows
 
 ## Capability Status

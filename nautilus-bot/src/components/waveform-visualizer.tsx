@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { getWaveformData } from "@/lib/backend";
+import { getWaveformData } from "@/lib/backend/recordings";
 
 interface WaveformVisualizerProps {
   data: number[];

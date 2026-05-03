@@ -545,7 +545,13 @@ impl EmbeddingClusterer {
         }
     }
 
-    /// Set clustering threshold
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "test and tuning entry point for diarization clustering threshold"
+        )
+    )]
     pub fn with_threshold(mut self, threshold: f32) -> Self {
         self.threshold = threshold;
         self

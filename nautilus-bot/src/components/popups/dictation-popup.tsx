@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { LogicalSize, invoke, listen, getCurrentWindow } from "@/lib/electron";
+import { LogicalSize, invoke, getCurrentWindow } from "@/lib/electron";
 import {
   AppWindow,
   CheckCircle2,
@@ -21,11 +21,19 @@ import {
   X,
 } from "lucide-react";
 import {
-  getSettings,
   getDictationAudioLevel,
   startDictation,
   stopDictation,
-} from "@/lib/backend";
+} from "@/lib/backend/dictation";
+import { getSettings } from "@/lib/backend/settings";
+import {
+  useDictationRuntime,
+  type DictationContextSource,
+  type DictationInsertionMode,
+  type DictationModePreset,
+  type DictationPhase,
+  type DictationStateChangedEvent,
+} from "@/features/dictation/runtime";
 import type { DictationRoutePreference } from "@/lib/asr-capabilities";
 import {
   formatAppliedDictationCommandLabel,
@@ -43,81 +51,6 @@ import { AudioWaveform } from "@/components/ui/audio-waveform";
 import type { DictationCustomMode } from "@/types/settings";
 
 type DisplayMode = "full" | "compact" | "minimal";
-type DictationPhase =
-  | "idle"
-  | "primed"
-  | "recording"
-  | "stopping"
-  | "transcribing"
-  | "delivering"
-  | "done"
-  | "error";
-
-interface DictationStateChangedEvent {
-  phase: DictationPhase;
-  startedAtMs?: number | null;
-  message?: string | null;
-  preview?: string | null;
-  partialText?: string | null;
-  sessionId?: number | null;
-  stopReason?: string | null;
-  outcome?: string | null;
-  resolvedModePreset?: DictationModePreset | null;
-  resolvedCustomModeId?: string | null;
-  resolvedModeLabel?: string | null;
-  contextSource?: DictationContextSource | null;
-  insertionMode?: DictationInsertionMode | null;
-  appTarget?: string | null;
-  activationMatcher?: string | null;
-  dictationProvider?: string | null;
-  dictationModelId?: string | null;
-  requestedRoute?: DictationRoutePreference | null;
-  resolvedRoute?: string | null;
-  providerModelLabel?: string | null;
-  dictationRoutePreference?: DictationRoutePreference | null;
-  dictationResolvedHosting?: DictationRoutePreference | null;
-}
-
-interface DictationTextReadyEvent {
-  text: string;
-  pasted?: boolean;
-  copied?: boolean;
-  pasteError?: string | null;
-  modelId?: string;
-  insertionModeUsed?:
-    | "auto"
-    | "paste"
-    | "inline"
-    | "clipboard_only"
-    | "command_only"
-    | "none";
-  commandApplied?: string | null;
-  snippetAppliedCount?: number;
-  appTarget?: string | null;
-  activationMatcher?: string | null;
-  contextSource?: DictationContextSource | null;
-  routePreference?: DictationRoutePreference | null;
-  resolvedRoute?: string | null;
-  resolvedHosting?: DictationRoutePreference | null;
-  providerModelLabel?: string | null;
-  actualProvider?: string | null;
-}
-
-type DictationModePreset =
-  | "voice"
-  | "messages"
-  | "email"
-  | "notes"
-  | "translate_english"
-  | "meeting_follow_up"
-  | "custom";
-
-type DictationContextSource =
-  | "none"
-  | "clipboard"
-  | "selected_text"
-  | "application_context";
-type DictationInsertionMode = "auto" | "paste" | "inline" | "clipboard_only";
 const MODE_META: Record<
   DictationModePreset,
   { label: string; icon: typeof Mic; accent: string }
@@ -141,11 +74,6 @@ const MODE_META: Record<
     label: "Notes",
     icon: StickyNote,
     accent: "text-violet-200 bg-violet-400/10 border-violet-400/30",
-  },
-  translate_english: {
-    label: "Translate to English",
-    icon: Wand2,
-    accent: "text-sky-200 bg-sky-400/10 border-sky-400/30",
   },
   meeting_follow_up: {
     label: "Meeting Follow-up",
@@ -221,10 +149,6 @@ function normalizePopupModeLabel(label: string | null): string | null {
       return "Slack & Chat";
     case "email":
       return "Writing";
-    case "translate english":
-    case "translate to english":
-    case "translate_english":
-      return "Translate to English";
     case "follow-up":
     case "meeting follow-up":
       return "Meeting Follow-up";
@@ -448,6 +372,7 @@ function PopupActionButton({
 
 export function DictationPopup() {
   const window = getCurrentWindow();
+  const { stateEvent, textReadyEvent } = useDictationRuntime();
   const [phase, setPhase] = useState<DictationPhase>("idle");
   const [startedAtMs, setStartedAtMs] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
@@ -690,89 +615,73 @@ export function DictationPopup() {
   };
 
   useEffect(() => {
-    let unlistenState: (() => void) | undefined;
-    let unlistenTextReady: (() => void) | undefined;
+    void refreshPopupSettings().catch(() => {
+      // Keep default mode if settings are temporarily unavailable.
+    });
 
-    const setup = async () => {
-      try {
-        const initialState = await invoke<DictationStateChangedEvent>(
-          "get_dictation_overlay_state",
-        );
-        applyOverlaySnapshot(initialState);
-        void refreshPopupSettings().catch(() => {
-          // Keep default mode if settings are temporarily unavailable.
-        });
-      } catch (error) {
-        console.error("Failed to load initial dictation popup state:", error);
-      }
-
-      unlistenState = await listen<DictationStateChangedEvent>(
-        "dictation-state-changed",
-        (event) => {
-          applyOverlaySnapshot(event.payload);
-        },
-      );
-
-      unlistenTextReady = await listen<DictationTextReadyEvent>(
-        "dictation-text-ready",
-        (event) => {
-          const payload = event.payload;
-          setFinalText(payload.text ?? null);
-          setFinalCommandApplied(payload.commandApplied ?? null);
-          setFinalSnippetAppliedCount(payload.snippetAppliedCount ?? 0);
-          setActionFeedback(null);
-          if (typeof payload.appTarget !== "undefined") {
-            setRuntimeAppTarget(payload.appTarget ?? null);
-          }
-          if (typeof payload.activationMatcher !== "undefined") {
-            setActivationMatcher(payload.activationMatcher ?? null);
-          }
-          if (payload.contextSource) {
-            setContextSource(payload.contextSource);
-          }
-          if (typeof payload.resolvedRoute !== "undefined") {
-            setResolvedRoute(payload.resolvedRoute ?? null);
-          }
-          if (typeof payload.providerModelLabel !== "undefined") {
-            setProviderModelLabel(payload.providerModelLabel ?? null);
-          }
-          if (typeof payload.routePreference !== "undefined") {
-            setRequestedRoute(payload.routePreference ?? null);
-          }
-          if (typeof payload.resolvedHosting !== "undefined") {
-            _setDictationResolvedHosting(payload.resolvedHosting ?? null);
-          }
-          if (
-            typeof payload.insertionModeUsed !== "undefined" &&
-            payload.insertionModeUsed
-          ) {
-            setDictationInsertionMode(
-              payload.insertionModeUsed === "command_only" ||
-                payload.insertionModeUsed === "none"
-                ? "clipboard_only"
-                : payload.insertionModeUsed,
-            );
-          }
-          if (
-            typeof payload.actualProvider !== "undefined" &&
-            payload.actualProvider
-          ) {
-            setDictationProvider(payload.actualProvider);
-          }
-          if (typeof payload.modelId !== "undefined" && payload.modelId) {
-            setDictationModelId(payload.modelId);
-          }
-        },
-      );
-    };
-
-    void setup();
     return () => {
       stopSpeakingText();
-      unlistenState?.();
-      unlistenTextReady?.();
     };
   }, []);
+
+  useEffect(() => {
+    if (stateEvent) {
+      applyOverlaySnapshot(stateEvent);
+    }
+  }, [stateEvent]);
+
+  useEffect(() => {
+    if (!textReadyEvent) {
+      return;
+    }
+
+    const payload = textReadyEvent;
+    setFinalText(payload.text ?? null);
+    setFinalCommandApplied(payload.commandApplied ?? null);
+    setFinalSnippetAppliedCount(payload.snippetAppliedCount ?? 0);
+    setActionFeedback(null);
+    if (typeof payload.appTarget !== "undefined") {
+      setRuntimeAppTarget(payload.appTarget ?? null);
+    }
+    if (typeof payload.activationMatcher !== "undefined") {
+      setActivationMatcher(payload.activationMatcher ?? null);
+    }
+    if (payload.contextSource) {
+      setContextSource(payload.contextSource);
+    }
+    if (typeof payload.resolvedRoute !== "undefined") {
+      setResolvedRoute(payload.resolvedRoute ?? null);
+    }
+    if (typeof payload.providerModelLabel !== "undefined") {
+      setProviderModelLabel(payload.providerModelLabel ?? null);
+    }
+    if (typeof payload.routePreference !== "undefined") {
+      setRequestedRoute(payload.routePreference ?? null);
+    }
+    if (typeof payload.resolvedHosting !== "undefined") {
+      _setDictationResolvedHosting(payload.resolvedHosting ?? null);
+    }
+    if (
+      typeof payload.insertionModeUsed !== "undefined" &&
+      payload.insertionModeUsed
+    ) {
+      setDictationInsertionMode(
+        payload.insertionModeUsed === "command_only" ||
+          payload.insertionModeUsed === "none"
+          ? "clipboard_only"
+          : payload.insertionModeUsed,
+      );
+    }
+    if (
+      typeof payload.actualProvider !== "undefined" &&
+      payload.actualProvider
+    ) {
+      setDictationProvider(payload.actualProvider);
+    }
+    if (typeof payload.modelId !== "undefined" && payload.modelId) {
+      setDictationModelId(payload.modelId);
+    }
+  }, [textReadyEvent]);
 
   useEffect(() => {
     if (phase === "idle") {

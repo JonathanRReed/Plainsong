@@ -7,15 +7,15 @@
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type UnlistenFn = () => void;
+type UnlistenFn = () => void;
 
-export interface Event<T> {
+interface Event<T> {
   event: string;
   payload: T;
   id: number;
 }
 
-export type EventCallback<T> = (event: Event<T>) => void;
+type EventCallback<T> = (event: Event<T>) => void;
 
 // ── invoke ────────────────────────────────────────────────────────────────────
 
@@ -29,14 +29,14 @@ export async function invoke<T = unknown>(
   if (!window.electronAPI) {
     return Promise.reject(
       new Error(
-        "[electron] window.electronAPI not available — is the preload script loaded?"
+        "[electron] window.electronAPI not available, is the preload script loaded?"
       )
     );
   }
   return window.electronAPI.invoke(cmd, args ?? {}) as Promise<T>;
 }
 
-// ── listen / once ─────────────────────────────────────────────────────────────
+// ── listen ───────────────────────────────────────────────────────────────────
 
 let _listenerId = 0;
 
@@ -61,34 +61,9 @@ export async function listen<T = unknown>(
   };
 }
 
-/**
- * Listen to a backend event once.
- */
-export async function once<T = unknown>(
-  event: string,
-  handler: EventCallback<T>
-): Promise<UnlistenFn> {
-  let unlisten: UnlistenFn = () => {};
-  const wrapped: EventCallback<T> = (e) => {
-    handler(e);
-    unlisten();
-  };
-  unlisten = await listen(event, wrapped);
-  return unlisten;
-}
-
-// ── emit (frontend → main) ────────────────────────────────────────────────────
-
-/**
- * Emit an event from the renderer to the Electron main process.
- */
-export function emit(event: string, payload?: unknown): void {
-  window.electronAPI?.invoke("__emit__", { event, payload }).catch(() => {});
-}
-
 // ── getCurrentWindow / window label ──────────────────────────────────────────
 
-export interface WebviewWindowHandle {
+interface WebviewWindowHandle {
   label: string;
   setSize(size: LogicalSize): Promise<void>;
   setPosition(pos: { x: number; y: number }): Promise<void>;

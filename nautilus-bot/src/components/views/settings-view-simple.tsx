@@ -30,60 +30,65 @@ import {
 } from "@/components/ui/dialog";
 import { useTheme } from "@/components/theme-provider";
 import {
-  createBackupDefault,
-  createSettingsBackupDefault,
   clearProviderSecret,
-  listAudioInputDevices,
-  getBackupConfig,
   getPermissionDiagnostics,
-  getBackupSetupReport,
-  getOllamaStatus,
   getSecurityStatus,
   getSettings,
   hasProviderSecret,
   lockVault,
-  listBackups,
-  listOllamaModels,
-  listOllamaCloudModels,
-  listOpenAiModels,
-  listAnthropicModels,
-  listGeminiModels,
-  listDeepSeekModels,
-  listDownloadedModels,
   migrateToEncryptedStorage,
   openPermissionSettings,
   repairCursorInsertPermissions,
   requestDictationPermissions,
-  restoreBackupDefault,
   saveSettings,
-  saveBackupConfig,
   setProviderSecret,
   resetAppState,
-  syncBackupToCloud,
   unlockVault,
+} from "@/lib/backend/settings";
+import {
+  createBackupDefault,
+  createSettingsBackupDefault,
+  getBackupConfig,
+  getBackupSetupReport,
+  listBackups,
+  restoreBackupDefault,
+  saveBackupConfig,
+  syncBackupToCloud,
   verifyBackupCloudConnection,
-} from "@/lib/backend";
+} from "@/lib/backend/storage";
+import {
+  getOllamaStatus,
+  listAnthropicModels,
+  listDeepSeekModels,
+  listGeminiModels,
+  listOpenAiModels,
+  listOllamaCloudModels,
+  listOllamaModels,
+} from "@/lib/backend/ai";
+import {
+  downloadDiarizationModel,
+  isDiarizationModelAvailable,
+  listDiarizationModels,
+  listDownloadedModels,
+} from "@/lib/backend/asr";
+import {
+  listAudioInputDevices,
+  type AudioInputDeviceInfo,
+  type AudioInputDeviceInventory,
+} from "@/lib/backend/recordings";
+import {
+  activateLicense,
+  deactivateLicense,
+  validateLicense,
+} from "@/lib/backend/license";
 import type {
   BackupConfig,
   BackupInfo,
   CloudSetupReport,
-  SecurityStatus,
-  LicenseInfo,
-} from "@/lib/backend";
-import type { PermissionDiagnostics } from "@/lib/backend";
-import {
-  validateLicense,
-  activateLicense,
-  deactivateLicense,
-  isDiarizationModelAvailable,
-  downloadDiarizationModel,
-  listDiarizationModels,
-} from "@/lib/backend";
-import type { DiarizationModelOption } from "@/lib/backend";
-import type {
-  AudioInputDeviceInfo,
-  AudioInputDeviceInventory,
-} from "@/lib/backend";
+} from "@/lib/backend/storage";
+import type { PermissionDiagnostics, SecurityStatus } from "@/lib/backend/settings";
+import type { LicenseInfo } from "@/lib/backend/license";
+import type { DiarizationModelOption } from "@/lib/backend/asr";
 import {
   isFeatureAllowed,
   canUseFormattingAssistant,
@@ -764,7 +769,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         }
       })
       .catch((err) => {
-        // Log but don't reset — a keychain error in dev/unsigned builds should not
+        // Log but do not reset, a keychain error in dev or unsigned builds should not
         // wipe the "Stored securely" indicator from a successful save earlier.
         console.warn("hasProviderSecret check failed:", err);
       });
@@ -5445,7 +5450,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                               }
                             >
                               <ExternalLink className="h-3.5 w-3.5" />
-                              Buy a license — $8 lifetime
+                              Buy a license, $8 lifetime
                             </Button>
                           </div>
                         ) : (

@@ -11,7 +11,7 @@ import {
   extractActionItems,
   extractActionItemsGrounded,
   type MeetingChatMessage,
-} from "@/lib/backend";
+} from "@/lib/backend/ai";
 import type { LlmAnalysisResult, ActionItem, AnalysisTemplate, LlmCitation } from "@/types";
 import { 
   Sparkles, 

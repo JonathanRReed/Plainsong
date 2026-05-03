@@ -93,10 +93,12 @@ function parseLanguageMatrix() {
 }
 
 function qaAreaSummary(bundle, areas) {
-  const summary = { total: 0, pass: 0, fail: 0, blocked: 0, pending: 0 };
-  const matchingRows = (bundle?.rows ?? []).filter((row) => areas.includes(row.area));
+  return summarizeQaRows((bundle?.rows ?? []).filter((row) => areas.includes(row.area)));
+}
 
-  for (const row of matchingRows) {
+function summarizeQaRows(rows) {
+  const summary = { total: 0, pass: 0, fail: 0, blocked: 0, pending: 0 };
+  for (const row of rows) {
     const normalized = String(row.status ?? "").toLowerCase();
     summary.total += 1;
     if (normalized in summary) {
@@ -105,6 +107,15 @@ function qaAreaSummary(bundle, areas) {
   }
 
   return summary;
+}
+
+function isExternalDistributionQaRow(row) {
+  if (row.area === "Install" || row.area === "Security" || row.area === "Updates") {
+    return true;
+  }
+  return /notarization|gatekeeper|authenticode|smartscreen|stable channel/i.test(
+    `${row.testCase} ${row.evidence}`
+  );
 }
 
 function summarizeAppMatrix(rows) {
@@ -138,6 +149,27 @@ function summarizeAppMatrix(rows) {
   }
 
   return summary;
+}
+
+function summarizeAppMatrixGate(gate, fallbackRows) {
+  const fallback = summarizeAppMatrix(fallbackRows);
+  const rows = gate?.rows ?? [];
+  return {
+    ...fallback,
+    ready: gate?.summary?.ready ?? rows.filter((row) => row.launchReady).length,
+    missingPackagedEvidence:
+      gate?.summary?.missingPackagedEvidence ??
+      rows.filter((row) => !row.packagedEvidenceReady).length,
+    missingInsertionEvidence:
+      gate?.summary?.missingInsertionEvidence ??
+      rows.filter((row) => !row.insertionEvidenceReady).length,
+    openBlockedEntries:
+      gate?.summary?.openBlockedEntries ??
+      new Set(rows.flatMap((row) => row.openBlockedEntries ?? [])).size,
+    rejectedInsertionEvidence:
+      gate?.summary?.rejectedInsertionEvidence ??
+      (Array.isArray(gate?.rejectedInsertionEvidence) ? gate.rejectedInsertionEvidence.length : 0),
+  };
 }
 
 function summarizeLanguageMatrix(rows) {
@@ -176,33 +208,65 @@ function areaStatus({ blockers = [], checks = [], summary = null, allowPartial =
 
 const releaseBlockers = readJson("artifacts/release-blockers.json");
 const qaBundle = readJson("artifacts/packaged-qa-evidence-bundle.json");
-const uxBundle = readJson("artifacts/packaged-ux-evidence-bundle.json");
 const macBenchmarkGate = readJson("artifacts/benchmark-gates-macos.json");
 const windowsBenchmarkGate = readJson("artifacts/benchmark-gates-windows.json");
+const packagedMacosBenchmarkGate = readJson("artifacts/benchmark-gates-packaged-macos.json");
+const packagedWindowsBenchmarkGate = readJson("artifacts/benchmark-gates-packaged-windows.json");
 const parityEvidence = readJson("artifacts/dictation-parity-evidence.json");
 const promptEval = readJson("artifacts/dictation-prompt-eval.json");
+const appMatrixGate = readJson("artifacts/dictation-app-matrix-gate.json");
 const localRelease = readJson("artifacts/local-release-macos.json");
 const appMatrixRows = parseAppMatrix();
 const languageMatrixRows = parseLanguageMatrix();
-const appMatrixSummary = summarizeAppMatrix(appMatrixRows);
+const appMatrixSummary = summarizeAppMatrixGate(appMatrixGate, appMatrixRows);
 const languageMatrixSummary = summarizeLanguageMatrix(languageMatrixRows);
+const appMatrixEvidenceViolations = appMatrixGate?.evidenceViolations ?? [];
+const appMatrixRejectedInsertionEvidence = appMatrixGate?.rejectedInsertionEvidence ?? [];
+const appMatrixEvidenceClean =
+  appMatrixGate && Array.isArray(appMatrixEvidenceViolations) && appMatrixEvidenceViolations.length === 0;
+const appMatrixPass = Boolean(appMatrixGate?.pass && appMatrixEvidenceClean);
+const productQaRows = (qaBundle?.rows ?? []).filter((row) => !isExternalDistributionQaRow(row));
+const productQaBundle = {
+  rows: productQaRows,
+};
 
 const dictationQaSummary = qaAreaSummary(qaBundle, ["Capture", "Permissions", "Onboarding", "Transcription"]);
 const meetingQaSummary = qaAreaSummary(qaBundle, ["Capture", "Retention", "Backup", "AI"]);
-const trustQaSummary = qaAreaSummary(qaBundle, ["Install", "Security", "Updates", "Licensing", "Backup"]);
+const trustQaSummary = qaAreaSummary(productQaBundle, ["Licensing", "Backup"]);
+const qaEvidenceSummary = {
+  missingEvidence: qaBundle?.summary?.missingEvidence ?? null,
+  mismatchedEvidenceStatus: qaBundle?.summary?.mismatchedEvidenceStatus ?? null,
+  missingPlatform: qaBundle?.summary?.missingPlatform ?? null,
+  byPlatform: qaBundle?.summary?.byPlatform ?? {},
+  product: qaBundle?.summary?.product ?? summarizeQaRows(productQaRows),
+  externalDistribution: qaBundle?.summary?.externalDistribution ?? null,
+  productByPlatform: qaBundle?.summary?.productByPlatform ?? {},
+  externalDistributionByPlatform: qaBundle?.summary?.externalDistributionByPlatform ?? {},
+};
+const packagedWindowsBenchmarkEvidence = packagedWindowsBenchmarkGate
+  ? "artifacts/benchmark-gates-packaged-windows.json"
+  : "artifacts/benchmark-packaged.blocked.md";
 
 const activeBlockers = releaseBlockers?.blockers ?? [];
+const externalBlockerGates = new Set(["apple-release-signing", "windows-release-signing"]);
+const completionBlockers = activeBlockers.filter((blocker) => !externalBlockerGates.has(blocker.gate));
+const externalBlockers = activeBlockers.filter((blocker) => externalBlockerGates.has(blocker.gate));
 
 const dictationStatus = areaStatus({
-  blockers: activeBlockers.filter((blocker) => blocker.gate === "benchmark-gates-packaged"),
+  blockers: activeBlockers.filter((blocker) =>
+    ["benchmark-gates-packaged", "dictation-app-matrix"].includes(blocker.gate)
+  ),
   checks: [
     Boolean(macBenchmarkGate?.pass),
     Boolean(windowsBenchmarkGate?.pass),
+    Boolean(packagedMacosBenchmarkGate?.pass),
+    Boolean(packagedWindowsBenchmarkGate?.pass),
     Boolean(parityEvidence?.summary?.allPass),
     Boolean(promptEval?.summary?.allPass),
     appMatrixSummary.pending === 0,
     appMatrixSummary.clipboardOnly === 0,
     appMatrixSummary.unsupported === 0,
+    appMatrixPass,
   ],
 });
 
@@ -217,9 +281,7 @@ const meetingStatus = areaStatus({
 
 const trustStatus = areaStatus({
   blockers: activeBlockers.filter((blocker) =>
-    ["cloud-asr-smoke", "apple-release-signing", "windows-release-signing", "packaged-qa-matrix"].includes(
-      blocker.gate
-    )
+    ["cloud-asr-smoke", "packaged-qa-matrix"].includes(blocker.gate)
   ),
   checks: [
     Boolean(releaseBlockers?.observations?.localReleasePass),
@@ -230,28 +292,34 @@ const trustStatus = areaStatus({
 
 const claimsStatus = areaStatus({
   blockers: activeBlockers.filter((blocker) =>
-    ["benchmark-gates-packaged", "packaged-qa-matrix"].includes(blocker.gate)
+    ["benchmark-gates-packaged", "dictation-app-matrix", "packaged-qa-matrix"].includes(
+      blocker.gate
+    )
   ),
   checks: [
     appMatrixSummary.pending === 0,
     appMatrixSummary.clipboardOnly === 0,
     appMatrixSummary.unsupported === 0,
+    appMatrixPass,
     languageMatrixSummary.packagedPending === 0,
   ],
 });
 
-const uxEvidenceStatus = uxBundle?.status ?? "BLOCKED";
-
 const report = {
   generatedAt,
-  status: releaseBlockers?.strictReady ? "GO" : "NO-GO",
+  status: completionBlockers.length === 0 ? "GO" : "NO-GO",
   areas: {
     dictation: {
       status: dictationStatus,
       benchmarkMacosPass: Boolean(macBenchmarkGate?.pass),
       benchmarkWindowsPass: Boolean(windowsBenchmarkGate?.pass),
+      packagedBenchmarkMacosPass: Boolean(packagedMacosBenchmarkGate?.pass),
+      packagedBenchmarkWindowsPass: Boolean(packagedWindowsBenchmarkGate?.pass),
       parityFixturesPass: Boolean(parityEvidence?.summary?.allPass),
       promptEvalPass: Boolean(promptEval?.summary?.allPass),
+      appMatrixPass,
+      appMatrixEvidenceViolations,
+      appMatrixRejectedInsertionEvidence,
       qaSummary: dictationQaSummary,
       appMatrixSummary,
     },
@@ -262,6 +330,7 @@ const report = {
     trust: {
       status: trustStatus,
       qaSummary: trustQaSummary,
+      qaEvidenceSummary,
       localReleasePass: Boolean(releaseBlockers?.observations?.localReleasePass),
       cloudSmokeReady: !activeBlockers.some((blocker) => blocker.gate === "cloud-asr-smoke"),
       appleReleaseSigningReady: !activeBlockers.some((blocker) => blocker.gate === "apple-release-signing"),
@@ -272,37 +341,30 @@ const report = {
       appMatrixSummary,
       languageMatrixSummary,
     },
-    uxEvidence: {
-      status: uxEvidenceStatus,
-      summary: uxBundle?.summary ?? null,
-      gateCount: uxBundle?.uxGates?.length ?? 0,
-      blockedGateCount: uxBundle?.uxGates?.filter((gate) => gate.status === "BLOCKED").length ?? 0,
-    },
-    productQuality: {
-      status: uxBundle?.productReadiness?.status ?? "BLOCKED",
-      posture:
-        uxBundle?.productReadiness?.posture ??
-        "Product quality and competitor parity evidence must pass before release signing work is useful.",
-      blockerCount: uxBundle?.productReadiness?.blockers?.length ?? 0,
-    },
   },
-  blockers: activeBlockers,
+  blockers: completionBlockers,
+  externalBlockers,
   nextActions: [
-    "Treat CP-01 through CP-15 and the dictation parity scorecard as the immediate product-quality backlog before release signing work.",
-    "Capture or implement evidence for dictation reliability, app-matrix insertion, command/snippet success, latency trend, provider routing, and recovery UX.",
-    "Replace BLOCKED UX stubs with PASS or FAIL notes that link screenshots, videos, logs, and defect IDs.",
-    "Defer Apple notarization, Windows signing, and signed updater validation until product-quality gates are credible.",
+    "Execute the remaining non-signing macOS packaged QA rows that require live credentials.",
+    "Use docs/windows-packaged-qa-handoff.md and scripts/windows-packaged-qa-runner.ps1 on a Windows release host, then execute the Windows packaged QA rows.",
+    "Capture packaged app-matrix evidence on macOS and Windows, then update the launch app matrix from PENDING to verified statuses.",
+    "Keep signing and publishing blockers tracked separately until product readiness is green.",
   ],
   evidence: {
     releaseBlockers: "artifacts/release-blockers.json",
     qaBundle: "artifacts/packaged-qa-evidence-bundle.json",
-    uxBundle: "artifacts/packaged-ux-evidence-bundle.json",
-    uxBundleMarkdown: "docs/packaged-ux-evidence-bundle.md",
     benchmarkMacos: "artifacts/benchmark-gates-macos.json",
     benchmarkWindows: "artifacts/benchmark-gates-windows.json",
+    packagedBenchmarkMacos: "artifacts/benchmark-gates-packaged-macos.json",
+    packagedBenchmarkWindows: packagedWindowsBenchmarkEvidence,
     dictationParity: "artifacts/dictation-parity-evidence.json",
     dictationPromptEval: "artifacts/dictation-prompt-eval.json",
+    appMatrixGate: "artifacts/dictation-app-matrix-gate.json",
     appMatrix: "docs/dictation-app-compatibility-matrix.md",
+    completionAudit: "docs/launch-completion-audit.md",
+    launchUnblockerPack: "docs/launch-unblocker-pack.md",
+    windowsQaHandoff: "docs/windows-packaged-qa-handoff.md",
+    windowsQaRunner: "scripts/windows-packaged-qa-runner.ps1",
     languageMatrix: "docs/evals/dictation-language-certification-matrix.md",
   },
 };
@@ -311,6 +373,13 @@ const blockerLines =
   report.blockers.length === 0
     ? ["- none"]
     : report.blockers.map(
+        (blocker) =>
+          `- \`${blocker.gate}\`: ${blocker.reason} (${blocker.evidence})`
+      );
+const externalBlockerLines =
+  report.externalBlockers.length === 0
+    ? ["- none"]
+    : report.externalBlockers.map(
         (blocker) =>
           `- \`${blocker.gate}\`: ${blocker.reason} (${blocker.evidence})`
       );
@@ -326,20 +395,25 @@ This dashboard is the single repo-side control surface for launch readiness agai
 
 | Area | Status | Current read |
 | --- | --- | --- |
-| Dictation | \`${report.areas.dictation.status}\` | Local benchmark gates pass on macOS and Windows, but the launch app matrix is still ${report.areas.dictation.appMatrixSummary.pending} pending and ${report.areas.dictation.appMatrixSummary.clipboardOnly} clipboard-only. |
+| Dictation | \`${report.areas.dictation.status}\` | Local benchmark gates pass on macOS and Windows, packaged benchmark gates are ${report.areas.dictation.packagedBenchmarkMacosPass ? "PASS" : "BLOCKED"} on macOS and ${report.areas.dictation.packagedBenchmarkWindowsPass ? "PASS" : "BLOCKED"} on Windows, and the launch app matrix is still ${report.areas.dictation.appMatrixSummary.ready}/${report.areas.dictation.appMatrixSummary.total} ready with ${report.areas.dictation.appMatrixSummary.pending} pending. |
 | Meetings | \`${report.areas.meetings.status}\` | Packaged meeting QA remains ${report.areas.meetings.qaSummary.blocked} blocked rows out of ${report.areas.meetings.qaSummary.total}. |
 | Trust | \`${report.areas.trust.status}\` | Internal hardening is in place, but release credentials and packaged trust evidence are still incomplete. |
 | Launch claims | \`${report.areas.launchClaims.status}\` | App and language claims still exceed the packaged evidence currently checked into the repo. |
-| Product quality | \`${report.areas.productQuality.status}\` | Core app and competitor-parity evidence are not ready; ${report.areas.productQuality.blockerCount} product blockers are called out in the UX bundle. |
-| UX evidence | \`${report.areas.uxEvidence.status}\` | Packaged UX bundle covers ${report.areas.uxEvidence.gateCount} P0 gates, with ${report.areas.uxEvidence.blockedGateCount} still blocked. |
 
 ## Dictation
 
 - macOS benchmark gate: \`${report.areas.dictation.benchmarkMacosPass ? "PASS" : "FAIL"}\`
 - Windows benchmark gate: \`${report.areas.dictation.benchmarkWindowsPass ? "PASS" : "FAIL"}\`
+- macOS packaged benchmark gate: \`${report.areas.dictation.packagedBenchmarkMacosPass ? "PASS" : "BLOCKED"}\`
+- Windows packaged benchmark gate: \`${report.areas.dictation.packagedBenchmarkWindowsPass ? "PASS" : "BLOCKED"}\`
 - Dictation parity fixtures: \`${report.areas.dictation.parityFixturesPass ? "PASS" : "FAIL"}\`
 - Prompt regression fixtures: \`${report.areas.dictation.promptEvalPass ? "PASS" : "FAIL"}\`
-- Launch app matrix: ${report.areas.dictation.appMatrixSummary.supported} supported, ${report.areas.dictation.appMatrixSummary.partial} partial, ${report.areas.dictation.appMatrixSummary.clipboardOnly} clipboard-only, ${report.areas.dictation.appMatrixSummary.pending} pending
+- App matrix gate: \`${report.areas.dictation.appMatrixPass ? "PASS" : "BLOCKED"}\`
+- Launch app matrix: ${report.areas.dictation.appMatrixSummary.ready}/${report.areas.dictation.appMatrixSummary.total} ready, ${report.areas.dictation.appMatrixSummary.supported} supported, ${report.areas.dictation.appMatrixSummary.partial} partial, ${report.areas.dictation.appMatrixSummary.clipboardOnly} clipboard-only, ${report.areas.dictation.appMatrixSummary.pending} pending
+- Missing insertion evidence: ${report.areas.dictation.appMatrixSummary.missingInsertionEvidence}
+- Rejected insertion evidence artifacts: ${report.areas.dictation.appMatrixSummary.rejectedInsertionEvidence}
+- Missing packaged benchmark evidence: ${report.areas.dictation.appMatrixSummary.missingPackagedEvidence}
+- Invalid app-matrix evidence artifacts: ${report.areas.dictation.appMatrixEvidenceViolations.length}
 
 ## Meetings
 
@@ -350,22 +424,16 @@ This dashboard is the single repo-side control surface for launch readiness agai
 ## Trust
 
 - Local release path: \`${report.areas.trust.localReleasePass ? "PASS" : "FAIL"}\`
+- QA evidence files present: \`${report.areas.trust.qaEvidenceSummary.missingEvidence === 0 ? "PASS" : "BLOCKED"}\`
+- QA evidence status matches matrix: \`${report.areas.trust.qaEvidenceSummary.mismatchedEvidenceStatus === 0 ? "PASS" : "BLOCKED"}\`
+- QA evidence platform ownership: \`${report.areas.trust.qaEvidenceSummary.missingPlatform === 0 ? "PASS" : "BLOCKED"}\`
+- macOS packaged QA: ${report.areas.trust.qaEvidenceSummary.byPlatform.macOS?.pass ?? 0} PASS / ${report.areas.trust.qaEvidenceSummary.byPlatform.macOS?.blocked ?? 0} BLOCKED / ${report.areas.trust.qaEvidenceSummary.byPlatform.macOS?.pending ?? 0} PENDING
+- Windows packaged QA: ${report.areas.trust.qaEvidenceSummary.byPlatform.Windows?.pass ?? 0} PASS / ${report.areas.trust.qaEvidenceSummary.byPlatform.Windows?.blocked ?? 0} BLOCKED / ${report.areas.trust.qaEvidenceSummary.byPlatform.Windows?.pending ?? 0} PENDING
+- Non-external packaged QA: ${report.areas.trust.qaEvidenceSummary.product?.pass ?? 0} PASS / ${report.areas.trust.qaEvidenceSummary.product?.blocked ?? 0} BLOCKED / ${report.areas.trust.qaEvidenceSummary.product?.pending ?? 0} PENDING
+- External distribution QA: ${report.areas.trust.qaEvidenceSummary.externalDistribution?.pass ?? 0} PASS / ${report.areas.trust.qaEvidenceSummary.externalDistribution?.blocked ?? 0} BLOCKED / ${report.areas.trust.qaEvidenceSummary.externalDistribution?.pending ?? 0} PENDING
 - Cloud smoke ready: \`${report.areas.trust.cloudSmokeReady ? "PASS" : "BLOCKED"}\`
 - Apple release signing ready: \`${report.areas.trust.appleReleaseSigningReady ? "PASS" : "BLOCKED"}\`
 - Windows release signing ready: \`${report.areas.trust.windowsReleaseSigningReady ? "PASS" : "BLOCKED"}\`
-
-## UX Evidence
-
-- Packaged UX bundle: \`${report.areas.uxEvidence.status}\`
-- UX gates covered: ${report.areas.uxEvidence.gateCount}
-- Blocked UX gates: ${report.areas.uxEvidence.blockedGateCount}
-- UX evidence rows: ${report.areas.uxEvidence.summary?.total ?? 0}
-
-## Product Quality
-
-- Product quality status: \`${report.areas.productQuality.status}\`
-- Current posture: ${report.areas.productQuality.posture}
-- Product blockers called out: ${report.areas.productQuality.blockerCount}
 
 ## Launch Claims
 
@@ -375,6 +443,16 @@ This dashboard is the single repo-side control surface for launch readiness agai
 ## Active Blockers
 
 ${blockerLines.join("\n")}
+
+## Control Artifacts
+
+- Completion audit: \`${report.evidence.completionAudit}\`
+- Launch unblocker pack: \`${report.evidence.launchUnblockerPack}\`
+- Windows QA handoff: \`${report.evidence.windowsQaHandoff}\`
+
+## External Signing And Publishing Blockers
+
+${externalBlockerLines.join("\n")}
 
 ## Next Actions
 

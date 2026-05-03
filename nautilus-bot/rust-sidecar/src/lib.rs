@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-#![allow(unused)]
-
 pub mod asr;
 mod audio;
 mod backup;
@@ -13,7 +10,6 @@ mod dictation_pipeline;
 mod download;
 mod events;
 mod export;
-mod integrations;
 mod license;
 mod llm;
 mod models;
@@ -67,7 +63,6 @@ use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
-#[allow(dead_code)]
 pub struct AppState {
     db: Arc<Mutex<db::Database>>,
     audio_capture: Arc<Mutex<audio::AudioCapture>>,
@@ -79,11 +74,9 @@ pub struct AppState {
     template_manager: Arc<export::templates::TemplateManager>,
     dictation_hotkey_active: Arc<Mutex<bool>>,
     dictation_release_pending: Arc<AtomicBool>,
-    dictation_watchdog_generation: Arc<Mutex<u64>>,
     dictation_session_tracker: Arc<Mutex<DictationSessionTracker>>,
     dictation_runtime_state: Arc<Mutex<DictationSessionState>>,
     dictation_start_options: Arc<Mutex<models::DictationStartOptions>>,
-    dictation_keep_warm_state: Arc<Mutex<DictationKeepWarmState>>,
     pending_dictation_target: Arc<StdMutex<Option<PendingDictationTarget>>>,
     last_external_target: Arc<StdMutex<Option<PendingDictationTarget>>>,
     dictation_overlay_state: Arc<StdMutex<DictationOverlayState>>,
@@ -92,9 +85,6 @@ pub struct AppState {
     last_cursor_insert_status: Arc<StdMutex<Option<CursorInsertStatus>>>,
     recent_dictation_delivery: Arc<Mutex<Option<RecentDictationDelivery>>>,
     streaming_transcriber: Arc<streaming::StreamingTranscriber>,
-    dictation_stream_stop: Arc<AtomicBool>,
-    dictation_inline_state: Arc<Mutex<InlineDictationState>>,
-    apple_live_dictation: Arc<Mutex<Option<AppleLiveDictationRuntime>>>,
     vault_state: Arc<Mutex<VaultRuntimeState>>,
     /// Stop flag for the live recording streaming task; set to false to terminate it
     recording_stream_stop: Arc<AtomicBool>,
@@ -102,39 +92,16 @@ pub struct AppState {
     recording_templates: Arc<StdMutex<std::collections::HashMap<String, String>>>,
 }
 
-const DICTATION_OVERLAY_LABEL: &str = "dictation-overlay";
-const RECORDING_OVERLAY_LABEL: &str = "recording-overlay";
-const RECORDING_TRAY_ID: &str = "recording-indicator";
-const PRIMARY_TRAY_ID: &str = "primary-menu-bar";
-const TRAY_ITEM_STATUS: &str = "tray_status";
-const TRAY_ITEM_OPEN: &str = "tray_open";
-const TRAY_ITEM_OPEN_DICTATION: &str = "tray_open_dictation";
-const TRAY_ITEM_OPEN_MEETINGS: &str = "tray_open_meetings";
-const TRAY_ITEM_OPEN_SETTINGS: &str = "tray_open_settings";
-const TRAY_ITEM_START_DICTATION: &str = "tray_start_dictation";
-const TRAY_ITEM_STOP_DICTATION: &str = "tray_stop_dictation";
-const TRAY_ITEM_START_MEETING_MIC: &str = "tray_start_meeting_mic";
-const TRAY_ITEM_START_MEETING_SYSTEM: &str = "tray_start_meeting_system";
-const TRAY_ITEM_STOP_MEETING: &str = "tray_stop_meeting";
-const TRAY_ITEM_QUIT: &str = "tray_quit";
-const DICTATION_MAX_DURATION_SECONDS: u64 = 360;
-const DEFAULT_HANDS_FREE_SILENCE_TIMEOUT_SECONDS: f32 = 1.8;
 const MIN_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 0.8;
 const MAX_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 30.0;
 const DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
 const DICTATION_IDLE_RESET_SUCCESS_MS: u64 = 1800;
-const DICTATION_IDLE_RESET_STARTUP_ERROR_MS: u64 = 900;
-const DICTATION_IDLE_RESET_SHORT_ERROR_MS: u64 = 900;
-const DICTATION_IDLE_RESET_ERROR_MS: u64 = 1300;
-const DICTATION_KEEP_WARM_SHORT_SECS: u64 = 75;
 #[cfg(target_os = "macos")]
 const HOTKEY_TARGET_MAX_AGE_MS: i64 = 5_000;
 #[cfg(target_os = "macos")]
 const LAST_EXTERNAL_TARGET_MAX_AGE_MS: i64 = 120_000;
 #[cfg(target_os = "macos")]
 const MEETING_CONSENT_TARGET_MAX_AGE_MS: i64 = 12_000;
-const DICTATION_AI_FORMAT_TIMEOUT_MS: u64 = 1400;
-const DICTATION_AI_FORMAT_MIN_CHARS: usize = 80;
 const DICTATION_COMMAND_PREFIX_DEFAULT: &str = "command";
 const APP_BUNDLE_IDENTIFIER: &str = "com.nautilus.bot";
 const STREAMING_PREVIEW_MAX_SECONDS: f64 = 90.0;
@@ -160,10 +127,6 @@ enum DictationSessionState {
     Idle,
     Starting,
     Recording,
-    Stopping,
-    Transcribing,
-    Done,
-    Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,27 +197,6 @@ struct DictationSessionTracker {
     copy_to_clipboard_at_start: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DictationKeepWarmRoute {
-    provider: asr::AsrProviderType,
-    model_id: String,
-}
-
-#[derive(Debug, Default)]
-struct DictationKeepWarmState {
-    generation: u64,
-    active_route: Option<DictationKeepWarmRoute>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct InlineDictationState {
-    session_id: Option<u64>,
-    app_target: Option<String>,
-    last_inserted_text: String,
-    original_clipboard: Option<String>,
-    keep_text_in_clipboard: bool,
-}
-
 #[derive(Debug, Clone)]
 struct RecentDictationDelivery {
     text: String,
@@ -264,17 +206,6 @@ struct RecentDictationDelivery {
 }
 
 const RECENT_DICTATION_DELIVERY_WINDOW_SECS: i64 = 45;
-
-#[cfg(target_os = "macos")]
-struct AppleLiveDictationRuntime {
-    session_id: u64,
-    audio_forward_task: Option<tokio::task::JoinHandle<()>>,
-    final_rx: Option<
-        tokio::sync::oneshot::Receiver<
-            Result<crate::asr::platform::macos_speech::LiveSpeechResult, String>,
-        >,
-    >,
-}
 
 #[derive(Debug, Clone)]
 struct AnalysisContextSegment {
@@ -480,26 +411,6 @@ struct PermissionDiagnostics {
     notes: Vec<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AudioInputDeviceInventory {
-    devices: Vec<audio::AudioInputDeviceInfo>,
-    app_wide_selected_device_id: Option<String>,
-    dictation_override_enabled: bool,
-    dictation_selected_device_id: Option<String>,
-    meeting_override_enabled: bool,
-    meeting_selected_device_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum CursorInsertFailureKind {
-    Automation,
-    PostEventAccess,
-    SelfTarget,
-    Unknown,
-}
-
 #[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum CursorInsertStrategy {
@@ -512,7 +423,6 @@ enum CursorInsertStrategy {
 struct CursorInsertStatus {
     succeeded: bool,
     copied_only: bool,
-    failure_kind: Option<CursorInsertFailureKind>,
     successful_strategy: Option<CursorInsertStrategy>,
     attempted_strategies: Vec<CursorInsertStrategy>,
     message: Option<String>,
@@ -525,23 +435,6 @@ struct LocalModelRepairReport {
     repaired_count: usize,
     removed_paths: Vec<String>,
     notes: Vec<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShortcutApplyStatus {
-    ok: bool,
-    message: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ResetAppStateResult {
-    deleted_recordings: usize,
-    deleted_audio_files: usize,
-    failed_audio_file_deletions: Vec<String>,
-    cleared_provider_secrets: Vec<String>,
-    failed_provider_secret_clears: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1030,7 +923,7 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
         DiarizationModelOption {
             id: "ecapa_tdnn_speaker",
             label: "ECAPA-TDNN 512",
-            description: "Fast and accurate — recommended for most use cases (~25 MB)",
+            description: "Fast and accurate, recommended for most use cases (~25 MB)",
             installed: diarization_model_path("ecapa_tdnn_speaker")
                 .map(|p| p.exists())
                 .unwrap_or(false),
@@ -1038,7 +931,7 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
         DiarizationModelOption {
             id: "resnet34_speaker",
             label: "ResNet34",
-            description: "Balanced performance — good accuracy with moderate speed (~30 MB)",
+            description: "Balanced performance, good accuracy with moderate speed (~30 MB)",
             installed: diarization_model_path("resnet34_speaker")
                 .map(|p| p.exists())
                 .unwrap_or(false),
@@ -1046,7 +939,7 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
         DiarizationModelOption {
             id: "campplus_speaker",
             label: "CAM++",
-            description: "Highest accuracy — best for challenging audio conditions (~35 MB)",
+            description: "Highest accuracy, best for challenging audio conditions (~35 MB)",
             installed: diarization_model_path("campplus_speaker")
                 .map(|p| p.exists())
                 .unwrap_or(false),
@@ -1225,23 +1118,6 @@ fn inject_meeting_notes_into_query(query: &str, meeting_notes: Option<&str>) -> 
             notes, query
         ),
         None => query.to_string(),
-    }
-}
-
-fn inject_meeting_notes_into_analysis_text(
-    transcript: &str,
-    meeting_notes: Option<&str>,
-) -> String {
-    let trimmed_notes = meeting_notes
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-
-    match trimmed_notes {
-        Some(notes) => format!(
-            "Meeting notes (user-authored):\n{}\n\nTranscript:\n{}",
-            notes, transcript
-        ),
-        None => transcript.to_string(),
     }
 }
 
@@ -1806,7 +1682,7 @@ fn push_relationship_evidence(
     next: models::RelationshipMemoryEvidence,
 ) {
     evidence.push(next);
-    evidence.sort_by_key(|item| std::cmp::Reverse(item.created_at));
+    evidence.sort_by(|left, right| right.created_at.cmp(&left.created_at));
     evidence.truncate(3);
 }
 
@@ -2226,44 +2102,6 @@ fn build_meeting_transcript_details(
 
 // Intelligent punctuation command
 
-async fn ensure_asr_provider_ready(
-    state: &AppState,
-    provider_type: asr::AsrProviderType,
-    context: &str,
-) -> Result<(), String> {
-    let diagnostics = state
-        .asr_manager
-        .get_runtime_diagnostics(provider_type)
-        .await;
-    let provider_available = state
-        .asr_manager
-        .get_provider(provider_type)
-        .await
-        .is_available();
-
-    if matches!(
-        diagnostics.runtime_status,
-        asr::manager::RuntimeStatus::Ready
-    ) && provider_available
-    {
-        return Ok(());
-    }
-
-    let runtime_message = diagnostics
-        .runtime_message
-        .unwrap_or_else(|| "Runtime is not ready for the selected provider.".to_string());
-    let setup_action = diagnostics.runtime_details.setup_action.unwrap_or_else(|| {
-        "Open Settings -> ASR Models and complete the required runtime/model setup.".to_string()
-    });
-    Err(format!(
-        "ASR provider '{}' is not ready for {}. {} {}",
-        provider_type.display_name(),
-        context,
-        runtime_message,
-        setup_action
-    ))
-}
-
 async fn ensure_asr_route_ready(
     state: &AppState,
     provider_type: asr::AsrProviderType,
@@ -2274,6 +2112,14 @@ async fn ensure_asr_route_ready(
         .asr_manager
         .resolve_effective_provider_and_model(provider_type, model_id)
         .await;
+    if provider_type == asr::AsrProviderType::Moonshine
+        && effective_provider == asr::AsrProviderType::Moonshine
+    {
+        return Err(
+            "Moonshine native ONNX inference is not launch-ready in this build. Choose a stable local dictation route such as Whisper, MLX Audio, or Apple Native Speech."
+                .to_string(),
+        );
+    }
     let diagnostics = state
         .asr_manager
         .get_runtime_diagnostics(provider_type)
@@ -2571,118 +2417,6 @@ async fn resolve_ready_dictation_selection(
     ))
 }
 
-#[cfg(target_os = "macos")]
-async fn wait_for_dictation_stream_queue(
-    state: &AppState,
-    session_id: u64,
-    timeout: Duration,
-) -> Option<(Arc<crossbeam::queue::SegQueue<Vec<f32>>>, u32)> {
-    let started = std::time::Instant::now();
-
-    loop {
-        if active_dictation_session_id(state).await != Some(session_id) {
-            return None;
-        }
-
-        let maybe_stream_info = {
-            let audio = state.audio_capture.lock().await;
-            audio.get_dictation_stream_queue()
-        };
-
-        if maybe_stream_info.is_some() {
-            return maybe_stream_info;
-        }
-
-        if started.elapsed() >= timeout {
-            return None;
-        }
-
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
-
-#[cfg(target_os = "macos")]
-async fn finish_apple_live_dictation_session(
-    state: &AppState,
-    session_id: u64,
-) -> Option<Result<crate::asr::platform::macos_speech::LiveSpeechResult, String>> {
-    let (audio_forward_task, final_rx) = {
-        let mut runtime = state.apple_live_dictation.lock().await;
-        let live = runtime.as_mut()?;
-        if live.session_id != session_id {
-            return None;
-        }
-        (live.audio_forward_task.take(), live.final_rx.take())
-    };
-    let final_rx = final_rx?;
-
-    if let Some(task) = audio_forward_task {
-        match tokio::time::timeout(Duration::from_secs(2), task).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    "Apple live dictation audio forward task ended unexpectedly: {}",
-                    error
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "Timed out while waiting for Apple live dictation audio stream to close"
-                );
-            }
-        }
-    }
-
-    let outcome = tokio::time::timeout(Duration::from_secs(12), final_rx).await;
-
-    {
-        let mut runtime = state.apple_live_dictation.lock().await;
-        if runtime
-            .as_ref()
-            .map(|live| live.session_id == session_id)
-            .unwrap_or(false)
-        {
-            *runtime = None;
-        }
-    }
-
-    Some(match outcome {
-        Ok(Ok(result)) => result,
-        Ok(Err(_)) => {
-            Err("Apple live dictation session was canceled before completion.".to_string())
-        }
-        Err(_) => Err("Apple live dictation timed out while finalizing.".to_string()),
-    })
-}
-
-async fn fallback_apple_dictation_transcription(
-    state: &AppState,
-    audio_data: &[u8],
-    dictation_model_id: &str,
-    live_error: &str,
-) -> Result<asr::TranscriptionResult, anyhow::Error> {
-    tracing::warn!(
-        "Apple live dictation did not finalize cleanly ({}); falling back to captured-audio transcription",
-        live_error
-    );
-
-    state
-        .asr_manager
-        .transcribe_bytes_with_provider(
-            asr::AsrProviderType::MacosAppleSpeech,
-            audio_data,
-            Some(dictation_model_id),
-        )
-        .await
-        .map_err(|fallback_error| {
-            anyhow::anyhow!(
-                "Apple Native live dictation failed: {}. Captured-audio fallback also failed: {}",
-                live_error,
-                fallback_error
-            )
-        })
-}
-
 async fn tracker_insertion_mode(state: &AppState) -> String {
     let tracker = state.dictation_session_tracker.lock().await;
     tracker
@@ -2718,7 +2452,7 @@ async fn reprocess_dictation_text_impl(
     let formatting_hint = resolve_dictation_formatting_hint(app_target.as_deref(), None, None);
 
     let (output_text, used_ai, provider, model_id) = match effective_mode.as_str() {
-        "messages" | "email" | "translate_english" | "meeting_follow_up" => {
+        "messages" | "email" | "meeting_follow_up" => {
             let prompt = dictation_mode_transform_prompt(&effective_mode)
                 .ok_or_else(|| "No transform prompt is configured for this mode.".to_string())?;
             match run_custom_dictation_transform_with_selected_provider(state, input, prompt).await
@@ -2732,7 +2466,7 @@ async fn reprocess_dictation_text_impl(
                 Err(error) => {
                     let fallback = match effective_mode.as_str() {
                         "messages" => rewrite_shorter_text(input),
-                        "email" | "translate_english" => rewrite_professional_text(input),
+                        "email" => rewrite_professional_text(input),
                         "meeting_follow_up" => rewrite_professional_text(input),
                         _ => input.to_string(),
                     };
@@ -2781,25 +2515,12 @@ async fn reprocess_dictation_text_impl(
     }))
 }
 
-fn should_render_dictation_overlay_state(phase: &str, dismissed: bool) -> bool {
-    !dismissed && !matches!(phase, "idle")
-}
-
 async fn active_dictation_session_id(state: &AppState) -> Option<u64> {
     state
         .dictation_session_tracker
         .lock()
         .await
         .active_session_id
-}
-
-async fn dictation_live_preview_enabled(state: &AppState) -> bool {
-    state
-        .dictation_start_options
-        .lock()
-        .await
-        .live_preview_enabled
-        .unwrap_or(true)
 }
 
 async fn set_dictation_hotkey_flags(state: &AppState, active: bool, release_pending: bool) {
@@ -2810,145 +2531,6 @@ async fn set_dictation_hotkey_flags(state: &AppState, active: bool, release_pend
     state
         .dictation_release_pending
         .store(release_pending, Ordering::SeqCst);
-}
-
-fn normalize_dictation_keep_warm_value(value: &str) -> &'static str {
-    match value.trim() {
-        "off" => "off",
-        "long" => "long",
-        _ => "short",
-    }
-}
-
-async fn suspend_matching_dictation_keep_warm_route(
-    state: &AppState,
-    provider: asr::AsrProviderType,
-    model_id: &str,
-    resolved_hosting: Option<&str>,
-) {
-    if resolved_hosting != Some("local")
-        || !state
-            .asr_manager
-            .supports_short_keep_warm(provider, model_id)
-            .await
-    {
-        return;
-    }
-
-    let keep_warm_value = {
-        let settings_manager = state.settings_manager.lock().await;
-        normalize_dictation_keep_warm_value(
-            &settings_manager
-                .settings()
-                .transcription
-                .dictation_keep_warm,
-        )
-    };
-    if keep_warm_value != "short" {
-        return;
-    }
-
-    let current_route = DictationKeepWarmRoute {
-        provider,
-        model_id: model_id.to_string(),
-    };
-    let mut keep_warm_state = state.dictation_keep_warm_state.lock().await;
-    if keep_warm_state.active_route.as_ref() == Some(&current_route) {
-        keep_warm_state.generation += 1;
-    }
-}
-
-async fn replace_dictation_keep_warm_route(
-    state: &AppState,
-    next_route: Option<DictationKeepWarmRoute>,
-) -> (u64, Option<DictationKeepWarmRoute>) {
-    let mut keep_warm_state = state.dictation_keep_warm_state.lock().await;
-    keep_warm_state.generation += 1;
-    let generation = keep_warm_state.generation;
-    let previous_route = keep_warm_state.active_route.take();
-    keep_warm_state.active_route = next_route;
-    (generation, previous_route)
-}
-
-async fn apply_dictation_keep_warm_policy(
-    state: &AppState,
-    provider: asr::AsrProviderType,
-    model_id: &str,
-    resolved_hosting: Option<&str>,
-) {
-    let keep_warm_value = {
-        let settings_manager = state.settings_manager.lock().await;
-        normalize_dictation_keep_warm_value(
-            &settings_manager
-                .settings()
-                .transcription
-                .dictation_keep_warm,
-        )
-    };
-
-    let eligible = keep_warm_value == "short"
-        && resolved_hosting == Some("local")
-        && state
-            .asr_manager
-            .supports_short_keep_warm(provider, model_id)
-            .await;
-
-    let current_route = DictationKeepWarmRoute {
-        provider,
-        model_id: model_id.to_string(),
-    };
-
-    if !eligible {
-        let (_, previous_route) = replace_dictation_keep_warm_route(state, None).await;
-        if previous_route.as_ref() != Some(&current_route) {
-            if let Some(previous_route) = previous_route {
-                state
-                    .asr_manager
-                    .cool_down_local_route(previous_route.provider, &previous_route.model_id)
-                    .await;
-            }
-        }
-        state
-            .asr_manager
-            .cool_down_local_route(provider, model_id)
-            .await;
-        return;
-    }
-
-    let (generation, previous_route) =
-        replace_dictation_keep_warm_route(state, Some(current_route.clone())).await;
-    if previous_route.as_ref() != Some(&current_route) {
-        if let Some(previous_route) = previous_route {
-            state
-                .asr_manager
-                .cool_down_local_route(previous_route.provider, &previous_route.model_id)
-                .await;
-        }
-    }
-
-    let keep_warm_state = Arc::clone(&state.dictation_keep_warm_state);
-    let asr_manager = Arc::clone(&state.asr_manager);
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(DICTATION_KEEP_WARM_SHORT_SECS)).await;
-
-        let should_cool = {
-            let mut keep_warm_state = keep_warm_state.lock().await;
-            if keep_warm_state.generation == generation
-                && keep_warm_state.active_route.as_ref() == Some(&current_route)
-            {
-                keep_warm_state.active_route = None;
-                true
-            } else {
-                false
-            }
-        };
-
-        if should_cool {
-            asr_manager
-                .cool_down_local_route(current_route.provider, &current_route.model_id)
-                .await;
-        }
-    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3303,12 +2885,6 @@ fn capture_hotkey_target_context(
 }
 
 #[cfg(target_os = "macos")]
-fn capture_hotkey_target_application() -> (Option<String>, Option<String>) {
-    let (app_name, app_bundle_id, _) = capture_hotkey_target_context(false);
-    (app_name, app_bundle_id)
-}
-
-#[cfg(target_os = "macos")]
 fn capture_pending_hotkey_target(state: &AppState) {
     // Keep hotkey target capture free of AppleScript/browser automation so
     // dictation never triggers macOS permission UI before insertion completes.
@@ -3385,29 +2961,6 @@ fn build_pending_dictation_target(
 }
 
 #[cfg(target_os = "macos")]
-fn update_last_external_target(
-    state: &AppState,
-    app_name: Option<String>,
-    app_bundle_id: Option<String>,
-    browser_url: Option<String>,
-) {
-    let captured_at_ms = chrono::Utc::now().timestamp_millis();
-    if let Some(target) =
-        build_pending_dictation_target(app_name, app_bundle_id, browser_url, captured_at_ms)
-    {
-        if let Ok(mut last_external_target) = state.last_external_target.lock() {
-            *last_external_target = Some(target);
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn note_frontmost_application(state: &AppState) {
-    let (app_name, app_bundle_id, browser_url) = capture_hotkey_target_context(false);
-    update_last_external_target(state, app_name, app_bundle_id, browser_url);
-}
-
-#[cfg(target_os = "macos")]
 fn take_recent_external_target(state: &AppState) -> Option<PendingDictationTarget> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let cached = state
@@ -3428,27 +2981,6 @@ fn take_recent_external_target(state: &AppState) -> Option<PendingDictationTarge
 #[cfg(target_os = "macos")]
 fn is_recent_external_target_fresh(captured_at_ms: i64, now_ms: i64) -> bool {
     now_ms - captured_at_ms <= LAST_EXTERNAL_TARGET_MAX_AGE_MS
-}
-
-#[cfg(target_os = "macos")]
-fn resolve_insert_target(
-    state: &AppState,
-    provided_app_name: Option<String>,
-    provided_app_bundle_id: Option<String>,
-) -> (Option<String>, Option<String>) {
-    let provided = sanitize_dictation_target(provided_app_name, provided_app_bundle_id);
-    if provided.0.is_some() || provided.1.is_some() {
-        update_last_external_target(state, provided.0.clone(), provided.1.clone(), None);
-        return provided;
-    }
-
-    let current = capture_hotkey_target_application();
-    if current.0.is_some() || current.1.is_some() {
-        update_last_external_target(state, current.0.clone(), current.1.clone(), None);
-        return current;
-    }
-
-    (None, None)
 }
 
 #[cfg(target_os = "macos")]
@@ -3901,6 +3433,7 @@ fn strip_non_speech_placeholder(text: &str) -> String {
     trimmed.to_string()
 }
 
+#[cfg(test)]
 fn normalize_dictation_fragment(text: &str) -> String {
     text.trim()
         .chars()
@@ -3917,6 +3450,7 @@ fn normalize_dictation_fragment(text: &str) -> String {
         .join(" ")
 }
 
+#[cfg(test)]
 fn looks_low_information_dictation(text: &str) -> bool {
     let normalized = normalize_dictation_fragment(text);
     if normalized.is_empty() {
@@ -3941,6 +3475,7 @@ fn looks_low_information_dictation(text: &str) -> bool {
     false
 }
 
+#[cfg(test)]
 fn should_suppress_low_information_dictation(
     text: &str,
     _raw_duration_seconds: f64,
@@ -3951,6 +3486,7 @@ fn should_suppress_low_information_dictation(
     looks_low_information_dictation(text)
 }
 
+#[cfg(test)]
 fn should_replace_with_retry_transcript(primary: &str, retry: &str) -> bool {
     let primary_text = primary.trim();
     let retry_text = retry.trim();
@@ -4072,6 +3608,7 @@ fn enrich_meeting_transcript(transcript: &mut models::Transcript) {
     transcript.segments = cleaned_segments;
 }
 
+#[cfg(test)]
 fn compute_meeting_transcript_quality_score(transcript: &models::Transcript) -> f64 {
     let full_text = transcript.full_text.trim();
     if full_text.is_empty() || transcript.segments.is_empty() {
@@ -4444,9 +3981,6 @@ fn dictation_mode_transform_prompt(mode_preset: &str) -> Option<&'static str> {
         "email" => Some(
             "Rewrite the user's text into polished email-ready prose. Keep the meaning, improve structure, punctuation, and professionalism. Return only the final text.",
         ),
-        "translate_english" => Some(
-            "Translate the user's text into natural English. Preserve names, numbers, formatting, code terms, and intent. If the text is already English, lightly clean punctuation only. Return only the final English text.",
-        ),
         "meeting_follow_up" => Some(
             "Turn the user's text into a concise professional meeting follow-up. Keep action items, owners, and next steps clear. Return only the final follow-up text.",
         ),
@@ -4475,7 +4009,6 @@ fn normalize_dictation_base_mode_preset(value: &str) -> &'static str {
         "messages" => "messages",
         "email" => "email",
         "notes" => "notes",
-        "translate_english" => "translate_english",
         "meeting_follow_up" => "meeting_follow_up",
         _ => "voice",
     }
@@ -4711,80 +4244,6 @@ async fn run_dictation_formatting_with_selected_provider(
     }
 }
 
-async fn run_dictation_command_with_selected_provider(
-    state: &AppState,
-    command_key: &str,
-    payload: &str,
-) -> Result<String, String> {
-    let input = payload.trim();
-    if input.is_empty() {
-        return Err("Command payload cannot be empty".to_string());
-    }
-
-    let system_prompt = resolve_dictation_command_prompt(state, command_key).await?;
-    let (provider, remote_processing_enabled, _, settings_model) =
-        selected_analysis_provider_and_settings(state).await;
-    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
-
-    let selected_model = settings_model
-        .as_deref()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| provider.default_model());
-
-    let raw_output = match provider {
-        AnalysisProvider::Ollama => state
-            .ollama_client
-            .generate(selected_model, &format!("{}\n\n{}", system_prompt, input))
-            .await
-            .map_err(|e| e.to_string())?,
-        AnalysisProvider::OllamaCloud => {
-            let api_key = provider_secret_for(provider)?;
-            llm::OllamaCloudClient::with_api_key(Some(api_key))
-                .generate(selected_model, &format!("{}\n\n{}", system_prompt, input))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        AnalysisProvider::OpenAi => {
-            let api_key = provider_secret_for(provider)?;
-            llm::OpenAIClient::with_api_key(Some(api_key))
-                .generate(selected_model, input, Some(&system_prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        AnalysisProvider::Anthropic => {
-            let api_key = provider_secret_for(provider)?;
-            llm::AnthropicClient::with_api_key(Some(api_key))
-                .generate(selected_model, input, Some(&system_prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        AnalysisProvider::Gemini => {
-            let api_key = provider_secret_for(provider)?;
-            llm::GeminiClient::with_api_key(Some(api_key))
-                .generate(selected_model, input, Some(&system_prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        AnalysisProvider::DeepSeek => {
-            let api_key = provider_secret_for(provider)?;
-            llm::DeepSeekClient::with_api_key(Some(api_key))
-                .generate(selected_model, input, Some(&system_prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-    };
-
-    let cleaned = sanitize_dictation_output(raw_output.trim(), input);
-    if cleaned.trim().is_empty() {
-        return Err(format!(
-            "Command '{}' returned an empty response",
-            command_key
-        ));
-    }
-
-    Ok(cleaned.trim().to_string())
-}
-
 async fn run_custom_dictation_transform_with_selected_provider(
     state: &AppState,
     input: &str,
@@ -5014,79 +4473,6 @@ async fn run_action_items_with_provider(
                 .map_err(|e| e.to_string())
         }
     }
-}
-
-async fn run_title_with_provider(
-    provider: AnalysisProvider,
-    remote_processing_enabled: bool,
-    settings_model: Option<String>,
-    ollama_client: &llm::OllamaClient,
-    transcript: &str,
-    model: Option<&str>,
-) -> Result<String, String> {
-    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
-
-    let selected_model = model
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| settings_model.as_deref().filter(|v| !v.trim().is_empty()))
-        .unwrap_or_else(|| provider.default_model());
-
-    let prompt = format!(
-        "Generate a concise, descriptive meeting title for the transcript below. Return only the title, with no quotation marks or extra commentary.\n\nTranscript:\n{}",
-        transcript
-    );
-
-    let system_prompt = "You create short, useful meeting titles. Keep titles specific, professional, and easy to scan.";
-
-    let raw = match provider {
-        AnalysisProvider::Ollama => ollama_client
-            .generate(selected_model, &format!("{}\n\n{}", system_prompt, prompt))
-            .await
-            .map_err(|e| e.to_string())?,
-        AnalysisProvider::OpenAi => {
-            let api_key = provider_secret_for(provider)?;
-            llm::OpenAIClient::with_api_key(Some(api_key))
-                .generate(selected_model, &prompt, Some(system_prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        AnalysisProvider::Anthropic => {
-            let api_key = provider_secret_for(provider)?;
-            llm::AnthropicClient::with_api_key(Some(api_key))
-                .generate(selected_model, &prompt, Some(system_prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        AnalysisProvider::Gemini => {
-            let api_key = provider_secret_for(provider)?;
-            llm::GeminiClient::with_api_key(Some(api_key))
-                .generate(selected_model, &prompt, Some(system_prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        AnalysisProvider::DeepSeek => {
-            let api_key = provider_secret_for(provider)?;
-            llm::DeepSeekClient::with_api_key(Some(api_key))
-                .generate(selected_model, &prompt, Some(system_prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-        AnalysisProvider::OllamaCloud => {
-            let api_key = provider_secret_for(provider)?;
-            llm::OllamaCloudClient::with_api_key(Some(api_key))
-                .generate(selected_model, &format!("{}\n\n{}", system_prompt, prompt))
-                .await
-                .map_err(|e| e.to_string())?
-        }
-    };
-
-    let title = raw.trim().trim_matches('"').trim().to_string();
-    if title.is_empty() {
-        return Err("Generated meeting title was empty".to_string());
-    }
-
-    Ok(title)
 }
 
 async fn build_security_status(state: &AppState) -> Result<SecurityStatus, String> {
@@ -5411,15 +4797,6 @@ fn cleanup_staged_recording_encryption(staged: &StagedRecordingEncryption) -> Re
         })?;
     }
     Ok(())
-}
-
-fn encrypt_recording_file_in_place(path: &Path, key: &[u8; 32]) -> Result<PathBuf, String> {
-    let staged = stage_recording_encryption(path, key)?;
-    let result = finalize_staged_recording_encryption(&staged);
-    if result.is_err() {
-        let _ = cleanup_staged_recording_encryption(&staged);
-    }
-    result
 }
 
 async fn resolve_audio_path_for_runtime(
@@ -5836,14 +5213,6 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
-    }
-
-    #[test]
-    fn dictation_overlay_stays_visible_for_done_until_idle_reset() {
-        assert!(should_render_dictation_overlay_state("done", false));
-        assert!(should_render_dictation_overlay_state("recording", false));
-        assert!(!should_render_dictation_overlay_state("idle", false));
-        assert!(!should_render_dictation_overlay_state("done", true));
     }
 
     #[test]
@@ -6569,23 +5938,11 @@ mod tests {
     }
 
     #[test]
-    fn cursor_insert_failure_classification_prefers_automation_errors() {
-        assert_eq!(
-            classify_cursor_insert_failure(
-                "macOS blocked Automation for System Events (Not authorized to send Apple events to System Events.)"
-            ),
-            CursorInsertFailureKind::Automation
-        );
-    }
-
-    #[test]
-    fn cursor_insert_failure_classification_detects_post_event_access_errors() {
-        assert_eq!(
-            classify_cursor_insert_failure(
-                "Copied to clipboard. macOS blocked keystroke paste (CoreGraphics fallback failed: Failed to create target key down event). Grant Accessibility."
-            ),
-            CursorInsertFailureKind::PostEventAccess
-        );
+    fn windows_set_clipboard_script_reads_utf8_payload_file() {
+        let script = build_windows_set_clipboard_script(Path::new("C:\\Temp\\Bob's note.txt"));
+        assert!(script.contains("[System.Text.UTF8Encoding]::new($false)"));
+        assert!(script.contains("[System.IO.File]::ReadAllText('C:\\Temp\\Bob''s note.txt'"));
+        assert!(script.contains("Set-Clipboard -Value $text"));
     }
 
     #[cfg(target_os = "macos")]
@@ -6643,10 +6000,10 @@ mod tests {
     #[test]
     fn utf16_range_replacement_handles_unicode_scalars() {
         let (updated, next_range) = replace_utf16_range(
-            "A🙂B",
+            "AéB",
             CFRange {
                 location: 1,
-                length: 2,
+                length: 1,
             },
             "世界",
         )
@@ -7023,7 +6380,6 @@ mod tests {
     fn dictation_mode_transform_prompts_cover_reprocess_modes() {
         assert!(dictation_mode_transform_prompt("messages").is_some());
         assert!(dictation_mode_transform_prompt("email").is_some());
-        assert!(dictation_mode_transform_prompt("translate_english").is_some());
         assert!(dictation_mode_transform_prompt("meeting_follow_up").is_some());
         assert!(dictation_mode_transform_prompt("voice").is_none());
     }
@@ -7321,6 +6677,10 @@ mod tests {
             "parakeet-ctc-0.6b"
         ));
         assert!(meeting_route_is_shared_compatible(
+            asr::AsrProviderType::Parakeet,
+            "parakeet-tdt-0.6b-v3"
+        ));
+        assert!(meeting_route_is_shared_compatible(
             asr::AsrProviderType::Voxtral,
             "voxtral-local"
         ));
@@ -7421,7 +6781,7 @@ mod tests {
             ),
             provider_info_for_test(
                 asr::AsrProviderType::Parakeet,
-                "parakeet-ctc-0.6b",
+                "parakeet-tdt-0.6b-v3",
                 asr::manager::RuntimeStatus::Ready,
                 true,
             ),
@@ -7444,7 +6804,7 @@ mod tests {
         .expect("meeting candidate should be selected");
 
         assert_eq!(selection.0, asr::AsrProviderType::Parakeet);
-        assert_eq!(selection.1, "parakeet-ctc-0.6b");
+        assert_eq!(selection.1, "parakeet-tdt-0.6b-v3");
     }
 
     #[test]
@@ -7460,7 +6820,7 @@ mod tests {
     }
 
     #[test]
-    fn moonshine_tiny_can_fall_back_to_ready_base_for_local_dictation() {
+    fn moonshine_tiny_does_not_auto_fall_back_until_native_runtime_is_smoke_verified() {
         let root = temp_models_root();
         let moonshine_dir = root.join("moonshine");
         std::fs::create_dir_all(&moonshine_dir).expect("create moonshine dir");
@@ -7492,7 +6852,7 @@ mod tests {
             &root,
         );
 
-        assert_eq!(selection.as_deref(), Some("moonshine-base"));
+        assert_eq!(selection, None);
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -7546,6 +6906,56 @@ mod tests {
             "parakeet-ctc-0.6b",
             vec![("me", me), ("them", them)],
         );
+
+        assert_eq!(transcript.segments.len(), 2);
+        assert_eq!(transcript.segments[0].speaker_id.as_deref(), Some("me"));
+        assert_eq!(transcript.segments[1].speaker_id.as_deref(), Some("them"));
+        assert_eq!(
+            transcript.full_text,
+            "I opened the roadmap Let's ship this Friday"
+        );
+    }
+
+    #[test]
+    fn source_aware_transcript_keeps_text_only_provider_output() {
+        let me = asr::TranscriptionResult {
+            text: "I opened the roadmap".to_string(),
+            segments: Vec::new(),
+            language: "en".to_string(),
+            confidence: 0.9,
+            processing_time_ms: 10,
+            model_name: "MLX Audio".to_string(),
+            model_id: "mlx-community/whisper-large-v3-turbo-asr-fp16".to_string(),
+            requested_provider: asr::AsrProviderType::MlxAudio,
+            actual_provider: asr::AsrProviderType::MlxAudio,
+            requested_engine: None,
+            actual_engine: None,
+            optimization_applied: false,
+            fallback_reason: None,
+        };
+        let them = asr::TranscriptionResult {
+            text: "Let's ship this Friday".to_string(),
+            segments: Vec::new(),
+            language: "en".to_string(),
+            confidence: 0.85,
+            processing_time_ms: 10,
+            model_name: "MLX Audio".to_string(),
+            model_id: "mlx-community/whisper-large-v3-turbo-asr-fp16".to_string(),
+            requested_provider: asr::AsrProviderType::MlxAudio,
+            actual_provider: asr::AsrProviderType::MlxAudio,
+            requested_engine: None,
+            actual_engine: None,
+            optimization_applied: false,
+            fallback_reason: None,
+        };
+
+        let mut transcript = build_source_aware_models_transcript(
+            "recording-1",
+            asr::AsrProviderType::MlxAudio,
+            "mlx-community/whisper-large-v3-turbo-asr-fp16",
+            vec![("me", me), ("them", them)],
+        );
+        enrich_meeting_transcript(&mut transcript);
 
         assert_eq!(transcript.segments.len(), 2);
         assert_eq!(transcript.segments[0].speaker_id.as_deref(), Some("me"));
@@ -7631,6 +7041,37 @@ mod tests {
     }
 
     #[test]
+    fn ready_dictation_candidate_skips_native_moonshine_for_launch_fallback() {
+        let providers = vec![
+            provider_info_for_test(
+                asr::AsrProviderType::Moonshine,
+                "moonshine-base",
+                asr::manager::RuntimeStatus::Ready,
+                true,
+            ),
+            provider_info_for_test(
+                asr::AsrProviderType::Whisper,
+                "base.en",
+                asr::manager::RuntimeStatus::Ready,
+                true,
+            ),
+        ];
+
+        let selection = select_ready_dictation_candidate(
+            &providers,
+            &[
+                asr::AsrProviderType::Moonshine,
+                asr::AsrProviderType::Whisper,
+            ],
+            DictationRoutePreference::Local,
+        )
+        .expect("stable local fallback should be selected");
+
+        assert_eq!(selection.0, asr::AsrProviderType::Whisper);
+        assert_eq!(selection.1, "base.en");
+    }
+
+    #[test]
     fn repair_local_model_cache_removes_invalid_artifacts_only() {
         let root = temp_models_root();
         let parakeet_dir = root.join("parakeet");
@@ -7702,11 +7143,6 @@ fn default_speaker_color(index: usize) -> String {
         "#3B82F6", "#10B981", "#F59E0B", "#EF4444", "#6366F1", "#14B8A6",
     ];
     COLORS[index % COLORS.len()].to_string()
-}
-
-async fn default_dictation_start_options(state: &AppState) -> models::DictationStartOptions {
-    let settings_manager = state.settings_manager.lock().await;
-    dictation_options_from_settings(settings_manager.settings())
 }
 
 fn dictation_options_from_settings(settings: &settings::Settings) -> models::DictationStartOptions {
@@ -7884,7 +7320,6 @@ fn dictation_mode_label(
         "messages" => "Messages".to_string(),
         "email" => "Email".to_string(),
         "notes" => "Notes".to_string(),
-        "translate_english" => "Translate to English".to_string(),
         "meeting_follow_up" => "Meeting Follow-up".to_string(),
         "custom" => selected_custom_mode_id
             .and_then(|selected_id| {
@@ -7922,41 +7357,6 @@ fn resolve_dictation_formatting_hint(
         })
 }
 
-fn apply_runtime_dictation_custom_mode(
-    settings: &mut settings::Settings,
-    mode: &settings::DictationCustomMode,
-) {
-    settings.transcription.dictation_profile = mode.profile.clone();
-    if let Some(route_preference) = mode.route_preference.as_ref() {
-        settings.transcription.dictation_route_preference = route_preference.clone();
-    }
-    if let Some(language_override) = mode.language_override.as_ref() {
-        settings.transcription.language = Some(language_override.clone());
-    }
-    if let Some(live_preview_enabled) = mode.live_preview_enabled {
-        settings.transcription.dictation_live_preview_enabled = live_preview_enabled;
-    }
-    settings.transcription.dictation_insertion_mode = mode.insertion_mode.clone();
-    settings.transcription.dictation_context_source = mode.context_source.clone();
-    settings.transcription.dictation_save_to_inbox = mode.save_to_inbox;
-    settings.transcription.dictation_copy_to_clipboard = mode.copy_to_clipboard;
-    settings.transcription.dictation_command_mode_enabled = mode.command_mode_enabled;
-    settings.transcription.dictation_mode_preset = "custom".to_string();
-    settings.transcription.dictation_selected_custom_mode_id = Some(mode.id.clone());
-    if let Some(provider) = mode.dictation_provider.as_ref() {
-        settings.transcription.dictation_provider = provider.clone();
-    }
-    if let Some(model_id) = mode.dictation_model_id.as_ref() {
-        settings.transcription.dictation_model_id = model_id.clone();
-    }
-    if let Some(provider) = mode.ai_provider.as_ref() {
-        settings.privacy.llm_provider = provider.clone();
-    }
-    if let Some(model_id) = mode.ai_model_id.as_ref() {
-        settings.privacy.llm_model_id = Some(model_id.clone());
-    }
-}
-
 fn dictation_profile_to_settings_value(profile: &models::DictationProfile) -> &'static str {
     match profile {
         models::DictationProfile::NormalSpeed => "normal_speed",
@@ -7986,7 +7386,6 @@ fn normalize_dictation_mode_preset(value: &str) -> &'static str {
         "messages" => "messages",
         "email" => "email",
         "notes" => "notes",
-        "translate_english" => "translate_english",
         "meeting_follow_up" => "meeting_follow_up",
         "custom" => "custom",
         _ => "voice",
@@ -8181,7 +7580,8 @@ async fn enforce_meeting_retention_policy(
     state: &AppState,
     app: Option<&impl crate::sidecar_handle::AppEmitter>,
     reason: &str,
-) -> Result<(usize, usize), String> {
+    recording_id_filter: Option<&str>,
+) -> Result<(usize, usize, usize), String> {
     let (preset, custom_months, delete_mode) = {
         let settings_manager = state.settings_manager.lock().await;
         let transcription = &settings_manager.settings().transcription;
@@ -8194,7 +7594,7 @@ async fn enforce_meeting_retention_policy(
 
     let now = chrono::Utc::now();
     let Some(cutoff) = meeting_retention_cutoff(&preset, custom_months, now) else {
-        return Ok((0, 0));
+        return Ok((0, 0, 0));
     };
 
     let delete_mode = normalize_meeting_retention_delete_mode(&delete_mode).to_string();
@@ -8211,10 +7611,13 @@ async fn enforce_meeting_retention_policy(
     let mut audio_only_clears = 0usize;
     let mut audio_paths: Vec<String> = Vec::new();
 
-    for recording in recordings
-        .into_iter()
-        .filter(|recording| recording.source_type == "meeting" && recording.created_at <= cutoff)
-    {
+    for recording in recordings.into_iter().filter(|recording| {
+        recording.source_type == "meeting"
+            && recording.created_at <= cutoff
+            && recording_id_filter
+                .map(|recording_id| recording.id == recording_id)
+                .unwrap_or(true)
+    }) {
         if delete_mode == "audio_and_transcript" {
             match db.delete_recording(&recording.id) {
                 Ok(path) => {
@@ -8315,7 +7718,120 @@ async fn enforce_meeting_retention_policy(
         );
     }
 
-    Ok((deleted_recordings, deleted_audio_files))
+    Ok((deleted_recordings, deleted_audio_files, audio_only_clears))
+}
+
+async fn apply_meeting_transcript_only_storage_policy(
+    state: &AppState,
+    app: Option<&impl crate::sidecar_handle::AppEmitter>,
+    reason: &str,
+    recording_id_filter: Option<&str>,
+) -> Result<(usize, usize), String> {
+    let storage_mode = {
+        let settings_manager = state.settings_manager.lock().await;
+        settings_manager
+            .settings()
+            .transcription
+            .meeting_audio_storage_mode
+            .clone()
+    };
+
+    if normalize_meeting_audio_storage_mode(&storage_mode) != "transcript_only" {
+        return Ok((0, 0));
+    }
+
+    let mut db = state.db.lock().await;
+    let recordings = db.get_recordings(None).map_err(|error| {
+        format!(
+            "Failed to load recordings for transcript-only storage cleanup: {}",
+            error
+        )
+    })?;
+
+    let mut deleted_audio_files = 0usize;
+    let mut audio_paths_cleared = 0usize;
+
+    for recording in recordings.into_iter().filter(|recording| {
+        recording.source_type == "meeting"
+            && recording.status == "completed"
+            && !recording.audio_path.trim().is_empty()
+            && recording_id_filter
+                .map(|recording_id| recording.id == recording_id)
+                .unwrap_or(true)
+    }) {
+        let Some(_) = db.get_transcript(&recording.id).map_err(|error| {
+            format!(
+                "Failed to load transcript for transcript-only storage cleanup: {}",
+                error
+            )
+        })?
+        else {
+            continue;
+        };
+
+        let candidate = std::path::Path::new(&recording.audio_path);
+        let mut audio_deleted_or_absent = true;
+        if candidate.exists() {
+            match std::fs::remove_file(candidate) {
+                Ok(()) => deleted_audio_files += 1,
+                Err(error) => {
+                    audio_deleted_or_absent = false;
+                    tracing::warn!(
+                        "Failed to remove meeting audio '{}' during transcript-only storage cleanup: {}",
+                        recording.audio_path,
+                        error
+                    );
+                }
+            }
+        }
+
+        if !audio_deleted_or_absent {
+            continue;
+        }
+
+        db.clear_recording_audio_path(&recording.id)
+            .map_err(|error| {
+                format!(
+                    "Failed to clear meeting audio path during transcript-only storage cleanup: {}",
+                    error
+                )
+            })?;
+        audio_paths_cleared += 1;
+    }
+
+    if deleted_audio_files > 0 || audio_paths_cleared > 0 {
+        let details = serde_json::json!({
+            "reason": reason,
+            "storage_mode": normalize_meeting_audio_storage_mode(&storage_mode),
+            "deleted_audio_files": deleted_audio_files,
+            "audio_paths_cleared": audio_paths_cleared,
+        });
+        if let Err(error) = db.log_audit_event(
+            "meeting_transcript_only_storage_cleanup",
+            Some(details),
+            "info",
+        ) {
+            tracing::warn!(
+                "Failed to log meeting transcript-only storage cleanup event: {}",
+                error
+            );
+        }
+    }
+    drop(db);
+
+    if let Some(app_handle) = app {
+        app_handle.emit_event(
+            "meeting-storage-cleanup",
+            serde_json::json!({
+                "reason": reason,
+                "storageMode": normalize_meeting_audio_storage_mode(&storage_mode),
+                "deletedAudioFiles": deleted_audio_files,
+                "audioPathsCleared": audio_paths_cleared,
+            }),
+        );
+    }
+
+    Ok((audio_paths_cleared, deleted_audio_files))
 }
 
 fn is_meeting_placeholder_title(value: &str) -> bool {
@@ -8527,7 +8043,12 @@ async fn transcribe_recording_in_chunks(
         return Err("Chunked transcription requires a valid WAV sample rate/channels".to_string());
     }
 
-    let chunk_size_frames = (spec.sample_rate as usize * 90).max(spec.sample_rate as usize);
+    let chunk_seconds = match provider {
+        asr::AsrProviderType::MlxAudio => 30usize,
+        _ => 90usize,
+    };
+    let chunk_size_frames =
+        (spec.sample_rate as usize * chunk_seconds).max(spec.sample_rate as usize);
     let total_duration_seconds =
         compute_wav_duration_seconds(audio_path.to_string_lossy().as_ref()).max(0) as f64;
 
@@ -8561,6 +8082,24 @@ async fn transcribe_recording_in_chunks(
         let asr_manager = Arc::clone(&asr_manager);
         let model_id = model_id.clone();
         Box::pin(async move {
+            let chunk_start_seconds = chunk_start_frame as f64 / spec.sample_rate as f64;
+            let chunk_end_seconds =
+                (chunk_start_frame + chunk.len()) as f64 / spec.sample_rate as f64;
+            app.emit_event(
+                "recording-transcription-progress",
+                serde_json::json!({
+                    "recordingId": recording_id,
+                    "chunkIndex": chunk_idx + 1,
+                    "progress": if total_duration_seconds > 0.0 {
+                        (chunk_start_seconds / total_duration_seconds).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    },
+                    "stage": "chunk_started",
+                    "startTime": chunk_start_seconds,
+                    "endTime": chunk_end_seconds,
+                }),
+            );
             let wav_chunk = mono_samples_to_wav_bytes(&chunk, spec.sample_rate)?;
             let result = asr_manager
                 .transcribe_bytes_for_meeting(provider, &wav_chunk, Some(model_id.as_str()))
@@ -8574,9 +8113,6 @@ async fn transcribe_recording_in_chunks(
                     )
                 })?;
 
-            let chunk_start_seconds = chunk_start_frame as f64 / spec.sample_rate as f64;
-            let chunk_end_seconds =
-                (chunk_start_frame + chunk.len()) as f64 / spec.sample_rate as f64;
             app.emit_event(
                 "recording-transcription-stream",
                 serde_json::json!({
@@ -8920,92 +8456,6 @@ async fn emit_streaming_transcription_previews(
     Ok(())
 }
 
-fn compute_wav_duration_seconds_from_bytes(audio_data: &[u8]) -> i64 {
-    let cursor = std::io::Cursor::new(audio_data);
-    match hound::WavReader::new(cursor) {
-        Ok(reader) => {
-            let spec = reader.spec();
-            if spec.sample_rate == 0 {
-                return 0;
-            }
-            (reader.duration() as f64 / spec.sample_rate as f64).round() as i64
-        }
-        Err(error) => {
-            tracing::warn!(
-                "Failed to compute in-memory dictation duration from bytes: {}",
-                error
-            );
-            0
-        }
-    }
-}
-
-fn wav_has_non_silent_audio(audio_data: &[u8], threshold: f32) -> bool {
-    let cursor = std::io::Cursor::new(audio_data);
-    match hound::WavReader::new(cursor) {
-        Ok(mut reader) => {
-            let spec = reader.spec();
-            if spec.sample_rate == 0 {
-                return false;
-            }
-            let max_abs = if spec.sample_format == hound::SampleFormat::Float {
-                reader
-                    .samples::<f32>()
-                    .filter_map(Result::ok)
-                    .map(f32::abs)
-                    .fold(0.0_f32, f32::max)
-            } else {
-                reader
-                    .samples::<i16>()
-                    .filter_map(Result::ok)
-                    .map(|sample| (sample as f32 / i16::MAX as f32).abs())
-                    .fold(0.0_f32, f32::max)
-            };
-            max_abs >= threshold
-        }
-        Err(error) => {
-            tracing::warn!(
-                "Failed to inspect dictation wav bytes for silence detection: {}",
-                error
-            );
-            false
-        }
-    }
-}
-
-fn wav_file_has_non_silent_audio(path: &Path, threshold: f32) -> bool {
-    match hound::WavReader::open(path) {
-        Ok(mut reader) => {
-            let spec = reader.spec();
-            if spec.sample_rate == 0 {
-                return false;
-            }
-            let max_abs = if spec.sample_format == hound::SampleFormat::Float {
-                reader
-                    .samples::<f32>()
-                    .filter_map(Result::ok)
-                    .map(f32::abs)
-                    .fold(0.0_f32, f32::max)
-            } else {
-                reader
-                    .samples::<i16>()
-                    .filter_map(Result::ok)
-                    .map(|sample| (sample as f32 / i16::MAX as f32).abs())
-                    .fold(0.0_f32, f32::max)
-            };
-            max_abs >= threshold
-        }
-        Err(error) => {
-            tracing::warn!(
-                "Failed to inspect wav file '{}' for silence detection: {}",
-                path.display(),
-                error
-            );
-            false
-        }
-    }
-}
-
 fn default_source_speaker_name(speaker_id: &str) -> Option<&'static str> {
     match speaker_id.trim().to_ascii_lowercase().as_str() {
         "me" => Some("Me"),
@@ -9024,6 +8474,7 @@ fn transcript_has_source_aware_speakers(segments: &[models::TranscriptSegment]) 
     })
 }
 
+#[cfg(test)]
 fn source_aware_speaker_aliases_from_segments(
     segments: &[models::TranscriptSegment],
 ) -> std::collections::HashMap<String, String> {
@@ -9529,6 +8980,7 @@ fn select_ready_dictation_candidate(
             .iter()
             .find(|info| {
                 info.provider_type == *candidate_provider
+                    && info.provider_type != asr::AsrProviderType::Moonshine
                     && matches!(info.runtime_status, asr::manager::RuntimeStatus::Ready)
                     && info.is_available
                     && info.inference_enabled
@@ -9546,25 +8998,14 @@ fn preferred_same_provider_dictation_fallback_model(
     provider_type: asr::AsrProviderType,
     requested_model_id: &str,
     preference: DictationRoutePreference,
-    models_root: &Path,
+    _models_root: &Path,
 ) -> Option<String> {
     if !matches!(preference, DictationRoutePreference::Local) {
         return None;
     }
 
     match provider_type {
-        asr::AsrProviderType::Moonshine if requested_model_id == "moonshine-tiny" => {
-            let base_model_dir = models_root.join("moonshine");
-            let base_ready = is_valid_onnx_artifact(&base_model_dir.join("encoder_model.onnx"))
-                && is_valid_onnx_artifact(&base_model_dir.join("decoder_model_merged.onnx"))
-                && is_valid_json_artifact(&base_model_dir.join("tokenizer.json"), 1024);
-
-            if base_ready {
-                Some("moonshine-base".to_string())
-            } else {
-                None
-            }
-        }
+        asr::AsrProviderType::Moonshine if requested_model_id == "moonshine-tiny" => None,
         _ => None,
     }
 }
@@ -9838,7 +9279,7 @@ fn build_provider_fallback_message(
     fallback_reason: Option<&str>,
     optimization_applied: bool,
 ) -> Option<String> {
-    // An intentional MLX remap is an optimization, not a fallback — suppress the warning.
+    // An intentional MLX remap is an optimization, not a fallback. Suppress the warning.
     if requested_provider == actual_provider || optimization_applied {
         return None;
     }
@@ -9860,21 +9301,36 @@ fn build_models_transcript_from_asr_result(
     recording_id: &str,
     result: asr::TranscriptionResult,
 ) -> models::Transcript {
+    let fallback_text = result.text.trim().to_string();
+    let segments: Vec<models::TranscriptSegment> = result
+        .segments
+        .into_iter()
+        .map(|s| models::TranscriptSegment {
+            id: uuid::Uuid::new_v4().to_string(),
+            start_time: s.start_time,
+            end_time: s.end_time,
+            text: s.text,
+            speaker_id: None,
+            confidence: s.confidence,
+        })
+        .collect();
+    let segments = if segments.is_empty() && !fallback_text.is_empty() {
+        vec![models::TranscriptSegment {
+            id: uuid::Uuid::new_v4().to_string(),
+            start_time: 0.0,
+            end_time: 0.0,
+            text: fallback_text.clone(),
+            speaker_id: None,
+            confidence: result.confidence,
+        }]
+    } else {
+        segments
+    };
+
     models::Transcript {
         id: uuid::Uuid::new_v4().to_string(),
         recording_id: recording_id.to_string(),
-        segments: result
-            .segments
-            .into_iter()
-            .map(|s| models::TranscriptSegment {
-                id: uuid::Uuid::new_v4().to_string(),
-                start_time: s.start_time,
-                end_time: s.end_time,
-                text: s.text,
-                speaker_id: None,
-                confidence: s.confidence,
-            })
-            .collect(),
+        segments,
         full_text: result.text,
         language: result.language,
         confidence: result.confidence,
@@ -9888,6 +9344,10 @@ fn build_models_transcript_from_asr_result(
     }
 }
 
+#[expect(
+    dead_code,
+    reason = "provider routing metadata is retained for transcription diagnostics and QA evidence"
+)]
 struct MeetingTranscriptionOutput {
     transcript: models::Transcript,
     requested_provider: asr::AsrProviderType,
@@ -9927,11 +9387,14 @@ fn build_source_aware_models_transcript(
         weighted_confidence_sum += result.confidence * text_weight;
         weighted_confidence_count += text_weight;
 
+        let fallback_text = result.text.trim().to_string();
+        let mut inserted_source_segment = false;
         for segment in result.segments {
             let text = segment.text.trim().to_string();
             if text.is_empty() {
                 continue;
             }
+            inserted_source_segment = true;
             full_text_parts.push((segment.start_time, text.clone()));
             segments.push(models::TranscriptSegment {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -9940,6 +9403,17 @@ fn build_source_aware_models_transcript(
                 text,
                 speaker_id: Some(speaker_id.to_string()),
                 confidence: segment.confidence,
+            });
+        }
+        if !inserted_source_segment && !fallback_text.is_empty() {
+            full_text_parts.push((0.0, fallback_text.clone()));
+            segments.push(models::TranscriptSegment {
+                id: uuid::Uuid::new_v4().to_string(),
+                start_time: 0.0,
+                end_time: 0.0,
+                text: fallback_text,
+                speaker_id: Some(speaker_id.to_string()),
+                confidence: result.confidence,
             });
         }
     }
@@ -10147,10 +9621,11 @@ fn normalize_asr_model_id(provider_type: asr::AsrProviderType, model_id: &str) -
 
     match provider_type {
         asr::AsrProviderType::Parakeet => match candidate {
-            "parakeet-tdt-0.6b-v3" | "parakeet-ctc-0.6b" => "parakeet-ctc-0.6b".to_string(),
+            "parakeet-tdt-0.6b-v3" | "parakeet-tdt-0.6b-v2" => "parakeet-tdt-0.6b-v3".to_string(),
+            "parakeet-ctc-0.6b" => "parakeet-ctc-0.6b".to_string(),
             "parakeet-ctc-1.1b" => "parakeet-ctc-1.1b".to_string(),
             "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => "parakeet-tdt-ctc-110m".to_string(),
-            _ => "parakeet-ctc-0.6b".to_string(),
+            _ => "parakeet-tdt-0.6b-v3".to_string(),
         },
         asr::AsrProviderType::WhisperCandle => "whisper-large-v3-turbo".to_string(),
         asr::AsrProviderType::Voxtral => match candidate {
@@ -10269,74 +9744,6 @@ fn provider_model_map_to_settings(
             )
         })
         .collect()
-}
-
-fn migrate_legacy_asr_artifacts() -> Vec<String> {
-    let models_root = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Nautilus")
-        .join("models");
-    let mut notices = Vec::new();
-
-    let parakeet_dir = models_root.join("parakeet");
-    if parakeet_dir.exists() {
-        let legacy_model = parakeet_dir.join("model.onnx");
-        let target_model = parakeet_dir.join("encoder.onnx");
-        if !target_model.exists() && is_valid_onnx_artifact(&legacy_model) {
-            match std::fs::copy(&legacy_model, &target_model) {
-                Ok(_) => {
-                    notices.push("Migrated legacy Parakeet model.onnx to encoder.onnx.".to_string())
-                }
-                Err(error) => notices.push(format!(
-                    "Failed migrating legacy Parakeet model.onnx -> encoder.onnx: {}",
-                    error
-                )),
-            }
-        } else if !target_model.exists() && legacy_model.exists() {
-            notices.push(
-                "Detected legacy Parakeet model.onnx, but artifact is invalid. Re-download encoder.onnx in Settings -> ASR Models."
-                    .to_string(),
-            );
-        }
-
-        let legacy_vocab = parakeet_dir.join("vocab.txt");
-        let target_vocab = parakeet_dir.join("tokens.txt");
-        if !target_vocab.exists() && is_valid_token_list_artifact(&legacy_vocab, 128) {
-            match std::fs::copy(&legacy_vocab, &target_vocab) {
-                Ok(_) => {
-                    notices.push("Migrated legacy Parakeet vocab.txt to tokens.txt.".to_string())
-                }
-                Err(error) => notices.push(format!(
-                    "Failed migrating legacy Parakeet vocab.txt -> tokens.txt: {}",
-                    error
-                )),
-            }
-        } else if !target_vocab.exists() && legacy_vocab.exists() {
-            notices.push(
-                "Detected legacy Parakeet vocab.txt, but artifact is invalid. Re-download tokens.txt in Settings -> ASR Models."
-                    .to_string(),
-            );
-        }
-    }
-
-    let moonshine_dir = models_root.join("moonshine");
-    if moonshine_dir.exists() {
-        let has_required_onnx = is_valid_onnx_artifact(&moonshine_dir.join("encoder_model.onnx"))
-            && is_valid_onnx_artifact(&moonshine_dir.join("decoder_model_merged.onnx"));
-        let has_legacy_payload = moonshine_dir.join("encode.onnx").exists()
-            || moonshine_dir.join("uncached_decode.onnx").exists()
-            || moonshine_dir.join("model.safetensors").exists()
-            || moonshine_dir.join("preprocessor_config.json").exists()
-            || moonshine_dir.join("generation_config.json").exists();
-        if has_legacy_payload && !has_required_onnx {
-            notices.push(
-                "Detected legacy Moonshine payload. Re-download Moonshine merged ONNX assets (encoder_model.onnx + decoder_model_merged.onnx) in Settings -> ASR Models."
-                    .to_string(),
-            );
-        }
-    }
-
-    notices
 }
 
 fn is_valid_onnx_artifact(path: &Path) -> bool {
@@ -10889,6 +10296,10 @@ fn open_path_in_default_app(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[expect(
+    dead_code,
+    reason = "paste strategy metadata is retained for insertion diagnostics and QA evidence"
+)]
 struct PasteOutcome {
     pasted: bool,
     copied: bool,
@@ -11190,37 +10601,6 @@ fn is_running_from_disk_image() -> bool {
     current_app_bundle_path()
         .map(|path| path.starts_with("/Volumes/"))
         .unwrap_or(false)
-}
-
-#[cfg(target_os = "macos")]
-fn is_automation_permission_error(error: &str) -> bool {
-    let normalized = error.to_ascii_lowercase();
-    normalized.contains("not authorized to send apple events")
-        || normalized.contains("1743")
-        || normalized.contains("automation")
-}
-
-#[cfg(target_os = "macos")]
-fn classify_cursor_insert_failure(error: &str) -> CursorInsertFailureKind {
-    let normalized = error.to_ascii_lowercase();
-    if is_automation_permission_error(error) {
-        CursorInsertFailureKind::Automation
-    } else if normalized.contains("could not activate target")
-        || normalized.contains("failed to activate target app")
-        || normalized.contains("activate target")
-    {
-        CursorInsertFailureKind::Unknown
-    } else if normalized.contains("there was no external app to paste into") {
-        CursorInsertFailureKind::SelfTarget
-    } else if normalized.contains("accessibility")
-        || normalized.contains("keystroke paste")
-        || normalized.contains("coregraphics fallback failed")
-        || normalized.contains("event")
-    {
-        CursorInsertFailureKind::PostEventAccess
-    } else {
-        CursorInsertFailureKind::Unknown
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -11660,6 +11040,14 @@ fn build_windows_sendkeys_script(keys: &str, target_app: Option<&str>) -> String
     statements.join("; ")
 }
 
+#[cfg(any(test, target_os = "windows"))]
+fn build_windows_set_clipboard_script(payload_path: &Path) -> String {
+    format!(
+        "$utf8 = [System.Text.UTF8Encoding]::new($false); $text = [System.IO.File]::ReadAllText('{}', $utf8); Set-Clipboard -Value $text",
+        escape_powershell_single_quoted(&payload_path.to_string_lossy())
+    )
+}
+
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
     tracing::info!("Copying {} chars to clipboard", text.len());
 
@@ -11687,23 +11075,26 @@ fn copy_to_clipboard(text: &str) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        use std::process::{Command, Stdio};
+        use std::fs;
+        use std::process::Command;
 
-        let mut clip = Command::new("cmd")
-            .args(["/C", "clip"])
-            .stdin(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to launch clip.exe: {}", e))?;
-        if let Some(stdin) = clip.stdin.as_mut() {
-            stdin
-                .write_all(text.as_bytes())
-                .map_err(|e| format!("Failed to write text to clipboard: {}", e))?;
-        }
-        let status = clip
-            .wait()
-            .map_err(|e| format!("Failed waiting for clip.exe: {}", e))?;
+        let payload_path =
+            std::env::temp_dir().join(format!("nautilus-clipboard-{}.txt", uuid::Uuid::new_v4()));
+
+        fs::write(&payload_path, text.as_bytes())
+            .map_err(|e| format!("Failed to stage clipboard payload: {}", e))?;
+
+        let script = build_windows_set_clipboard_script(&payload_path);
+        let status = Command::new("powershell")
+            .args(["-NoProfile", "-Command", script.as_str()])
+            .status()
+            .map_err(|e| format!("Failed to launch Set-Clipboard: {}", e));
+
+        let _ = fs::remove_file(&payload_path);
+
+        let status = status?;
         if !status.success() {
-            return Err("clip.exe exited with failure status".to_string());
+            return Err("Set-Clipboard exited with failure status".to_string());
         }
         Ok(())
     }
@@ -12571,47 +11962,6 @@ fn paste_text_systemwide(
     }
 }
 
-#[cfg(target_os = "macos")]
-async fn clear_inline_dictation_session(
-    state: &AppState,
-    session_id: u64,
-    remove_inserted_text: bool,
-) -> Result<(), String> {
-    let snapshot = {
-        let inline_state = state.dictation_inline_state.lock().await;
-        if inline_state.session_id != Some(session_id) {
-            return Ok(());
-        }
-        inline_state.clone()
-    };
-
-    if remove_inserted_text && !snapshot.last_inserted_text.is_empty() && can_dispatch_hotkeys() {
-        if let Some(target) = snapshot.app_target.as_deref() {
-            if let Err(error) = reactivate_target_application(Some(target), None) {
-                tracing::warn!(
-                    "Failed to reactivate inline dictation target '{}': {}",
-                    target,
-                    error
-                );
-            }
-        }
-        send_native_undo_key()?;
-    }
-
-    if !snapshot.keep_text_in_clipboard {
-        if let Some(previous) = snapshot.original_clipboard.as_deref() {
-            copy_to_clipboard(previous)?;
-        }
-    }
-
-    let mut inline_state = state.dictation_inline_state.lock().await;
-    if inline_state.session_id == Some(session_id) {
-        *inline_state = InlineDictationState::default();
-    }
-
-    Ok(())
-}
-
 #[derive(Debug)]
 struct DictationCommandExecutionResult {
     output_text: String,
@@ -12991,11 +12341,9 @@ pub async fn build_app_state() -> Result<AppState, String> {
         template_manager: Arc::new(export::templates::TemplateManager::new()),
         dictation_hotkey_active: Arc::new(Mutex::new(false)),
         dictation_release_pending: Arc::new(AtomicBool::new(false)),
-        dictation_watchdog_generation: Arc::new(Mutex::new(0)),
         dictation_session_tracker: Arc::new(Mutex::new(DictationSessionTracker::default())),
         dictation_runtime_state: Arc::new(Mutex::new(DictationSessionState::Idle)),
         dictation_start_options: Arc::new(Mutex::new(initial_dictation_options)),
-        dictation_keep_warm_state: Arc::new(Mutex::new(DictationKeepWarmState::default())),
         pending_dictation_target: Arc::new(StdMutex::new(None)),
         last_external_target: Arc::new(StdMutex::new(None)),
         dictation_overlay_state: Arc::new(StdMutex::new(DictationOverlayState::default())),
@@ -13004,9 +12352,6 @@ pub async fn build_app_state() -> Result<AppState, String> {
         last_cursor_insert_status: Arc::new(StdMutex::new(None)),
         recent_dictation_delivery: Arc::new(Mutex::new(None)),
         streaming_transcriber,
-        dictation_stream_stop: Arc::new(AtomicBool::new(false)),
-        dictation_inline_state: Arc::new(Mutex::new(InlineDictationState::default())),
-        apple_live_dictation: Arc::new(Mutex::new(None)),
         vault_state: Arc::new(Mutex::new(VaultRuntimeState::default())),
         recording_stream_stop: Arc::new(AtomicBool::new(false)),
         recording_templates: Arc::new(StdMutex::new(std::collections::HashMap::new())),
@@ -13844,7 +13189,7 @@ async fn stop_dictation_for_sidecar(
 
     if !final_text.is_empty() && command_applied.is_none() {
         match effective_mode.as_str() {
-            "messages" | "email" | "translate_english" | "meeting_follow_up" => {
+            "messages" | "email" | "meeting_follow_up" => {
                 if let Some(prompt) = dictation_mode_transform_prompt(&effective_mode) {
                     match run_custom_dictation_transform_with_selected_provider(
                         state,
@@ -13870,7 +13215,7 @@ async fn stop_dictation_for_sidecar(
                             );
                             final_text = match effective_mode.as_str() {
                                 "messages" => rewrite_shorter_text(final_text.as_str()),
-                                "email" | "translate_english" | "meeting_follow_up" => {
+                                "email" | "meeting_follow_up" => {
                                     rewrite_professional_text(final_text.as_str())
                                 }
                                 _ => final_text,
@@ -14499,19 +13844,13 @@ async fn start_recording_for_sidecar(
         state.recording_stream_stop.store(false, Ordering::SeqCst);
         let stop_flag = Arc::clone(&state.recording_stream_stop);
         let streaming_transcriber = Arc::clone(&state.streaming_transcriber);
-        let meeting_selection = {
-            let settings = state.settings_manager.lock().await.settings().clone();
-            resolve_transcription_provider_and_model(
-                &settings.transcription,
-                TranscriptionScope::Meeting,
-            )
-        };
+        let streaming_provider = meeting_selection.0;
+        let streaming_model_id = meeting_selection.1.clone();
         let emit_handle = handle.clone();
         let rec_id = recording_id.clone();
         tokio::spawn(async move {
-            let (provider, model_id) = meeting_selection;
             let session_result = streaming_transcriber
-                .start_session(provider, sample_rate, model_id)
+                .start_session(streaming_provider, sample_rate, streaming_model_id)
                 .await;
             let (session_id, mut result_rx) = match session_result {
                 Ok(pair) => pair,
@@ -14613,7 +13952,7 @@ async fn stop_recording_for_sidecar(
 ) -> Result<(), String> {
     tracing::info!("stop_recording_for_sidecar called for {}", recording_id);
 
-    state.recording_stream_stop.store(false, Ordering::SeqCst);
+    state.recording_stream_stop.store(true, Ordering::SeqCst);
 
     let stop_result = {
         let mut audio = state.audio_capture.lock().await;
@@ -14681,7 +14020,7 @@ async fn stop_recording_for_sidecar(
         }),
     );
 
-    // Hide the recording overlay — transcription will happen in the background.
+    // Hide the recording overlay. Transcription will happen in the background.
     handle.window_command("hide-recording-overlay", &serde_json::Value::Null);
 
     let state_clone = Arc::clone(state);
@@ -14713,12 +14052,38 @@ async fn stop_recording_for_sidecar(
 
         let meeting_selection = {
             let settings = state_clone.settings_manager.lock().await.settings().clone();
-            resolve_transcription_provider_and_model(
-                &settings.transcription,
-                TranscriptionScope::Meeting,
-            )
+            resolve_ready_meeting_selection(state_clone.as_ref(), &settings.transcription).await
         };
-        let (meeting_provider, meeting_model_id) = meeting_selection;
+        let (meeting_provider, meeting_model_id, meeting_route_warning) = match meeting_selection {
+            Ok(selection) => selection,
+            Err(error) => {
+                tracing::error!(
+                    "Failed to resolve ready meeting route for {}: {}",
+                    recording_id_clone,
+                    error
+                );
+                {
+                    let mut db = state_clone.db.lock().await;
+                    let _ = db.update_recording_status(&recording_id_clone, "error");
+                    let _ = db.log_audit_event(
+                        "transcription_failed",
+                        Some(serde_json::json!({"recording_id": &recording_id_clone, "error": &error})),
+                        "error",
+                    );
+                }
+                handle_clone.emit_event(
+                    "recording-status-changed",
+                    serde_json::json!({
+                        "recordingId": &recording_id_clone, "status": "error",
+                        "message": error, "updatedAt": chrono::Utc::now().to_rfc3339(),
+                    }),
+                );
+                return;
+            }
+        };
+        if let Some(warning) = meeting_route_warning {
+            tracing::warn!("{}", warning);
+        }
 
         let preview_handle = handle_clone.clone();
         let preview_path = path.clone();
@@ -14779,6 +14144,14 @@ async fn stop_recording_for_sidecar(
                     let _ = db.save_transcript(&transcript);
                     let _ = db.update_recording_status(&recording_id_clone, "completed");
                 }
+
+                let _ = apply_meeting_transcript_only_storage_policy(
+                    state_clone.as_ref(),
+                    Some(&handle_clone),
+                    "meeting-transcript-saved",
+                    Some(&recording_id_clone),
+                )
+                .await;
 
                 handle_clone.emit_event(
                     "recording-status-changed",
@@ -14890,6 +14263,7 @@ async fn stop_recording_for_sidecar(
                     state_clone.as_ref(),
                     None::<&crate::sidecar_handle::SidecarHandle>,
                     "meeting-completed",
+                    None,
                 )
                 .await;
             }
@@ -14931,11 +14305,8 @@ async fn stop_recording_for_sidecar(
 /// Used by the sidecar binary's stdin loop.
 ///
 /// Commands that previously relied on shell-owned window management are handled here
-/// by either using `SidecarHandle` for event emission or returning a no-op result
-/// (window management is delegated to the Electron main process via IPC).
-///
-/// Phase 1: Basic plumbing commands fully wired. Commands that depend on
-/// `AppHandle` emit patterns are stubbed — they will be fully wired in Phase 2.6.
+/// with `SidecarHandle` event emission, while window ownership stays in the
+/// Electron main process via IPC.
 pub async fn dispatch_command(
     state: &Arc<AppState>,
     handle: &crate::sidecar_handle::SidecarHandle,
@@ -15883,25 +15254,13 @@ pub async fn dispatch_command(
             persist_benchmark_results(state.as_ref(), &results).await;
             serde_json::to_value(results).map_err(|e| e.to_string())
         }
-        "transcribe_audio_file_bytes" => {
-            let audio_bytes: Vec<u8> =
-                serde_json::from_value(params["audioBytes"].clone()).map_err(|e| e.to_string())?;
-            if audio_bytes.is_empty() {
-                return Err("Audio file is empty.".to_string());
-            }
-            let (provider_type, model_id) = {
-                let settings = state.settings_manager.lock().await.settings().clone();
-                resolve_transcription_provider_and_model(
-                    &settings.transcription,
-                    TranscriptionScope::Dictation,
-                )
-            };
-            let result = state
-                .asr_manager
-                .transcribe_bytes_for_dictation(provider_type, &audio_bytes, Some(&model_id))
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+        "generate_dictation_benchmark_run" => {
+            let fixture: dictation_parity::DictationBenchmarkFixture =
+                serde_json::from_value(params["fixture"].clone()).map_err(|e| e.to_string())?;
+            let context: dictation_parity::DictationBenchmarkContext =
+                serde_json::from_value(params["context"].clone()).map_err(|e| e.to_string())?;
+            let run = dictation_parity::generate_dictation_benchmark_run(&fixture, &context);
+            serde_json::to_value(run).map_err(|e| e.to_string())
         }
         "set_default_asr_provider" => {
             let provider_type: asr::AsrProviderType =
@@ -16663,6 +16022,58 @@ pub async fn dispatch_command(
                     .map_err(|e| e.to_string())?;
             save_settings_for_sidecar(state.as_ref(), handle, settings).await
         }
+        "run_storage_retention_maintenance" => {
+            let recording_id_filter = params
+                .get("recordingId")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let (transcript_only_clears, transcript_only_deleted_audio_files) =
+                apply_meeting_transcript_only_storage_policy(
+                    state.as_ref(),
+                    Some(handle),
+                    "manual-maintenance",
+                    recording_id_filter,
+                )
+                .await?;
+            let (dictation_deleted_recordings, dictation_deleted_audio_files) =
+                if recording_id_filter.is_some() {
+                    (0, 0)
+                } else {
+                    enforce_dictation_retention_policy(
+                        state.as_ref(),
+                        Some(handle),
+                        "manual-maintenance",
+                    )
+                    .await?
+                };
+            let (
+                meeting_deleted_recordings,
+                meeting_deleted_audio_files,
+                meeting_audio_paths_cleared,
+            ) = enforce_meeting_retention_policy(
+                state.as_ref(),
+                Some(handle),
+                "manual-maintenance",
+                recording_id_filter,
+            )
+            .await?;
+            Ok(serde_json::json!({
+                "transcriptOnly": {
+                    "audioPathsCleared": transcript_only_clears,
+                    "deletedAudioFiles": transcript_only_deleted_audio_files,
+                },
+                "dictationRetention": {
+                    "deletedRecordings": dictation_deleted_recordings,
+                    "deletedAudioFiles": dictation_deleted_audio_files,
+                },
+                "meetingRetention": {
+                    "deletedRecordings": meeting_deleted_recordings,
+                    "deletedAudioFiles": meeting_deleted_audio_files,
+                    "audioPathsCleared": meeting_audio_paths_cleared,
+                }
+            }))
+        }
         "reset_app_state" => reset_app_state_for_sidecar(state.as_ref(), handle).await,
 
         // ── System / permissions ───────────────────────────────────────────
@@ -16764,10 +16175,11 @@ pub async fn dispatch_command(
                 }
             }
             insights.active_days = active_days.len() as u64;
-            insights.average_words_per_dictation = insights
-                .dictated_words
-                .checked_div(insights.total_dictations)
-                .unwrap_or(0);
+            insights.average_words_per_dictation = if insights.total_dictations > 0 {
+                insights.dictated_words / insights.total_dictations
+            } else {
+                0
+            };
             if let Some((app_target, count)) = app_target_counts.into_iter().max_by_key(|(_, c)| *c)
             {
                 insights.top_app_target = Some(app_target);

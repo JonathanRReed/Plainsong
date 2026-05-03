@@ -1,6 +1,6 @@
 # Dictation Hands-Free Readiness
 
-Generated: 2026-04-09T22:43:34.310Z
+Generated: 2026-05-03T15:52:13.163Z
 
 Hands-free remains a launch-critical trust path. The repo now has explicit local evidence for implementation coverage, but not yet packaged long-session evidence.
 

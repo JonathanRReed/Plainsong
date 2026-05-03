@@ -88,8 +88,11 @@ vi.mock("@/lib/electron", () => ({
   },
 }));
 
-vi.mock("@/lib/backend", () => ({
+vi.mock("@/lib/backend/settings", () => ({
   getSettings: popupMocks.getSettings,
+}));
+
+vi.mock("@/lib/backend/dictation", () => ({
   getDictationAudioLevel: popupMocks.getDictationAudioLevel,
   startDictation: popupMocks.startDictation,
   stopDictation: popupMocks.stopDictation,

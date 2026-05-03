@@ -1,6 +1,6 @@
 # Dictation App Matrix Evidence
 
-Generated: 2026-04-09T22:43:34.310Z
+Generated: 2026-05-03T15:52:13.163Z
 
 This rollup compares the frozen launch app matrix with the current local benchmark corpus and blocked-app register. It does not replace packaged QA, but it shows where the local corpus already exercises insertion behavior and where gaps remain.
 
@@ -8,7 +8,7 @@ This rollup compares the frozen launch app matrix with the current local benchma
 
 | App | Matrix status | Mode | Local corpus | Scenario IDs | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Apple Notes | PENDING | auto | covered | basic-notes | Core native text-field baseline for solo-professional dictation. |
+| Apple Notes | SUPPORTED | auto | covered | basic-notes | Packaged insertion verified in `artifacts/qa/macos/app-matrix-insertion-apple-notes.md`. |
 | Google Docs (Chrome) | PENDING | auto | covered | command-newline, command-paragraph, it-google-docs-brief | High-value browser editor; validate cursor focus recovery after hotkey release. |
 | Slack | PENDING | auto | covered | command-rewrite-shorter, snippet-positive-slack, nl-slack-check-in | High-frequency chat target; validate snippet expansions and punctuation consistency. |
 | Notion | PENDING | auto | covered | snippet-negative-notion, ja-notion-brief | High-frequency notes workspace; validate multiline insert behavior. |

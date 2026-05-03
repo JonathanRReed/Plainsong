@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from "react";
-import { validateLicense } from "@/lib/backend";
-import type { LicenseInfo } from "@/lib/backend";
+import { validateLicense } from "@/lib/backend/license";
+import type { LicenseInfo } from "@/lib/backend/license";
 
 const VALIDATION_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const LAST_CHECK_KEY = "nautilus_license_last_check";

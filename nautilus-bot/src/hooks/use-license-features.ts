@@ -1,7 +1,6 @@
-import { useMemo } from "react";
-import type { LicenseInfo, LicenseTier } from "@/lib/backend";
+import type { LicenseInfo, LicenseTier } from "@/lib/backend/license";
 
-export interface FeatureFlags {
+interface FeatureFlags {
   whisperLargeModel: boolean;
   intelligentPunctuation: boolean;
   autoDiarization: boolean;
@@ -9,7 +8,7 @@ export interface FeatureFlags {
   prioritySupport: boolean;
 }
 
-export interface Entitlement {
+interface Entitlement {
   trialActive: boolean;
   licenseValid: boolean;
   tier: "free" | "pro" | "friends";
@@ -19,7 +18,7 @@ export interface Entitlement {
   features: FeatureFlags;
 }
 
-export type ThemeAccessLevel = "basic" | "pro" | "friends";
+type ThemeAccessLevel = "basic" | "pro" | "friends";
 
 const TIER_FEATURES: Record<LicenseTier, FeatureFlags> = {
   none: {
@@ -74,19 +73,6 @@ export function deriveEntitlement(license: LicenseInfo | null): Entitlement {
     canUpdate,
     features,
   };
-}
-
-export function useEntitlement(license: LicenseInfo | null): Entitlement {
-  return useMemo(
-    () => deriveEntitlement(license),
-    [license?.valid, license?.tier, license?.trialActive]
-  );
-}
-
-export function useLicenseFeatures(license: LicenseInfo | null): FeatureFlags {
-  return useMemo(() => {
-    return deriveEntitlement(license).features;
-  }, [license?.valid, license?.tier, license?.trialActive]);
 }
 
 export function isFeatureAllowed(

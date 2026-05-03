@@ -1,13 +1,13 @@
 export const MEETING_CONSENT_NOTICE_TEXT =
   "Heads up: I’m recording and transcribing this meeting with Nautilus for my notes. Please let me know now if you want me to stop.";
 
-export interface MeetingConsentStateLike {
+interface MeetingConsentStateLike {
   consentPromptShown?: boolean | null;
   consentNoticeMode?: string | null;
   consentNoticeMessage?: string | null;
 }
 
-export interface MeetingConsentDescriptor {
+interface MeetingConsentDescriptor {
   label: string;
   shareLabel: string;
   message: string | null;

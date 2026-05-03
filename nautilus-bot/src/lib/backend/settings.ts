@@ -1,0 +1,25 @@
+export {
+  clearProviderSecret,
+  getPermissionDiagnostics,
+  getSecurityStatus,
+  getSettings,
+  hasProviderSecret,
+  lockVault,
+  migrateToEncryptedStorage,
+  openInstalledNautilusApp,
+  openPermissionSettings,
+  requestDictationPermissions,
+  repairCursorInsertPermissions,
+  resetAppState,
+  saveSettings,
+  setProviderSecret,
+  unlockVault,
+  verifyDictationSetup,
+  verifyMeetingSetup,
+  verifySystemAudioSetup,
+} from "../backend";
+export type {
+  PermissionDiagnostics,
+  SecurityStatus,
+  SetupVerificationResult,
+} from "../backend";

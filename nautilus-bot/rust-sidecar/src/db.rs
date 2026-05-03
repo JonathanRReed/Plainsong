@@ -3,8 +3,6 @@
 //! Manages recordings, transcripts, projects, and audit logs
 //! with full CRUD operations.
 
-#![allow(dead_code)]
-
 use crate::models::*;
 use crate::store::{
     CaptureSessionRecord, ContextSnapshotRecord, InsertionActionRecord, MeetingArtifactRecord,
@@ -22,6 +20,10 @@ pub struct Database {
     conn: Connection,
 }
 
+#[expect(
+    dead_code,
+    reason = "database module keeps migration and evidence-table helpers beyond current command usage"
+)]
 impl Database {
     /// Create new database connection with optional encryption
     pub fn new_with_key(_key: Option<&str>) -> Result<Self> {

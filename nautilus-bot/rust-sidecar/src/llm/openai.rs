@@ -2,8 +2,6 @@
 //!
 //! Supports GPT-3.5-turbo, GPT-4, and other OpenAI models
 
-#![allow(dead_code)]
-
 use crate::llm::{ActionItem, AnalysisResult, Citation};
 use anyhow::{Context, Result};
 
@@ -27,11 +25,6 @@ impl OpenAIClient {
             api_key: resolved_api_key,
             client: reqwest::Client::new(),
         }
-    }
-
-    /// Check if OpenAI is available (has API key)
-    pub fn is_available(&self) -> bool {
-        self.api_key.is_some()
     }
 
     /// List all available model ids from OpenAI.

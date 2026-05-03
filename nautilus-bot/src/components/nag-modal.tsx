@@ -75,7 +75,7 @@ export function NagModal({ onActivate }: Props) {
 
                 <div className="space-y-4 p-5">
                     <DialogDescription className="leading-relaxed">
-                        Your 30-day free trial has ended. Nautilus keeps working — a license
+                        Your 30-day free trial has ended. Nautilus keeps working, and a license
                         removes this reminder. Pro unlocks updates and core paid features.
                         Friends Club adds cloud sync and priority support.
                     </DialogDescription>

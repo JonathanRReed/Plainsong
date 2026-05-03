@@ -7,7 +7,7 @@ import {
   getLoopbackDeviceName,
   getMeetingConsentAutomationStatus,
   type MeetingConsentAutomationStatus,
-} from "@/lib/backend";
+} from "@/lib/backend/recordings";
 import { MEETING_CONSENT_NOTICE_TEXT } from "@/lib/meeting-consent";
 import { getMeetingTemplateOption, MEETING_TEMPLATES } from "@/lib/meeting-templates";
 

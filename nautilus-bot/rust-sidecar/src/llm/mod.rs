@@ -7,8 +7,6 @@
 //! - Anthropic (Claude)
 //! - Google (Gemini)
 //! - DeepSeek
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 mod anthropic;
@@ -26,32 +24,6 @@ pub use embeddings::{cosine_similarity, OllamaEmbedder};
 pub use gemini::GeminiClient;
 pub use ollama::OllamaClient;
 pub use openai::OpenAIClient;
-
-/// Provider type for LLM selection
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum LlmProvider {
-    #[default]
-    Ollama,
-    OllamaCloud,
-    OpenAI,
-    Anthropic,
-    Gemini,
-    DeepSeek,
-}
-
-impl LlmProvider {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::Ollama => "Ollama (Local)",
-            Self::OllamaCloud => "Ollama Cloud",
-            Self::OpenAI => "OpenAI GPT",
-            Self::Anthropic => "Anthropic Claude",
-            Self::Gemini => "Google Gemini",
-            Self::DeepSeek => "DeepSeek",
-        }
-    }
-}
 
 /// Analysis result with citations
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,13 +3,6 @@ import type { AsrProviderInfo, AsrProviderType } from "@/types";
 export type DictationRoutePreference = "local" | "cloud";
 
 const HIDDEN_PROVIDER_SET = new Set<AsrProviderType>(["mlx_audio"]);
-const MLX_ACCELERATABLE_PROVIDER_SET = new Set<AsrProviderType>([
-  "moonshine",
-  "whisper",
-  "parakeet",
-  "voxtral",
-]);
-
 const DOWNLOADABLE_PROVIDER_SET = new Set<AsrProviderType>([
   "whisper",
   "parakeet",
@@ -50,10 +43,6 @@ export function isDownloadableProvider(providerType: AsrProviderType) {
 
 export function isVisibleAsrProvider(providerType: AsrProviderType) {
   return !HIDDEN_PROVIDER_SET.has(providerType);
-}
-
-export function providerCanUseMlxAcceleration(providerType: AsrProviderType) {
-  return MLX_ACCELERATABLE_PROVIDER_SET.has(providerType);
 }
 
 export function mlxMappedModelId(

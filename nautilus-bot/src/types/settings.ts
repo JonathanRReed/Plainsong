@@ -1,9 +1,8 @@
-export type DictationBaseModePreset =
+type DictationBaseModePreset =
   | "voice"
   | "messages"
   | "email"
   | "notes"
-  | "translate_english"
   | "meeting_follow_up";
 
 export interface Settings {
@@ -41,7 +40,7 @@ export interface DictationCustomMode {
   activationDomainMatcher?: string | null;
 }
 
-export interface AudioSettings {
+interface AudioSettings {
   sampleRate: number;
   channels: number;
   captureSystemAudio: boolean;
@@ -58,7 +57,7 @@ export interface AudioSettings {
   manualGainDb: number;
 }
 
-export interface AudioInputDevicePreference {
+interface AudioInputDevicePreference {
   deviceId: string;
   deviceName: string;
   transportType?: "builtin" | "bluetooth" | "usb" | "virtual" | "unknown" | null;
@@ -74,7 +73,7 @@ export interface TranscriptionSettings {
   meetingModelId?: string;
   meetingRoutePolicy?: "prefer_local" | "best_available";
   providerModelIds?: Record<string, string>;
-  /** @deprecated – kept for migration; use dictationMlxEnabled / meetingMlxEnabled instead */
+  /** @deprecated, kept for migration; use dictationMlxEnabled / meetingMlxEnabled instead */
   mlxAcceleratedProviders?: string[];
   /** MLX acceleration for the dictation route slot only */
   dictationMlxEnabled?: boolean;
@@ -102,7 +101,6 @@ export interface TranscriptionSettings {
     | "messages"
     | "email"
     | "notes"
-    | "translate_english"
     | "meeting_follow_up"
     | "custom";
   dictationSelectedCustomModeId?: string | null;
@@ -149,7 +147,7 @@ export interface PlatformOptimizationSettings {
   manualEnginePriority: string[];
 }
 
-export interface UiSettings {
+interface UiSettings {
   alwaysOnTop: boolean;
   minimizeToTray: boolean;
   windowPosition: [number, number] | null;
@@ -160,7 +158,7 @@ export interface UiSettings {
   colorScheme: string;
 }
 
-export interface ExportSettings {
+interface ExportSettings {
   defaultFormat: string;
   autoExport: boolean;
   exportDirectory: string | null;
@@ -169,7 +167,7 @@ export interface ExportSettings {
   openAfterExport: boolean;
 }
 
-export interface PrivacySettings {
+interface PrivacySettings {
   encryptRecordings: boolean;
   autoDeleteDays: number;
   requirePassword: boolean;
@@ -183,14 +181,14 @@ export interface PrivacySettings {
   vaultSalt: string | null;
 }
 
-export interface UpdateSettings {
+interface UpdateSettings {
   channel: "stable" | "beta";
   autoCheck: boolean;
   lastCheckAt: string | null;
   lastSeenVersion: string | null;
 }
 
-export interface KeyboardShortcuts {
+interface KeyboardShortcuts {
   toggleRecording: string;
   toggleDictation: string;
   toggleDictationAlternates?: string[];

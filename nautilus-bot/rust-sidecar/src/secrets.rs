@@ -194,6 +194,13 @@ pub fn get_internal_secret(key: &str) -> Result<Option<String>> {
     get_secret_for_account(&account)
 }
 
+#[cfg_attr(
+    test,
+    expect(
+        dead_code,
+        reason = "license cleanup path is not exercised in unit tests"
+    )
+)]
 pub fn clear_internal_secret(key: &str) -> Result<()> {
     migrate_legacy_file_if_needed();
     let account = internal_account_name(key)?;

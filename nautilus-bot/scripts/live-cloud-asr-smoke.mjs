@@ -1,8 +1,12 @@
 #!/usr/bin/env node
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
 const requiredKeys = ["OPENAI_API_KEY", "ELEVENLABS_API_KEY", "MISTRAL_API_KEY"];
+const requiredProviders = ["openai", "elevenlabs", "mistral"];
+const thresholdMs = 6000;
+const fixtureRelativePath = "scripts/fixtures/live-cloud-smoke.wav";
 const missing = requiredKeys.filter((key) => !process.env[key] || !process.env[key].trim());
 if (missing.length > 0) {
   console.error(`Missing required live cloud ASR secrets: ${missing.join(", ")}`);
@@ -12,11 +16,31 @@ if (missing.length > 0) {
 const args = process.argv.slice(2);
 const outIndex = args.indexOf("--out");
 const outFile = outIndex >= 0 ? args[outIndex + 1] : null;
-const fixturePath = path.resolve(
-  process.cwd(),
-  "scripts/fixtures/live-cloud-smoke.wav"
-);
+const fixturePath = path.resolve(process.cwd(), fixtureRelativePath);
 const audio = await fs.readFile(fixturePath);
+const fixtureSha256 = sha256(audio);
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function normalizeTranscript(value) {
+  return String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function resultFor(provider, elapsedMs, text) {
+  const normalized = normalizeTranscript(text);
+  if (!normalized) {
+    throw new Error(`${provider} ASR returned empty transcript text`);
+  }
+
+  return {
+    provider,
+    elapsedMs,
+    textLength: normalized.length,
+    transcriptSha256: sha256(normalized),
+  };
+}
 
 async function callOpenAI() {
   const started = Date.now();
@@ -37,18 +61,13 @@ async function callOpenAI() {
   }
 
   const parsed = JSON.parse(body);
-  const text = String(parsed.text || "").trim();
-  if (!text) {
-    throw new Error("OpenAI ASR returned empty transcript text");
-  }
-
-  return { provider: "openai", elapsedMs, textLength: text.length };
+  return resultFor("openai", elapsedMs, parsed.text);
 }
 
 async function callElevenLabs() {
   const started = Date.now();
   const form = new FormData();
-  form.append("audio", new Blob([audio], { type: "audio/wav" }), "live-cloud-smoke.wav");
+  form.append("file", new Blob([audio], { type: "audio/wav" }), "live-cloud-smoke.wav");
   form.append("model_id", "scribe_v1");
 
   const response = await fetch("https://api.elevenlabs.io/v1/speech-to-text", {
@@ -64,12 +83,7 @@ async function callElevenLabs() {
   }
 
   const parsed = JSON.parse(body);
-  const text = String(parsed.text || "").trim();
-  if (!text) {
-    throw new Error("ElevenLabs ASR returned empty transcript text");
-  }
-
-  return { provider: "elevenlabs", elapsedMs, textLength: text.length };
+  return resultFor("elevenlabs", elapsedMs, parsed.text);
 }
 
 async function callMistral() {
@@ -80,7 +94,7 @@ async function callMistral() {
 
   const response = await fetch("https://api.mistral.ai/v1/audio/transcriptions", {
     method: "POST",
-    headers: { Authorization: `Bearer ${process.env.MISTRAL_API_KEY}` },
+    headers: { "x-api-key": process.env.MISTRAL_API_KEY },
     body: form,
   });
 
@@ -91,29 +105,44 @@ async function callMistral() {
   }
 
   const parsed = JSON.parse(body);
-  const text = String(parsed.text || "").trim();
-  if (!text) {
-    throw new Error("Mistral ASR returned empty transcript text");
-  }
-
-  return { provider: "mistral", elapsedMs, textLength: text.length };
+  return resultFor("mistral", elapsedMs, parsed.text);
 }
 
 const results = [await callOpenAI(), await callElevenLabs(), await callMistral()];
 const latencies = results.map((result) => result.elapsedMs).sort((a, b) => a - b);
 const medianLatencyMs = latencies[Math.floor(latencies.length / 2)];
+const providers = results.map((result) => result.provider);
+const uniqueProviders = new Set(providers);
+const missingProviders = requiredProviders.filter((provider) => !uniqueProviders.has(provider));
+const extraProviders = providers.filter((provider) => !requiredProviders.includes(provider));
 
-if (medianLatencyMs >= 6000) {
-  console.error(`Cloud ASR median latency gate failed: ${medianLatencyMs}ms >= 6000ms`);
+if (
+  results.length !== requiredProviders.length ||
+  uniqueProviders.size !== requiredProviders.length ||
+  missingProviders.length > 0 ||
+  extraProviders.length > 0
+) {
+  console.error("Cloud ASR provider set gate failed.");
+  console.error(JSON.stringify({ providers, missingProviders, extraProviders }, null, 2));
+  process.exit(1);
+}
+
+if (medianLatencyMs >= thresholdMs) {
+  console.error(`Cloud ASR median latency gate failed: ${medianLatencyMs}ms >= ${thresholdMs}ms`);
   console.error(JSON.stringify({ results, medianLatencyMs }, null, 2));
   process.exit(1);
 }
 
 const report = {
-  fixture: fixturePath,
+  pass: true,
+  fixture: fixtureRelativePath,
+  fixtureSha256,
   generatedAt: new Date().toISOString(),
   medianLatencyMs,
-  thresholdMs: 6000,
+  thresholdMs,
+  providerCount: results.length,
+  requiredProviders,
+  secretPolicy: "Secret values and transcript text are never written.",
   results,
 };
 

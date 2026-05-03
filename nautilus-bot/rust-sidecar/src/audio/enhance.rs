@@ -2,8 +2,6 @@
 //!
 //! Provides spectral subtraction and basic noise gating
 //! to improve transcription quality.
-#![allow(dead_code)]
-
 use anyhow::Result;
 
 /// Noise suppressor configuration
@@ -118,8 +116,6 @@ pub struct SpectralNoiseReducer {
     config: NoiseSuppressionConfig,
     /// Noise spectrum estimate
     noise_spectrum: Vec<f32>,
-    /// Previous overlap buffer
-    overlap_buffer: Vec<f32>,
     /// Smoothing factor for noise estimation
     alpha: f32,
     /// Frame counter for noise estimation
@@ -129,12 +125,10 @@ pub struct SpectralNoiseReducer {
 impl SpectralNoiseReducer {
     pub fn new(config: NoiseSuppressionConfig) -> Self {
         let fft_size = config.fft_size;
-        let overlap = config.overlap;
 
         Self {
             config,
             noise_spectrum: vec![0.0; fft_size / 2 + 1],
-            overlap_buffer: vec![0.0; (fft_size as f32 * overlap) as usize],
             alpha: 0.9,
             frame_count: 0,
         }
@@ -218,11 +212,6 @@ impl AudioPreprocessor {
         }
     }
 
-    /// Enable/disable processing
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
     /// Process audio samples
     pub fn process(&mut self, samples: &mut [f32]) -> Result<()> {
         if !self.enabled {
@@ -268,56 +257,4 @@ fn normalize_audio(samples: &mut [f32]) {
             *sample *= gain;
         }
     }
-}
-
-/// Apply high-pass filter to remove low-frequency noise
-pub fn highpass_filter(samples: &mut [f32], sample_rate: u32, cutoff_hz: f32) {
-    let rc = 1.0 / (2.0 * std::f32::consts::PI * cutoff_hz);
-    let dt = 1.0 / sample_rate as f32;
-    let alpha = rc / (rc + dt);
-
-    let mut prev_output = 0.0f32;
-    let mut prev_input = 0.0f32;
-
-    for sample in samples.iter_mut() {
-        let input = *sample;
-        let output = alpha * (prev_output + input - prev_input);
-
-        prev_input = input;
-        prev_output = output;
-        *sample = output;
-    }
-}
-
-/// Apply low-pass filter to remove high-frequency noise
-pub fn lowpass_filter(samples: &mut [f32], sample_rate: u32, cutoff_hz: f32) {
-    let rc = 1.0 / (2.0 * std::f32::consts::PI * cutoff_hz);
-    let dt = 1.0 / sample_rate as f32;
-    let alpha = dt / (rc + dt);
-
-    let mut prev_output = 0.0f32;
-
-    for sample in samples.iter_mut() {
-        let input = *sample;
-        let output = prev_output + alpha * (input - prev_output);
-
-        prev_output = output;
-        *sample = output;
-    }
-}
-
-/// Full audio enhancement pipeline
-pub fn enhance_audio(samples: &mut [f32], sample_rate: u32) -> Result<()> {
-    // Remove DC offset and rumble
-    highpass_filter(samples, sample_rate, 80.0);
-
-    // Reduce high-frequency hiss
-    lowpass_filter(samples, sample_rate, 8000.0);
-
-    // Apply noise suppression
-    let mut preprocessor = AudioPreprocessor::new(sample_rate);
-    preprocessor.auto_calibrate(samples, sample_rate);
-    preprocessor.process(samples)?;
-
-    Ok(())
 }

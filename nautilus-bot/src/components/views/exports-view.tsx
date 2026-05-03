@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { useRecordings } from "@/hooks/use-recordings";
-import { exportRecordingV2, exportWithTemplate, listExportTemplates, verifyEvidenceBundle } from "@/lib/backend";
-import type { EvidenceVerificationResult } from "@/lib/backend";
-import type { ExportTemplate } from "@/lib/backend";
+import {
+  exportRecordingV2,
+  exportWithTemplate,
+  listExportTemplates,
+  verifyEvidenceBundle,
+  type EvidenceVerificationResult,
+  type ExportTemplate,
+} from "@/lib/backend/exports";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";

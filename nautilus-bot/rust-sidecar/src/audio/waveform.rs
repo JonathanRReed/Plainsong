@@ -1,12 +1,14 @@
 //! Audio waveform visualization and generation
 //!
 //! Generates waveform data for display and export.
-#![allow(dead_code)]
-
 use anyhow::Result;
 
 /// Waveform data structure
 #[derive(Debug, Clone)]
+#[expect(
+    dead_code,
+    reason = "waveform metadata is part of the exported waveform data shape"
+)]
 pub struct WaveformData {
     /// Sample points (normalized 0.0 to 1.0)
     pub samples: Vec<f32>,
@@ -100,57 +102,4 @@ pub fn export_waveform_svg(data: &WaveformData, width: u32, height: u32, color: 
 
     svg.push_str("</svg>");
     svg
-}
-
-/// Export waveform as data URI (SVG format)
-pub fn export_waveform_data_uri(data: &WaveformData, width: u32, height: u32) -> String {
-    let svg = export_waveform_svg(data, width, height, "#3b82f6");
-    // Simple URL encoding for SVG in data URI
-    let encoded = svg
-        .replace('"', "&quot;")
-        .replace('<', "%3C")
-        .replace('>', "%3E");
-    format!("data:image/svg+xml,{}", encoded)
-}
-
-/// Get peak amplitude from waveform
-pub fn get_peak_amplitude(data: &WaveformData) -> f32 {
-    data.samples.iter().fold(0.0, |max, &s| max.max(s))
-}
-
-/// Get average amplitude (RMS) from waveform
-pub fn get_average_amplitude(data: &WaveformData) -> f32 {
-    if data.samples.is_empty() {
-        return 0.0;
-    }
-    let sum_squares: f32 = data.samples.iter().map(|s| s * s).sum();
-    (sum_squares / data.samples.len() as f32).sqrt()
-}
-
-/// Detect silence regions in waveform
-pub fn detect_silence_regions(data: &WaveformData, threshold: f32) -> Vec<(f64, f64)> {
-    let mut regions = Vec::new();
-    let mut in_silence = false;
-    let mut silence_start = 0.0;
-
-    let time_per_sample = data.duration / data.samples.len() as f64;
-
-    for (i, &amplitude) in data.samples.iter().enumerate() {
-        let time = i as f64 * time_per_sample;
-
-        if amplitude < threshold && !in_silence {
-            silence_start = time;
-            in_silence = true;
-        } else if amplitude >= threshold && in_silence {
-            regions.push((silence_start, time));
-            in_silence = false;
-        }
-    }
-
-    // Close open silence region
-    if in_silence {
-        regions.push((silence_start, data.duration));
-    }
-
-    regions
 }

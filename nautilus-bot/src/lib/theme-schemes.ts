@@ -1,6 +1,6 @@
-export type ThemeAccessLevel = "basic" | "pro" | "friends";
+type ThemeAccessLevel = "basic" | "pro" | "friends";
 
-export interface ThemeSchemeOption {
+interface ThemeSchemeOption {
   value: string;
   label: string;
 }
@@ -33,7 +33,7 @@ export function themeSchemesForAccess(level: ThemeAccessLevel): ThemeSchemeOptio
   return [...BASIC_SCHEMES];
 }
 
-export function isKnownThemeScheme(value: string): boolean {
+function isKnownThemeScheme(value: string): boolean {
   if (value === "default") {
     return true;
   }

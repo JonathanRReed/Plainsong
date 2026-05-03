@@ -1,4 +1,4 @@
-export type DictationPhase =
+type DictationPhase =
   | "idle"
   | "recording"
   | "stopping"
@@ -6,7 +6,7 @@ export type DictationPhase =
   | "delivering"
   | "done"
   | "error";
-export type HotkeyEvent = "pressed" | "released" | "emergency_stop" | "watchdog_timeout";
+type HotkeyEvent = "pressed" | "released" | "emergency_stop" | "watchdog_timeout";
 
 export function nextDictationPhase(current: DictationPhase, event: HotkeyEvent): DictationPhase {
   if (current === "recording" && (event === "released" || event === "emergency_stop" || event === "watchdog_timeout")) {

@@ -18,10 +18,10 @@ import {
   Zap,
 } from "lucide-react";
 import {
-  checkSystemAudioAvailability,
   downloadAsrModels,
   getAsrProviders,
-  getLoopbackDeviceName,
+} from "@/lib/backend/asr";
+import {
   getPermissionDiagnostics,
   getSettings,
   openInstalledNautilusApp,
@@ -31,7 +31,11 @@ import {
   verifyMeetingSetup,
   type PermissionDiagnostics,
   type SetupVerificationResult,
-} from "@/lib/backend";
+} from "@/lib/backend/settings";
+import {
+  checkSystemAudioAvailability,
+  getLoopbackDeviceName,
+} from "@/lib/backend/recordings";
 import {
   defaultDictationShortcut,
   dictationInstruction,
@@ -509,7 +513,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       ? "Set up Nautilus the way you actually plan to use it."
       : step === "meeting-setup"
         ? "Meetings can be configured now or revisited later from Setup."
-        : `Step ${stepIndex + 1} of ${steps.length} — ${STEP_LABELS[step]}`;
+        : `Step ${stepIndex + 1} of ${steps.length}, ${STEP_LABELS[step]}`;
 
   const nextLabel =
     step === "meeting-setup" && meetingRouteReady === false

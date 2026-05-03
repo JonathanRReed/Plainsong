@@ -4,9 +4,9 @@ import {
   getRecording,
   getMeetingTranscriptDetails,
   getRecordingWaveform,
-  getSpeakers,
   getTranscript,
-} from "@/lib/backend";
+} from "@/lib/backend/recordings";
+import { getSpeakers } from "@/lib/backend/asr";
 import { useScopedRequestGuard } from "@/hooks/use-scoped-request-guard";
 import type {
   MeetingTranscriptDetails,

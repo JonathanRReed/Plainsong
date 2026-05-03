@@ -19,7 +19,7 @@ import { ActivationModal } from "@/components/activation-modal";
 import { NagModal, shouldShowNag } from "@/components/nag-modal";
 import { FirstRunWizard } from "@/components/first-run-wizard";
 import { ToastProvider, useToast } from "@/components/toast";
-import { validateLicense } from "@/lib/backend";
+import { validateLicense } from "@/lib/backend/license";
 import {
   MEETING_ONBOARDING_STORAGE_KEY,
   ONBOARDING_STORAGE_KEY,
@@ -31,7 +31,7 @@ import {
   OPEN_RECORDING_WORKSPACE_EVENT as OPEN_RECORDING_WORKSPACE_CUSTOM_EVENT,
   type MainViewId,
 } from "@/lib/navigation";
-import type { LicenseInfo } from "@/lib/backend";
+import type { LicenseInfo } from "@/lib/backend/license";
 import { usePeriodicLicenseCheck } from "@/hooks/use-periodic-license-check";
 
 const DashboardView = lazy(() =>
@@ -203,7 +203,7 @@ function App() {
         }
       })
       .catch((err) => {
-        // Electron not available or error – proceed in trial mode
+        // Electron not available or error, proceed in trial mode
         console.error("License validation failed:", err);
         setLicense(null);
         setLicenseChecked(true);
@@ -385,7 +385,7 @@ function App() {
                 </div>
 
                 {/* Dismissible nag (no license + trial expired) */}
-                {showNag && !license?.valid && (
+                {showNag && !license?.valid && license?.nagRequired && (
                   <NagModal onActivate={() => { setShowNag(false); setShowActivationModal(true); }} />
                 )}
 

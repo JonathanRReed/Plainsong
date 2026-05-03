@@ -2,44 +2,6 @@ use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DictationStateChangedEvent {
-    pub phase: String,
-    pub started_at_ms: Option<i64>,
-    pub message: Option<String>,
-    pub preview: Option<String>,
-    pub partial_text: Option<String>,
-    pub session_id: Option<u64>,
-    pub stop_reason: Option<String>,
-    pub outcome: Option<String>,
-    pub resolved_mode_preset: Option<String>,
-    pub resolved_custom_mode_id: Option<String>,
-    pub resolved_mode_label: Option<String>,
-    pub context_source: Option<String>,
-    pub insertion_mode: Option<String>,
-    pub app_target: Option<String>,
-    pub activation_matcher: Option<String>,
-    pub dictation_provider: Option<String>,
-    pub dictation_model_id: Option<String>,
-    pub requested_route: Option<String>,
-    pub resolved_route: Option<String>,
-    pub provider_model_label: Option<String>,
-    pub dictation_route_preference: Option<String>,
-    pub dictation_resolved_hosting: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MeetingRecordingStateChangedEvent {
-    pub phase: String,
-    pub recording_id: Option<String>,
-    pub started_at_ms: Option<i64>,
-    pub system_audio_active: Option<bool>,
-    pub consent_prompt_shown: Option<bool>,
-    pub message: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RecordingStatusChangedEvent {
     pub recording_id: String,
     pub status: String,

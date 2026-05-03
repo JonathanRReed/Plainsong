@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
-// Parakeet: native ONNX inference — sherpa-onnx format (encoder.onnx + tokens.txt)
+// Parakeet: native ONNX inference, sherpa-onnx format (encoder.onnx + tokens.txt)
 const PARAKEET_ONNX_NAMES: [&str; 1] = ["encoder.onnx"];
 const PARAKEET_VOCAB_NAMES: [&str; 1] = ["tokens.txt"];
 // Whisper Candle: Whisper Large V3 Turbo via Candle (no Python)
@@ -27,14 +27,13 @@ const DISTIL_REQUIRED_FILES: [&str; 4] = [
     "preprocessor_config.json",
 ];
 /// Manages multiple ASR providers
-#[allow(dead_code)]
 pub struct AsrManager {
     default_provider: RwLock<AsrProviderType>,
     selected_model_id: RwLock<String>,
     provider_model_ids: RwLock<HashMap<AsrProviderType, String>>,
-    /// Legacy global set — kept for provider-info display and backward-compat callers.
+    /// Legacy global set, kept for provider-info display and backward-compat callers.
     mlx_accelerated_providers: RwLock<HashSet<AsrProviderType>>,
-    /// Per-slot MLX flags — these are the authoritative source for routing.
+    /// Per-slot MLX flags, these are the authoritative source for routing.
     dictation_mlx_enabled: RwLock<bool>,
     meeting_mlx_enabled: RwLock<bool>,
     silence_skip_enabled: RwLock<bool>,
@@ -103,12 +102,15 @@ impl AsrManager {
 
         match provider_type {
             AsrProviderType::Parakeet => match candidate {
-                "parakeet-tdt-0.6b-v3" | "parakeet-ctc-0.6b" => "parakeet-ctc-0.6b".to_string(),
+                "parakeet-tdt-0.6b-v3" | "parakeet-tdt-0.6b-v2" => {
+                    "parakeet-tdt-0.6b-v3".to_string()
+                }
+                "parakeet-ctc-0.6b" => "parakeet-ctc-0.6b".to_string(),
                 "parakeet-ctc-1.1b" => "parakeet-ctc-1.1b".to_string(),
                 "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => {
                     "parakeet-tdt-ctc-110m".to_string()
                 }
-                _ => "parakeet-ctc-0.6b".to_string(),
+                _ => "parakeet-tdt-0.6b-v3".to_string(),
             },
             AsrProviderType::Voxtral => match candidate {
                 "voxtral-mini-4b" => "voxtral-local".to_string(),
@@ -412,7 +414,6 @@ impl AsrManager {
     }
 
     /// Get a provider by type - creates fresh instance each time
-    #[allow(dead_code)]
     pub async fn get_provider(&self, provider_type: AsrProviderType) -> Box<dyn AsrProvider> {
         let selected_model = self.provider_model_id(provider_type).await;
         Self::provider_with_model(provider_type, Some(selected_model.as_str()))
@@ -885,17 +886,6 @@ impl AsrManager {
         .await
     }
 
-    /// Transcribe with a specific provider
-    #[allow(dead_code)]
-    pub async fn transcribe_with_provider(
-        &self,
-        provider_type: AsrProviderType,
-        audio_path: &Path,
-    ) -> Result<TranscriptionResult> {
-        self.transcribe_inner(provider_type, Some(audio_path), None, None, None)
-            .await
-    }
-
     /// Get info for all providers (Parallelized)
     pub async fn get_all_providers_info(&self) -> Result<Vec<ProviderInfo>, String> {
         if let Some(cached) = self.provider_info_cache.read().await.clone() {
@@ -1069,7 +1059,6 @@ impl AsrManager {
     }
 
     /// Get models directory
-    #[allow(dead_code)]
     pub fn models_dir(&self) -> &PathBuf {
         &self.models_dir
     }
@@ -2405,6 +2394,25 @@ mod tests {
             "gpt-4o-mini-transcribe"
         );
         assert_eq!(selected_model_id(AsrProviderType::Groq), "whisper-large-v3");
+    }
+
+    #[tokio::test]
+    async fn parakeet_provider_preserves_recommended_v3_model_id() {
+        let manager = AsrManager::new();
+        manager
+            .set_provider_model_id(
+                AsrProviderType::Parakeet,
+                "parakeet-tdt-0.6b-v3".to_string(),
+            )
+            .await;
+
+        assert_eq!(
+            manager.provider_model_id(AsrProviderType::Parakeet).await,
+            "parakeet-tdt-0.6b-v3"
+        );
+
+        let provider = manager.get_provider(AsrProviderType::Parakeet).await;
+        assert_eq!(provider.model_info().version, "0.6b-v3");
     }
 
     #[test]

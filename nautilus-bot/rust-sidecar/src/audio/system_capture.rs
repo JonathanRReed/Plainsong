@@ -486,11 +486,6 @@ impl MixedAudioCapture {
             self.dropped_mixed_chunks.load(Ordering::Relaxed),
         )
     }
-
-    #[allow(dead_code)]
-    pub fn is_active(&self) -> bool {
-        self.is_capturing.load(Ordering::SeqCst)
-    }
 }
 
 impl Default for SystemAudioCapture {

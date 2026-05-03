@@ -1,6 +1,6 @@
 # Dictation Parity Artifact Summary
 
-Generated: 2026-04-09T22:43:34.310Z
+Generated: 2026-05-03T15:52:13.163Z
 
 ## Local evidence state
 

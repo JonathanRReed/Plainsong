@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 use std::{cell::RefCell, thread_local};
 
 // ---------------------------------------------------------------------------
-// UsefulSensors Moonshine — native ONNX inference, no Python required.
+// UsefulSensors Moonshine, native ONNX inference, no Python required.
 // Uses the official merged ONNX export: encoder_model.onnx + decoder_model_merged.onnx.
-// Input: raw 16 kHz f32 PCM (no mel preprocessing — Moonshine operates on
+// Input: raw 16 kHz f32 PCM (no mel preprocessing, Moonshine operates on
 // raw waveform directly). Tokenizer: SentencePiece BPE (32 768 tokens).
 // ---------------------------------------------------------------------------
 const MOONSHINE_BASE_MODEL_ID: &str = "moonshine-base";
@@ -411,7 +411,7 @@ fn run_moonshine_onnx(model_dir: &Path, audio_path: &Path) -> Result<String> {
                 )
             })?;
 
-            // logits shape: [1, n_tokens, vocab_size] — take last position
+            // logits shape: [1, n_tokens, vocab_size], take last position.
             let logits_array = dec_outputs[0]
                 .try_extract_array::<f32>()
                 .context("Failed to extract Moonshine logits")?;
@@ -504,9 +504,9 @@ impl AsrProvider for MoonshineProvider {
 
     fn description(&self) -> &str {
         if self.model_id == MOONSHINE_TINY_MODEL_ID {
-            "UsefulSensors Moonshine Tiny — native ONNX, ultra-low latency, English only, no Python."
+            "UsefulSensors Moonshine Tiny, native ONNX, ultra-low latency, English only, no Python."
         } else {
-            "UsefulSensors Moonshine Base — native ONNX, ultra-low latency, English only, no Python."
+            "UsefulSensors Moonshine Base, native ONNX, ultra-low latency, English only, no Python."
         }
     }
 

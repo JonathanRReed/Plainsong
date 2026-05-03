@@ -65,7 +65,7 @@ impl MelSpectrogram {
 
     /// Compute mel spectrogram.
     ///
-    /// Returns shape `[n_mels][n_frames]` — matches NeMo `processed_signal` after transposing to [n_mels, T].
+    /// Returns shape `[n_mels][n_frames]`, matching NeMo `processed_signal` after transposing to [n_mels, T].
     /// Uses snip_edges=False style frame calculation (centered frames, matches sherpa-onnx).
     pub fn compute(&self, samples: &[f32]) -> Vec<Vec<f32>> {
         // snip_edges=False: frames are centered, not snipped at edges
@@ -178,16 +178,6 @@ impl MelSpectrogram {
                     .collect()
             })
             .collect()
-    }
-
-    /// Return number of mel frames that would be produced for `n_samples` audio samples.
-    #[allow(dead_code)]
-    pub fn n_frames(&self, n_samples: usize) -> usize {
-        if n_samples >= self.win_length {
-            (n_samples - self.win_length) / self.hop_length + 1
-        } else {
-            0
-        }
     }
 }
 

@@ -22,11 +22,11 @@ import {
 import { CheckCircle2, AlertCircle, Info, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type ToastVariant = "success" | "error" | "info";
+type ToastVariant = "success" | "error" | "info";
 
 const TOAST_DURATION_MS = 3500;
 
-export interface Toast {
+interface Toast {
     id: string;
     message: string;
     variant: ToastVariant;

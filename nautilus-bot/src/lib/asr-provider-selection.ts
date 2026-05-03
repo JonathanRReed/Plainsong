@@ -1,7 +1,7 @@
 import type { AsrProviderInfo } from "@/types";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 
-export interface ProviderSelectionStatus {
+interface ProviderSelectionStatus {
   selectable: boolean;
   reason: string | null;
 }

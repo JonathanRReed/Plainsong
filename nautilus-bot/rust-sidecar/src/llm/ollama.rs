@@ -64,20 +64,42 @@ impl OllamaClient {
         Ok(models)
     }
 
-    /// Validate that a specific model is available
-    pub async fn validate_model(&self, model: &str) -> Result<bool> {
-        let models = self.list_models().await?;
-        Ok(models.iter().any(|m| m == model))
-    }
-
     /// Generate completion
     pub async fn generate(&self, model: &str, prompt: &str) -> Result<String> {
+        self.generate_inner(model, prompt, None, 0.7).await
+    }
+
+    async fn generate_with_format(
+        &self,
+        model: &str,
+        prompt: &str,
+        format: serde_json::Value,
+    ) -> Result<String> {
+        let response = self
+            .generate_inner(model, prompt, Some(format), 0.1)
+            .await?;
+
+        if response.trim().is_empty() {
+            return self.generate_inner(model, prompt, None, 0.1).await;
+        }
+
+        Ok(response)
+    }
+
+    async fn generate_inner(
+        &self,
+        model: &str,
+        prompt: &str,
+        format: Option<serde_json::Value>,
+        temperature: f32,
+    ) -> Result<String> {
         let request = GenerateRequest {
             model: model.to_string(),
             prompt: prompt.to_string(),
             stream: false,
+            format,
             options: Some(GenerationOptions {
-                temperature: 0.7,
+                temperature,
                 num_predict: 1024,
             }),
         };
@@ -119,7 +141,11 @@ impl OllamaClient {
 
         let start_time = std::time::Instant::now();
 
-        let response = self.generate(model, &prompt).await?;
+        let response = if let Some(format) = structured_format_for_query(query) {
+            self.generate_with_format(model, &prompt, format).await?
+        } else {
+            self.generate(model, &prompt).await?
+        };
 
         // Extract citations from response
         let citations = extract_citations(&response, transcript);
@@ -159,27 +185,6 @@ impl OllamaClient {
         );
 
         self.generate(model, &prompt).await
-    }
-
-    /// Generate a short descriptive title for a meeting
-    pub async fn generate_title(&self, transcript: &str, model: &str) -> Result<String> {
-        let snippet = &transcript[..transcript.len().min(1500)];
-        let prompt = format!(
-            "Generate a short, descriptive title (4-8 words) for this meeting or conversation. \
-            Return ONLY the title text, no quotes, no punctuation at the end, no explanation:\n\n{snippet}\n\nTitle:"
-        );
-        let raw = self.generate(model, &prompt).await?;
-        let title = raw
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .trim_matches('.')
-            .trim()
-            .to_string();
-        if title.is_empty() || title.len() > 120 {
-            return Err(anyhow::anyhow!("Generated title was empty or too long"));
-        }
-        Ok(title)
     }
 
     /// Extract action items
@@ -231,60 +236,6 @@ Action Items:"
 
         Ok(items)
     }
-
-    /// Identify speaker names from transcript using LLM
-    /// Returns a map of speaker identifiers to their likely names
-    pub async fn identify_speakers(
-        &self,
-        transcript: &str,
-        model: &str,
-    ) -> Result<std::collections::HashMap<String, String>> {
-        let prompt = format!(
-            "You are an expert at identifying speaker names from meeting transcripts. \
-Analyze the transcript and identify ALL unique speakers and their names.\n\n\
-Rules:\n\
-1. Look for self-introductions: 'This is [Name]', 'I am [Name]', 'My name is [Name]', '[Name] speaking'\n\
-2. Look for introductions of others: 'Here is [Name]', 'Next is [Name]', 'Now [Name] will speak'\n\
-3. Each DIFFERENT speaker gets a different number (speaker_1, speaker_2, etc.)\n\
-4. Only extract ACTUAL PERSON NAMES - ignore common words, test, audio, meeting, etc.\n\
-5. Names should be properly capitalized (e.g., 'Jonathan', 'Arioc', 'The Prime Time')\n\
-6. If a name is mentioned but not clearly a speaker introduction, don't assign it\n\n\
-Output format - list each speaker you identified:\n\
-speaker_1: [Name of first speaker]\n\
-speaker_2: [Name of second speaker]\n\n\
-If you can only identify one speaker, just output speaker_1.\n\
-If you cannot identify any speakers with confidence, output nothing.\n\n\
-Transcript:\n{transcript}\n\n\
-Speakers identified:"
-        );
-
-        let response = self.generate(model, &prompt).await?;
-
-        let mut speakers = std::collections::HashMap::new();
-        for line in response.lines() {
-            let line = line.trim();
-            if let Some((speaker_id, name)) = line.split_once(':') {
-                let speaker_id = speaker_id.trim().to_string();
-                let name = name.trim().to_string();
-                // Filter out obvious non-names
-                if !name.is_empty()
-                    && name.to_lowercase() != "none"
-                    && name.to_lowercase() != "unknown"
-                    && name.to_lowercase() != "speaker"
-                    && name.len() > 1
-                    && name
-                        .chars()
-                        .next()
-                        .map(|c| c.is_alphabetic())
-                        .unwrap_or(false)
-                {
-                    speakers.insert(speaker_id, name);
-                }
-            }
-        }
-
-        Ok(speakers)
-    }
 }
 
 impl Default for OllamaClient {
@@ -299,6 +250,8 @@ struct GenerateRequest {
     model: String,
     prompt: String,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<serde_json::Value>,
     options: Option<GenerationOptions>,
 }
 
@@ -338,4 +291,95 @@ fn extract_citations(response: &str, transcript: &str) -> Vec<Citation> {
     }
 
     citations
+}
+
+fn structured_format_for_query(query: &str) -> Option<serde_json::Value> {
+    let normalized = query.to_ascii_lowercase();
+    if !(normalized.contains("return json only") && normalized.contains("citations")) {
+        return None;
+    }
+
+    if normalized.contains("actionitems") {
+        return Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "actionItems": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task": { "type": "string" },
+                            "assignee": { "type": ["string", "null"] },
+                            "deadline": { "type": ["string", "null"] },
+                            "citations": {
+                                "type": "array",
+                                "items": citation_schema()
+                            }
+                        },
+                        "required": ["task", "assignee", "deadline", "citations"]
+                    }
+                }
+            },
+            "required": ["actionItems"]
+        }));
+    }
+
+    if normalized.contains("\"response\"") {
+        return Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "response": { "type": "string" },
+                "citations": {
+                    "type": "array",
+                    "items": citation_schema()
+                }
+            },
+            "required": ["response", "citations"]
+        }));
+    }
+
+    None
+}
+
+fn citation_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "recordingId": { "type": "string" },
+            "startTime": { "type": "number" },
+            "endTime": { "type": "number" },
+            "text": { "type": "string" },
+            "certainty": { "type": "number" }
+        },
+        "required": ["recordingId", "startTime", "endTime", "text", "certainty"]
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::structured_format_for_query;
+
+    #[test]
+    fn structured_format_detects_grounded_analysis_payload() {
+        let format = structured_format_for_query(
+            "Return JSON only with schema: {\"response\":\"string\",\"citations\":[]}",
+        )
+        .expect("schema");
+        assert!(format["properties"]["response"].is_object());
+        assert!(format["properties"]["citations"].is_object());
+    }
+
+    #[test]
+    fn structured_format_detects_grounded_action_items_payload() {
+        let format = structured_format_for_query(
+            "Return JSON only with schema: {\"actionItems\":[{\"citations\":[]}]}",
+        )
+        .expect("schema");
+        assert!(format["properties"]["actionItems"].is_object());
+    }
+
+    #[test]
+    fn structured_format_ignores_free_text_queries() {
+        assert!(structured_format_for_query("Summarize this transcript").is_none());
+    }
 }

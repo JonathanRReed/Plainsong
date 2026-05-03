@@ -175,11 +175,17 @@ function getMeetingVerificationResult() {
   };
 }
 
-vi.mock("@/lib/backend", () => ({
-  checkSystemAudioAvailability: vi.fn(async () => true),
-  downloadWhisperModel: vi.fn(async () => {}),
+vi.mock("@/lib/backend/asr", () => ({
+  downloadAsrModels: vi.fn(async () => {}),
   getAsrProviders: vi.fn(async () => providers),
+}));
+
+vi.mock("@/lib/backend/recordings", () => ({
+  checkSystemAudioAvailability: vi.fn(async () => true),
   getLoopbackDeviceName: vi.fn(async () => "BlackHole 2ch"),
+}));
+
+vi.mock("@/lib/backend/settings", () => ({
   getPermissionDiagnostics: vi.fn(async () => ({
     microphoneReady: true,
     microphonePermissionReady: true,
@@ -234,7 +240,7 @@ describe("FirstRunWizard", () => {
 
   it("completes the full onboarding in dictation-only mode", async () => {
     const onComplete = vi.fn();
-    const backend = await import("@/lib/backend");
+    const backend = await import("@/lib/backend/settings");
     const saveSettings = vi.mocked(backend.saveSettings);
 
     render(<FirstRunWizard onComplete={onComplete} />);
@@ -329,7 +335,7 @@ describe("FirstRunWizard", () => {
   });
 
   it("opens the matching macOS permission settings from the wizard", async () => {
-    const backend = await import("@/lib/backend");
+    const backend = await import("@/lib/backend/settings");
     const getPermissionDiagnostics = vi.mocked(backend.getPermissionDiagnostics);
     const openPermissionSettings = vi.mocked(backend.openPermissionSettings);
 
@@ -354,7 +360,7 @@ describe("FirstRunWizard", () => {
   });
 
   it("opens the installed app when the wizard detects the DMG copy", async () => {
-    const backend = await import("@/lib/backend");
+    const backend = await import("@/lib/backend/settings");
     const getPermissionDiagnostics = vi.mocked(backend.getPermissionDiagnostics);
     const openInstalledNautilusApp = vi.mocked(backend.openInstalledNautilusApp);
 

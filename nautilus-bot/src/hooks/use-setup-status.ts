@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { getAsrProviders } from "@/lib/backend/asr";
 import {
-  checkSystemAudioAvailability,
-  getAsrProviders,
-  getLoopbackDeviceName,
   getPermissionDiagnostics,
   getSettings,
   type PermissionDiagnostics,
-} from "@/lib/backend";
+} from "@/lib/backend/settings";
+import {
+  checkSystemAudioAvailability,
+  getLoopbackDeviceName,
+} from "@/lib/backend/recordings";
 import {
   isMeetingEligibleProvider,
   isMeetingEligibleModel,
@@ -15,7 +17,7 @@ import {
 import type { AsrProviderInfo, AsrProviderType } from "@/types";
 import type { Settings } from "@/types/settings";
 
-export interface SetupRouteStatus {
+interface SetupRouteStatus {
   providerType: AsrProviderType | null;
   modelId: string | null;
   provider: AsrProviderInfo | null;
@@ -24,7 +26,7 @@ export interface SetupRouteStatus {
   reason: string | null;
 }
 
-export interface SetupStatusSnapshot {
+interface SetupStatusSnapshot {
   settings: Settings | null;
   providers: AsrProviderInfo[];
   permissions: PermissionDiagnostics | null;

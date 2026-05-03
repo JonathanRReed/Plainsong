@@ -15,7 +15,7 @@ This matrix is the default source of truth for DP-02 in `docs/evals/dictation-pa
 
 | App | Status | Mode Used | Notes |
 | --- | --- | --- | --- |
-| Apple Notes | PENDING | auto | Core native text-field baseline for solo-professional dictation. |
+| Apple Notes | SUPPORTED | auto | Packaged insertion verified in `artifacts/qa/macos/app-matrix-insertion-apple-notes.md`. |
 | Google Docs (Chrome) | PENDING | auto | High-value browser editor; validate cursor focus recovery after hotkey release. |
 | Slack | PENDING | auto | High-frequency chat target; validate snippet expansions and punctuation consistency. |
 | Notion | PENDING | auto | High-frequency notes workspace; validate multiline insert behavior. |

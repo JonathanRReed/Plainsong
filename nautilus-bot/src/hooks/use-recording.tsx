@@ -12,11 +12,14 @@ import { invoke, listen } from "@/lib/electron";
 import {
   type DictationStartOptions,
   startDictation,
-  startRecording,
   stopDictation,
+} from "@/lib/backend/dictation";
+import {
+  startRecording,
   stopRecording,
-} from "@/lib/backend";
+} from "@/lib/backend/recordings";
 import { logger } from "@/lib/logger";
+import type { DictationStateChangedEvent as SharedDictationStateChangedEvent } from "@/features/dictation/runtime";
 
 interface RecordingState {
   isRecording: boolean;
@@ -24,20 +27,6 @@ interface RecordingState {
   recordingMode: "dictation" | "meeting" | null;
   duration: number;
   isSystemAudioActive: boolean;
-}
-
-interface DictationStateChangedEvent {
-  phase:
-    | "idle"
-    | "primed"
-    | "recording"
-    | "stopping"
-    | "transcribing"
-    | "delivering"
-    | "done"
-    | "error";
-  startedAtMs?: number | null;
-  sessionId?: number | null;
 }
 
 interface MeetingRecordingStateChangedEvent {
@@ -232,7 +221,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     let unlistenMeeting: (() => void) | undefined;
 
     const setup = async () => {
-      unlistenDictation = await listen<DictationStateChangedEvent>(
+      unlistenDictation = await listen<SharedDictationStateChangedEvent>(
         "dictation-state-changed",
         (event) => {
           const payload = event.payload;
@@ -330,7 +319,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const id = setInterval(() => {
       if (stateRef.current.recordingMode === "dictation") {
-        void invoke<DictationStateChangedEvent>("get_dictation_overlay_state")
+        void invoke<SharedDictationStateChangedEvent>("get_dictation_overlay_state")
           .then((overlayState) => {
             if (
               overlayState.phase === "idle" ||

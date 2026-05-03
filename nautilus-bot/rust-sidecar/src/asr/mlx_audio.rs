@@ -610,7 +610,7 @@ pub fn mapped_model_for_visible_route(
             "large-v3-turbo" => Some("mlx-community/whisper-large-v3-turbo-asr-fp16"),
             _ => None,
         },
-        // parakeet-ctc-0.6b is the v3 multilingual model; legacy 110m has no MLX equivalent
+        // Parakeet TDT 0.6B v3 maps to the MLX community conversion; legacy 110m has no MLX equivalent.
         AsrProviderType::Parakeet => match model_id.trim() {
             "parakeet-ctc-0.6b" | "parakeet-tdt-0.6b-v3" => {
                 Some("mlx-community/parakeet-tdt-0.6b-v3")

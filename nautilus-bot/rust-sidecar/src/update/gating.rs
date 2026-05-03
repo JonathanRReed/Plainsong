@@ -57,7 +57,7 @@ fn is_trial_active(license: &LicenseState) -> bool {
     };
 
     let days_elapsed = (chrono::Utc::now() - first_run).num_days();
-    days_elapsed < 30
+    (0..30).contains(&days_elapsed)
 }
 
 /// Check if the user can use the beta channel specifically
@@ -117,6 +117,19 @@ mod tests {
     fn test_expired_trial_cannot_check() {
         let state = create_test_state(Tier::None, "", "", 35); // 35 days, trial expired
         assert!(!can_check_for_updates(&state, UpdateChannel::Stable));
+    }
+
+    #[test]
+    fn test_future_dated_trial_cannot_check_stable() {
+        let state = create_test_state(Tier::None, "", "", -5);
+        assert!(!can_check_for_updates(&state, UpdateChannel::Stable));
+    }
+
+    #[test]
+    fn test_future_dated_trial_cannot_use_beta() {
+        let state = create_test_state(Tier::FriendsClub, "", "", -5);
+        assert!(!can_use_beta_channel(&state));
+        assert!(!can_check_for_updates(&state, UpdateChannel::Beta));
     }
 
     #[test]

@@ -205,7 +205,13 @@ impl BackupManager {
             BackupType::Incremental => "incremental",
             BackupType::Settings => "settings",
         };
-        let backup_id = format!("{}_{}", backup_prefix, timestamp.format("%Y%m%d_%H%M%S"));
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let backup_id = format!(
+            "{}_{}_{}",
+            backup_prefix,
+            timestamp.format("%Y%m%d_%H%M%S"),
+            &nonce[..8]
+        );
         let backup_path = backup_dir.join(&backup_id);
         tokio::fs::create_dir_all(&backup_path).await?;
         let mut components = Vec::new();
@@ -1401,6 +1407,13 @@ mod tests {
     fn backup_id_accepts_expected_characters() {
         let value = validate_backup_id("backup_20260219_154500").expect("valid backup id");
         assert_eq!(value, "backup_20260219_154500");
+    }
+
+    #[test]
+    fn backup_id_accepts_nonce_suffix() {
+        let value = validate_backup_id("settings_20260502_223442_a1b2c3d4")
+            .expect("valid backup id with nonce");
+        assert_eq!(value, "settings_20260502_223442_a1b2c3d4");
     }
 
     #[test]
