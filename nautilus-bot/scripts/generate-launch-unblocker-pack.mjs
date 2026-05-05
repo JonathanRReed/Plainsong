@@ -60,6 +60,7 @@ const audit = readJson("artifacts/launch-completion-audit.json");
 const launchReport = readJson("artifacts/launch-readiness-report.json");
 const cloudPreflight = readJson("artifacts/cloud-asr-preflight.json");
 const licensePreflight = readJson("artifacts/qa/macos/licensing-activate-deactivate-live.json");
+const releaseCredentialPreflight = readJson("artifacts/release-credential-preflight.json");
 const appPreflight = readJson("artifacts/qa/macos/app-matrix-preflight.json");
 const appMatrixGate = readJson("artifacts/dictation-app-matrix-gate.json");
 const windowsHandoff = readJson("artifacts/windows-packaged-qa-handoff.json");
@@ -87,6 +88,23 @@ const licenseSecret = {
   present: Boolean(licensePreflight.requiredEnvPresent),
   required: true,
 };
+const releaseCredentialRows = [
+  {
+    area: "macOS signing and notarization",
+    ready: Boolean(releaseCredentialPreflight.macOS?.ready),
+    artifact: "artifacts/release-credential-preflight.md",
+  },
+  {
+    area: "Windows signing",
+    ready: Boolean(releaseCredentialPreflight.windows?.ready),
+    artifact: "artifacts/release-credential-preflight.md",
+  },
+  {
+    area: "Draft publishing token",
+    ready: Boolean(releaseCredentialPreflight.publish?.ready),
+    artifact: "artifacts/release-credential-preflight.md",
+  },
+];
 
 const macosScratchTargets = (appPreflight.rows ?? [])
   .filter((row) => row.status === "PENDING" && row.canAttemptManualCapture)
@@ -176,6 +194,7 @@ const pack = {
     inputTemplate: "docs/launch-inputs.template.env",
     cloudPreflight: "artifacts/cloud-asr-preflight.json",
     licensePreflight: "artifacts/qa/macos/licensing-activate-deactivate-live.json",
+    releaseCredentialPreflight: "artifacts/release-credential-preflight.json",
     appMatrixGate: "artifacts/dictation-app-matrix-gate.json",
     macosAppMatrixPreflight: "artifacts/qa/macos/app-matrix-preflight.json",
     windowsHandoff: "artifacts/windows-packaged-qa-handoff.json",
@@ -189,6 +208,13 @@ const pack = {
   requiredInputs: {
     cloudSecrets,
     licenseSecret,
+    releaseCredentials: {
+      status: releaseCredentialPreflight.status,
+      macOSReady: Boolean(releaseCredentialPreflight.macOS?.ready),
+      windowsReady: Boolean(releaseCredentialPreflight.windows?.ready),
+      publishReady: Boolean(releaseCredentialPreflight.publish?.ready),
+      rows: releaseCredentialRows,
+    },
     qaSummary: {
       total: qaBundle.summary?.total ?? 0,
       byPlatform: qaBundle.summary?.byPlatform ?? {},
@@ -215,6 +241,7 @@ const pack = {
     "bun run qa:cloud-asr:smoke",
     "bun run gate:license-live:preflight",
     "bun run qa:packaged:macos:license-live",
+    "bun run gate:release-credentials:preflight",
     "bun run gate:blockers:refresh",
     "bun run gate:completion-audit",
   ],
@@ -224,6 +251,13 @@ const pack = {
 
 const cloudLines = cloudSecrets
   .map((entry) => `| ${entry.name} | ${entry.present ? "yes" : "no"} |`)
+  .join("\n");
+
+const releaseCredentialLines = releaseCredentialRows
+  .map(
+    (entry) =>
+      `| ${entry.area} | ${entry.ready ? "yes" : "no"} | \`${entry.artifact}\` |`
+  )
   .join("\n");
 
 const scratchLines = macosScratchTargets.length
@@ -278,6 +312,18 @@ const inputTemplateLines = [
   "# Disposable QA license key. Required for bun run qa:packaged:macos:license-live.",
   `${licenseSecret.name}=`,
   "",
+  "# Release signing and publishing inputs. Required for signed release-candidate validation.",
+  "CSC_LINK=",
+  "CSC_NAME=",
+  "CSC_KEY_PASSWORD=",
+  "APPLE_ID=",
+  "APPLE_APP_SPECIFIC_PASSWORD=",
+  "APPLE_TEAM_ID=",
+  "WIN_CSC_LINK=",
+  "WIN_CSC_KEY_PASSWORD=",
+  "WIN_PUBLISHER_NAME=",
+  "GH_TOKEN=",
+  "",
   "# Disposable scratch targets for macOS app insertion QA.",
   "# Use document, channel, note, draft, or field names that are safe to paste into.",
   "# Do not use customer, private, production, or real conversation targets.",
@@ -291,6 +337,7 @@ const inputTemplateLines = [
   "# bun run qa:cloud-asr:smoke",
   "# bun run gate:license-live:preflight",
   "# bun run qa:packaged:macos:license-live",
+  "# bun run gate:release-credentials:preflight",
   "# bun run gate:blockers:refresh",
   "# bun run gate:completion-audit",
 ];
@@ -314,6 +361,7 @@ This pack is generated from the current completion audit and preflight artifacts
 - Input template: \`${pack.sourceEvidence.inputTemplate}\`
 - Cloud preflight: \`${pack.sourceEvidence.cloudPreflight}\`
 - License preflight: \`${pack.sourceEvidence.licensePreflight}\`
+- Release credential preflight: \`${pack.sourceEvidence.releaseCredentialPreflight}\`
 - App matrix gate: \`${pack.sourceEvidence.appMatrixGate}\`
 - macOS app matrix preflight: \`${pack.sourceEvidence.macosAppMatrixPreflight}\`
 - Windows handoff: \`${pack.sourceEvidence.windowsHandoff}\`
@@ -338,6 +386,14 @@ ${cloudLines}
 | Env var | Present |
 | --- | --- |
 | ${licenseSecret.name} | ${licenseSecret.present ? "yes" : "no"} |
+
+## Release Credentials
+
+Overall status: ${pack.requiredInputs.releaseCredentials.status}
+
+| Area | Ready | Artifact |
+| --- | --- | --- |
+${releaseCredentialLines}
 
 ## Packaged QA Summary
 

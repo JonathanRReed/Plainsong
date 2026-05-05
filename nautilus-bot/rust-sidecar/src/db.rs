@@ -40,6 +40,10 @@ impl Database {
         #[cfg(feature = "sqlcipher")]
         if let Some(key) = _key {
             let hex_key = hex::encode(key.as_bytes());
+            // Validate hex encoding to prevent SQL injection
+            if !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(anyhow::anyhow!("Invalid hex encoding in database key"));
+            }
             conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_key))?;
             // Verify encryption is working
             conn.execute("SELECT count(*) FROM sqlite_master;", [])?;
@@ -75,6 +79,10 @@ impl Database {
     #[cfg(feature = "sqlcipher")]
     pub fn change_key(&self, new_key: &str) -> Result<()> {
         let hex_key = hex::encode(new_key.as_bytes());
+        // Validate hex encoding to prevent SQL injection
+        if !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(anyhow::anyhow!("Invalid hex encoding in database key"));
+        }
         self.conn
             .execute_batch(&format!("PRAGMA rekey = \"x'{}'\";", hex_key))?;
         tracing::info!("Database encryption key changed");
@@ -160,16 +168,28 @@ impl Database {
         let rows = stmt.query_map(params![limit as i64], |row| {
             let payload_json: String = row.get(5)?;
             let created_at: String = row.get(6)?;
+            let payload = match serde_json::from_str(&payload_json) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("Failed to parse runtime event payload for event {}: {}", row.get::<_, i64>(0).unwrap_or(0), e);
+                    serde_json::json!({})
+                }
+            };
+            let created_at = match chrono::DateTime::parse_from_rfc3339(&created_at) {
+                Ok(dt) => dt.with_timezone(&Utc),
+                Err(e) => {
+                    tracing::warn!("Failed to parse created_at for event {}: {}", row.get::<_, i64>(0).unwrap_or(0), e);
+                    Utc::now()
+                }
+            };
             Ok(RuntimeEventRecord {
                 id: row.get(0)?,
                 event_type: row.get(1)?,
                 surface: row.get(2)?,
                 session_id: row.get(3)?,
                 recording_id: row.get(4)?,
-                payload: serde_json::from_str(&payload_json).unwrap_or(serde_json::json!({})),
-                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
+                payload,
+                created_at,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()

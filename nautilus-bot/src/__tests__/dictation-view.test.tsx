@@ -376,6 +376,7 @@ describe("DictationView modes", () => {
     render(<DictationView />);
 
     await screen.findByText("Recommended flow profiles");
+    expect(screen.queryByText(/App undefined/i)).not.toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: /install and use/i })[0]);
 
     await waitFor(() => {
@@ -392,6 +393,8 @@ describe("DictationView modes", () => {
     expect(latestSettings.transcription.dictationCustomModes[0].activationAppMatcher).toBe("Slack");
     expect(latestSettings.transcription.dictationCustomModes[0].customPrompt).toMatch(/slack reply/i);
     expect(latestSettings.transcription.dictationContextSource).toBe("application_context");
+    expect(latestSettings.transcription.dictationProvider).toBe("distil_whisper");
+    expect(latestSettings.transcription.dictationModelId).toBe("distil-large-v3.5");
   });
 
   it("refreshes dictation history when a dictation result event arrives", async () => {

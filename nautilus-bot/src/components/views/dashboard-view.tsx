@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -36,7 +36,6 @@ import {
   Loader2,
   Mic,
   Rocket,
-  Sparkles,
   CheckCircle2,
   ArrowRight,
   Search,
@@ -45,7 +44,6 @@ import {
   Building2,
   Zap,
 } from "lucide-react";
-import { AnimatedGradientText } from "@/components/ui/animated-gradient-text";
 import { TierBadge } from "@/components/tier-badge";
 
 const QUICK_STATS = [
@@ -101,6 +99,7 @@ export function DashboardView() {
   const [memoryMessages, setMemoryMessages] = useState<MeetingChatMessage[]>([]);
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
+  const currentRequestIdRef = useRef<number>(0);
   const [relationshipMemory, setRelationshipMemory] = useState<RelationshipMemory | null>(null);
   const [relationshipMemoryLoading, setRelationshipMemoryLoading] = useState(true);
   const [relationshipMemoryError, setRelationshipMemoryError] = useState<string | null>(null);
@@ -186,10 +185,20 @@ export function DashboardView() {
   const runMemoryQuery = async (queryOverride?: string) => {
     const query = (queryOverride ?? memoryQuery).trim();
     if (!query) return;
+    
+    const requestId = Date.now();
+    currentRequestIdRef.current = requestId;
+    
     setMemoryLoading(true);
     setMemoryError(null);
     try {
       const result = await askMemory(buildThreadedMemoryQuery(query));
+      
+      // Check if this is still the current request
+      if (currentRequestIdRef.current !== requestId) {
+        return; // Abandon stale result
+      }
+      
       const timestamp = new Date().toISOString();
       setMemoryMessages((current) => [
         ...current,
@@ -212,9 +221,15 @@ export function DashboardView() {
         setMemoryQuery("");
       }
     } catch (error) {
-      setMemoryError(error instanceof Error ? error.message : String(error));
+      // Only update error if this is still the current request
+      if (currentRequestIdRef.current === requestId) {
+        setMemoryError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      setMemoryLoading(false);
+      // Only update loading state if this is still the current request
+      if (currentRequestIdRef.current === requestId) {
+        setMemoryLoading(false);
+      }
     }
   };
 
@@ -264,14 +279,110 @@ export function DashboardView() {
         subtitle="Dictation, meetings, and follow-through in one place"
         actions={
           <Button onClick={() => requestMainView("dictation")}>
-            <Mic className="mr-2 h-4 w-4" />
+            <Mic data-icon="inline-start" />
             Start Dictation
           </Button>
         }
       />
 
       <ScrollArea className="flex-1">
-        <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-6 py-6 lg:px-8">
+        <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-6 py-6 lg:px-8">
+          <section className="grid grid-cols-1 gap-5 xl:grid-cols-12">
+            <Card className="surface-panel overflow-hidden xl:col-span-8">
+              <CardContent className="grid gap-6 p-5 sm:p-6 lg:grid-cols-[minmax(0,1fr)_260px]">
+                <div className="min-w-0">
+                  <div className="mb-5 flex flex-wrap items-center gap-2">
+                    <Badge variant={dictationReady && meetingReady ? "success" : "warning"}>
+                      {setupLoading ? "Checking setup" : dictationReady && meetingReady ? "Ready" : "Needs attention"}
+                    </Badge>
+                    <Badge variant="outline">{entitlement.proEnabled ? "Pro memory" : "Trial workspace"}</Badge>
+                  </div>
+                  <p className="text-2xl font-semibold tracking-tight text-card-foreground sm:text-3xl">
+                    {setupHeadline}
+                  </p>
+                  <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">
+                    Capture voice, review the result, and move the next action forward without leaving the workspace.
+                  </p>
+                  <div className="mt-6 flex flex-wrap gap-2">
+                    <Button onClick={() => requestMainView("dictation")}>
+                      <Mic data-icon="inline-start" />
+                      Open dictation
+                    </Button>
+                    <Button variant="outline" onClick={() => requestMainView("recordings")}>
+                      <FileAudio data-icon="inline-start" />
+                      Open meetings
+                    </Button>
+                    <Button variant="ghost" onClick={() => requestMainView("setup")}>
+                      <Rocket data-icon="inline-start" />
+                      Setup
+                    </Button>
+                  </div>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
+                  {[
+                    { label: "Dictation", ready: dictationReady, action: () => requestOnboarding("dictation") },
+                    { label: "Meetings", ready: meetingReady, action: () => requestOnboarding("meetings") },
+                    { label: "Local memory", ready: entitlement.proEnabled, action: () => requestMainView("settings") },
+                  ].map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      className="command-card flex items-center justify-between gap-3 rounded-xl px-3 py-3 text-left"
+                      onClick={item.ready ? undefined : item.action}
+                    >
+                      <span className="min-w-0">
+                        <span className="block text-sm font-medium text-card-foreground">{item.label}</span>
+                        <span className="mt-0.5 block text-xs text-muted-foreground">
+                          {item.ready ? "Ready" : "Review"}
+                        </span>
+                      </span>
+                      {item.ready ? (
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
+                      ) : (
+                        <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="surface-panel-subtle xl:col-span-4">
+              <CardContent className="flex h-full flex-col gap-4 p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="quiet-label">Today</p>
+                    <p className="mt-1 text-lg font-semibold tracking-tight">Capture overview</p>
+                  </div>
+                  <div className="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                    <Brain className="h-4 w-4" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="rounded-xl border border-border/60 bg-background/55 p-3">
+                    <p className="text-xl font-semibold">{recordings.length}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Meetings</p>
+                  </div>
+                  <div className="rounded-xl border border-border/60 bg-background/55 p-3">
+                    <p className="text-xl font-semibold">{projects.length}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Projects</p>
+                  </div>
+                  <div className="rounded-xl border border-border/60 bg-background/55 p-3">
+                    <p className="text-xl font-semibold">{Math.floor(totalDuration / 3600)}h</p>
+                    <p className="mt-1 text-xs text-muted-foreground">Audio</p>
+                  </div>
+                </div>
+                <Separator />
+                <div className="flex items-start gap-3 rounded-xl bg-muted/35 p-3">
+                  <Zap className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+                  <p className="text-sm leading-6 text-muted-foreground">
+                    Dictation stays first. Meetings add memory, action items, and follow-through.
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          </section>
+
           {/* Quick Stats */}
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             {QUICK_STATS.map((stat) => {
@@ -283,24 +394,20 @@ export function DashboardView() {
                     ? String(recordings.length)
                     : stat.label === "Duration"
                       ? `${Math.floor(totalDuration / 3600)}h ${Math.floor((totalDuration % 3600) / 60)}m`
-                      : (
-                          <AnimatedGradientText colorFrom="#34d399" colorTo="#10b981" className="text-2xl font-bold">
-                            4x faster
-                          </AnimatedGradientText>
-                        );
+                      : "4x";
               const supportingCopy = stat.label === "Dictation Speed" ? "than typing" : null;
               return (
                 <Card
                   key={stat.label}
                   variant="interactive"
-                  className="overflow-hidden border-border/80 bg-linear-to-br from-card via-card to-muted/30"
+                  className="overflow-hidden border-border/70 bg-card/78"
                 >
-                  <CardContent className="flex min-h-40 flex-col gap-6 p-5">
+                  <CardContent className="flex min-h-32 flex-col gap-5 p-5">
                     <div className="flex items-start justify-between gap-3">
-                      <p className="text-xs font-medium uppercase tracking-[0.2em] text-muted-foreground">
+                      <p className="quiet-label">
                         {stat.label}
                       </p>
-                      <div className={cn("flex size-10 items-center justify-center rounded-2xl", stat.accentClass)}>
+                      <div className={cn("flex size-9 items-center justify-center rounded-xl", stat.accentClass)}>
                         <Icon className="h-4 w-4" />
                       </div>
                     </div>
@@ -317,116 +424,59 @@ export function DashboardView() {
           </div>
 
           {/* Setup Status */}
-          <div className="grid gap-4 lg:grid-cols-2">
-            <Card className={cn(
-              "transition-colors hover-lift border-border/80 bg-card",
-              dictationReady ? "shadow-[0_0_0_1px_hsl(var(--success)/0.12)]" : "shadow-[0_0_0_1px_hsl(var(--warning)/0.16)]"
-            )}>
-              <CardContent className="flex min-h-32 flex-col gap-4 p-5 sm:flex-row sm:items-center">
-                <div className={cn(
-                  "flex size-12 shrink-0 items-center justify-center rounded-2xl",
-                  dictationReady ? "bg-success/15 text-success" : "bg-warning/15 text-warning"
-                )}>
-                  {setupLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : dictationReady ? <CheckCircle2 className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-base font-medium text-card-foreground">Dictation</p>
-                  <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                    {setupLoading ? "Checking…" : dictationReady ? "Ready to go" : "Needs setup"}
-                  </p>
-                </div>
-                {!setupLoading && !dictationReady && (
-                  <Button size="sm" variant="outline" onClick={() => requestOnboarding("dictation")}>
-                    Fix
-                  </Button>
-                )}
-              </CardContent>
-            </Card>
-            <Card className={cn(
-              "transition-colors hover-lift border-border/80 bg-card",
-              meetingReady ? "shadow-[0_0_0_1px_hsl(var(--success)/0.12)]" : "shadow-[0_0_0_1px_hsl(var(--warning)/0.16)]"
-            )}>
-              <CardContent className="flex min-h-32 flex-col gap-4 p-5 sm:flex-row sm:items-center">
-                <div className={cn(
-                  "flex size-12 shrink-0 items-center justify-center rounded-2xl",
-                  meetingReady ? "bg-success/15 text-success" : "bg-warning/15 text-warning"
-                )}>
-                  {setupLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : meetingReady ? <CheckCircle2 className="h-5 w-5" /> : <FileAudio className="h-5 w-5" />}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <p className="text-base font-medium text-card-foreground">Meetings</p>
-                    {meetingReady && <Badge variant="success" size="sm">Ready</Badge>}
-                    {!setupLoading && !meetingReady && <Badge variant="warning" size="sm">Setup needed</Badge>}
+          <section className="surface-panel-subtle grid gap-3 rounded-2xl p-4 md:grid-cols-[1fr_auto] md:items-center">
+            <div>
+              <p className="quiet-label">Readiness</p>
+              <p className="mt-1 text-base font-medium text-card-foreground">
+                Daily capture checks stay close to the workflows they affect.
+              </p>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {[
+                {
+                  label: "Dictation",
+                  ready: dictationReady,
+                  icon: Mic,
+                  action: () => requestOnboarding("dictation"),
+                },
+                {
+                  label: "Meetings",
+                  ready: meetingReady,
+                  icon: FileAudio,
+                  action: () => requestOnboarding("meetings"),
+                },
+              ].map((item) => {
+                const Icon = item.icon;
+                return (
+                  <div
+                    key={item.label}
+                    className="flex min-w-56 items-center gap-3 rounded-xl border border-border/70 bg-background/55 px-3 py-3"
+                  >
+                    <div
+                      className={cn(
+                        "flex size-9 shrink-0 items-center justify-center rounded-lg",
+                        item.ready ? "bg-success/15 text-success" : "bg-warning/15 text-warning"
+                      )}
+                    >
+                      {setupLoading ? <Loader2 className="size-4 animate-spin" /> : item.ready ? <CheckCircle2 className="size-4" /> : <Icon className="size-4" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-card-foreground">{item.label}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {setupLoading ? "Checking" : item.ready ? "Ready" : "Needs setup"}
+                      </p>
+                    </div>
+                    {!setupLoading && !item.ready && (
+                      <Button size="sm" variant="outline" onClick={item.action}>
+                        Fix
+                      </Button>
+                    )}
                   </div>
-                  <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                    {setupLoading ? "Checking…" : meetingReady ? "Ready to go" : "Needs setup"}
-                  </p>
-                </div>
-                {!setupLoading && !meetingReady && (
-                  <Button size="sm" variant="outline" onClick={() => requestOnboarding("meetings")}>
-                    Fix
-                  </Button>
-                )}
-              </CardContent>
-            </Card>
-          </div>
+                );
+              })}
+            </div>
+          </section>
 
-          {/* Daily Cockpit */}
-          <Card variant="default" className="hover-lift border-border/80">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Sparkles className="h-5 w-5 text-primary" />
-                Daily Cockpit
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="flex flex-col gap-4">
-              <div className="grid gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)]">
-                <div className="flex min-w-0 flex-col gap-4">
-                  <div>
-                    <p className="text-xl font-semibold tracking-tight text-card-foreground">{setupHeadline}</p>
-                    <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-                      Open dictation, meetings, or setup from one place.
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button onClick={() => requestMainView("dictation")}>
-                      <Mic className="mr-2 h-4 w-4" />
-                      Open dictation
-                    </Button>
-                    <Button variant="outline" onClick={() => requestMainView("recordings")}>
-                      <FileAudio className="mr-2 h-4 w-4" />
-                      Open meetings
-                    </Button>
-                    <Button variant="outline" onClick={() => requestMainView("setup")}>
-                      <Rocket className="mr-2 h-4 w-4" />
-                      Open setup
-                    </Button>
-                  </div>
-                </div>
-                <div className="flex flex-col gap-3 rounded-2xl border border-border/70 bg-muted/25 p-4">
-                  <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                    Typical workflow
-                  </p>
-                  <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
-                    <div className="rounded-xl border border-border/70 bg-background/70 px-3 py-3">
-                      <p className="text-sm font-medium">1. Capture</p>
-                      <p className="mt-1 text-xs text-muted-foreground">Dictate anywhere or run a meeting with notes live.</p>
-                    </div>
-                    <div className="rounded-xl border border-border/70 bg-background/70 px-3 py-3">
-                      <p className="text-sm font-medium">2. Review</p>
-                      <p className="mt-1 text-xs text-muted-foreground">Use summaries, action items, memory, and edits to confirm the result.</p>
-                    </div>
-                    <div className="rounded-xl border border-border/70 bg-background/70 px-3 py-3">
-                      <p className="text-sm font-medium">3. Share</p>
-                      <p className="mt-1 text-xs text-muted-foreground">Copy the follow-up, task list, or next agenda before context fades.</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-          
           {/* Second Brain - Memory */}
           <Card className={cn(!entitlement.proEnabled && "opacity-60", "border-primary/20 hover-lift")}>
             <CardHeader>

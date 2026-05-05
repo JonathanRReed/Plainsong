@@ -2,6 +2,8 @@ import { ipcMain, type IpcMainInvokeEvent } from "electron";
 import { spawn, ChildProcess } from "child_process";
 import { createInterface } from "readline";
 import { randomUUID } from "crypto";
+import { getCommandTimeoutMs } from "./ipc-command-policy";
+import { buildSidecarEnv } from "./sidecar-env";
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -24,6 +26,7 @@ type PendingRequest = {
   args?: unknown;
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
+  timeout: NodeJS.Timeout;
 };
 
 type EventCallback = (eventName: string, payload: unknown) => void;
@@ -198,6 +201,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "verify_system_audio_setup",
 ]);
 
+
 export class IpcBridge {
   private sidecarPath: string;
   private process: ChildProcess | null = null;
@@ -240,7 +244,7 @@ export class IpcBridge {
 
     this.process = spawn(this.sidecarPath, [], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
+      env: buildSidecarEnv(process.env),
     });
 
     const rl = createInterface({ input: this.process.stdout! });
@@ -264,15 +268,21 @@ export class IpcBridge {
       if (!this.shuttingDown && this.restartAttempts < this.maxRestarts) {
         const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
         this.restartAttempts++;
-        console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts})`);
+        console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
         setTimeout(() => this.spawnSidecar(), delay);
       } else if (this.restartAttempts >= this.maxRestarts) {
         console.error("[sidecar] max restarts reached, giving up");
       }
+      // Reject all pending requests with a clear error message
+      const pendingCount = this.pending.size;
       for (const [, pending] of this.pending) {
-        pending.reject(new Error("Sidecar process exited"));
+        clearTimeout(pending.timeout);
+        pending.reject(new Error(`Sidecar process exited (code=${code}, signal=${signal})`));
       }
       this.pending.clear();
+      if (pendingCount > 0) {
+        console.warn(`[sidecar] rejected ${pendingCount} pending request(s) due to process exit`);
+      }
     });
 
     this.process.on("spawn", () => {
@@ -296,6 +306,7 @@ export class IpcBridge {
       const pending = this.pending.get(msg.id);
       if (!pending) return;
       this.pending.delete(msg.id);
+      clearTimeout(pending.timeout);
       if (msg.error) {
         pending.reject(new Error(msg.error.message));
       } else {
@@ -315,19 +326,22 @@ export class IpcBridge {
   invokeSidecar(command: string, args?: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const id = randomUUID();
-      this.pending.set(id, { command, args, resolve, reject });
+      const timeout = setTimeout(() => {
+        const pending = this.pending.get(id);
+        if (pending) {
+          this.pending.delete(id);
+          reject(new Error(`Command timed out after ${getCommandTimeoutMs(command)}ms: ${command}`));
+        }
+      }, getCommandTimeoutMs(command));
+      this.pending.set(id, { command, args, resolve, reject, timeout });
       try {
         this.sendToSidecar({ jsonrpc: "2.0", id, method: command, params: args ?? {} });
       } catch (e) {
+        // Clear timeout before deleting to prevent race condition
+        clearTimeout(timeout);
         this.pending.delete(id);
         reject(e);
       }
-      setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          reject(new Error(`Command timed out: ${command}`));
-        }
-      }, 60_000);
     });
   }
 

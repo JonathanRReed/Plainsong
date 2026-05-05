@@ -136,6 +136,10 @@ pub struct DictationStartOptions {
     #[serde(default)]
     pub requested_model_id: Option<String>,
     #[serde(default)]
+    pub actual_provider: Option<String>,
+    #[serde(default)]
+    pub actual_model_id: Option<String>,
+    #[serde(default)]
     pub resolved_route: Option<String>,
     #[serde(default)]
     pub provider_model_label: Option<String>,
@@ -171,6 +175,8 @@ impl Default for DictationStartOptions {
             live_preview_enabled: None,
             requested_provider: None,
             requested_model_id: None,
+            actual_provider: None,
+            actual_model_id: None,
             resolved_route: None,
             provider_model_label: None,
             resolved_hosting: None,

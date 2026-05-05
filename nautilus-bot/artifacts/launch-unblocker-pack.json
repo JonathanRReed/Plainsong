@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-03T15:53:35.490Z",
+  "generatedAt": "2026-05-05T15:23:44.586Z",
   "status": "BLOCKED",
   "completionReadyExcludingSigningAndPublishing": false,
   "sourceEvidence": {
@@ -9,6 +9,7 @@
     "inputTemplate": "docs/launch-inputs.template.env",
     "cloudPreflight": "artifacts/cloud-asr-preflight.json",
     "licensePreflight": "artifacts/qa/macos/licensing-activate-deactivate-live.json",
+    "releaseCredentialPreflight": "artifacts/release-credential-preflight.json",
     "appMatrixGate": "artifacts/dictation-app-matrix-gate.json",
     "macosAppMatrixPreflight": "artifacts/qa/macos/app-matrix-preflight.json",
     "windowsHandoff": "artifacts/windows-packaged-qa-handoff.json",
@@ -57,6 +58,29 @@
       "name": "NAUTILUS_QA_LICENSE_KEY",
       "present": false,
       "required": true
+    },
+    "releaseCredentials": {
+      "status": "BLOCKED",
+      "macOSReady": false,
+      "windowsReady": false,
+      "publishReady": false,
+      "rows": [
+        {
+          "area": "macOS signing and notarization",
+          "ready": false,
+          "artifact": "artifacts/release-credential-preflight.md"
+        },
+        {
+          "area": "Windows signing",
+          "ready": false,
+          "artifact": "artifacts/release-credential-preflight.md"
+        },
+        {
+          "area": "Draft publishing token",
+          "ready": false,
+          "artifact": "artifacts/release-credential-preflight.md"
+        }
+      ]
     },
     "qaSummary": {
       "total": 52,
@@ -272,16 +296,7 @@
         "captureCommand": null
       }
     ],
-    "rejectedMacosInsertionEvidence": [
-      {
-        "path": "artifacts/qa/macos/app-matrix-insertion-slack.json",
-        "targetApp": "Slack",
-        "status": "BLOCKED",
-        "pass": false,
-        "reason": "pass is not true, status is BLOCKED, sidecar command did not complete, frontmost app did not match target, paste was not reported, manual observation was not accepted, scratch target is a placeholder, manual observation result is missing",
-        "requiredAction": "Replace this artifact by rerunning the packaged insertion capture with a real disposable scratch target, or delete it before recapturing."
-      }
-    ],
+    "rejectedMacosInsertionEvidence": [],
     "windows": {
       "hostRequired": true,
       "runner": "scripts/windows-packaged-qa-runner.ps1",
@@ -564,6 +579,7 @@
     "bun run qa:cloud-asr:smoke",
     "bun run gate:license-live:preflight",
     "bun run qa:packaged:macos:license-live",
+    "bun run gate:release-credentials:preflight",
     "bun run gate:blockers:refresh",
     "bun run gate:completion-audit"
   ],

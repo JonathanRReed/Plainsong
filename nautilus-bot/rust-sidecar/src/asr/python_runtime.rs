@@ -180,17 +180,14 @@ async fn get_or_spawn_worker(
     provider: &str,
     python: &str,
 ) -> Result<Arc<tokio::sync::Mutex<PythonAsrWorker>>> {
-    {
-        let cache = python_worker_cache().lock().await;
-        if let Some(existing) = cache.get(provider) {
-            return Ok(existing.clone());
-        }
+    let mut cache = python_worker_cache().lock().await;
+    if let Some(existing) = cache.get(provider) {
+        return Ok(existing.clone());
     }
 
     let worker = Arc::new(tokio::sync::Mutex::new(PythonAsrWorker::spawn(
         provider, python,
     )?));
-    let mut cache = python_worker_cache().lock().await;
     Ok(cache
         .entry(provider.to_string())
         .or_insert_with(|| worker.clone())

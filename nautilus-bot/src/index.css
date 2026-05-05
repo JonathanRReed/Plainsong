@@ -178,6 +178,11 @@
     @apply bg-background text-foreground;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+    font-feature-settings:
+      "cv02" 1,
+      "cv03" 1,
+      "cv04" 1,
+      "tnum" 1;
   }
   html {
     @apply font-sans;
@@ -195,6 +200,66 @@
   [data-drag-region] [role="button"],
   [data-drag-region] [data-no-drag] {
     -webkit-app-region: no-drag;
+  }
+}
+
+@layer components {
+  .app-shell {
+    background:
+      linear-gradient(135deg, hsl(var(--background)) 0%, hsl(var(--muted) / 0.32) 48%, hsl(var(--background)) 100%),
+      radial-gradient(120% 90% at 50% 0%, hsl(var(--primary) / 0.1), transparent 58%);
+  }
+
+  .app-main-surface {
+    background:
+      linear-gradient(180deg, hsl(var(--background) / 0.92) 0%, hsl(var(--background)) 42%),
+      linear-gradient(90deg, hsl(var(--border) / 0.18) 1px, transparent 1px),
+      linear-gradient(0deg, hsl(var(--border) / 0.14) 1px, transparent 1px);
+    background-size:
+      auto,
+      44px 44px,
+      44px 44px;
+  }
+
+  .surface-panel {
+    border: 1px solid hsl(var(--border) / 0.72);
+    background:
+      linear-gradient(180deg, hsl(var(--card) / 0.96), hsl(var(--card) / 0.88)),
+      linear-gradient(135deg, hsl(var(--primary) / 0.08), transparent 42%);
+    box-shadow:
+      0 1px 0 hsl(var(--foreground) / 0.05) inset,
+      0 18px 50px hsl(225 22% 3% / 0.16);
+  }
+
+  .surface-panel-subtle {
+    border: 1px solid hsl(var(--border) / 0.64);
+    background: hsl(var(--card) / 0.74);
+    box-shadow: 0 1px 0 hsl(var(--foreground) / 0.04) inset;
+  }
+
+  .command-card {
+    border: 1px solid hsl(var(--border) / 0.68);
+    background:
+      linear-gradient(180deg, hsl(var(--card) / 0.92), hsl(var(--muted) / 0.28)),
+      hsl(var(--card));
+    transition:
+      transform 180ms ease,
+      border-color 180ms ease,
+      background-color 180ms ease,
+      box-shadow 180ms ease;
+  }
+
+  .command-card:hover {
+    border-color: hsl(var(--primary) / 0.32);
+    box-shadow: 0 14px 36px hsl(225 22% 3% / 0.14);
+    transform: translateY(-1px);
+  }
+
+  .quiet-label {
+    color: hsl(var(--muted-foreground));
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0;
   }
 }
 

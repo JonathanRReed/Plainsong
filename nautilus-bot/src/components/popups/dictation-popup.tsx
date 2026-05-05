@@ -306,6 +306,12 @@ function formatDoneMessage(
   return "The result is ready for a quick spoken edit or another pass.";
 }
 
+function formatLatencyMetric(ms: number | null): string | null {
+  if (ms === null) return null;
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 function formatHandsFreeRuntimeHint(
   handsFreeEnabled: boolean,
   silenceTimeoutSeconds: number,
@@ -426,6 +432,10 @@ export function DictationPopup() {
   const [finalSnippetAppliedCount, setFinalSnippetAppliedCount] = useState(0);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [isSpeakingAloud, setIsSpeakingAloud] = useState(false);
+  // @ts-ignore - Used for latency tracking, will be displayed in future UI
+  const [startupLatencyMs, setStartupLatencyMs] = useState<number | null>(null);
+  const [transcriptionLatencyMs, setTranscriptionLatencyMs] = useState<number | null>(null);
+  const [insertLatencyMs, setInsertLatencyMs] = useState<number | null>(null);
   const lastSessionIdRef = useRef<number | null>(null);
   const lastActiveStartedAtRef = useRef<number | null>(null);
   const sessionClockStartedAtRef = useRef<number | null>(null);
@@ -486,12 +496,15 @@ export function DictationPopup() {
     setFinalSnippetAppliedCount(0);
     setActionFeedback(null);
     setIsSpeakingAloud(false);
+    setStartupLatencyMs(null);
+    setTranscriptionLatencyMs(null);
+    setInsertLatencyMs(null);
     stopSpeakingText();
   };
 
   const applyRuntimeMetadata = (payload: DictationStateChangedEvent) => {
     setResolvedModeLabel(payload.resolvedModeLabel ?? null);
-    setRuntimeAppTarget(payload.appTarget ?? null);
+    setRuntimeAppTarget(payload.targetApp ?? payload.appTarget ?? null);
     if (payload.resolvedModePreset) {
       setModePreset(payload.resolvedModePreset);
     }
@@ -510,8 +523,14 @@ export function DictationPopup() {
     if (typeof payload.dictationProvider !== "undefined") {
       setDictationProvider(payload.dictationProvider ?? null);
     }
+    if (typeof payload.actualProvider !== "undefined") {
+      setDictationProvider(payload.actualProvider ?? null);
+    }
     if (typeof payload.dictationModelId !== "undefined") {
       setDictationModelId(payload.dictationModelId ?? null);
+    }
+    if (typeof payload.actualModelId !== "undefined") {
+      setDictationModelId(payload.actualModelId ?? null);
     }
     if (typeof payload.requestedRoute !== "undefined") {
       setRequestedRoute(payload.requestedRoute ?? null);
@@ -531,6 +550,15 @@ export function DictationPopup() {
   };
 
   const applyOverlaySnapshot = (payload: DictationStateChangedEvent) => {
+    if (payload.dismissed) {
+      setPhase("idle");
+      setMessage(null);
+      setPreview(null);
+      setOutcome(null);
+      resetCompletionState();
+      return;
+    }
+
     applyRuntimeMetadata(payload);
     const sanitizedMessage = sanitizeUserFacingDictationMessage(
       payload.message,
@@ -681,6 +709,15 @@ export function DictationPopup() {
     if (typeof payload.modelId !== "undefined" && payload.modelId) {
       setDictationModelId(payload.modelId);
     }
+    if (typeof payload.startupLatencyMs !== "undefined") {
+      setStartupLatencyMs(payload.startupLatencyMs ?? null);
+    }
+    if (typeof payload.latencyMs !== "undefined") {
+      setTranscriptionLatencyMs(payload.latencyMs);
+    }
+    if (typeof payload.insertLatencyMs !== "undefined") {
+      setInsertLatencyMs(payload.insertLatencyMs);
+    }
   }, [textReadyEvent]);
 
   useEffect(() => {
@@ -764,32 +801,61 @@ export function DictationPopup() {
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
   }, [elapsed]);
 
-  const modeMeta = MODE_META[modePreset] ?? MODE_META.voice;
-  const selectedModeLabel =
-    normalizePopupModeLabel(
-      resolvedModeLabel ??
-        (modePreset === "custom"
-          ? (customModes.find((option) => option.id === selectedCustomModeId)
-              ?.name ?? modeMeta.label)
-          : modeMeta.label),
-    ) ?? modeMeta.label;
-  const contextMeta = CONTEXT_META[contextSource] ?? CONTEXT_META.none;
-  const insertionMeta =
-    INSERTION_META[dictationInsertionMode] ?? INSERTION_META.auto;
-  const routeLabel = formatRouteLabel(
+  const computedMeta = useMemo(() => {
+    const modeMetaValue = MODE_META[modePreset] ?? MODE_META.voice;
+    const selectedModeLabelValue =
+      normalizePopupModeLabel(
+        resolvedModeLabel ??
+          (modePreset === "custom"
+            ? (customModes.find((option) => option.id === selectedCustomModeId)
+                ?.name ?? modeMetaValue.label)
+            : modeMetaValue.label),
+      ) ?? modeMetaValue.label;
+    const contextMetaValue = CONTEXT_META[contextSource] ?? CONTEXT_META.none;
+    const insertionMetaValue =
+      INSERTION_META[dictationInsertionMode] ?? INSERTION_META.auto;
+    const routeLabelValue = formatRouteLabel(
+      providerModelLabel,
+      resolvedRoute,
+      dictationProvider,
+      dictationModelId,
+    );
+    const targetDetailValue = runtimeAppTarget ? ` for ${runtimeAppTarget}` : "";
+    const autoActivationDetailValue =
+      activationMatcher && runtimeAppTarget
+        ? `Auto for ${runtimeAppTarget} via "${activationMatcher}"`
+        : activationMatcher
+          ? `Auto via "${activationMatcher}"`
+          : null;
+    const isCapturePhaseValue = phase === "primed" || phase === "recording";
+
+    return {
+      modeMeta: modeMetaValue,
+      selectedModeLabel: selectedModeLabelValue,
+      contextMeta: contextMetaValue,
+      insertionMeta: insertionMetaValue,
+      routeLabel: routeLabelValue,
+      targetDetail: targetDetailValue,
+      autoActivationDetail: autoActivationDetailValue,
+      isCapturePhase: isCapturePhaseValue,
+    };
+  }, [
+    modePreset,
+    resolvedModeLabel,
+    customModes,
+    selectedCustomModeId,
+    contextSource,
+    dictationInsertionMode,
     providerModelLabel,
     resolvedRoute,
     dictationProvider,
     dictationModelId,
-  );
-  const targetDetail = runtimeAppTarget ? ` for ${runtimeAppTarget}` : "";
-  const autoActivationDetail =
-    activationMatcher && runtimeAppTarget
-      ? `Auto for ${runtimeAppTarget} via "${activationMatcher}"`
-      : activationMatcher
-        ? `Auto via "${activationMatcher}"`
-        : null;
-  const isCapturePhase = phase === "primed" || phase === "recording";
+    runtimeAppTarget,
+    activationMatcher,
+    phase,
+  ]);
+
+  const { selectedModeLabel, contextMeta, insertionMeta, routeLabel, targetDetail, autoActivationDetail, isCapturePhase } = computedMeta;
 
   const cycleDisplayMode = async () => {
     const next: DisplayMode =
@@ -813,19 +879,6 @@ export function DictationPopup() {
     });
   }, [displayMode, message, phase, preview, window]);
 
-  useEffect(() => {
-    if (phase !== "idle") {
-      void window.show().catch((error) => {
-        console.error("Failed to show dictation popup:", error);
-      });
-      return;
-    }
-
-    void window.hide().catch((error) => {
-      console.error("Failed to hide dictation popup while idle:", error);
-    });
-  }, [phase, window]);
-
   const openMainApp = async (
     view?: "dictation" | "settings" | "recordings",
   ) => {
@@ -843,7 +896,6 @@ export function DictationPopup() {
   const hidePopup = async () => {
     try {
       await invoke("dismiss_dictation_overlay");
-      await window.hide();
     } catch (error) {
       console.error("Failed to hide dictation popup:", error);
     }
@@ -965,20 +1017,23 @@ export function DictationPopup() {
               : phase === "error"
                 ? "Problem"
                 : "Working";
-  const doneTitle = formatDoneTitle(
-    outcome,
-    finalCommandApplied,
-    runtimeAppTarget,
-  );
-  const doneMessage =
-    message ??
-    formatDoneMessage(
+
+  const { doneTitle, doneMessage, commandLabel } = useMemo(() => ({
+    doneTitle: formatDoneTitle(
       outcome,
       finalCommandApplied,
-      finalSnippetAppliedCount,
       runtimeAppTarget,
-    );
-  const commandLabel = formatAppliedDictationCommandLabel(finalCommandApplied);
+    ),
+    doneMessage:
+      message ??
+      formatDoneMessage(
+        outcome,
+        finalCommandApplied,
+        finalSnippetAppliedCount,
+        runtimeAppTarget,
+      ),
+    commandLabel: formatAppliedDictationCommandLabel(finalCommandApplied),
+  }), [outcome, finalCommandApplied, runtimeAppTarget, message, finalSnippetAppliedCount]);
   const spokenEditHints = [
     "scratch that",
     "actually ...",
@@ -1176,6 +1231,16 @@ export function DictationPopup() {
                   {runtimeAppTarget && (
                     <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
                       Target {runtimeAppTarget}
+                    </span>
+                  )}
+                  {transcriptionLatencyMs !== null && (
+                    <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+                      {formatLatencyMetric(transcriptionLatencyMs)} transcribe
+                    </span>
+                  )}
+                  {insertLatencyMs !== null && (
+                    <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+                      {formatLatencyMetric(insertLatencyMs)} insert
                     </span>
                   )}
                   <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">

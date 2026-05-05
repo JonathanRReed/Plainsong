@@ -357,7 +357,7 @@ function App() {
           <ErrorBoundary>
             <RecordingProvider>
               <DataCacheProvider>
-                <div className="flex h-screen bg-background text-foreground">
+                <div className="app-shell flex h-screen bg-background text-foreground">
                   <Sidebar
                     activeView={activeView}
                     onViewChange={(v) => setActiveView(v as ViewId)}
@@ -367,7 +367,7 @@ function App() {
                     onActivateClick={() => setShowActivationModal(true)}
                   />
 
-                  <main className="flex-1 overflow-hidden">
+                  <main className="app-main-surface min-w-0 flex-1 overflow-hidden">
                     <Suspense
                       fallback={
                         <div className="h-full flex items-center justify-center text-muted-foreground text-sm">

@@ -677,7 +677,32 @@ impl DownloadManager {
 
 impl Default for DownloadManager {
     fn default() -> Self {
-        Self::new().expect("Failed to create download manager")
+        match Self::new() {
+            Ok(manager) => manager,
+            Err(error) => {
+                tracing::error!("Failed to create download manager in data dir: {}", error);
+                let models_dir = std::env::temp_dir().join("Nautilus").join("models");
+                if let Err(create_error) = std::fs::create_dir_all(&models_dir) {
+                    tracing::error!(
+                        "Failed to create fallback model directory {}: {}",
+                        models_dir.display(),
+                        create_error
+                    );
+                }
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(300))
+                    .redirect(reqwest::redirect::Policy::limited(10))
+                    .build()
+                    .unwrap_or_else(|client_error| {
+                        tracing::error!(
+                            "Failed to build configured download client, using default client: {}",
+                            client_error
+                        );
+                        reqwest::Client::new()
+                    });
+                Self { client, models_dir }
+            }
+        }
     }
 }
 

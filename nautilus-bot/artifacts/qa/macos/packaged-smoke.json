@@ -1,8 +1,8 @@
 {
-  "generatedAt": "2026-05-02T21:37:28.152Z",
+  "generatedAt": "2026-05-05T16:25:57.399Z",
   "appPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app",
   "sidecarPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/release/mac-arm64/Nautilus.app/Contents/Resources/sidecar/nautilus-sidecar",
-  "pass": true,
+  "pass": false,
   "timedOut": false,
   "pendingCommands": [],
   "checks": {
@@ -10,7 +10,7 @@
     "accessibilityReady": true,
     "postEventReady": true,
     "cursorInsertionReady": true,
-    "dictationSetupOk": true,
+    "dictationSetupOk": false,
     "meetingSetupOk": true,
     "systemAudioAvailable": true
   },
@@ -40,11 +40,10 @@
       "details": [
         "Microphone: ready",
         "Cursor insert: ready",
-        "Route preference: local",
-        "Resolved route: UsefulSensors Moonshine / moonshine-tiny (local)"
+        "Moonshine dictation route 'moonshine-base' is not ready. Moonshine native ONNX inference is not launch-ready in this build. Choose a stable local dictation route such as Whisper, MLX Audio, or Apple Native Speech. Open Settings -> ASR / Providers and download or repair Moonshine before trying again."
       ],
-      "ok": true,
-      "summary": "Dictation route, microphone, and insertion permissions are ready.",
+      "ok": false,
+      "summary": "No ready dictation route matched the current preference.",
       "title": "Dictation verification"
     },
     "meetingSetup": {
@@ -150,7 +149,7 @@
         "dictationLivePreviewEnabled": true,
         "dictationMlxEnabled": false,
         "dictationModePreset": "voice",
-        "dictationModelId": "moonshine-tiny",
+        "dictationModelId": "moonshine-base",
         "dictationProfile": "normal_speed",
         "dictationProjectId": "inbox",
         "dictationProvider": "moonshine",
@@ -172,7 +171,7 @@
         "meetingAutoNameEnabled": true,
         "meetingAutoNameModel": null,
         "meetingCustomPrompt": null,
-        "meetingMlxEnabled": true,
+        "meetingMlxEnabled": false,
         "meetingModelId": "distil-large-v3.5",
         "meetingProvider": "distil_whisper",
         "meetingRetentionCustomMonths": 1,
@@ -233,5 +232,5 @@
       }
     }
   },
-  "stderr": "[sidecar] ready\n2026-05-02T21:37:11.513734Z  INFO nautilus_bot_lib::audio::system_capture: Found loopback device: BlackHole 2ch\n2026-05-02T21:37:11.562708Z  INFO nautilus_bot_lib::audio::system_capture: Found loopback device: BlackHole 2ch\n2026-05-02T21:37:28.149878Z  INFO nautilus_sidecar: Received shutdown command, exiting"
+  "stderr": "[sidecar] ready\n2026-05-05T16:25:35.077643Z  INFO nautilus_bot_lib::audio::system_capture: Found loopback device: BlackHole 2ch\n2026-05-05T16:25:35.215325Z  INFO nautilus_bot_lib::audio::system_capture: Found loopback device: BlackHole 2ch\n2026-05-05T16:25:57.394657Z  INFO nautilus_sidecar: Received shutdown command, exiting"
 }

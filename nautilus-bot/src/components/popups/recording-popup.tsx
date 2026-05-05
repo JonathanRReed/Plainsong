@@ -204,10 +204,17 @@ export function RecordingPopup() {
     }
 
     let cancelled = false;
+    let isFetching = false;
     const interval = setInterval(async () => {
+      if (isFetching) return;
+
       try {
+        isFetching = true;
         const samples = await getWaveformData(recordingId);
-        if (cancelled || !samples?.length) return;
+        if (cancelled || !samples?.length) {
+          isFetching = false;
+          return;
+        }
 
         const targetBars = 18;
         const stride = Math.max(1, Math.floor(samples.length / targetBars));
@@ -223,9 +230,13 @@ export function RecordingPopup() {
             Math.max(1, slice.length);
           bars.push(Math.min(1, avg * 12));
         }
-        setLevels(bars);
+        if (!cancelled) {
+          setLevels(bars);
+        }
       } catch {
         // Ignore transient polling errors while recording starts/stops.
+      } finally {
+        isFetching = false;
       }
     }, 250);
 

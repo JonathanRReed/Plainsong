@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-03T15:52:37.829Z",
+  "generatedAt": "2026-05-05T15:41:12.069Z",
   "status": "NO-GO",
   "areas": {
     "dictation": {
@@ -12,15 +12,7 @@
       "promptEvalPass": true,
       "appMatrixPass": false,
       "appMatrixEvidenceViolations": [],
-      "appMatrixRejectedInsertionEvidence": [
-        {
-          "path": "artifacts/qa/macos/app-matrix-insertion-slack.json",
-          "status": "BLOCKED",
-          "targetApp": "Slack",
-          "pass": false,
-          "reason": "pass is not true, status is BLOCKED, sidecar command did not complete, frontmost app did not match target, paste was not reported, manual observation was not accepted, scratch target is a placeholder, manual observation result is missing"
-        }
-      ],
+      "appMatrixRejectedInsertionEvidence": [],
       "qaSummary": {
         "total": 19,
         "pass": 10,
@@ -39,7 +31,7 @@
         "missingPackagedEvidence": 8,
         "missingInsertionEvidence": 15,
         "openBlockedEntries": 6,
-        "rejectedInsertionEvidence": 1
+        "rejectedInsertionEvidence": 0
       }
     },
     "meetings": {
@@ -146,7 +138,7 @@
         "missingPackagedEvidence": 8,
         "missingInsertionEvidence": 15,
         "openBlockedEntries": 6,
-        "rejectedInsertionEvidence": 1
+        "rejectedInsertionEvidence": 0
       },
       "languageMatrixSummary": {
         "total": 10,
@@ -172,7 +164,7 @@
       "gate": "dictation-app-matrix",
       "status": "BLOCKED",
       "evidence": "artifacts/dictation-app-matrix-gate.json",
-      "reason": "Frozen app matrix is not launch-ready: 1/16 ready, 15 pending, 8 missing packaged benchmark evidence, 15 missing insertion evidence, 6 open blocked-app entries, 1 rejected insertion evidence artifacts."
+      "reason": "Frozen app matrix is not launch-ready: 1/16 ready, 15 pending, 8 missing packaged benchmark evidence, 15 missing insertion evidence, 6 open blocked-app entries, 0 rejected insertion evidence artifacts."
     },
     {
       "gate": "packaged-qa-matrix",

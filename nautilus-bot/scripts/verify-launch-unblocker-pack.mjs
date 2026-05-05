@@ -59,6 +59,7 @@ const audit = readJson("artifacts/launch-completion-audit.json");
 const launchReport = readJson("artifacts/launch-readiness-report.json");
 const cloudPreflight = readJson("artifacts/cloud-asr-preflight.json");
 const licensePreflight = readJson("artifacts/qa/macos/licensing-activate-deactivate-live.json");
+const releaseCredentialPreflight = readJson("artifacts/release-credential-preflight.json");
 const appPreflight = readJson("artifacts/qa/macos/app-matrix-preflight.json");
 const appMatrixGate = readJson("artifacts/dictation-app-matrix-gate.json");
 const windowsHandoff = readJson("artifacts/windows-packaged-qa-handoff.json");
@@ -148,6 +149,46 @@ if (
   )
 ) {
   violations.push("Markdown license secret row is missing or stale.");
+}
+
+const releaseCredentials = pack.requiredInputs?.releaseCredentials;
+if (!releaseCredentials) {
+  violations.push("Pack is missing release credential preflight summary.");
+} else {
+  if (releaseCredentials.status !== releaseCredentialPreflight.status) {
+    violations.push("Release credential status does not match preflight artifact.");
+  }
+  if (Boolean(releaseCredentials.macOSReady) !== Boolean(releaseCredentialPreflight.macOS?.ready)) {
+    violations.push("macOS release credential readiness does not match preflight artifact.");
+  }
+  if (Boolean(releaseCredentials.windowsReady) !== Boolean(releaseCredentialPreflight.windows?.ready)) {
+    violations.push("Windows release credential readiness does not match preflight artifact.");
+  }
+  if (Boolean(releaseCredentials.publishReady) !== Boolean(releaseCredentialPreflight.publish?.ready)) {
+    violations.push("Publishing credential readiness does not match preflight artifact.");
+  }
+  const expectedRows = [
+    `macOS signing and notarization:${Boolean(releaseCredentialPreflight.macOS?.ready)}`,
+    `Windows signing:${Boolean(releaseCredentialPreflight.windows?.ready)}`,
+    `Draft publishing token:${Boolean(releaseCredentialPreflight.publish?.ready)}`,
+  ].sort();
+  const actualRows = (releaseCredentials.rows ?? [])
+    .map((row) => `${row.area}:${Boolean(row.ready)}`)
+    .sort();
+  if (JSON.stringify(actualRows) !== JSON.stringify(expectedRows)) {
+    violations.push("Release credential rows do not match preflight artifact.");
+  }
+  for (const row of releaseCredentials.rows ?? []) {
+    if (row.artifact !== "artifacts/release-credential-preflight.md") {
+      violations.push(`Release credential row ${row.area} points to the wrong artifact.`);
+    }
+    if (!markdown.includes(`| ${row.area} | ${row.ready ? "yes" : "no"} |`)) {
+      violations.push(`Markdown release credential row is missing ${row.area}.`);
+    }
+  }
+  if (!markdown.includes(`Overall status: ${releaseCredentialPreflight.status}`)) {
+    violations.push("Markdown release credential status is missing or stale.");
+  }
 }
 
 const packQaSummary = pack.requiredInputs?.qaSummary;
@@ -316,6 +357,7 @@ const requiredCommands = [
   "bun run qa:cloud-asr:smoke",
   "bun run gate:license-live:preflight",
   "bun run qa:packaged:macos:license-live",
+  "bun run gate:release-credentials:preflight",
   "bun run gate:blockers:refresh",
   "bun run gate:completion-audit",
 ];
@@ -342,6 +384,7 @@ if (!inputTemplate) {
     "Keep this checked-in template blank. Put real values only in an untracked local file.",
     "Live cloud ASR smoke credentials. Required for bun run qa:cloud-asr:smoke.",
     "Disposable QA license key. Required for bun run qa:packaged:macos:license-live.",
+    "Release signing and publishing inputs. Required for signed release-candidate validation.",
     "Do not use customer, private, production, or real conversation targets.",
   ];
   for (const comment of requiredTemplateComments) {
@@ -356,6 +399,23 @@ if (!inputTemplate) {
   }
   if (!inputTemplate.includes(`${licenseSecret?.name}=`)) {
     violations.push(`Input template is missing ${licenseSecret?.name}.`);
+  }
+  const releaseTemplateVars = [
+    "CSC_LINK",
+    "CSC_NAME",
+    "CSC_KEY_PASSWORD",
+    "APPLE_ID",
+    "APPLE_APP_SPECIFIC_PASSWORD",
+    "APPLE_TEAM_ID",
+    "WIN_CSC_LINK",
+    "WIN_CSC_KEY_PASSWORD",
+    "WIN_PUBLISHER_NAME",
+    "GH_TOKEN",
+  ];
+  for (const name of releaseTemplateVars) {
+    if (!inputTemplate.includes(`${name}=`)) {
+      violations.push(`Input template is missing ${name}.`);
+    }
   }
   for (const target of pack.requiredInputs?.macosScratchTargets ?? []) {
     if (!inputTemplate.includes(`# ${target.app}: ${target.command}`)) {

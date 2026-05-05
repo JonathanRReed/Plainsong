@@ -31,6 +31,7 @@ export type DictationInsertionMode = "auto" | "paste" | "inline" | "clipboard_on
 
 export interface DictationStateChangedEvent {
   phase: DictationPhase;
+  dismissed?: boolean;
   startedAtMs?: number | null;
   message?: string | null;
   preview?: string | null;
@@ -47,6 +48,12 @@ export interface DictationStateChangedEvent {
   activationMatcher?: string | null;
   dictationProvider?: string | null;
   dictationModelId?: string | null;
+  requestedProvider?: string | null;
+  actualProvider?: string | null;
+  requestedModelId?: string | null;
+  actualModelId?: string | null;
+  fallbackReason?: string | null;
+  targetApp?: string | null;
   requestedRoute?: DictationRoutePreference | null;
   resolvedRoute?: string | null;
   providerModelLabel?: string | null;

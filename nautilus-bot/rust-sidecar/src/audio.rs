@@ -115,6 +115,18 @@ pub struct RecordingStopResult {
     pub dropped_mixed_chunks: u64,
 }
 
+fn dictation_start_elapsed_ms(dictation_start: &std::sync::Mutex<Option<Instant>>) -> Option<u64> {
+    match dictation_start.lock() {
+        Ok(guard) => guard
+            .as_ref()
+            .map(|start| start.elapsed().as_millis() as u64),
+        Err(error) => {
+            tracing::error!("Dictation timing state lock poisoned: {}", error);
+            None
+        }
+    }
+}
+
 fn infer_transport_type(device_name: &str) -> String {
     let normalized = device_name.trim().to_ascii_lowercase();
     if normalized.contains("airpods")
@@ -412,7 +424,18 @@ impl AudioCapture {
 
         // Reset speech tracking
         self.last_speech_ms.store(0, Ordering::SeqCst);
-        *self.dictation_start.lock().unwrap() = Some(Instant::now());
+        match self.dictation_start.lock() {
+            Ok(mut start) => {
+                *start = Some(Instant::now());
+            }
+            Err(error) => {
+                self.is_dictating.store(false, Ordering::SeqCst);
+                return Err(anyhow::anyhow!(
+                    "Dictation timing state is unavailable: {}",
+                    error
+                ));
+            }
+        }
 
         let is_dictating = Arc::clone(&self.is_dictating);
         let buffer = Arc::clone(&self.dictation_buffer);
@@ -486,8 +509,9 @@ impl AudioCapture {
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
                             audio_level_f32.store(level, Ordering::SeqCst);
                             if rms > SPEECH_THRESHOLD {
-                                if let Some(start) = dictation_start_f32.lock().unwrap().as_ref() {
-                                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                                if let Some(elapsed_ms) =
+                                    dictation_start_elapsed_ms(&dictation_start_f32)
+                                {
                                     last_speech_f32.store(elapsed_ms, Ordering::SeqCst);
                                 }
                             }
@@ -530,8 +554,9 @@ impl AudioCapture {
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
                             audio_level_i16.store(level, Ordering::SeqCst);
                             if rms > SPEECH_THRESHOLD {
-                                if let Some(start) = dictation_start_i16.lock().unwrap().as_ref() {
-                                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                                if let Some(elapsed_ms) =
+                                    dictation_start_elapsed_ms(&dictation_start_i16)
+                                {
                                     last_speech_i16.store(elapsed_ms, Ordering::SeqCst);
                                 }
                             }
@@ -574,8 +599,9 @@ impl AudioCapture {
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
                             audio_level_u8.store(level, Ordering::SeqCst);
                             if rms > SPEECH_THRESHOLD {
-                                if let Some(start) = dictation_start_u8.lock().unwrap().as_ref() {
-                                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                                if let Some(elapsed_ms) =
+                                    dictation_start_elapsed_ms(&dictation_start_u8)
+                                {
                                     last_speech_u8.store(elapsed_ms, Ordering::SeqCst);
                                 }
                             }

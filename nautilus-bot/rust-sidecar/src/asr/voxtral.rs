@@ -212,13 +212,14 @@ impl VoxtralProvider {
             900,
         )
         .await
-        .context("Voxtral local transcription failed")?;
+        .context("Voxtral local transcription failed");
 
-        // Cleanup temp file if we created one
+        // Cleanup temp file if we created one (even if transcription fails)
         if audio_path_to_use != audio_path {
             let _ = std::fs::remove_file(&audio_path_to_use);
         }
 
+        let output = output?;
         let text = output.text.unwrap_or_default().trim().to_string();
         if text.is_empty() {
             anyhow::bail!("Voxtral local returned an empty transcript");

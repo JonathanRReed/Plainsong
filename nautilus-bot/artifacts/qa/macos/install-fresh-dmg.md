@@ -2,7 +2,7 @@
 
 Status: BLOCKED
 Owner: qa-macos
-Generated: 2026-05-03T15:52:37.638Z
+Generated: 2026-05-05T15:17:06.616Z
 
 ## Current Local Observation
 - DMG helper path passes locally and produced `release/Nautilus-1.0.0-arm64.dmg`.

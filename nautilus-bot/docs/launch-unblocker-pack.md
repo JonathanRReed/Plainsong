@@ -1,7 +1,7 @@
 # Launch Unblocker Pack
 
 Status: BLOCKED
-Generated: 2026-05-03T15:53:35.490Z
+Generated: 2026-05-05T15:23:44.586Z
 
 This pack is generated from the current completion audit and preflight artifacts. It lists only the inputs that still require credentials, safe manual targets, or a Windows release host.
 
@@ -13,6 +13,7 @@ This pack is generated from the current completion audit and preflight artifacts
 - Input template: `docs/launch-inputs.template.env`
 - Cloud preflight: `artifacts/cloud-asr-preflight.json`
 - License preflight: `artifacts/qa/macos/licensing-activate-deactivate-live.json`
+- Release credential preflight: `artifacts/release-credential-preflight.json`
 - App matrix gate: `artifacts/dictation-app-matrix-gate.json`
 - macOS app matrix preflight: `artifacts/qa/macos/app-matrix-preflight.json`
 - Windows handoff: `artifacts/windows-packaged-qa-handoff.json`
@@ -43,6 +44,16 @@ This pack is generated from the current completion audit and preflight artifacts
 | Env var | Present |
 | --- | --- |
 | NAUTILUS_QA_LICENSE_KEY | no |
+
+## Release Credentials
+
+Overall status: BLOCKED
+
+| Area | Ready | Artifact |
+| --- | --- | --- |
+| macOS signing and notarization | no | `artifacts/release-credential-preflight.md` |
+| Windows signing | no | `artifacts/release-credential-preflight.md` |
+| Draft publishing token | no | `artifacts/release-credential-preflight.md` |
 
 ## Packaged QA Summary
 
@@ -80,7 +91,7 @@ These artifacts are ignored by the app-matrix gate until they are replaced by pa
 
 | App | Status | Pass | Artifact | Reason | Required action |
 | --- | --- | --- | --- | --- | --- |
-| Slack | BLOCKED | false | `artifacts/qa/macos/app-matrix-insertion-slack.json` | pass is not true, status is BLOCKED, sidecar command did not complete, frontmost app did not match target, paste was not reported, manual observation was not accepted, scratch target is a placeholder, manual observation result is missing | Replace this artifact by rerunning the packaged insertion capture with a real disposable scratch target, or delete it before recapturing. |
+| none | none | none | none | none | none |
 
 ## Windows Release Host
 
@@ -127,6 +138,7 @@ These artifacts are ignored by the app-matrix gate until they are replaced by pa
 - `bun run qa:cloud-asr:smoke`
 - `bun run gate:license-live:preflight`
 - `bun run qa:packaged:macos:license-live`
+- `bun run gate:release-credentials:preflight`
 - `bun run gate:blockers:refresh`
 - `bun run gate:completion-audit`
 

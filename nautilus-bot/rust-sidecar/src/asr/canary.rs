@@ -351,12 +351,11 @@ impl AsrProvider for CanaryProvider {
                 writer.finalize().context("Failed to finalize temp WAV")?;
             }
             let temp_path_for_cleanup = temp_path.clone();
-            let result =
-                tokio::task::spawn_blocking(move || run_canary_candle(&model_dir, &temp_path))
-                    .await
-                    .context("Whisper Candle inference task panicked")??;
+            let result = tokio::task::spawn_blocking(move || run_canary_candle(&model_dir, &temp_path))
+                .await
+                .context("Whisper Candle inference task panicked");
             let _ = std::fs::remove_file(&temp_path_for_cleanup);
-            result
+            result??
         } else {
             let audio_path_owned = audio_path.to_path_buf();
             tokio::task::spawn_blocking(move || run_canary_candle(&model_dir, &audio_path_owned))

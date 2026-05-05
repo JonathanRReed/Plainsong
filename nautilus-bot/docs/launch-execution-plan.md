@@ -75,7 +75,10 @@ Still open:
 
 - LX-01 Truthful docs
 - LX-02 Dependency audit cleanup
-- LX-03 Signing and secret provisioning
+- LX-03 Signing and secret provisioning:
+  - run `bun run gate:release-credentials:preflight`
+  - keep `RG-01` blocked until signed macOS and Windows artifacts pass the validation commands in `docs/CODE_SIGNING.md`
+  - publish only as a draft release until signed update install is validated
 
 ### Phase 2, fix stop-ship product risks
 
@@ -117,6 +120,12 @@ Still open:
 - Validate insertion in the frozen launch app matrix.
 - Close or de-scope VS Code, Cursor, HubSpot, Word, and Outlook if they cannot pass the launch bar.
 - Record latency, insertion mode, command, snippet, and provider-integrity telemetry in the evidence bundle.
+
+### LX-08 Meeting reliability proof
+
+- Keep meeting capture bot-free and local-first for this release.
+- Treat transcript processing, consent state, retention mode, export state, and cross-meeting recall as the visible review cockpit.
+- Do not add team workspaces, CRM automation, or mobile sync until packaged meeting capture and review evidence passes on both platforms.
 
 ## Exit Rule
 

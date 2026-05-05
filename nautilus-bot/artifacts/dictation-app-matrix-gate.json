@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-03T15:52:36.192Z",
+  "generatedAt": "2026-05-05T15:17:00.590Z",
   "pass": false,
   "matrixPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/dictation-app-compatibility-matrix.md",
   "blockedRegisterPath": "/Users/jonathanreed/Downloads/NautilusBot/nautilus-bot/docs/dictation-blocked-app-register.md",
@@ -20,18 +20,10 @@
     "missingPackagedEvidence": 8,
     "missingInsertionEvidence": 15,
     "openBlockedEntries": 6,
-    "rejectedInsertionEvidence": 1
+    "rejectedInsertionEvidence": 0
   },
   "evidenceViolations": [],
-  "rejectedInsertionEvidence": [
-    {
-      "path": "artifacts/qa/macos/app-matrix-insertion-slack.json",
-      "status": "BLOCKED",
-      "targetApp": "Slack",
-      "pass": false,
-      "reason": "pass is not true, status is BLOCKED, sidecar command did not complete, frontmost app did not match target, paste was not reported, manual observation was not accepted, scratch target is a placeholder, manual observation result is missing"
-    }
-  ],
+  "rejectedInsertionEvidence": [],
   "rows": [
     {
       "platform": "macOS",

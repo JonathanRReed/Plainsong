@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-03T15:52:37.638Z",
+  "generatedAt": "2026-05-05T15:17:06.616Z",
   "strictReady": false,
   "blockers": [
     {
@@ -18,7 +18,7 @@
       "gate": "dictation-app-matrix",
       "status": "BLOCKED",
       "evidence": "artifacts/dictation-app-matrix-gate.json",
-      "reason": "Frozen app matrix is not launch-ready: 1/16 ready, 15 pending, 8 missing packaged benchmark evidence, 15 missing insertion evidence, 6 open blocked-app entries, 1 rejected insertion evidence artifacts."
+      "reason": "Frozen app matrix is not launch-ready: 1/16 ready, 15 pending, 8 missing packaged benchmark evidence, 15 missing insertion evidence, 6 open blocked-app entries, 0 rejected insertion evidence artifacts."
     },
     {
       "gate": "apple-release-signing",

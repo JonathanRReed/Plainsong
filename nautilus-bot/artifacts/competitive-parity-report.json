@@ -1,0 +1,189 @@
+{
+  "generatedAt": "2026-05-05T17:07:13.726Z",
+  "status": "BLOCKED",
+  "claimDecision": "DO_NOT_CLAIM_PARITY_OR_BETTER",
+  "sourceRegister": [
+    {
+      "competitor": "Wispr Flow",
+      "bar": "System-wide dictation, dictionary, snippets, command mode, styles, developer syntax awareness, privacy mode, cross-device plans.",
+      "urls": [
+        "https://wisprflow.ai/features",
+        "https://docs.wisprflow.ai/articles/9559327591-flow-plans-and-what-s-included",
+        "https://docs.wisprflow.ai/articles/3818554249-enable-hipaa-support-and-zero-data-retention-zdr-in-wispr-flow"
+      ]
+    },
+    {
+      "competitor": "Superwhisper",
+      "bar": "Local and cloud voice models, custom modes, 100+ language positioning, Windows shipping with documented gaps.",
+      "urls": [
+        "https://superwhisper.com/docs",
+        "https://superwhisper.com/models",
+        "https://superwhisper.com/docs/models/voice",
+        "https://superwhisper.com/docs/get-started/windows"
+      ]
+    },
+    {
+      "competitor": "Granola",
+      "bar": "Bot-free meeting notes, templates, recipes, chat, spaces, folders, integrations, API, MCP, consent and trust UX.",
+      "urls": [
+        "https://docs.granola.ai/help-center/getting-started/granola-101",
+        "https://docs.granola.ai/article/integrations-with-granola",
+        "https://docs.granola.ai/help-center/taking-notes/customise-notes-with-templates",
+        "https://docs.granola.ai/help-center/getting-more-from-your-notes/recipes",
+        "https://docs.granola.ai/help-center/consent-security-privacy/security-privacy-data-faqs"
+      ]
+    },
+    {
+      "competitor": "OpenOats",
+      "bar": "Open-source local-first live meeting copilot, local transcripts, knowledge-base search, local or BYOK LLM path.",
+      "urls": [
+        "https://github.com/yazinsai/OpenOats"
+      ]
+    }
+  ],
+  "summary": {
+    "competitiveRows": {
+      "total": 15,
+      "pass": 8,
+      "blocked": 7
+    },
+    "launchStatus": "NO-GO",
+    "dictationStatus": "BLOCKED",
+    "meetingStatus": "BLOCKED",
+    "trustStatus": "BLOCKED",
+    "claimStatus": "BLOCKED"
+  },
+  "topGaps": [
+    {
+      "capability": "System-wide dictation",
+      "status": "BLOCKED",
+      "competitiveBar": "Text lands in real apps, not only an internal editor.",
+      "requiredAction": "Capture packaged insertion evidence for the frozen app matrix. Current ready count: 1/16."
+    },
+    {
+      "capability": "Cloud ASR choice",
+      "status": "BLOCKED",
+      "competitiveBar": "Optional cloud ASR providers can be live-smoked without storing secrets in artifacts.",
+      "requiredAction": "Provide OPENAI_API_KEY, ELEVENLABS_API_KEY, and MISTRAL_API_KEY, then run the cloud ASR smoke gate."
+    },
+    {
+      "capability": "Cross-platform packaged behavior",
+      "status": "BLOCKED",
+      "competitiveBar": "macOS and Windows packaged builds both have product QA evidence.",
+      "requiredAction": "Run Windows packaged QA. Current Windows packaged QA: 0 PASS / 25 BLOCKED."
+    },
+    {
+      "capability": "Meeting transcription",
+      "status": "BLOCKED",
+      "competitiveBar": "Live meeting capture and processing are validated.",
+      "requiredAction": "Finish blocked meeting-critical packaged QA rows. Current meeting status: BLOCKED."
+    },
+    {
+      "capability": "AI meeting notes",
+      "status": "BLOCKED",
+      "competitiveBar": "Meeting transcripts can be summarized and exported with action-oriented outputs.",
+      "requiredAction": "Run Windows AI and export QA rows, then refresh the packaged QA evidence bundle."
+    },
+    {
+      "capability": "Privacy and retention",
+      "status": "BLOCKED",
+      "competitiveBar": "Users can control audio and transcript retention.",
+      "requiredAction": "Run Windows retention QA rows and keep macOS retention evidence green."
+    },
+    {
+      "capability": "Backup and restore",
+      "status": "BLOCKED",
+      "competitiveBar": "Local backup and restore paths are tested.",
+      "requiredAction": "Run Windows backup and restore QA rows and live license-related trust rows."
+    }
+  ],
+  "differentiation": [
+    {
+      "capability": "Local-first ASR",
+      "status": "PASS",
+      "claimBoundary": "Can support narrow positioning only while launch report remains NO-GO."
+    },
+    {
+      "capability": "AI cleanup and formatting",
+      "status": "PASS",
+      "claimBoundary": "Can support narrow positioning only while launch report remains NO-GO."
+    },
+    {
+      "capability": "Launch claim discipline",
+      "status": "PASS",
+      "claimBoundary": "Differentiator is trust posture, not a feature parity claim."
+    },
+    {
+      "capability": "Provider fallback transparency",
+      "status": "PASS",
+      "claimBoundary": "Internal quality differentiator. Keep it in product proof, not broad public parity copy."
+    },
+    {
+      "capability": "Overlay lifecycle control",
+      "status": "PASS",
+      "claimBoundary": "Internal quality differentiator. Keep it in product proof, not broad public parity copy."
+    },
+    {
+      "capability": "Settings first-load guard",
+      "status": "PASS",
+      "claimBoundary": "Internal quality differentiator. Keep it in product proof, not broad public parity copy."
+    },
+    {
+      "capability": "Sidecar trust boundary",
+      "status": "PASS",
+      "claimBoundary": "Internal quality differentiator. Keep it in product proof, not broad public parity copy."
+    },
+    {
+      "capability": "IPC drift and timeout guard",
+      "status": "PASS",
+      "claimBoundary": "Internal quality differentiator. Keep it in product proof, not broad public parity copy."
+    }
+  ],
+  "activeBlockers": [
+    {
+      "gate": "cloud-asr-smoke",
+      "status": "BLOCKED",
+      "evidence": "artifacts/cloud-asr-smoke.blocked.md",
+      "reason": "Missing required live cloud ASR secrets: OPENAI_API_KEY, ELEVENLABS_API_KEY, MISTRAL_API_KEY"
+    },
+    {
+      "gate": "benchmark-gates-packaged",
+      "status": "BLOCKED",
+      "evidence": "artifacts/benchmark-packaged.blocked.md",
+      "reason": "macOS packaged dictation benchmark evidence is present and passing; Windows packaged benchmark evidence is still missing."
+    },
+    {
+      "gate": "dictation-app-matrix",
+      "status": "BLOCKED",
+      "evidence": "artifacts/dictation-app-matrix-gate.json",
+      "reason": "Frozen app matrix is not launch-ready: 1/16 ready, 15 pending, 8 missing packaged benchmark evidence, 15 missing insertion evidence, 6 open blocked-app entries, 0 rejected insertion evidence artifacts."
+    },
+    {
+      "gate": "packaged-qa-matrix",
+      "status": "BLOCKED",
+      "evidence": "artifacts/packaged-qa-evidence-bundle.json",
+      "reason": "Non-external packaged QA remains 21 BLOCKED / 21 PASS. External distribution QA remains 10 BLOCKED / 0 PASS and is tracked separately."
+    }
+  ],
+  "externalBlockers": [
+    {
+      "gate": "apple-release-signing",
+      "status": "BLOCKED",
+      "evidence": "artifacts/qa/macos/security-gatekeeper.md",
+      "reason": "Gatekeeper still rejects the local dev-signed app; release signing and notarization are not configured."
+    },
+    {
+      "gate": "windows-release-signing",
+      "status": "BLOCKED",
+      "evidence": "artifacts/qa/windows/security-authenticode.md",
+      "reason": "Windows signing and SmartScreen validation have not been executed from a Windows release host."
+    }
+  ],
+  "sourceArtifacts": {
+    "competitiveMatrix": "docs/competitive-readiness-matrix.md",
+    "launchReport": "artifacts/launch-readiness-report.json",
+    "qaBundle": "artifacts/packaged-qa-evidence-bundle.json",
+    "researchBrief": "docs/research/competitive-research-2026-05-05.md",
+    "researchMatrix": "docs/research/competitive-matrix-2026-05-05.csv"
+  }
+}

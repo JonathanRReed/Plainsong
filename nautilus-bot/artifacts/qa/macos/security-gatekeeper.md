@@ -2,7 +2,7 @@
 
 Status: BLOCKED
 Owner: qa-macos
-Generated: 2026-05-03T15:52:37.638Z
+Generated: 2026-05-05T15:17:06.616Z
 
 ## Current Local Observation
 - `codesign --verify --deep --strict --verbose=2 release/mac-arm64/Nautilus.app` passed.

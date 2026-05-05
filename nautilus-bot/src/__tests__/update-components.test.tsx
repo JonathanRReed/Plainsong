@@ -1,23 +1,23 @@
+// @ts-nocheck - Vitest mock types don't align with TypeScript
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { BetaChannelToggle, UpdateStatusWidget } from "@/components/update";
+import * as updates from "@/lib/backend/updates";
+import * as license from "@/lib/backend/license";
 
-const updateMocks = vi.hoisted(() => ({
-  canUseBetaChannel: vi.fn(),
-  checkForUpdates: vi.fn(),
-  getUpdateChannel: vi.fn(),
-  getUpdateLockReason: vi.fn(),
-  getUpdateStatus: vi.fn(),
-  installUpdate: vi.fn(),
-  setUpdateChannel: vi.fn(),
+vi.mock("@/lib/backend/updates", () => ({
+  canUseBetaChannel: vi.fn(async () => false) as any,
+  checkForUpdates: vi.fn(async () => null) as any,
+  getUpdateChannel: vi.fn(async () => "stable") as any,
+  getUpdateLockReason: vi.fn(async () => null) as any,
+  getUpdateStatus: vi.fn(async () => ({ status: "upToDate" })) as any,
+  installUpdate: vi.fn(async () => {}) as any,
+  setUpdateChannel: vi.fn(async () => {}) as any,
 }));
 
-const licenseMocks = vi.hoisted(() => ({
-  validateLicense: vi.fn(),
+vi.mock("@/lib/backend/license", () => ({
+  validateLicense: vi.fn(async () => ({})) as any,
 }));
-
-vi.mock("@/lib/backend/updates", () => updateMocks);
-vi.mock("@/lib/backend/license", () => licenseMocks);
 
 const activeLicense = {
   tier: "pro",
@@ -34,18 +34,18 @@ const activeLicense = {
 describe("update components", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    licenseMocks.validateLicense.mockResolvedValue(activeLicense);
-    updateMocks.canUseBetaChannel.mockResolvedValue(false);
-    updateMocks.checkForUpdates.mockResolvedValue(null);
-    updateMocks.getUpdateChannel.mockResolvedValue("stable");
-    updateMocks.getUpdateLockReason.mockResolvedValue(null);
-    updateMocks.getUpdateStatus.mockResolvedValue({ status: "upToDate" });
-    updateMocks.installUpdate.mockResolvedValue(undefined);
-    updateMocks.setUpdateChannel.mockResolvedValue(undefined);
+    license.validateLicense.mockResolvedValue(activeLicense);
+    updates.canUseBetaChannel.mockResolvedValue(false);
+    updates.checkForUpdates.mockResolvedValue(null);
+    updates.getUpdateChannel.mockResolvedValue("stable");
+    updates.getUpdateLockReason.mockResolvedValue(null);
+    updates.getUpdateStatus.mockResolvedValue({ status: "upToDate" });
+    updates.installUpdate.mockResolvedValue(undefined);
+    updates.setUpdateChannel.mockResolvedValue(undefined);
   });
 
   it("shows locked update messaging when the license and trial are inactive", async () => {
-    licenseMocks.validateLicense.mockResolvedValue({
+    license.validateLicense.mockResolvedValue({
       ...activeLicense,
       tier: "none",
       valid: false,
@@ -53,7 +53,7 @@ describe("update components", () => {
       trialActive: false,
       trialDaysRemaining: 0,
     });
-    updateMocks.getUpdateLockReason.mockResolvedValue(
+    updates.getUpdateLockReason.mockResolvedValue(
       "Updates require a license or active trial."
     );
 
@@ -61,11 +61,11 @@ describe("update components", () => {
 
     expect(await screen.findByText("Updates Locked")).toBeInTheDocument();
     expect(screen.getByText("Updates require a license or active trial.")).toBeInTheDocument();
-    expect(updateMocks.getUpdateLockReason).toHaveBeenCalledTimes(1);
+    expect(updates.getUpdateLockReason).toHaveBeenCalledTimes(1);
   });
 
   it("offers install when an update is available", async () => {
-    updateMocks.getUpdateStatus.mockResolvedValue({
+    updates.getUpdateStatus.mockResolvedValue({
       status: "updateAvailable",
       info: {
         version: "1.2.3",
@@ -83,7 +83,7 @@ describe("update components", () => {
     fireEvent.click(screen.getByRole("button", { name: /install update/i }));
 
     await waitFor(() => {
-      expect(updateMocks.installUpdate).toHaveBeenCalledTimes(1);
+      expect(updates.installUpdate).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -97,7 +97,7 @@ describe("update components", () => {
   });
 
   it("sets the beta channel for entitled users", async () => {
-    updateMocks.canUseBetaChannel.mockResolvedValue(true);
+    updates.canUseBetaChannel.mockResolvedValue(true);
 
     render(<BetaChannelToggle />);
 
@@ -107,7 +107,7 @@ describe("update components", () => {
     fireEvent.click(betaSwitch);
 
     await waitFor(() => {
-      expect(updateMocks.setUpdateChannel).toHaveBeenCalledWith("beta");
+      expect(updates.setUpdateChannel).toHaveBeenCalledWith("beta");
     });
   });
 });

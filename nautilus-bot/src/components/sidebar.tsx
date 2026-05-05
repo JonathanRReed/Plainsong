@@ -197,6 +197,7 @@ export function Sidebar({
 
   useEffect(() => {
     let mounted = true;
+    let intervalId: ReturnType<typeof setInterval> | undefined;
 
     const refreshLocalMode = async () => {
       try {
@@ -217,14 +218,19 @@ export function Sidebar({
       }
     };
 
-    void refreshLocalMode();
-    const intervalId = setInterval(() => {
-      void refreshLocalMode();
-    }, 5000);
+    void refreshLocalMode().then(() => {
+      if (mounted) {
+        intervalId = setInterval(() => {
+          void refreshLocalMode();
+        }, 5000);
+      }
+    });
 
     return () => {
       mounted = false;
-      clearInterval(intervalId);
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
     };
   }, []);
 
@@ -238,8 +244,8 @@ export function Sidebar({
     <TooltipProvider>
       <div
         className={cn(
-          "flex flex-col h-full border-r bg-background transition-all duration-300",
-          isCollapsed ? "w-16" : "w-72"
+          "flex h-full shrink-0 flex-col overflow-hidden border-r border-border/70 bg-card/80 shadow-[1px_0_0_hsl(var(--foreground)/0.03)_inset] backdrop-blur-xl transition-[width] duration-200",
+          isCollapsed ? "w-[72px]" : "w-72"
         )}
       >
         <div
@@ -250,8 +256,8 @@ export function Sidebar({
           )}
         >
           <div className={cn("min-w-0", isCollapsed && "hidden")}>
-            <h1 className="font-semibold text-lg tracking-tight">Nautilus</h1>
-            <p className="mt-1 text-[11px] font-medium tracking-[0.14em] text-muted-foreground">
+            <p className="text-lg font-semibold tracking-tight">Nautilus</p>
+            <p className="mt-1 text-[11px] font-medium text-muted-foreground">
               Voice workspace
             </p>
           </div>
@@ -274,12 +280,12 @@ export function Sidebar({
 
         <Separator />
 
-        <ScrollArea className="flex-1 px-3 py-5">
+        <ScrollArea className={cn("flex-1 py-5", isCollapsed ? "px-2" : "px-3")}>
           <nav className="flex flex-col gap-6">
             {/* Primary Navigation */}
-            <div className="flex flex-col gap-1">
+              <div className="flex flex-col gap-1.5">
               {!isCollapsed && (
-                <p className="mb-2 px-3 text-[10px] font-medium uppercase tracking-[0.2em] text-muted-foreground">
+                <p className="quiet-label mb-2 px-3">
                   Primary
                 </p>
               )}
@@ -292,11 +298,13 @@ export function Sidebar({
                       <Button
                         variant="ghost"
                         className={cn(
-                          "h-10 w-full justify-start rounded-xl border-l-2 border-transparent px-3.5 text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-all duration-200",
-                          isActive && "border-l-primary bg-primary/8 text-foreground font-medium shadow-sm",
+                          "h-10 w-full justify-start rounded-xl border border-transparent px-3.5 text-muted-foreground transition-all duration-200 hover:border-border/70 hover:bg-muted/55 hover:text-foreground",
+                          isActive &&
+                            "border-primary/25 bg-primary/10 text-foreground shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset]",
                           isCollapsed && "justify-center px-2 border-l-0"
                         )}
                         onClick={() => onViewChange(item.id as ViewId)}
+                        aria-label={isCollapsed ? item.label : undefined}
                       >
                         <Icon className="h-4 w-4 shrink-0" />
                         {!isCollapsed && (
@@ -321,9 +329,9 @@ export function Sidebar({
             </div>
 
             {/* Secondary Navigation */}
-            <div className="flex flex-col gap-1">
+              <div className="flex flex-col gap-1.5">
               {!isCollapsed && (
-                <p className="mb-2 px-3 text-[10px] font-medium uppercase tracking-[0.2em] text-muted-foreground">
+                <p className="quiet-label mb-2 px-3">
                   Secondary
                 </p>
               )}
@@ -336,11 +344,13 @@ export function Sidebar({
                       <Button
                         variant="ghost"
                         className={cn(
-                          "h-10 w-full justify-start rounded-xl border-l-2 border-transparent px-3.5 text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-all duration-200",
-                          isActive && "border-l-primary bg-primary/8 text-foreground font-medium shadow-sm",
+                          "h-10 w-full justify-start rounded-xl border border-transparent px-3.5 text-muted-foreground transition-all duration-200 hover:border-border/70 hover:bg-muted/55 hover:text-foreground",
+                          isActive &&
+                            "border-primary/25 bg-primary/10 text-foreground shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset]",
                           isCollapsed && "justify-center px-2 border-l-0"
                         )}
                         onClick={() => onViewChange(item.id as ViewId)}
+                        aria-label={isCollapsed ? item.label : undefined}
                       >
                         <Icon className="h-4 w-4 shrink-0" />
                         {!isCollapsed && (
@@ -369,7 +379,7 @@ export function Sidebar({
               <div className="flex flex-col gap-1 pt-2">
                 <Button
                   variant="ghost"
-                  className="h-10 w-full justify-start rounded-xl px-3.5 text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-all duration-200"
+                  className="h-10 w-full justify-start rounded-xl border border-transparent px-3.5 text-muted-foreground transition-all duration-200 hover:border-border/70 hover:bg-muted/55 hover:text-foreground"
                   onClick={() => setShowMoreItems((value) => !value)}
                   aria-expanded={showMoreItems}
                   aria-controls="sidebar-more-items"
@@ -395,8 +405,9 @@ export function Sidebar({
                         key={item.id}
                         variant="ghost"
                         className={cn(
-                          "h-10 w-full justify-start rounded-xl border-l-2 border-transparent px-3.5 text-muted-foreground hover:bg-muted/60 hover:text-foreground transition-all duration-200",
-                          isActive && "border-l-primary bg-primary/8 text-foreground font-medium shadow-sm"
+                          "h-10 w-full justify-start rounded-xl border border-transparent px-3.5 text-muted-foreground transition-all duration-200 hover:border-border/70 hover:bg-muted/55 hover:text-foreground",
+                          isActive &&
+                            "border-primary/25 bg-primary/10 text-foreground shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset]"
                         )}
                         onClick={() => onViewChange(item.id as ViewId)}
                       >
@@ -408,16 +419,43 @@ export function Sidebar({
                 </div>
               </div>
             )}
+            {isCollapsed && (
+              <div className="flex flex-col gap-1.5">
+                {moreNavItems.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = activeView === item.id;
+                  return (
+                    <Tooltip key={item.id} delayDuration={0}>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          className={cn(
+                            "h-10 w-full justify-center rounded-xl border border-transparent px-2 text-muted-foreground transition-all duration-200 hover:border-border/70 hover:bg-muted/55 hover:text-foreground",
+                            isActive &&
+                              "border-primary/25 bg-primary/10 text-foreground shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset]",
+                          )}
+                          onClick={() => onViewChange(item.id as ViewId)}
+                          aria-label={item.label}
+                        >
+                          <Icon className="h-4 w-4 shrink-0" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="right">{item.label}</TooltipContent>
+                    </Tooltip>
+                  );
+                })}
+              </div>
+            )}
           </nav>
         </ScrollArea>
 
         <Separator />
 
-        <div className="flex flex-col gap-3 p-4">
+        <div className={cn("flex flex-col gap-3", isCollapsed ? "items-center p-2" : "p-4")}>
           {isRecording && (
             <div
               className={cn(
-                "flex items-center gap-2 rounded-md border border-border bg-muted/60 px-2 py-1 text-xs transition-all duration-200",
+                "flex items-center gap-2 rounded-xl border border-destructive/20 bg-destructive/10 px-2.5 py-2 text-xs transition-all duration-200",
                 isCollapsed && "justify-center"
               )}
             >
@@ -439,7 +477,7 @@ export function Sidebar({
             onActivateClick={onActivateClick}
           />
 
-          <div className={cn("flex items-center gap-2", isCollapsed && "justify-center")}>
+          <div className={cn("flex items-center gap-2 rounded-xl border border-border/60 bg-muted/30 px-2 py-1.5", isCollapsed && "h-10 w-10 justify-center px-0")}>
             <ThemeToggle />
             {!isCollapsed && <span className="text-xs text-muted-foreground">Theme</span>}
           </div>
@@ -448,8 +486,8 @@ export function Sidebar({
             <TooltipTrigger asChild>
               <div
                 className={cn(
-                  "flex items-center gap-2 text-xs text-muted-foreground cursor-help",
-                  isCollapsed && "justify-center"
+                  "flex items-center gap-2 rounded-xl border border-border/60 bg-muted/30 px-2.5 py-2 text-xs text-muted-foreground cursor-help",
+                  isCollapsed && "h-10 w-10 justify-center p-0"
                 )}
               >
                 <div

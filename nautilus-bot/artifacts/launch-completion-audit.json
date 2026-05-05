@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-05-03T15:52:41.266Z",
+  "generatedAt": "2026-05-05T15:23:44.301Z",
   "objective": "Finish NautilusBot so it is at parity or better than credible dictation and meeting-capture alternatives, with everything ready except signing and publishing.",
   "completionReadyExcludingSigningAndPublishing": false,
   "status": "NO-GO",
@@ -170,7 +170,7 @@
         "docs/dictation-app-compatibility-matrix.md"
       ],
       "state": "BLOCKED",
-      "detail": "1/16 ready, 15 pending, 15 missing insertion evidence, 6 open blocked-app entries, 0 invalid evidence artifacts, 1 rejected insertion artifacts.",
+      "detail": "1/16 ready, 15 pending, 15 missing insertion evidence, 6 open blocked-app entries, 0 invalid evidence artifacts, 0 rejected insertion artifacts.",
       "launchBlocking": true,
       "requiredToComplete": [
         "Capture real packaged insertion evidence for each launch app row.",
@@ -358,7 +358,7 @@
       "id": "app-matrix",
       "requirement": "Frozen dictation app matrix is certified with packaged insertion evidence.",
       "state": "BLOCKED",
-      "detail": "1/16 ready, 15 pending, 15 missing insertion evidence, 6 open blocked-app entries, 0 invalid evidence artifacts, 1 rejected insertion artifacts.",
+      "detail": "1/16 ready, 15 pending, 15 missing insertion evidence, 6 open blocked-app entries, 0 invalid evidence artifacts, 0 rejected insertion artifacts.",
       "evidence": [
         "artifacts/dictation-app-matrix-gate.json",
         "artifacts/qa/macos/app-matrix-preflight.json",
@@ -444,7 +444,7 @@
       "gate": "dictation-app-matrix",
       "status": "BLOCKED",
       "evidence": "artifacts/dictation-app-matrix-gate.json",
-      "reason": "Frozen app matrix is not launch-ready: 1/16 ready, 15 pending, 8 missing packaged benchmark evidence, 15 missing insertion evidence, 6 open blocked-app entries, 1 rejected insertion evidence artifacts."
+      "reason": "Frozen app matrix is not launch-ready: 1/16 ready, 15 pending, 8 missing packaged benchmark evidence, 15 missing insertion evidence, 6 open blocked-app entries, 0 rejected insertion evidence artifacts."
     },
     {
       "gate": "packaged-qa-matrix",

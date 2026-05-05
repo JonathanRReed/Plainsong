@@ -310,6 +310,12 @@ struct DictationOverlayState {
     activation_matcher: Option<String>,
     dictation_provider: Option<String>,
     dictation_model_id: Option<String>,
+    requested_provider: Option<String>,
+    actual_provider: Option<String>,
+    requested_model_id: Option<String>,
+    actual_model_id: Option<String>,
+    fallback_reason: Option<String>,
+    target_app: Option<String>,
     requested_route: Option<String>,
     resolved_route: Option<String>,
     provider_model_label: Option<String>,
@@ -338,6 +344,12 @@ impl Default for DictationOverlayState {
             activation_matcher: None,
             dictation_provider: None,
             dictation_model_id: None,
+            requested_provider: None,
+            actual_provider: None,
+            requested_model_id: None,
+            actual_model_id: None,
+            fallback_reason: None,
+            target_app: None,
             requested_route: None,
             resolved_route: None,
             provider_model_label: None,
@@ -4521,7 +4533,8 @@ async fn unlock_vault_runtime(state: &AppState, password: &str) -> Result<(), St
         generated
     };
 
-    let recording_key = crate::crypto::ProjectKeyManager::derive_key(password, &salt);
+    let recording_key = crate::crypto::ProjectKeyManager::derive_key(password, &salt)
+        .map_err(|e| format!("Failed to derive recording key: {}", e))?;
 
     if vault_initialized {
         let Some(blob_hex) =
@@ -4584,7 +4597,8 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
         generated
     };
 
-    let recording_key = crate::crypto::ProjectKeyManager::derive_key(password, &salt);
+    let recording_key = crate::crypto::ProjectKeyManager::derive_key(password, &salt)
+        .map_err(|e| format!("Failed to derive recording key: {}", e))?;
 
     let recordings = {
         let db = state.db.lock().await;
@@ -7175,6 +7189,8 @@ fn dictation_options_from_settings(settings: &settings::Settings) -> models::Dic
         live_preview_enabled: Some(settings.transcription.dictation_live_preview_enabled),
         requested_provider: None,
         requested_model_id: None,
+        actual_provider: None,
+        actual_model_id: None,
         resolved_route: None,
         provider_model_label: None,
         resolved_hosting: None,
@@ -8935,8 +8951,8 @@ fn preferred_dictation_provider_candidates(
         asr::AsrProviderType::WindowsSdkDictation,
         asr::AsrProviderType::Whisper,
         asr::AsrProviderType::Moonshine,
-        asr::AsrProviderType::Parakeet,
         asr::AsrProviderType::MlxAudio,
+        asr::AsrProviderType::Parakeet,
         asr::AsrProviderType::WhisperCandle,
         asr::AsrProviderType::Voxtral,
     ];
@@ -12654,6 +12670,10 @@ async fn start_dictation_for_sidecar(
         let sm = state.settings_manager.lock().await;
         sm.settings().clone()
     };
+    let requested_selection = resolve_transcription_provider_and_model(
+        &settings_snapshot.transcription,
+        TranscriptionScope::Dictation,
+    );
 
     let (
         dictation_provider,
@@ -12672,9 +12692,16 @@ async fn start_dictation_for_sidecar(
         handle.emit_event("asr-provider-warning", warning.to_string());
     }
 
-    options.requested_provider =
-        Some(asr_provider_to_settings_value(dictation_provider).to_string());
-    options.requested_model_id = Some(dictation_model_id.clone());
+    let requested_provider_value =
+        asr_provider_to_settings_value(requested_selection.0).to_string();
+    let requested_model_id_value = requested_selection.1.clone();
+    let actual_provider_value = asr_provider_to_settings_value(dictation_provider).to_string();
+    let actual_model_id_value = dictation_model_id.clone();
+
+    options.requested_provider = Some(requested_provider_value.clone());
+    options.requested_model_id = Some(requested_model_id_value.clone());
+    options.actual_provider = Some(actual_provider_value.clone());
+    options.actual_model_id = Some(actual_model_id_value.clone());
     options.route_preference =
         Some(dictation_route_preference_to_settings_value(resolved_route_preference).to_string());
     options.resolved_route = Some(format!(
@@ -12794,6 +12821,12 @@ async fn start_dictation_for_sidecar(
         overlay.dictation_provider =
             Some(asr_provider_to_settings_value(dictation_provider).to_string());
         overlay.dictation_model_id = Some(dictation_model_id.clone());
+        overlay.requested_provider = Some(requested_provider_value.clone());
+        overlay.actual_provider = Some(actual_provider_value.clone());
+        overlay.requested_model_id = Some(requested_model_id_value.clone());
+        overlay.actual_model_id = Some(actual_model_id_value.clone());
+        overlay.fallback_reason = provider_warning.clone();
+        overlay.target_app = options.context_app_name.clone();
         overlay.resolved_mode_preset = options.resolved_mode_preset.clone();
         overlay.resolved_custom_mode_id = options.resolved_custom_mode_id.clone();
         overlay.resolved_mode_label = options.resolved_mode_label.clone();
@@ -12822,6 +12855,12 @@ async fn start_dictation_for_sidecar(
             "message": "Preparing dictation",
             "dictationProvider": asr_provider_to_settings_value(dictation_provider),
             "dictationModelId": dictation_model_id,
+            "requestedProvider": requested_provider_value,
+            "actualProvider": actual_provider_value,
+            "requestedModelId": requested_model_id_value,
+            "actualModelId": actual_model_id_value,
+            "fallbackReason": provider_warning,
+            "targetApp": options.context_app_name,
             "resolvedModePreset": options.resolved_mode_preset,
             "resolvedCustomModeId": options.resolved_custom_mode_id,
             "resolvedModeLabel": options.resolved_mode_label,
@@ -12902,6 +12941,11 @@ async fn start_dictation_for_sidecar(
             "startedAtMs": session_started_at_ms,
             "dictationProvider": asr_provider_to_settings_value(dictation_provider),
             "dictationModelId": dictation_model_id,
+            "requestedProvider": asr_provider_to_settings_value(requested_selection.0),
+            "actualProvider": asr_provider_to_settings_value(dictation_provider),
+            "requestedModelId": requested_selection.1,
+            "actualModelId": dictation_model_id,
+            "targetApp": options.context_app_name,
             "resolvedModePreset": options.resolved_mode_preset,
             "resolvedCustomModeId": options.resolved_custom_mode_id,
             "resolvedModeLabel": options.resolved_mode_label,
@@ -12941,17 +12985,26 @@ async fn stop_dictation_for_sidecar(
         )
         .0
     };
-    let provider_type = dictation_options
+    let requested_provider_type = dictation_options
         .requested_provider
         .as_deref()
         .and_then(asr_provider_from_settings_value)
         .unwrap_or(fallback_provider_type);
+    let provider_type = dictation_options
+        .actual_provider
+        .as_deref()
+        .and_then(asr_provider_from_settings_value)
+        .unwrap_or(requested_provider_type);
     let requested_model_id = dictation_options.requested_model_id.clone();
+    let actual_model_id = dictation_options
+        .actual_model_id
+        .clone()
+        .or_else(|| requested_model_id.clone());
     let app_target = dictation_options.context_app_name.clone();
     let app_bundle_id = dictation_options.context_app_bundle_id.clone();
     let requested_insertion_mode = tracker_insertion_mode(state).await;
 
-    if let Some(model_id) = requested_model_id.as_ref() {
+    if let Some(model_id) = actual_model_id.as_ref() {
         state
             .asr_manager
             .set_provider_model_id(provider_type, model_id.clone())
@@ -13013,9 +13066,16 @@ async fn stop_dictation_for_sidecar(
                         "phase": "error",
                         "sessionId": session_id,
                         "message": format!("Failed to stop dictation audio: {}", error),
+                        "requestedProvider": asr_provider_to_settings_value(requested_provider_type),
+                        "actualProvider": asr_provider_to_settings_value(provider_type),
+                        "requestedModelId": requested_model_id.clone(),
+                        "actualModelId": actual_model_id.clone(),
+                        "targetApp": app_target.clone(),
+                        "insertionMode": requested_insertion_mode,
+                        "resolvedRoute": dictation_options.resolved_route,
+                        "routePreference": dictation_options.route_preference,
                     }),
                 );
-                handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
                 return Err(format!("Failed to stop dictation audio: {}", error));
             }
         }
@@ -13031,12 +13091,16 @@ async fn stop_dictation_for_sidecar(
             "phase": "transcribing",
             "sessionId": session_id,
             "message": "Transcribing…",
+            "requestedProvider": asr_provider_to_settings_value(requested_provider_type),
+            "actualProvider": asr_provider_to_settings_value(provider_type),
+            "requestedModelId": requested_model_id.clone(),
+            "actualModelId": actual_model_id.clone(),
             "resolvedModePreset": dictation_options.resolved_mode_preset,
             "resolvedCustomModeId": dictation_options.resolved_custom_mode_id,
             "resolvedModeLabel": dictation_options.resolved_mode_label,
             "contextSource": dictation_options.context_source,
             "insertionMode": requested_insertion_mode,
-            "appTarget": app_target,
+            "appTarget": app_target.clone(),
             "activationMatcher": dictation_options.activation_matcher,
             "requestedRoute": dictation_options.route_preference,
             "resolvedRoute": dictation_options.resolved_route,
@@ -13048,11 +13112,19 @@ async fn stop_dictation_for_sidecar(
 
     let transcription_result = match state
         .asr_manager
-        .transcribe_bytes_for_dictation(provider_type, &audio_bytes, requested_model_id.as_deref())
+        .transcribe_bytes_for_dictation(provider_type, &audio_bytes, actual_model_id.as_deref())
         .await
     {
         Ok(result) => result,
         Err(error) => {
+            let route_label = actual_model_id
+                .as_deref()
+                .map(|model| format!("{} / {}", provider_type.display_name(), model))
+                .unwrap_or_else(|| provider_type.display_name().to_string());
+            let user_message = format!(
+                "Dictation transcription failed on {}: {}",
+                route_label, error
+            );
             {
                 let mut runtime_state = state.dictation_runtime_state.lock().await;
                 *runtime_state = DictationSessionState::Idle;
@@ -13070,18 +13142,34 @@ async fn stop_dictation_for_sidecar(
             }
             if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
                 overlay.phase = "error".to_string();
-                overlay.message = Some(format!("Dictation transcription failed: {}", error));
+                overlay.message = Some(user_message.clone());
+                overlay.requested_provider =
+                    Some(asr_provider_to_settings_value(requested_provider_type).to_string());
+                overlay.actual_provider =
+                    Some(asr_provider_to_settings_value(provider_type).to_string());
+                overlay.requested_model_id = requested_model_id.clone();
+                overlay.actual_model_id = actual_model_id.clone();
+                overlay.fallback_reason = Some(error.to_string());
+                overlay.target_app = app_target.clone();
             }
             handle.emit_event(
                 "dictation-state-changed",
                 serde_json::json!({
                     "phase": "error",
                     "sessionId": session_id,
-                    "message": format!("Dictation transcription failed: {}", error),
+                    "message": user_message,
+                    "requestedProvider": asr_provider_to_settings_value(requested_provider_type),
+                    "actualProvider": asr_provider_to_settings_value(provider_type),
+                    "requestedModelId": requested_model_id.clone(),
+                    "actualModelId": actual_model_id.clone(),
+                    "fallbackReason": error.to_string(),
+                    "targetApp": app_target.clone(),
+                    "insertionMode": requested_insertion_mode,
+                    "resolvedRoute": dictation_options.resolved_route,
+                    "routePreference": dictation_options.route_preference,
                 }),
             );
-            handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
-            return Err(format!("Dictation transcription failed: {}", error));
+            return Err(user_message);
         }
     };
 
@@ -13667,10 +13755,14 @@ async fn stop_dictation_for_sidecar(
             "resolvedModeLabel": dictation_options.resolved_mode_label,
             "contextSource": dictation_options.context_source,
             "insertionMode": actual_insertion_mode,
-            "appTarget": app_target,
+            "appTarget": app_target.clone(),
             "activationMatcher": dictation_options.activation_matcher,
             "dictationProvider": asr_provider_to_settings_value(provider_type),
-            "dictationModelId": requested_model_id,
+            "dictationModelId": actual_model_id.clone(),
+            "requestedProvider": asr_provider_to_settings_value(transcription_result.requested_provider),
+            "actualProvider": asr_provider_to_settings_value(transcription_result.actual_provider),
+            "requestedModelId": dictation_options.requested_model_id.clone(),
+            "actualModelId": dictation_options.actual_model_id.clone(),
             "requestedRoute": dictation_options.route_preference,
             "resolvedRoute": dictation_options.resolved_route,
             "providerModelLabel": dictation_options.provider_model_label,
@@ -16481,7 +16573,18 @@ pub async fn dispatch_command(
         "dismiss_dictation_overlay" => {
             if let Ok(mut s) = state.dictation_overlay_state.lock() {
                 s.dismissed = true;
+                s.phase = "idle".to_string();
+                s.message = None;
+                s.preview = None;
+                s.partial_text = None;
             }
+            handle.emit_event(
+                "dictation-state-changed",
+                serde_json::json!({
+                    "phase": "idle",
+                    "dismissed": true,
+                }),
+            );
             handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
             Ok(serde_json::Value::Null)
         }

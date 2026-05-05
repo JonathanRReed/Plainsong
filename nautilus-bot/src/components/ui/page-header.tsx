@@ -23,8 +23,8 @@ export function PageHeader({
   children,
 }: PageHeaderProps) {
   return (
-    <div className={cn("border-b bg-background", className)}>
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-6 py-6 lg:px-8">
+    <div className={cn("border-b border-border/70 bg-background/82 backdrop-blur-xl", className)}>
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-6 py-5 lg:px-8">
         {/* Breadcrumbs */}
         {breadcrumbs && breadcrumbs.length > 0 && (
           <nav className="flex flex-wrap items-center gap-2 text-sm">

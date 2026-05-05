@@ -2,7 +2,7 @@
 
 Status: BLOCKED
 Owner: qa-windows
-Generated: 2026-05-03T15:52:37.638Z
+Generated: 2026-05-05T15:17:06.616Z
 
 ## Current Local Observation
 - No Windows SmartScreen validation run occurred in this pass.

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { shouldShowNag } from "@/components/nag-modal";
 
 const DISMISS_KEY = "nautilus_nag_dismissed_at";
@@ -11,22 +11,28 @@ function resetNagStorage() {
 }
 
 describe("shouldShowNag", () => {
+  const originalLocalStorage = global.localStorage;
+  const originalDateNow = Date.now;
+
   beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(NOW);
     resetNagStorage();
-    vi.stubGlobal("localStorage", {
+    global.localStorage = {
       getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => {
         storage.set(key, value);
       },
-    });
+      removeItem: (key: string) => storage.delete(key),
+      clear: () => storage.clear(),
+      length: 0,
+      key: () => null,
+    } as Storage;
+    Date.now = () => NOW.getTime();
   });
 
   afterEach(() => {
-    vi.useRealTimers();
     resetNagStorage();
-    vi.unstubAllGlobals();
+    global.localStorage = originalLocalStorage;
+    Date.now = originalDateNow;
   });
 
   it("shows immediately when the expired trial has never been dismissed", () => {

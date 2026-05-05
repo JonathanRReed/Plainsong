@@ -453,11 +453,11 @@ pub fn get_tier_activation_limit(tier: &Tier) -> u32 {
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 
-fn ls_client() -> reqwest::Client {
+fn ls_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .expect("reqwest client")
+        .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))
 }
 
 fn encode_form(pairs: &[(&str, &str)]) -> String {
@@ -487,7 +487,7 @@ pub async fn activate_license(key: &str) -> Result<LicenseInfo, String> {
     }
 
     let device_id = state.device_id.clone();
-    let client = ls_client();
+    let client = ls_client().map_err(|e| e.to_string())?;
     let body = encode_form(&[("license_key", &key), ("instance_name", &device_id)]);
 
     let resp = client
@@ -551,7 +551,7 @@ async fn validate_license_inner(state: &mut LicenseState) -> Result<LicenseInfo,
         return Ok(info_from_state(state));
     }
 
-    let client = ls_client();
+    let client = ls_client().map_err(|e| e.to_string())?;
     let body = encode_form(&[
         ("license_key", &state.key),
         ("instance_id", &state.instance_id),
@@ -612,7 +612,7 @@ pub async fn deactivate_license() -> Result<(), String> {
         return Ok(());
     }
 
-    let client = ls_client();
+    let client = ls_client().map_err(|e| e.to_string())?;
     let body = encode_form(&[
         ("license_key", &state.key),
         ("instance_id", &state.instance_id),
