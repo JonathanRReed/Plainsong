@@ -34,6 +34,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.removeListener(`sidecar:event:${event}`, getWrappedHandler(event, handler));
   },
 
-  getWindowLabel: (): string | null =>
-    ipcRenderer.sendSync("window:get-label") as string | null,
+  getWindowLabel: (): Promise<string | null> =>
+    ipcRenderer.invoke("window:get-label"),
 });

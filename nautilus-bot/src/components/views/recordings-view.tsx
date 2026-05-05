@@ -2075,6 +2075,51 @@ export function RecordingsView() {
       selectedTranscript?.segments?.length,
     ]
   );
+  const selectedMeetingEvidenceState = useMemo(
+    () => [
+      {
+        label: "Capture",
+        value:
+          selectedRecording?.id === recordingId && isRecording
+            ? "Recording"
+            : formatMeetingReviewState(selectedRecording?.status),
+      },
+      {
+        label: "Consent action",
+        value: selectedMeetingConsent.needsManualNotice
+          ? "Copy notice"
+          : selectedMeetingConsent.label,
+      },
+      {
+        label: "Transcript",
+        value:
+          (selectedTranscript?.segments?.length ?? 0) > 0
+            ? `${selectedTranscript?.segments?.length ?? 0} segments`
+            : selectedRecording?.status === "processing"
+              ? "Processing"
+              : "Not grounded",
+      },
+      {
+        label: "Export",
+        value: isExportingMeeting
+          ? "Exporting"
+          : lastMeetingExportPath
+            ? "Last export ready"
+            : "Not exported",
+      },
+    ],
+    [
+      isExportingMeeting,
+      isRecording,
+      lastMeetingExportPath,
+      recordingId,
+      selectedMeetingConsent.label,
+      selectedMeetingConsent.needsManualNotice,
+      selectedRecording?.id,
+      selectedRecording?.status,
+      selectedTranscript?.segments?.length,
+    ]
+  );
   const transcriptPreviewItems = useMemo(() => {
     if (selectedRecording?.id === recordingId && streamChunks.length > 0) {
       return streamChunks.slice(-5).map((chunk, index) => ({
@@ -2319,41 +2364,40 @@ export function RecordingsView() {
             </Card>
           )}
 
-          <div className="mb-4 grid gap-3 md:grid-cols-4">
-            <Card>
-              <CardContent className="p-4">
-                <p className="text-xs text-muted-foreground">Total Meetings</p>
-                <p className="text-2xl font-semibold">{meetingStats.total}</p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="p-4">
-                <p className="text-xs text-muted-foreground">Completed</p>
-                <p className="text-2xl font-semibold">{meetingStats.completed}</p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="p-4">
-                <p className="text-xs text-muted-foreground">Total Time</p>
-                <p className="text-2xl font-semibold">{meetingStats.totalHours.toFixed(1)}h</p>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="p-4">
-                <p className="text-xs text-muted-foreground">Errors</p>
-                <p className="text-2xl font-semibold">{meetingStats.errors}</p>
-              </CardContent>
-            </Card>
-          </div>
+          <section className="surface-panel-subtle mb-4 rounded-2xl p-4">
+            <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-center">
+              <div>
+                <p className="quiet-label">Meeting workspace</p>
+                <p className="mt-1 text-base font-medium text-card-foreground">
+                  Bot-free capture, transcript-first review, and practical follow-through.
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {[
+                  ["Total", meetingStats.total],
+                  ["Completed", meetingStats.completed],
+                  ["Hours", `${meetingStats.totalHours.toFixed(1)}h`],
+                  ["Errors", meetingStats.errors],
+                ].map(([label, value]) => (
+                  <div
+                    key={label}
+                    className="min-w-24 rounded-xl border border-border/70 bg-background/55 px-3 py-2"
+                  >
+                    <p className="text-xs text-muted-foreground">{label}</p>
+                    <p className="mt-1 text-xl font-semibold tracking-tight">{value}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
 
-          <Card className="mb-4">
-            <CardContent className="p-4">
+          <section className="surface-panel-subtle mb-4 rounded-2xl p-4">
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div className="relative w-full md:max-w-md">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     className="pl-9"
-                    placeholder="Search meetings by title or date…"
+                    placeholder="Search meetings by title or date"
                     value={meetingSearch}
                     onChange={(event) => setMeetingSearch(event.target.value)}
                   />
@@ -2414,10 +2458,9 @@ export function RecordingsView() {
                 </div>
               </div>
               <p className="mt-3 text-xs text-muted-foreground">
-                Seeing a dictation in this list? Use <span className="font-medium">••• → Mark as Dictation</span> to move it out of Meetings.
+                Seeing a dictation in this list? Use the row menu and choose Mark as Dictation to move it out of Meetings.
               </p>
-            </CardContent>
-          </Card>
+          </section>
 
           {isRecording && recordingId && (
             <Card className="mb-4 border-active/40 bg-active/5">
@@ -2572,42 +2615,43 @@ export function RecordingsView() {
           )}
 
           {filteredMeetings.length === 0 ? (
-            <div className="text-center py-12">
-              <FileAudio className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-              <h3 className="text-lg font-medium">
+            <div className="surface-panel-subtle rounded-2xl px-6 py-12 text-center">
+              <div className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl border border-border/70 bg-muted/35 text-muted-foreground">
+                <FileAudio className="h-6 w-6" />
+              </div>
+              <h3 className="text-lg font-medium tracking-tight">
                 {meetings.length === 0 ? "No meetings yet" : "No meetings match your filters"}
               </h3>
-              <p className="text-muted-foreground mt-1">
+              <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-muted-foreground">
                 {meetings.length === 0
-                  ? "Start a meeting to capture long-form conversation and notes"
+                  ? "Start a meeting to capture conversation, notes, transcript review, and follow-up drafts."
                   : "Try a different search or status filter."}
               </p>
               {meetings.length === 0 && (
                 <Button className="mt-4" variant="active" onClick={() => setShowConsent(true)}>
-                  <Mic2 className="h-4 w-4 mr-2" />
+                  <Mic2 data-icon="inline-start" />
                   Start Meeting
                 </Button>
               )}
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="grid gap-2">
               {filteredMeetings.map((recording) => (
                 <Card
                   key={recording.id}
-                  className="hover:bg-accent/50 cursor-pointer transition-colors"
+                  className="cursor-pointer border-border/70 bg-card/78 transition-colors hover:bg-muted/25"
                   onClick={() => handleRecordingClick(recording)}
                 >
                   <CardContent className="p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-4">
-                        <div className="h-10 w-10 rounded-lg bg-trusted/10 flex items-center justify-center">
+                    <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                      <div className="flex min-w-0 items-center gap-4">
+                        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-trusted/10">
                           <FileAudio className="h-5 w-5 text-trusted" />
                         </div>
-                        <div>
-                          <h3 className="font-medium">{recording.title}</h3>
-                          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <div className="min-w-0">
+                          <h3 className="truncate font-medium">{recording.title}</h3>
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
                             <span>{new Date(recording.createdAt).toLocaleString()}</span>
-                            <span>•</span>
                             {recording.status === "processing" ? (
                               <span className="inline-flex items-center gap-1">
                                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -2616,13 +2660,12 @@ export function RecordingsView() {
                             ) : (
                               <span className="capitalize">{recording.status}</span>
                             )}
-                            <span>•</span>
                             <span>Meeting</span>
                           </div>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center justify-end gap-2">
                         <span className="text-sm text-muted-foreground">{formatDuration(recording.duration)}</span>
                         <Button
                           variant="ghost"
@@ -2843,6 +2886,21 @@ export function RecordingsView() {
                         </Badge>
                       </div>
                       <p className="mt-3 text-sm text-muted-foreground">{selectedMeetingReadyState.detail}</p>
+                      <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                        {selectedMeetingEvidenceState.map((item) => (
+                          <div
+                            key={item.label}
+                            className="rounded-md border bg-background/80 px-3 py-2"
+                          >
+                            <p className="text-xs font-medium text-muted-foreground">
+                              {item.label}
+                            </p>
+                            <p className="mt-1 text-sm font-semibold">
+                              {item.value}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
                       <div className="mt-4 grid gap-3 md:grid-cols-3">
                         <div className="rounded-md border bg-background/80 p-3">
                           <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">

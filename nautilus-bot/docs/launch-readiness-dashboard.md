@@ -1,6 +1,6 @@
 # Launch Readiness Dashboard
 
-Generated: 2026-05-03T15:52:37.829Z
+Generated: 2026-05-05T15:41:12.069Z
 Overall status: `NO-GO`
 
 This dashboard is the single repo-side control surface for launch readiness against the practical bar set by Wispr Flow, FreeFlow, Granola, and OpenOats.
@@ -25,7 +25,7 @@ This dashboard is the single repo-side control surface for launch readiness agai
 - App matrix gate: `BLOCKED`
 - Launch app matrix: 1/16 ready, 1 supported, 0 partial, 0 clipboard-only, 15 pending
 - Missing insertion evidence: 15
-- Rejected insertion evidence artifacts: 1
+- Rejected insertion evidence artifacts: 0
 - Missing packaged benchmark evidence: 8
 - Invalid app-matrix evidence artifacts: 0
 
@@ -58,7 +58,7 @@ This dashboard is the single repo-side control surface for launch readiness agai
 
 - `cloud-asr-smoke`: Missing required live cloud ASR secrets: OPENAI_API_KEY, ELEVENLABS_API_KEY, MISTRAL_API_KEY (artifacts/cloud-asr-smoke.blocked.md)
 - `benchmark-gates-packaged`: macOS packaged dictation benchmark evidence is present and passing; Windows packaged benchmark evidence is still missing. (artifacts/benchmark-packaged.blocked.md)
-- `dictation-app-matrix`: Frozen app matrix is not launch-ready: 1/16 ready, 15 pending, 8 missing packaged benchmark evidence, 15 missing insertion evidence, 6 open blocked-app entries, 1 rejected insertion evidence artifacts. (artifacts/dictation-app-matrix-gate.json)
+- `dictation-app-matrix`: Frozen app matrix is not launch-ready: 1/16 ready, 15 pending, 8 missing packaged benchmark evidence, 15 missing insertion evidence, 6 open blocked-app entries, 0 rejected insertion evidence artifacts. (artifacts/dictation-app-matrix-gate.json)
 - `packaged-qa-matrix`: Non-external packaged QA remains 21 BLOCKED / 21 PASS. External distribution QA remains 10 BLOCKED / 0 PASS and is tracked separately. (artifacts/packaged-qa-evidence-bundle.json)
 
 ## Control Artifacts

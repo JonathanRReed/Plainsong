@@ -6,7 +6,6 @@ export {
   getSpeakers,
   isDiarizationModelAvailable,
   listDiarizationModels,
-  listDownloadedModels,
   refreshAsrRuntimeProbes,
   renameSpeaker,
   repairLocalModelCache,

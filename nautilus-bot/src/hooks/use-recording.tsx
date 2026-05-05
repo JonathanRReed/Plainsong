@@ -213,17 +213,20 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
           });
         }
       })
-      .catch(() => {
-        // Ignore initial hydration failures.
+      .catch((error) => {
+        logger.warn("Initial recording overlay state hydration failed:", error);
       });
 
     let unlistenDictation: (() => void) | undefined;
     let unlistenMeeting: (() => void) | undefined;
+    let mounted = true;
 
     const setup = async () => {
       unlistenDictation = await listen<SharedDictationStateChangedEvent>(
         "dictation-state-changed",
         (event) => {
+          if (!mounted) return;
+
           const payload = event.payload;
           if (payload.phase === "recording") {
             if (
@@ -275,6 +278,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       unlistenMeeting = await listen<MeetingRecordingStateChangedEvent>(
         "meeting-recording-state-changed",
         (event) => {
+          if (!mounted) return;
+
           const payload = event.payload;
           if (payload.phase === "recording" && payload.recordingId) {
             setState({
@@ -310,6 +315,7 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     void setup();
 
     return () => {
+      mounted = false;
       clearTimer();
       unlistenDictation?.();
       unlistenMeeting?.();
@@ -317,10 +323,15 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   }, [clearTimer, startTimer]);
 
   useEffect(() => {
+    let mounted = true;
     const id = setInterval(() => {
+      if (!mounted) return;
+
       if (stateRef.current.recordingMode === "dictation") {
         void invoke<SharedDictationStateChangedEvent>("get_dictation_overlay_state")
           .then((overlayState) => {
+            if (!mounted) return;
+
             if (
               overlayState.phase === "idle" ||
               overlayState.phase === "done" ||
@@ -342,8 +353,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
               startTimer(overlayState.startedAtMs);
             }
           })
-          .catch(() => {
-            // Ignore transient backend polling issues.
+          .catch((error) => {
+            logger.debug("Transient backend polling error:", error);
           });
         return;
       }
@@ -351,6 +362,8 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       if (stateRef.current.recordingMode === "meeting") {
         void invoke<RecordingOverlayState>("get_recording_overlay_state")
           .then((overlayState) => {
+            if (!mounted) return;
+
             if (overlayState.phase === "idle" || overlayState.phase === "error") {
               clearTimer();
               setState(INITIAL_STATE);
@@ -381,13 +394,16 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
               }));
             }
           })
-          .catch(() => {
-            // Ignore transient backend polling issues.
+          .catch((error) => {
+            logger.debug("Transient backend polling error:", error);
           });
       }
     }, 2500);
 
-    return () => clearInterval(id);
+    return () => {
+      mounted = false;
+      clearInterval(id);
+    };
   }, [clearTimer, startTimer]);
 
   const formattedDuration = useMemo(() => {

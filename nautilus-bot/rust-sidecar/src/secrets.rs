@@ -120,8 +120,16 @@ fn migrate_legacy_file_if_needed() {
 
 fn migrate_legacy_file_inner() -> Result<()> {
     let path = legacy_secrets_file_path()?;
-    if !path.exists() {
-        return Ok(());
+    
+    // Open file with exclusive access to prevent TOCTOU attacks
+    let file = std::fs::File::open(&path)
+        .with_context(|| format!("Failed to open legacy secrets file {}", path.display()))?;
+    
+    // Validate it's a regular file (not a symlink)
+    let metadata = file.metadata()
+        .with_context(|| format!("Failed to read metadata for {}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(anyhow::anyhow!("Legacy secrets path is not a regular file"));
     }
 
     let raw = std::fs::read_to_string(&path)

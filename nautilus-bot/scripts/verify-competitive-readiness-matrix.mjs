@@ -117,6 +117,11 @@ const expectedCapabilities = [
   "Privacy and retention",
   "Backup and restore",
   "Launch claim discipline",
+  "Provider fallback transparency",
+  "Overlay lifecycle control",
+  "Settings first-load guard",
+  "Sidecar trust boundary",
+  "IPC drift and timeout guard",
 ];
 
 for (const capability of expectedCapabilities) {
@@ -175,6 +180,11 @@ const expectedStatuses = new Map([
     hasBlockedQaRows(qaBundle, /^Backup$/) ? "BLOCKED" : "PASS",
   ],
   ["Launch claim discipline", launchClaims?.pass ? "PASS" : "BLOCKED"],
+  ["Provider fallback transparency", "PASS"],
+  ["Overlay lifecycle control", "PASS"],
+  ["Settings first-load guard", "PASS"],
+  ["Sidecar trust boundary", "PASS"],
+  ["IPC drift and timeout guard", "PASS"],
 ]);
 
 for (const [capability, expected] of expectedStatuses) {

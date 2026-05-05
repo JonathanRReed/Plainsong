@@ -31,6 +31,7 @@ let ipcBridge: IpcBridge | null = null;
 let dictationPhase = "idle";
 let updaterConfigured = false;
 let updateReadyToInstall = false;
+let bootstrapComplete = false;
 
 function qaLog(message: string, payload?: unknown): void {
   if (process.env.NAUTILUS_QA_PACKAGED_HOTKEY === "1") {
@@ -203,53 +204,61 @@ function configureAutoUpdater(updater: AppUpdater): void {
     return;
   }
 
-  updaterConfigured = true;
-  updater.autoDownload = false;
-  updater.autoInstallOnAppQuit = false;
+  try {
+    updaterConfigured = true;
+    updater.autoDownload = false;
+    updater.autoInstallOnAppQuit = false;
 
-  updater.on("checking-for-update", () => {
-    updateReadyToInstall = false;
-    setUpdateStatus({ status: "checking" });
-  });
-
-  updater.on("update-available", (info) => {
-    updateReadyToInstall = false;
-    setUpdateStatus({
-      status: "updateAvailable",
-      info: normalizeUpdateInfo(info),
+    updater.on("checking-for-update", () => {
+      updateReadyToInstall = false;
+      setUpdateStatus({ status: "checking" });
     });
-  });
 
-  updater.on("update-not-available", () => {
-    updateReadyToInstall = false;
-    setUpdateStatus({ status: "upToDate" });
-  });
-
-  updater.on("download-progress", (progress) => {
-    setUpdateStatus({
-      status: "downloading",
-      info: updateStatus.info,
-      progress: typeof progress.percent === "number" ? progress.percent : undefined,
+    updater.on("update-available", (info) => {
+      updateReadyToInstall = false;
+      setUpdateStatus({
+        status: "updateAvailable",
+        info: normalizeUpdateInfo(info),
+      });
     });
-  });
 
-  updater.on("update-downloaded", (info) => {
-    updateReadyToInstall = true;
-    setUpdateStatus({
-      status: "updateAvailable",
-      info: normalizeUpdateInfo(info),
-      progress: 100,
+    updater.on("update-not-available", () => {
+      updateReadyToInstall = false;
+      setUpdateStatus({ status: "upToDate" });
     });
-  });
 
-  updater.on("error", (error) => {
-    updateReadyToInstall = false;
+    updater.on("download-progress", (progress) => {
+      setUpdateStatus({
+        status: "downloading",
+        info: updateStatus.info,
+        progress: typeof progress.percent === "number" ? progress.percent : undefined,
+      });
+    });
+
+    updater.on("update-downloaded", (info) => {
+      updateReadyToInstall = true;
+      setUpdateStatus({
+        status: "updateAvailable",
+        info: normalizeUpdateInfo(info),
+        progress: 100,
+      });
+    });
+
+    updater.on("error", (error) => {
+      updateReadyToInstall = false;
+      setUpdateStatus({
+        status: "error",
+        info: updateStatus.info,
+        error: error.message,
+      });
+    });
+  } catch (error) {
+    console.error("[updater] failed to configure autoUpdater:", error);
     setUpdateStatus({
       status: "error",
-      info: updateStatus.info,
-      error: error.message,
+      error: error instanceof Error ? error.message : "Failed to configure updater",
     });
-  });
+  }
 }
 
 async function checkForUpdatesInElectron(): Promise<UpdateInfoPayload | null> {
@@ -400,6 +409,12 @@ function convertShortcutToAccelerator(shortcut: string | undefined): string | nu
     return null;
   }
 
+  // Validate that the shortcut is not excessively long (security concern)
+  if (tokens.length > 5) {
+    console.error("[shortcuts] shortcut too long, rejecting:", value);
+    return null;
+  }
+
   const mapped = tokens.map((token) => {
     switch (token.toLowerCase()) {
       case "cmd":
@@ -429,9 +444,23 @@ function convertShortcutToAccelerator(shortcut: string | undefined): string | nu
       case "right":
         return "Right";
       default:
-        return token.length === 1 ? token.toUpperCase() : token;
+        // Only allow single-character keys (letters, numbers, symbols)
+        if (token.length === 1) {
+          const char = token.toUpperCase();
+          // Validate it's a printable ASCII character
+          if (char >= '!' && char <= '~') {
+            return char;
+          }
+        }
+        console.error("[shortcuts] invalid token in shortcut:", token);
+        return null;
     }
   });
+
+  // If any token failed validation, reject the entire shortcut
+  if (mapped.includes(null)) {
+    return null;
+  }
 
   return mapped.join("+");
 }
@@ -686,6 +715,10 @@ app.on("window-all-closed", () => {
 });
 
 app.on("activate", () => {
+  if (!bootstrapComplete) {
+    // Bootstrap hasn't completed yet, wait for it to finish
+    return;
+  }
   if (mainWindow === null) {
     mainWindow = createMainWindow();
   } else if (!mainWindow.isVisible()) {
@@ -695,13 +728,12 @@ app.on("activate", () => {
   }
 });
 
-ipcMain.on("window:get-label", (event) => {
+ipcMain.handle("window:get-label", (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win) {
-    event.returnValue = null;
-    return;
+    return null;
   }
-  event.returnValue = getWindowLabel(win);
+  return getWindowLabel(win);
 });
 
 
@@ -796,6 +828,7 @@ async function bootstrap() {
   await applyElectronGlobalShortcuts("startup");
 
   mainWindow = createMainWindow();
+  bootstrapComplete = true;
 }
 
 void bootstrap();

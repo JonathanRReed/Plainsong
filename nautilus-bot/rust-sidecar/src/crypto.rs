@@ -21,15 +21,16 @@ pub struct ProjectKeyManager;
 
 impl ProjectKeyManager {
     /// Derive encryption key from password and salt using Argon2id
-    pub fn derive_key(password: &str, salt: &[u8]) -> [u8; KEY_LEN] {
-        let params = Params::new(19_456, 2, 1, Some(KEY_LEN)).expect("invalid argon2 parameters");
+    pub fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
+        let params = Params::new(19_456, 2, 1, Some(KEY_LEN))
+            .map_err(|_| anyhow::anyhow!("Invalid argon2 parameters"))?;
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
         let mut key = [0u8; KEY_LEN];
         argon2
             .hash_password_into(password.as_bytes(), salt, &mut key)
-            .expect("argon2 key derivation failed");
-        key
+            .map_err(|_| anyhow::anyhow!("Argon2 key derivation failed"))?;
+        Ok(key)
     }
 
     /// Encrypt data with AES-256-GCM.
@@ -100,7 +101,7 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
         let salt = [7u8; SALT_LEN];
-        let key = ProjectKeyManager::derive_key("test-password", &salt);
+        let key = ProjectKeyManager::derive_key("test-password", &salt).unwrap();
         let plaintext = b"Hello, Nautilus!";
 
         let encrypted = ProjectKeyManager::encrypt(plaintext, &key).unwrap();
@@ -112,8 +113,8 @@ mod tests {
     #[test]
     fn test_wrong_key_fails_decrypt() {
         let salt = [7u8; SALT_LEN];
-        let key_correct = ProjectKeyManager::derive_key("correct", &salt);
-        let key_wrong = ProjectKeyManager::derive_key("wrong", &salt);
+        let key_correct = ProjectKeyManager::derive_key("correct", &salt).unwrap();
+        let key_wrong = ProjectKeyManager::derive_key("wrong", &salt).unwrap();
 
         let encrypted = ProjectKeyManager::encrypt(b"secret", &key_correct).unwrap();
         let result = ProjectKeyManager::decrypt(&encrypted, &key_wrong);

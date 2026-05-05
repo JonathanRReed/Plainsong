@@ -177,7 +177,6 @@ vi.mock("@/lib/backend", () => ({
   listAnthropicModels: vi.fn(async () => []),
   listGeminiModels: vi.fn(async () => []),
   listDeepSeekModels: vi.fn(async () => []),
-  listDownloadedModels: vi.fn(async () => []),
   downloadWhisperModel: vi.fn(async () => { }),
   isDiarizationModelAvailable: vi.fn(async () => true),
   downloadDiarizationModel: vi.fn(async () => {}),
@@ -253,6 +252,45 @@ describe("SettingsView performance behavior", () => {
     fireEvent.click(screen.getByText("Storage"));
     await waitFor(() => {
       expect(backend.listBackups).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("renders settings before backup config finishes loading", async () => {
+    const backend = await import("@/lib/backend");
+    let resolveBackupConfig: (
+      value: Awaited<ReturnType<typeof backend.getBackupConfig>>,
+    ) => void = () => {};
+    const slowBackupConfig = new Promise<
+      Awaited<ReturnType<typeof backend.getBackupConfig>>
+    >((resolve) => {
+      resolveBackupConfig = resolve;
+    });
+    vi.mocked(backend.getBackupConfig).mockReturnValueOnce(slowBackupConfig);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    expect(
+      await screen.findByText(
+        "Tune transcription, AI, privacy, storage, and app behavior",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Storage"));
+    expect(screen.getByText("Loading backup controls...")).toBeInTheDocument();
+
+    resolveBackupConfig({
+      enabled: true,
+      intervalHours: 24,
+      maxBackups: 7,
+      backupDir: null,
+      cloudSync: false,
+      cloudProvider: null,
+      cloudRemoteName: null,
+      cloudFolder: "NautilusBackups",
+      icloudPath: null,
     });
   });
 
@@ -531,6 +569,55 @@ describe("SettingsView performance behavior", () => {
     expect(events).toEqual(["dashboard", "dashboard", "recordings"]);
 
     window.removeEventListener(OPEN_MAIN_VIEW_EVENT, handler as EventListener);
+  });
+
+  it("switches local Ollama analysis without keeping a stale cloud model id", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getSettings).mockResolvedValueOnce({
+      ...baseSettings,
+      privacy: {
+        ...baseSettings.privacy,
+        remoteProcessingEnabled: true,
+        llmProvider: "openai",
+        llmModelId: "gpt-4o",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+    vi.mocked(backend.listOllamaModels).mockResolvedValueOnce([
+      "llama3.2",
+      "mistral",
+    ]);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("AI & Keys"));
+    await screen.findByText("Default analysis provider");
+
+    const providerSection = screen
+      .getByText("Default analysis provider")
+      .closest("div");
+    expect(providerSection).not.toBeNull();
+    const providerSelect = within(providerSection as HTMLElement).getByRole(
+      "combobox",
+    );
+    expect(providerSelect).toHaveValue("openai");
+
+    fireEvent.change(providerSelect, { target: { value: "ollama" } });
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          privacy: expect.objectContaining({
+            llmProvider: "ollama",
+            llmModelId: "llama3.2",
+          }),
+        }),
+      );
+    });
   });
 
   it("persists the dictation active language set from transcription settings", async () => {

@@ -72,11 +72,32 @@ interface WebviewWindowHandle {
   startDragging(): Promise<void>;
 }
 
+// Cache the window label asynchronously to avoid blocking the renderer
+let cachedWindowLabel: string | null = null;
+let labelInitialized = false;
+
+async function initializeWindowLabel(): Promise<void> {
+  if (!labelInitialized && window.electronAPI) {
+    try {
+      cachedWindowLabel = await window.electronAPI.getWindowLabel();
+      labelInitialized = true;
+    } catch (error) {
+      console.error("[electron] Failed to get window label:", error);
+      cachedWindowLabel = "main";
+      labelInitialized = true;
+    }
+  }
+}
+
+// Initialize the label on module load
+void initializeWindowLabel();
+
 /**
  * Return the current renderer window handle.
+ * Uses a cached label that's initialized asynchronously.
  */
 export function getCurrentWindow(): WebviewWindowHandle {
-  const label = window.electronAPI?.getWindowLabel() ?? "main";
+  const label = cachedWindowLabel ?? "main";
   return {
     label,
     async setSize(size: LogicalSize) {
@@ -123,7 +144,7 @@ declare global {
       invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown>;
       on(event: string, handler: (payload: unknown) => void): void;
       off(event: string, handler: (payload: unknown) => void): void;
-      getWindowLabel(): string | null;
+      getWindowLabel(): Promise<string | null>;
     };
   }
 }

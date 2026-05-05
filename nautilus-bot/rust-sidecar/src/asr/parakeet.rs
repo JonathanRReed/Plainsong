@@ -34,7 +34,9 @@ pub(crate) fn clear_cached_session() {}
 fn get_or_create_session(
     onnx_path: &Path,
 ) -> Result<std::sync::MutexGuard<'static, Option<Session>>> {
-    let mut cache = onnx_session_cache().lock().unwrap();
+    let mut cache = onnx_session_cache().lock().map_err(|error| {
+        anyhow::anyhow!("Parakeet ONNX session cache is unavailable: {}", error)
+    })?;
 
     // If session exists, return it
     if cache.is_some() {

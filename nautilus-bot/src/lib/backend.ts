@@ -143,32 +143,12 @@ export interface DictationReprocessResult {
   modelId: string | null;
 }
 
-export interface AudioFileTranscriptionResult {
-  text: string;
-  language: string;
-  confidence: number;
-  processingTimeMs: number;
-  modelName: string;
-  modelId: string;
-  requestedProvider: string;
-  actualProvider: string;
-  fallbackReason?: string | null;
-}
-
 export async function reprocessDictationText(
   text: string,
   modePreset: string,
   appTarget?: string | null
 ): Promise<DictationReprocessResult> {
   return await invoke("reprocess_dictation_text", { text, modePreset, appTarget });
-}
-
-export async function transcribeAudioFileBytes(
-  audioBytes: Uint8Array
-): Promise<AudioFileTranscriptionResult> {
-  return await invoke("transcribe_audio_file_bytes", {
-    audioBytes: Array.from(audioBytes),
-  });
 }
 
 export async function getDictationHistoryDetails(
@@ -839,19 +819,6 @@ export async function requestDictationPermissions(): Promise<PermissionDiagnosti
 
 export async function repairCursorInsertPermissions(): Promise<PermissionDiagnostics> {
   return await invoke("repair_cursor_insert_permissions");
-}
-
-export async function listDownloadedModels(): Promise<DownloadedModel[]> {
-  return await invoke("list_downloaded_models");
-}
-
-// Types for model downloads
-interface DownloadedModel {
-  name: string;
-  provider: string;
-  path: string;
-  sizeBytes: number;
-  downloadedAt: string;
 }
 
 // Diarization types

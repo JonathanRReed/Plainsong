@@ -1,6 +1,6 @@
 # Packaged UX Evidence Bundle
 
-Generated: 2026-04-19T00:04:39.159Z
+Generated: 2026-05-05T15:41:12.076Z
 Overall status: `BLOCKED`
 
 This bundle maps the packaged QA matrix to the P0 Nautilus UX launch gates. It is intentionally blocker-first: a gate can only pass after packaged macOS and Windows evidence exists for the relevant user journey.
@@ -9,7 +9,7 @@ This bundle maps the packaged QA matrix to the P0 Nautilus UX launch gates. It i
 
 | Total rows | PASS | FAIL | BLOCKED | PENDING |
 | --- | --- | --- | --- | --- |
-| 53 | 0 | 0 | 53 | 0 |
+| 52 | 21 | 0 | 31 | 0 |
 
 ## Product Readiness
 
@@ -48,12 +48,12 @@ Optional backlog, not launch blockers:
 | OS permissions | `BLOCKED` | 3 | qa-release |
 | Recording visibility | `BLOCKED` | 6 | qa-release |
 | Meeting processing state | `BLOCKED` | 2 | qa-release |
-| Transcript-ready state | `BLOCKED` | 8 | qa-release |
+| Transcript-ready state | `BLOCKED` | 4 | qa-release |
 | Retention and delete | `BLOCKED` | 6 | qa-release |
 | Backup/restore trust | `BLOCKED` | 4 | qa-release |
 | Licensing and trial | `BLOCKED` | 8 | qa-release |
-| Provider/model routing | `BLOCKED` | 8 | qa-release |
-| Failure recovery | `BLOCKED` | 33 | qa-release |
+| Provider/model routing | `BLOCKED` | 4 | qa-release |
+| Failure recovery | `BLOCKED` | 29 | qa-release |
 | Platform scope | `BLOCKED` | 10 | release-owner |
 | Install, update, and platform trust | `BLOCKED` | 10 | release-owner |
 
@@ -67,8 +67,8 @@ New user understands what Nautilus does, local-first posture, required permissio
 
 | Platform | Area | Test case | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| macOS | Onboarding | Normal user onboarding completes and persists baseline settings | `BLOCKED` | artifacts/qa/macos/onboarding-normal.md |
-| macOS | Onboarding | Power user onboarding completes and persists advanced storage/retention settings | `BLOCKED` | artifacts/qa/macos/onboarding-power.md |
+| macOS | Onboarding | Normal user onboarding completes and persists baseline settings | `PASS` | artifacts/qa/macos/onboarding-normal.md |
+| macOS | Onboarding | Power user onboarding completes and persists advanced storage/retention settings | `PASS` | artifacts/qa/macos/onboarding-power.md |
 | Windows | Onboarding | Normal user onboarding completes and persists baseline settings | `BLOCKED` | artifacts/qa/windows/onboarding-normal.md |
 | Windows | Onboarding | Power user onboarding completes and persists advanced storage/retention settings | `BLOCKED` | artifacts/qa/windows/onboarding-power.md |
 
@@ -80,8 +80,8 @@ Microphone, accessibility/input, screen/meeting-related permissions, and denial 
 
 | Platform | Area | Test case | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| macOS | Permissions | Microphone permission flow | `BLOCKED` | artifacts/qa/macos/permissions-microphone.md |
-| macOS | Permissions | Accessibility permission flow | `BLOCKED` | artifacts/qa/macos/permissions-accessibility.md |
+| macOS | Permissions | Microphone permission flow | `PASS` | artifacts/qa/macos/permissions-microphone.md |
+| macOS | Permissions | Accessibility permission flow | `PASS` | artifacts/qa/macos/permissions-accessibility.md |
 | Windows | Permissions | Microphone permission flow | `BLOCKED` | artifacts/qa/windows/permissions-microphone.md |
 
 ### Recording visibility
@@ -92,9 +92,9 @@ User can always tell whether audio is being captured, paused, stopped, or unavai
 
 | Platform | Area | Test case | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| macOS | Capture | Dictation hotkey end-to-end | `BLOCKED` | artifacts/qa/macos/capture-dictation-hotkey.md |
-| macOS | Capture | Meeting recording mic-only | `BLOCKED` | artifacts/qa/macos/capture-meeting-mic.md |
-| macOS | Capture | Meeting recording with system audio (where available) | `BLOCKED` | artifacts/qa/macos/capture-meeting-system-audio.md |
+| macOS | Capture | Dictation hotkey end-to-end | `PASS` | artifacts/qa/macos/capture-dictation-hotkey.md |
+| macOS | Capture | Meeting recording mic-only | `PASS` | artifacts/qa/macos/capture-meeting-mic.md |
+| macOS | Capture | Meeting recording with system audio (where available) | `PASS` | artifacts/qa/macos/capture-meeting-system-audio.md |
 | Windows | Capture | Dictation hotkey end-to-end | `BLOCKED` | artifacts/qa/windows/capture-dictation-hotkey.md |
 | Windows | Capture | Meeting recording mic-only | `BLOCKED` | artifacts/qa/windows/capture-meeting-mic.md |
 | Windows | Capture | Meeting recording with loopback/system audio | `BLOCKED` | artifacts/qa/windows/capture-meeting-system-audio.md |
@@ -107,7 +107,7 @@ On stop, meeting status changes to processing immediately; spinner/detail state 
 
 | Platform | Area | Test case | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| macOS | Capture | Meeting processing UX: immediate `processing` status + spinner + detail auto-refresh | `BLOCKED` | artifacts/qa/macos/capture-processing-ux.md |
+| macOS | Capture | Meeting processing UX: immediate `processing` status + spinner + detail auto-refresh | `PASS` | artifacts/qa/macos/capture-processing-ux.md |
 | Windows | Capture | Meeting processing UX: immediate `processing` status + spinner + detail auto-refresh | `BLOCKED` | artifacts/qa/windows/capture-processing-ux.md |
 
 ### Transcript-ready state
@@ -118,14 +118,10 @@ User can see when transcript is ready, incomplete, failed, or degraded, with rec
 
 | Platform | Area | Test case | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| macOS | Capture | 3h+ meeting soak (mic + system audio) completes transcript end-to-end | `BLOCKED` | artifacts/qa/macos/capture-soak-3h.md |
-| macOS | Transcription | Whisper transcription end-to-end | `BLOCKED` | artifacts/qa/macos/transcription-whisper-e2e.md |
-| macOS | Transcription | Translate to English dictation profile end-to-end | `BLOCKED` | artifacts/qa/macos/transcription-translate-english.md |
-| macOS | Transcription | WAV file transcription through active dictation route | `BLOCKED` | artifacts/qa/macos/transcription-file-wav.md |
+| macOS | Capture | 3h+ meeting soak (mic + system audio) completes transcript end-to-end | `PASS` | artifacts/qa/macos/capture-soak-3h.md |
+| macOS | Transcription | Whisper transcription end-to-end | `PASS` | artifacts/qa/macos/transcription-whisper-e2e.md |
 | Windows | Capture | 3h+ meeting soak (mic + system audio) completes transcript end-to-end | `BLOCKED` | artifacts/qa/windows/capture-soak-3h.md |
 | Windows | Transcription | Whisper transcription end-to-end | `BLOCKED` | artifacts/qa/windows/transcription-whisper-e2e.md |
-| Windows | Transcription | Translate to English dictation profile end-to-end | `BLOCKED` | artifacts/qa/windows/transcription-translate-english.md |
-| Windows | Transcription | WAV file transcription through active dictation route | `BLOCKED` | artifacts/qa/windows/transcription-file-wav.md |
 
 ### Retention and delete
 
@@ -135,9 +131,9 @@ User understands where transcripts and audio live, what delete modes remove, and
 
 | Platform | Area | Test case | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| macOS | Retention | Transcript-only storage deletes audio and keeps transcript accessible | `BLOCKED` | artifacts/qa/macos/retention-transcript-only.md |
-| macOS | Retention | Meeting retention `audio_only` clears file/path but keeps transcript | `BLOCKED` | artifacts/qa/macos/retention-audio-only.md |
-| macOS | Retention | Meeting retention `audio_and_transcript` deletes full entity | `BLOCKED` | artifacts/qa/macos/retention-audio-and-transcript.md |
+| macOS | Retention | Transcript-only storage deletes audio and keeps transcript accessible | `PASS` | artifacts/qa/macos/retention-transcript-only.md |
+| macOS | Retention | Meeting retention `audio_only` clears file/path but keeps transcript | `PASS` | artifacts/qa/macos/retention-audio-only.md |
+| macOS | Retention | Meeting retention `audio_and_transcript` deletes full entity | `PASS` | artifacts/qa/macos/retention-audio-and-transcript.md |
 | Windows | Retention | Transcript-only storage deletes audio and keeps transcript accessible | `BLOCKED` | artifacts/qa/windows/retention-transcript-only.md |
 | Windows | Retention | Meeting retention `audio_only` clears file/path but keeps transcript | `BLOCKED` | artifacts/qa/windows/retention-audio-only.md |
 | Windows | Retention | Meeting retention `audio_and_transcript` deletes full entity | `BLOCKED` | artifacts/qa/windows/retention-audio-and-transcript.md |
@@ -150,8 +146,8 @@ Backup, restore, and cloud sync paths show clear user-facing state and do not ov
 
 | Platform | Area | Test case | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| macOS | Backup | Create backup / restore backup | `BLOCKED` | artifacts/qa/macos/backup-create-restore.md |
-| macOS | Backup | Cloud provider setup + sync + restore (at least one provider) | `BLOCKED` | artifacts/qa/macos/backup-cloud-sync.md |
+| macOS | Backup | Create backup / restore backup | `PASS` | artifacts/qa/macos/backup-create-restore.md |
+| macOS | Backup | Cloud provider setup + sync + restore (at least one provider) | `PASS` | artifacts/qa/macos/backup-cloud-sync.md |
 | Windows | Backup | Create backup / restore backup | `BLOCKED` | artifacts/qa/windows/backup-create-restore.md |
 | Windows | Backup | Cloud provider setup + sync + restore (at least one provider) | `BLOCKED` | artifacts/qa/windows/backup-cloud-sync.md |
 
@@ -163,10 +159,10 @@ Trial, activation, expiry, tier boundaries, and lockout states are visible and r
 
 | Platform | Area | Test case | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| macOS | Licensing | Trial expiry + nag behavior | `BLOCKED` | artifacts/qa/macos/licensing-trial-expiry.md |
+| macOS | Licensing | Trial expiry + nag behavior | `PASS` | artifacts/qa/macos/licensing-trial-expiry.md |
 | macOS | Licensing | License activation/deactivation | `BLOCKED` | artifacts/qa/macos/licensing-activate-deactivate.md |
-| macOS | Licensing | License tiers unlock correct features (basic/pro/friends-club) | `BLOCKED` | artifacts/qa/macos/licensing-tier-matrix.md |
-| macOS | Licensing | 30-day pro lockout behavior verified | `BLOCKED` | artifacts/qa/macos/licensing-30-day-lockout.md |
+| macOS | Licensing | License tiers unlock correct features (basic/pro/friends-club) | `PASS` | artifacts/qa/macos/licensing-tier-matrix.md |
+| macOS | Licensing | 30-day pro lockout behavior verified | `PASS` | artifacts/qa/macos/licensing-30-day-lockout.md |
 | Windows | Licensing | Trial expiry + nag behavior | `BLOCKED` | artifacts/qa/windows/licensing-trial-expiry.md |
 | Windows | Licensing | License activation/deactivation | `BLOCKED` | artifacts/qa/windows/licensing-activate-deactivate.md |
 | Windows | Licensing | License tiers unlock correct features (basic/pro/friends-club) | `BLOCKED` | artifacts/qa/windows/licensing-tier-matrix.md |
@@ -180,13 +176,9 @@ Default route is recommended by user job; expert controls do not expose internal
 
 | Platform | Area | Test case | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| macOS | Transcription | Whisper transcription end-to-end | `BLOCKED` | artifacts/qa/macos/transcription-whisper-e2e.md |
-| macOS | Transcription | Translate to English dictation profile end-to-end | `BLOCKED` | artifacts/qa/macos/transcription-translate-english.md |
-| macOS | Transcription | WAV file transcription through active dictation route | `BLOCKED` | artifacts/qa/macos/transcription-file-wav.md |
-| macOS | AI | Local analysis (Ollama) flow | `BLOCKED` | artifacts/qa/macos/ai-ollama-local.md |
+| macOS | Transcription | Whisper transcription end-to-end | `PASS` | artifacts/qa/macos/transcription-whisper-e2e.md |
+| macOS | AI | Local analysis (Ollama) flow | `PASS` | artifacts/qa/macos/ai-ollama-local.md |
 | Windows | Transcription | Whisper transcription end-to-end | `BLOCKED` | artifacts/qa/windows/transcription-whisper-e2e.md |
-| Windows | Transcription | Translate to English dictation profile end-to-end | `BLOCKED` | artifacts/qa/windows/transcription-translate-english.md |
-| Windows | Transcription | WAV file transcription through active dictation route | `BLOCKED` | artifacts/qa/windows/transcription-file-wav.md |
 | Windows | AI | Local/remote analysis configured paths | `BLOCKED` | artifacts/qa/windows/ai-analysis-paths.md |
 
 ### Failure recovery
@@ -197,23 +189,21 @@ Failed setup, failed recording, failed transcription, provider failure, and inse
 
 | Platform | Area | Test case | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| macOS | Permissions | Microphone permission flow | `BLOCKED` | artifacts/qa/macos/permissions-microphone.md |
-| macOS | Permissions | Accessibility permission flow | `BLOCKED` | artifacts/qa/macos/permissions-accessibility.md |
-| macOS | Capture | Dictation hotkey end-to-end | `BLOCKED` | artifacts/qa/macos/capture-dictation-hotkey.md |
-| macOS | Capture | Meeting recording mic-only | `BLOCKED` | artifacts/qa/macos/capture-meeting-mic.md |
-| macOS | Capture | Meeting recording with system audio (where available) | `BLOCKED` | artifacts/qa/macos/capture-meeting-system-audio.md |
-| macOS | Capture | Meeting processing UX: immediate `processing` status + spinner + detail auto-refresh | `BLOCKED` | artifacts/qa/macos/capture-processing-ux.md |
-| macOS | Capture | 3h+ meeting soak (mic + system audio) completes transcript end-to-end | `BLOCKED` | artifacts/qa/macos/capture-soak-3h.md |
-| macOS | Transcription | Whisper transcription end-to-end | `BLOCKED` | artifacts/qa/macos/transcription-whisper-e2e.md |
-| macOS | Transcription | Translate to English dictation profile end-to-end | `BLOCKED` | artifacts/qa/macos/transcription-translate-english.md |
-| macOS | Transcription | WAV file transcription through active dictation route | `BLOCKED` | artifacts/qa/macos/transcription-file-wav.md |
-| macOS | AI | Local analysis (Ollama) flow | `BLOCKED` | artifacts/qa/macos/ai-ollama-local.md |
-| macOS | Backup | Create backup / restore backup | `BLOCKED` | artifacts/qa/macos/backup-create-restore.md |
-| macOS | Backup | Cloud provider setup + sync + restore (at least one provider) | `BLOCKED` | artifacts/qa/macos/backup-cloud-sync.md |
-| macOS | Licensing | Trial expiry + nag behavior | `BLOCKED` | artifacts/qa/macos/licensing-trial-expiry.md |
+| macOS | Permissions | Microphone permission flow | `PASS` | artifacts/qa/macos/permissions-microphone.md |
+| macOS | Permissions | Accessibility permission flow | `PASS` | artifacts/qa/macos/permissions-accessibility.md |
+| macOS | Capture | Dictation hotkey end-to-end | `PASS` | artifacts/qa/macos/capture-dictation-hotkey.md |
+| macOS | Capture | Meeting recording mic-only | `PASS` | artifacts/qa/macos/capture-meeting-mic.md |
+| macOS | Capture | Meeting recording with system audio (where available) | `PASS` | artifacts/qa/macos/capture-meeting-system-audio.md |
+| macOS | Capture | Meeting processing UX: immediate `processing` status + spinner + detail auto-refresh | `PASS` | artifacts/qa/macos/capture-processing-ux.md |
+| macOS | Capture | 3h+ meeting soak (mic + system audio) completes transcript end-to-end | `PASS` | artifacts/qa/macos/capture-soak-3h.md |
+| macOS | Transcription | Whisper transcription end-to-end | `PASS` | artifacts/qa/macos/transcription-whisper-e2e.md |
+| macOS | AI | Local analysis (Ollama) flow | `PASS` | artifacts/qa/macos/ai-ollama-local.md |
+| macOS | Backup | Create backup / restore backup | `PASS` | artifacts/qa/macos/backup-create-restore.md |
+| macOS | Backup | Cloud provider setup + sync + restore (at least one provider) | `PASS` | artifacts/qa/macos/backup-cloud-sync.md |
+| macOS | Licensing | Trial expiry + nag behavior | `PASS` | artifacts/qa/macos/licensing-trial-expiry.md |
 | macOS | Licensing | License activation/deactivation | `BLOCKED` | artifacts/qa/macos/licensing-activate-deactivate.md |
-| macOS | Licensing | License tiers unlock correct features (basic/pro/friends-club) | `BLOCKED` | artifacts/qa/macos/licensing-tier-matrix.md |
-| macOS | Licensing | 30-day pro lockout behavior verified | `BLOCKED` | artifacts/qa/macos/licensing-30-day-lockout.md |
+| macOS | Licensing | License tiers unlock correct features (basic/pro/friends-club) | `PASS` | artifacts/qa/macos/licensing-tier-matrix.md |
+| macOS | Licensing | 30-day pro lockout behavior verified | `PASS` | artifacts/qa/macos/licensing-30-day-lockout.md |
 | Windows | Permissions | Microphone permission flow | `BLOCKED` | artifacts/qa/windows/permissions-microphone.md |
 | Windows | Capture | Dictation hotkey end-to-end | `BLOCKED` | artifacts/qa/windows/capture-dictation-hotkey.md |
 | Windows | Capture | Meeting recording mic-only | `BLOCKED` | artifacts/qa/windows/capture-meeting-mic.md |
@@ -221,8 +211,6 @@ Failed setup, failed recording, failed transcription, provider failure, and inse
 | Windows | Capture | Meeting processing UX: immediate `processing` status + spinner + detail auto-refresh | `BLOCKED` | artifacts/qa/windows/capture-processing-ux.md |
 | Windows | Capture | 3h+ meeting soak (mic + system audio) completes transcript end-to-end | `BLOCKED` | artifacts/qa/windows/capture-soak-3h.md |
 | Windows | Transcription | Whisper transcription end-to-end | `BLOCKED` | artifacts/qa/windows/transcription-whisper-e2e.md |
-| Windows | Transcription | Translate to English dictation profile end-to-end | `BLOCKED` | artifacts/qa/windows/transcription-translate-english.md |
-| Windows | Transcription | WAV file transcription through active dictation route | `BLOCKED` | artifacts/qa/windows/transcription-file-wav.md |
 | Windows | AI | Local/remote analysis configured paths | `BLOCKED` | artifacts/qa/windows/ai-analysis-paths.md |
 | Windows | Backup | Create backup / restore backup | `BLOCKED` | artifacts/qa/windows/backup-create-restore.md |
 | Windows | Backup | Cloud provider setup + sync + restore (at least one provider) | `BLOCKED` | artifacts/qa/windows/backup-cloud-sync.md |

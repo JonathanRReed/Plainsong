@@ -138,6 +138,25 @@ describe("DictationPopup", () => {
     vi.useRealTimers();
   });
 
+  it("keeps a dismissed overlay hidden when the backend snapshot is stale", async () => {
+    popupMocks.invoke.mockResolvedValueOnce({
+      phase: "idle",
+      dismissed: true,
+      sessionId: 9,
+      message: null,
+    } as any);
+
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Listening/i)).not.toBeInTheDocument();
+    });
+    expect(popupMocks.windowHandle.hide).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Listening/i)).not.toBeInTheDocument();
+  });
+
   it("renders resolved runtime mode metadata from dictation state events", async () => {
     await act(async () => {
       render(<DictationPopup />);
@@ -468,8 +487,8 @@ describe("DictationPopup", () => {
       expect(popupMocks.invoke).toHaveBeenCalledWith(
         "dismiss_dictation_overlay",
       );
-      expect(popupMocks.windowHandle.hide).toHaveBeenCalled();
     });
+    expect(popupMocks.windowHandle.hide).not.toHaveBeenCalled();
   });
 
   it("turns done state into a real review surface with command metadata and quick actions", async () => {

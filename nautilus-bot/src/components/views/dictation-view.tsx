@@ -78,7 +78,6 @@ import {
   Copy,
   Brain,
   Sparkles,
-  Languages,
   Terminal,
   Volume2,
   BookOpen,
@@ -167,6 +166,21 @@ type DictationRecoveryState = {
   hints: string[];
 };
 
+type DeliveryDoctorTone = "ready" | "attention" | "warning";
+
+type DeliveryDoctorItem = {
+  label: string;
+  value: string;
+};
+
+type DeliveryDoctorSummary = {
+  tone: DeliveryDoctorTone;
+  title: string;
+  detail: string;
+  nextAction: string;
+  items: DeliveryDoctorItem[];
+};
+
 function describeDictationRecoveryState(
   fallbackStatus: string | null,
   pasteStatus: string | null,
@@ -223,6 +237,21 @@ function describeDictationRecoveryState(
       "If this keeps happening, switch to the more reliable path for this app.",
     ],
   };
+}
+
+function formatDurationMetric(value: number | null): string | null {
+  if (value === null) {
+    return null;
+  }
+  return value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(1)}s`;
+}
+
+function formatInsertionModeLabel(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+  const normalized = value as DictationInsertionMode;
+  return INSERTION_MODE_LABELS[normalized] ?? value.replace(/_/g, " ");
 }
 
 type DictationModeSummaryItem = {
@@ -1675,6 +1704,146 @@ export function DictationView() {
     () => describeDictationRecoveryState(fallbackStatus, pasteStatus),
     [fallbackStatus, pasteStatus],
   );
+  const deliveryDoctor = useMemo<DeliveryDoctorSummary | null>(() => {
+    const hasTelemetry =
+      Boolean(lastProvider) ||
+      Boolean(lastModelId) ||
+      Boolean(lastResolvedHosting) ||
+      Boolean(lastRoutePreference) ||
+      Boolean(lastResolvedRoute) ||
+      Boolean(lastProviderModelLabel) ||
+      Boolean(insertionModeUsed) ||
+      Boolean(commandApplied) ||
+      snippetAppliedCount > 0 ||
+      Boolean(appTarget) ||
+      Boolean(activationMatcher) ||
+      contextChars !== null ||
+      startupLatencyMs !== null ||
+      latencyMs !== null ||
+      insertLatencyMs !== null ||
+      endToEndMs !== null ||
+      Boolean(fallbackStatus) ||
+      Boolean(pasteStatus);
+
+    if (!hasTelemetry) {
+      return null;
+    }
+
+    const fallback = fallbackStatus?.trim() ?? "";
+    const paste = pasteStatus?.trim() ?? "";
+    const combined = `${fallback} ${paste}`.toLowerCase();
+    const insertionNeedsAttention =
+      combined.includes("accessibility") ||
+      combined.includes("cursor insertion") ||
+      combined.includes("paste") ||
+      combined.includes("clipboard") ||
+      combined.includes("frontmost");
+    const routeNeedsAttention =
+      combined.includes("fallback") ||
+      combined.includes("provider") ||
+      combined.includes("model") ||
+      combined.includes("route");
+    const tone: DeliveryDoctorTone = insertionNeedsAttention
+      ? "attention"
+      : routeNeedsAttention
+        ? "warning"
+        : "ready";
+    const nextAction = insertionNeedsAttention
+      ? "Verify the target app is focused, then switch this app to Clipboard only if automatic delivery keeps failing."
+      : routeNeedsAttention
+        ? "Download or enable the requested local model, or choose the route that actually completed this session."
+        : "Use this route and insertion mode as the known-good baseline for the next app-matrix run.";
+
+    const items: DeliveryDoctorItem[] = [
+      appTarget ? { label: "Target app", value: appTarget } : null,
+      insertionModeUsed
+        ? {
+            label: "Delivery",
+            value: formatInsertionModeLabel(insertionModeUsed) ?? insertionModeUsed,
+          }
+        : null,
+      lastResolvedHosting
+        ? {
+            label: "Resolved route",
+            value: lastResolvedHosting === "cloud" ? "Cloud" : "Local",
+          }
+        : null,
+      lastRoutePreference
+        ? {
+            label: "Requested route",
+            value: lastRoutePreference === "cloud" ? "Cloud" : "Local",
+          }
+        : null,
+      lastResolvedRoute ? { label: "Route id", value: lastResolvedRoute } : null,
+      lastProviderModelLabel
+        ? { label: "Route label", value: lastProviderModelLabel }
+        : null,
+      lastProvider ? { label: "Engine", value: lastProvider } : null,
+      lastModelId ? { label: "Model", value: lastModelId } : null,
+      endToEndMs !== null
+        ? { label: "End to end", value: formatDurationMetric(endToEndMs) ?? "" }
+        : null,
+      latencyMs !== null
+        ? { label: "Transcription", value: formatDurationMetric(latencyMs) ?? "" }
+        : null,
+      insertLatencyMs !== null
+        ? { label: "Insert", value: formatDurationMetric(insertLatencyMs) ?? "" }
+        : null,
+      startupLatencyMs !== null
+        ? { label: "Start", value: formatDurationMetric(startupLatencyMs) ?? "" }
+        : null,
+      commandApplied
+        ? {
+            label: "Command",
+            value:
+              formatAppliedDictationCommandLabel(commandApplied) ??
+              commandApplied,
+          }
+        : null,
+      snippetAppliedCount > 0
+        ? { label: "Snippets", value: String(snippetAppliedCount) }
+        : null,
+      activationMatcher ? { label: "Auto mode", value: activationMatcher } : null,
+      contextChars !== null && contextChars > 0
+        ? { label: "Context", value: `${contextChars} chars` }
+        : null,
+    ].filter((item): item is DeliveryDoctorItem => Boolean(item));
+
+    return {
+      tone,
+      title:
+        tone === "ready"
+          ? "Delivery doctor: ready baseline"
+          : tone === "warning"
+            ? "Delivery doctor: route needs review"
+            : "Delivery doctor: insertion needs review",
+      detail:
+        paste ||
+        fallback ||
+        "Latest dictation has the route, delivery path, and timing needed for launch evidence.",
+      nextAction,
+      items,
+    };
+  }, [
+    activationMatcher,
+    appTarget,
+    commandApplied,
+    contextChars,
+    endToEndMs,
+    fallbackStatus,
+    insertLatencyMs,
+    insertionModeUsed,
+    lastModelId,
+    lastProvider,
+    lastProviderModelLabel,
+    lastResolvedHosting,
+    lastResolvedRoute,
+    lastRoutePreference,
+    latencyMs,
+    pasteStatus,
+    snippetAppliedCount,
+    startupLatencyMs,
+  ]);
 
   const refreshDictationInsights = async () => {
     try {
@@ -1730,10 +1899,14 @@ export function DictationView() {
           settings.transcription.dictationSelectedCustomModeId ?? null,
         );
         setCurrentDictationProvider(
-          settings.transcription.dictationProvider ?? null,
+          settings.transcription.dictationProvider ??
+            settings.transcription.defaultProvider ??
+            null,
         );
         setCurrentDictationModelId(
-          settings.transcription.dictationModelId ?? null,
+          settings.transcription.dictationModelId ??
+            settings.transcription.selectedModelId ??
+            null,
         );
         setCurrentMeetingProvider(
           settings.transcription.meetingProvider ?? null,
@@ -2169,6 +2342,15 @@ export function DictationView() {
     void (async () => {
       try {
         const settings = await getSettings();
+        settings.transcription.dictationModePreset = "custom";
+        settings.transcription.dictationSelectedCustomModeId = mode.id;
+        settings.transcription.dictationProfile = mode.profile;
+        settings.transcription.dictationInsertionMode = mode.insertionMode;
+        settings.transcription.dictationContextSource = mode.contextSource;
+        settings.transcription.dictationSaveToInbox = mode.saveToInbox;
+        settings.transcription.dictationCopyToClipboard = mode.copyToClipboard;
+        settings.transcription.dictationCommandModeEnabled =
+          mode.commandModeEnabled;
         if (mode.dictationProvider)
           settings.transcription.dictationProvider = mode.dictationProvider;
         if (mode.dictationModelId)
@@ -2229,6 +2411,13 @@ export function DictationView() {
       settings.transcription.dictationModePreset = "custom";
       settings.transcription.dictationSelectedCustomModeId = nextMode.id;
       settings.transcription.dictationCustomModes = nextModes;
+      settings.transcription.dictationProfile = nextMode.profile;
+      settings.transcription.dictationInsertionMode = nextMode.insertionMode;
+      settings.transcription.dictationContextSource = nextMode.contextSource;
+      settings.transcription.dictationSaveToInbox = nextMode.saveToInbox;
+      settings.transcription.dictationCopyToClipboard = nextMode.copyToClipboard;
+      settings.transcription.dictationCommandModeEnabled =
+        nextMode.commandModeEnabled;
       settings.transcription.dictationProvider =
         nextMode.dictationProvider ?? settings.transcription.dictationProvider;
       settings.transcription.dictationModelId =
@@ -2320,6 +2509,38 @@ export function DictationView() {
       copyToClipboard: nextMode.copyToClipboard,
       commandModeEnabled: nextMode.commandModeEnabled,
     });
+
+    try {
+      const settings = await getSettings();
+      settings.transcription.dictationModePreset = "custom";
+      settings.transcription.dictationSelectedCustomModeId = nextMode.id;
+      settings.transcription.dictationCustomModes = nextModes;
+      settings.transcription.dictationProfile = nextMode.profile;
+      settings.transcription.dictationInsertionMode = nextMode.insertionMode;
+      settings.transcription.dictationContextSource = nextMode.contextSource;
+      settings.transcription.dictationSaveToInbox = nextMode.saveToInbox;
+      settings.transcription.dictationCopyToClipboard = nextMode.copyToClipboard;
+      settings.transcription.dictationCommandModeEnabled =
+        nextMode.commandModeEnabled;
+      settings.transcription.dictationProvider =
+        nextMode.dictationProvider ?? settings.transcription.dictationProvider;
+      settings.transcription.dictationModelId =
+        nextMode.dictationModelId ?? settings.transcription.dictationModelId;
+      settings.transcription.dictationRoutePreference =
+        nextMode.routePreference ??
+        settings.transcription.dictationRoutePreference ??
+        "local";
+      settings.transcription.dictationLivePreviewEnabled =
+        nextMode.livePreviewEnabled ??
+        settings.transcription.dictationLivePreviewEnabled;
+      settings.privacy.llmProvider =
+        nextMode.aiProvider ?? settings.privacy.llmProvider;
+      settings.privacy.llmModelId =
+        nextMode.aiModelId ?? settings.privacy.llmModelId ?? null;
+      await saveSettings(settings);
+    } catch (error) {
+      console.warn("Failed to persist recommended flow profile:", error);
+    }
   };
 
   const handleDeleteCustomMode = async (modeId: string) => {
@@ -3292,7 +3513,9 @@ export function DictationView() {
                             <p className="mt-2 text-xs text-muted-foreground">
                               {style.activationDomainMatcher
                                 ? `Domain ${style.activationDomainMatcher}`
-                                : `App ${style.activationAppMatcher}`}
+                                : style.activationAppMatcher
+                                  ? `App ${style.activationAppMatcher}`
+                                  : "Manual profile"}
                               {" · "}
                               {CONTEXT_SOURCE_LABELS[style.contextSource]}
                               {" · "}
@@ -3362,6 +3585,10 @@ export function DictationView() {
                                   : ""}
                                 {mode.activationDomainMatcher
                                   ? ` · Domain ${mode.activationDomainMatcher}`
+                                  : ""}
+                                {!mode.activationAppMatcher &&
+                                !mode.activationDomainMatcher
+                                  ? " · Manual profile"
                                   : ""}
                               </p>
                             </div>
@@ -4146,99 +4373,56 @@ export function DictationView() {
             </CardContent>
           </Card>
 
-          {/* Instructions */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Keyboard className="h-4 w-4" />
-                  Global Hotkey
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Works from anywhere on your computer. No need to switch to the
-                  Nautilus window.
+          <section className="surface-panel-subtle rounded-2xl p-4">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+              <div className="max-w-xl">
+                <p className="quiet-label">Daily dictation guardrails</p>
+                <p className="mt-1 text-base font-medium text-card-foreground">
+                  The main path stays simple: trigger, speak, insert, then repair only when the target app needs it.
                 </p>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Zap className="h-4 w-4" />
-                  Fast insertion
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Your final text is inserted after capture finishes, and live
-                  preview can stay visible while you speak.
-                </p>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Save className="h-4 w-4" />
-                  Save history
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Keep dictations in Inbox so they are searchable later.
-                </p>
-              </CardContent>
-            </Card>
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Replace className="h-4 w-4" />
-                  Backtrack
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Say <code>scratch that</code>, <code>actually ...</code>, or{" "}
-                  <code>replace X with Y</code> right after an insert.
-                </p>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <BookOpen className="h-4 w-4" />
-                  Personal dictionary
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Teach names, brands, and recurring terms once so Nautilus
-                  remembers them everywhere.
-                </p>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm flex items-center gap-2">
-                  <Languages className="h-4 w-4" />
-                  Context aware
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  App/domain-aware profiles, selected text, and clipboard
-                  context help match how you actually write.
-                </p>
-              </CardContent>
-            </Card>
-          </div>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 lg:w-[520px]">
+                {[
+                  {
+                    icon: Keyboard,
+                    label: "Trigger",
+                    body: "Use the global hotkey without switching back to Nautilus.",
+                  },
+                  {
+                    icon: Zap,
+                    label: "Insert",
+                    body: "Final text lands after capture finishes.",
+                  },
+                  {
+                    icon: Replace,
+                    label: "Repair",
+                    body: "Use scratch that, actually, or replace X with Y.",
+                  },
+                  {
+                    icon: BookOpen,
+                    label: "Remember",
+                    body: "Teach names and terms once.",
+                  },
+                ].map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <div
+                      key={item.label}
+                      className="flex gap-3 rounded-xl border border-border/70 bg-background/55 p-3"
+                    >
+                      <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted/45 text-muted-foreground">
+                        <Icon className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-card-foreground">{item.label}</p>
+                        <p className="mt-1 text-xs leading-5 text-muted-foreground">{item.body}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
 
           {activeCoachCards.length > 0 && (
             <Card>
@@ -4699,93 +4883,60 @@ export function DictationView() {
                     </div>
                   </div>
                 )}
-                {(lastProvider ||
-                  lastModelId ||
-                  lastResolvedHosting ||
-                  startupLatencyMs !== null ||
-                  latencyMs !== null ||
-                  insertLatencyMs !== null ||
-                  endToEndMs !== null ||
-                  insertionModeUsed ||
-                  commandApplied ||
-                  snippetAppliedCount > 0 ||
-                  appTarget ||
-                  activationMatcher ||
-                  contextChars !== null) && (
-                  <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-                    {startupLatencyMs !== null && (
-                      <span>
-                        Start:{" "}
-                        {startupLatencyMs < 1000
-                          ? `${startupLatencyMs}ms`
-                          : `${(startupLatencyMs / 1000).toFixed(1)}s`}
-                      </span>
+                {deliveryDoctor && (
+                  <div
+                    className={cn(
+                      "mt-3 rounded-lg border p-3 text-xs",
+                      deliveryDoctor.tone === "ready" &&
+                        "border-emerald-400/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200",
+                      deliveryDoctor.tone === "warning" &&
+                        "border-amber-400/50 bg-amber-500/10 text-amber-800 dark:text-amber-200",
+                      deliveryDoctor.tone === "attention" &&
+                        "border-orange-400/50 bg-orange-500/10 text-orange-800 dark:text-orange-200",
                     )}
-                    {latencyMs !== null && (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-active/10 text-active font-medium">
-                        <Zap className="h-3 w-3" />
-                        Transcription{" "}
-                        {latencyMs < 1000
-                          ? `${latencyMs}ms`
-                          : `${(latencyMs / 1000).toFixed(1)}s`}
-                      </span>
-                    )}
-                    {endToEndMs !== null && (
-                      <span>
-                        Ready to insert:{" "}
-                        {endToEndMs < 1000
-                          ? `${endToEndMs}ms`
-                          : `${(endToEndMs / 1000).toFixed(1)}s`}
-                      </span>
-                    )}
-                    {insertLatencyMs !== null && (
-                      <span>
-                        Insert:{" "}
-                        {insertLatencyMs < 1000
-                          ? `${insertLatencyMs}ms`
-                          : `${(insertLatencyMs / 1000).toFixed(1)}s`}
-                      </span>
-                    )}
-                    {lastResolvedHosting && (
-                      <span>
-                        Route:{" "}
-                        {lastResolvedHosting === "cloud" ? "Cloud" : "Local"}
-                      </span>
-                    )}
-                    {lastRoutePreference && (
-                      <span>
-                        Requested:{" "}
-                        {lastRoutePreference === "cloud" ? "Cloud" : "Local"}
-                      </span>
-                    )}
-                    {lastResolvedRoute && (
-                      <span>Resolved: {lastResolvedRoute}</span>
-                    )}
-                    {lastProviderModelLabel && (
-                      <span>Route label: {lastProviderModelLabel}</span>
-                    )}
-                    {lastProvider && <span>Engine: {lastProvider}</span>}
-                    {lastModelId && <span>Model: {lastModelId}</span>}
-                    {insertionModeUsed && (
-                      <span>Inserted via: {insertionModeUsed}</span>
-                    )}
-                    {commandApplied && (
-                      <span>
-                        Command:{" "}
-                        {formatAppliedDictationCommandLabel(commandApplied) ??
-                          commandApplied}
-                      </span>
-                    )}
-                    {snippetAppliedCount > 0 && (
-                      <span>Snippets: {snippetAppliedCount}</span>
-                    )}
-                    {appTarget && <span>Target app: {appTarget}</span>}
-                    {activationMatcher && (
-                      <span>Auto mode: {activationMatcher}</span>
-                    )}
-                    {contextChars !== null && contextChars > 0 && (
-                      <span>Context: {contextChars} chars</span>
-                    )}
+                  >
+                    <div className="flex items-start gap-3">
+                      {deliveryDoctor.tone === "ready" ? (
+                        <CheckCircle2 className="mt-0.5 h-4 w-4 flex-none" />
+                      ) : (
+                        <TriangleAlert className="mt-0.5 h-4 w-4 flex-none" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-medium">{deliveryDoctor.title}</p>
+                          {endToEndMs !== null && (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-current/20 px-2 py-0.5 font-medium">
+                              <Zap className="h-3 w-3" />
+                              {formatDurationMetric(endToEndMs)}
+                            </span>
+                          )}
+                        </div>
+                        <p className="mt-1 text-current/85">
+                          {deliveryDoctor.detail}
+                        </p>
+                        <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                          {deliveryDoctor.items.map((item) => (
+                            <div
+                              key={`${item.label}-${item.value}`}
+                              className="rounded-md border border-current/15 bg-background/60 px-2 py-1.5 text-current"
+                            >
+                              <span className="sr-only">
+                                {item.label}: {item.value}
+                              </span>
+                              <p className="text-[10px] font-medium uppercase text-current/60">
+                                {item.label}
+                              </p>
+                              <p className="mt-0.5 truncate font-medium">
+                                {item.value}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                        <p className="mt-3 rounded-md border border-current/15 bg-background/60 px-2 py-1.5 text-current/90">
+                          Next: {deliveryDoctor.nextAction}
+                        </p>
+                      </div>
+                    </div>
                   </div>
                 )}
               </CardContent>

@@ -237,7 +237,7 @@ export function selectionStateFromSettings(
       normalizedDefault.providerType,
       normalizedDefault.modelId
     );
-  const dictationSelection = useSharedAsrSelection ? normalizedDefault : useRequestedShared ? normalizedDefault : normalizedDictation;
+  const dictationSelection = useSharedAsrSelection ? normalizedDefault : normalizedDictation;
   const meetingProvider = useSharedAsrSelection
     ? normalizedDefault.providerType
     : fallbackMeetingProvider(
@@ -327,7 +327,7 @@ export function mergeSelectionStateUpdate(
       normalizedDefault.providerType,
       normalizedDefault.modelId
     );
-  const dictationSelection = useSharedAsrSelection ? normalizedDefault : useRequestedShared ? normalizedDefault : normalizedDictation;
+  const dictationSelection = useSharedAsrSelection ? normalizedDefault : normalizedDictation;
   const meetingProvider = useSharedAsrSelection
     ? normalizedDefault.providerType
     : fallbackMeetingProvider(

@@ -69,7 +69,6 @@ import {
   downloadDiarizationModel,
   isDiarizationModelAvailable,
   listDiarizationModels,
-  listDownloadedModels,
 } from "@/lib/backend/asr";
 import {
   listAudioInputDevices,
@@ -209,6 +208,7 @@ const SHORTCUT_FIELD_CONFIG: Array<{ key: ShortcutFieldKey; label: string }> = [
 ];
 
 const SETTINGS_SAVE_DEBOUNCE_MS = 350;
+const SETTINGS_SECONDARY_LOAD_TIMEOUT_MS = 2500;
 const DICTATION_ACTIVE_LANGUAGE_OPTIONS = [
   { value: "en", label: "English" },
   { value: "es", label: "Spanish" },
@@ -223,6 +223,72 @@ const DICTATION_ACTIVE_LANGUAGE_OPTIONS = [
   { value: "ar", label: "Arabic" },
   { value: "hi", label: "Hindi" },
 ] as const;
+
+type ProviderModelListValue =
+  | string
+  | {
+      id?: unknown;
+      name?: unknown;
+      model?: unknown;
+    }
+  | null
+  | undefined;
+
+function normalizeProviderModelList(models: unknown): string[] {
+  if (!Array.isArray(models)) {
+    return [];
+  }
+
+  const normalized = models
+    .map((model: ProviderModelListValue) => {
+      if (typeof model === "string") {
+        return model;
+      }
+      if (model && typeof model === "object") {
+        const candidate = model.id ?? model.name ?? model.model;
+        return typeof candidate === "string" ? candidate : "";
+      }
+      return "";
+    })
+    .map((model) => model.replace(/^models\//, "").trim())
+    .filter(Boolean);
+
+  return Array.from(new Set(normalized));
+}
+
+function coerceProviderModelId(
+  currentModelId: string | null | undefined,
+  availableModels: string[],
+): string | null {
+  if (availableModels.length === 0) {
+    return currentModelId ?? null;
+  }
+  if (currentModelId && availableModels.includes(currentModelId)) {
+    return currentModelId;
+  }
+  return availableModels[0] ?? null;
+}
+
+async function withSettingsSectionTimeout<T>(
+  section: string,
+  task: Promise<T>,
+  timeoutMs = SETTINGS_SECONDARY_LOAD_TIMEOUT_MS,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`${section} took too long to load`));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([task, timeout]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
 
 const SETTINGS_TABS = [
   {
@@ -443,6 +509,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const [hasApiKey, setHasApiKey] = useState(false);
   const [savingApiKey, setSavingApiKey] = useState(false);
   const [backupConfig, setBackupConfig] = useState<BackupConfig | null>(null);
+  const [backupConfigLoading, setBackupConfigLoading] = useState(false);
   const [backups, setBackups] = useState<BackupInfo[]>([]);
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
@@ -734,15 +801,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
     const load = async () => {
       try {
-        const [loaded, loadedBackupConfig] = await Promise.all([
-          getSettings(),
-          getBackupConfig(),
-          listDownloadedModels().catch(() => []),
-        ]);
+        const loaded = await getSettings();
         if (mountedRef.current) {
           setDraftSettings(loaded);
           setPersistedSettings(loaded);
-          setBackupConfig(loadedBackupConfig);
           markSettingsPerf("settings-initial-load-complete");
         }
       } catch (e) {
@@ -760,9 +822,49 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   }, [flushPendingSettingsSave]);
 
   useEffect(() => {
+    if (!settings || backupConfig || backupConfigLoading) {
+      return;
+    }
+
+    let mounted = true;
+    setBackupConfigLoading(true);
+    markSettingsPerf("settings-backup-config-load-start");
+
+    const loadBackupConfig = async () => {
+      try {
+        const loadedBackupConfig = await withSettingsSectionTimeout(
+          "Backup settings",
+          getBackupConfig(),
+        );
+        if (mounted && mountedRef.current) {
+          setBackupConfig(loadedBackupConfig);
+          markSettingsPerf("settings-backup-config-load-complete");
+        }
+      } catch (e) {
+        if (mounted && mountedRef.current) {
+          console.warn("Failed to load backup settings:", e);
+          markSettingsPerf("settings-backup-config-load-failed");
+        }
+      } finally {
+        if (mounted && mountedRef.current) {
+          setBackupConfigLoading(false);
+        }
+      }
+    };
+
+    void loadBackupConfig();
+    return () => {
+      mounted = false;
+    };
+  }, [backupConfig, backupConfigLoading, settings]);
+
+  useEffect(() => {
     let mounted = true;
     if (!settings) return;
-    hasProviderSecret(settings.privacy.llmProvider)
+      withSettingsSectionTimeout(
+        "Provider secret status",
+        hasProviderSecret(settings.privacy.llmProvider),
+      )
       .then((value) => {
         if (mounted) {
           setHasApiKey(value);
@@ -790,7 +892,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     let mounted = true;
     const loadPermissionDiagnostics = async () => {
       try {
-        const permissions = await getPermissionDiagnostics();
+        const permissions = await withSettingsSectionTimeout(
+          "Permission status",
+          getPermissionDiagnostics(),
+        );
         if (mounted) {
           setPermissionDiagnostics(permissions);
         }
@@ -818,7 +923,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     markSettingsPerf("settings-security-load-start");
     const loadSecurity = async () => {
       try {
-        const security = await getSecurityStatus();
+        const security = await withSettingsSectionTimeout(
+          "Security details",
+          getSecurityStatus(),
+        );
         if (mounted) {
           setSecurityStatus(security);
           setHasLoadedSecurityTab(true);
@@ -847,7 +955,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     markSettingsPerf("settings-storage-load-start");
     const loadBackups = async () => {
       try {
-        const loadedBackups = await listBackups();
+        const loadedBackups = await withSettingsSectionTimeout(
+          "Storage backups",
+          listBackups(),
+        );
         if (mounted) {
           setBackups(loadedBackups);
           setHasLoadedStorageTab(true);
@@ -868,7 +979,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   useEffect(() => {
     if (licenseInfo !== null) return;
     let mounted = true;
-    void validateLicense()
+    void withSettingsSectionTimeout("License status", validateLicense())
       .then((info) => {
         if (mounted) {
           setLicenseInfo(info);
@@ -914,38 +1025,41 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     try {
       switch (providerName) {
         case "openai": {
-          const models = await listOpenAiModels();
+          const models = normalizeProviderModelList(await listOpenAiModels());
           setOpenaiModels(models);
-          break;
+          return models;
         }
         case "anthropic": {
-          const models = await listAnthropicModels();
+          const models = normalizeProviderModelList(await listAnthropicModels());
           setAnthropicModels(models);
-          break;
+          return models;
         }
         case "gemini": {
-          const models = await listGeminiModels();
+          const models = normalizeProviderModelList(await listGeminiModels());
           setGeminiModels(models);
-          break;
+          return models;
         }
         case "deepseek": {
-          const models = await listDeepSeekModels();
+          const models = normalizeProviderModelList(await listDeepSeekModels());
           setDeepseekModels(models);
-          break;
+          return models;
         }
         case "ollama-cloud": {
-          const models = await listOllamaCloudModels();
+          const models = normalizeProviderModelList(
+            await listOllamaCloudModels(),
+          );
           setOllamaCloudModels(models);
-          break;
+          return models;
         }
         case "ollama": {
           const [available, models] = await Promise.all([
             getOllamaStatus(),
             listOllamaModels(),
           ]);
+          const normalizedModels = normalizeProviderModelList(models);
           setOllamaAvailable(available);
-          setOllamaModels(models);
-          break;
+          setOllamaModels(normalizedModels);
+          return normalizedModels;
         }
       }
     } catch (e) {
@@ -953,14 +1067,21 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     } finally {
       setModelsLoading(false);
     }
+    return [];
   }, []);
 
   useEffect(() => {
     let mounted = true;
     const load = async () => {
       const [avail, models] = await Promise.all([
-        isDiarizationModelAvailable(),
-        listDiarizationModels().catch(() => [] as DiarizationModelOption[]),
+        withSettingsSectionTimeout(
+          "Diarization availability",
+          isDiarizationModelAvailable(),
+        ),
+        withSettingsSectionTimeout(
+          "Diarization models",
+          listDiarizationModels().catch(() => [] as DiarizationModelOption[]),
+        ).catch(() => [] as DiarizationModelOption[]),
       ]);
       if (!mounted) return;
       setDiarizationAvailable(avail);
@@ -1019,12 +1140,12 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
 
         if (mounted) {
           setOllamaAvailable(ollamaAvail);
-          setOllamaModels(ollamaList);
-          setOllamaCloudModels(ollamaCloudList);
-          setOpenaiModels(openaiList);
-          setAnthropicModels(anthropicList);
-          setGeminiModels(geminiList);
-          setDeepseekModels(deepseekList);
+          setOllamaModels(normalizeProviderModelList(ollamaList));
+          setOllamaCloudModels(normalizeProviderModelList(ollamaCloudList));
+          setOpenaiModels(normalizeProviderModelList(openaiList));
+          setAnthropicModels(normalizeProviderModelList(anthropicList));
+          setGeminiModels(normalizeProviderModelList(geminiList));
+          setDeepseekModels(normalizeProviderModelList(deepseekList));
           setModelsLoading(false);
         }
       } catch (error) {
@@ -1065,6 +1186,133 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     },
     [flushPendingSettingsSave, queueSettingsSave],
   );
+
+  const getCachedModelsForProvider = useCallback(
+    (providerName: string) => {
+      switch (providerName) {
+        case "ollama":
+          return ollamaModels;
+        case "openai":
+          return openaiModels;
+        case "anthropic":
+          return anthropicModels;
+        case "gemini":
+          return geminiModels;
+        case "deepseek":
+          return deepseekModels;
+        case "ollama-cloud":
+          return ollamaCloudModels;
+        default:
+          return [];
+      }
+    },
+    [
+      anthropicModels,
+      deepseekModels,
+      geminiModels,
+      ollamaCloudModels,
+      ollamaModels,
+      openaiModels,
+    ],
+  );
+
+  const updateAnalysisModel = useCallback(
+    (modelId: string | null) => {
+      if (!settings) {
+        return;
+      }
+
+      void updateSettings({
+        ...settings,
+        privacy: {
+          ...settings.privacy,
+          llmModelId: modelId,
+        },
+      });
+    },
+    [settings, updateSettings],
+  );
+
+  const updateAnalysisProvider = useCallback(
+    async (providerName: string) => {
+      if (!settings) {
+        return;
+      }
+
+      const cachedModels = getCachedModelsForProvider(providerName);
+      const initialModelId = coerceProviderModelId(
+        settings.privacy.llmModelId,
+        cachedModels,
+      );
+      const initialSettings = {
+        ...settings,
+        privacy: {
+          ...settings.privacy,
+          llmProvider: providerName,
+          llmModelId: initialModelId,
+        },
+      };
+
+      void updateSettings(initialSettings, { immediate: true });
+
+      const refreshedModels = await refreshModelsForProvider(providerName);
+      const refreshedModelId = coerceProviderModelId(
+        initialModelId,
+        refreshedModels,
+      );
+
+      if (refreshedModelId !== initialModelId) {
+        void updateSettings(
+          {
+            ...initialSettings,
+            privacy: {
+              ...initialSettings.privacy,
+              llmModelId: refreshedModelId,
+            },
+          },
+          { immediate: true },
+        );
+      }
+    },
+    [
+      getCachedModelsForProvider,
+      refreshModelsForProvider,
+      settings,
+      updateSettings,
+    ],
+  );
+
+  useEffect(() => {
+    if (!settings || activeTab !== "ai") {
+      return;
+    }
+
+    const cachedModels = getCachedModelsForProvider(
+      settings.privacy.llmProvider,
+    );
+    if (cachedModels.length === 0) {
+      return;
+    }
+
+    const nextModelId = coerceProviderModelId(
+      settings.privacy.llmModelId,
+      cachedModels,
+    );
+    if (nextModelId === settings.privacy.llmModelId) {
+      return;
+    }
+
+    void updateSettings(
+      {
+        ...settings,
+        privacy: {
+          ...settings.privacy,
+          llmModelId: nextModelId,
+        },
+      },
+      { immediate: true },
+    );
+  }, [activeTab, getCachedModelsForProvider, settings, updateSettings]);
 
   const updateDictationShortcutBehavior = useCallback(
     (mode: DictationHotkeyBehavior) => {
@@ -1335,6 +1583,27 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   }, [micTestPlaybackUrl]);
 
   if (!settings) {
+    if (error) {
+      return (
+        <div className="flex h-full items-center justify-center px-6">
+          <div className="max-w-md rounded-2xl border border-destructive/25 bg-destructive/10 p-5 text-sm text-destructive">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <p className="font-medium">Settings could not load</p>
+                <p className="mt-1 leading-6 text-destructive/85">
+                  {error}
+                </p>
+                <p className="mt-3 text-xs leading-5 text-muted-foreground">
+                  Open Nautilus as the desktop app to use settings that require the local runtime.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="h-full flex items-center justify-center text-muted-foreground">
         <Loader2 className="h-5 w-5 mr-2 animate-spin" />
@@ -1512,7 +1781,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                 value={
                   settings.transcription.dictationCommandPrefix ?? "command"
                 }
-                onChange={(e: any) =>
+                onChange={(e: ChangeEvent<HTMLInputElement>) =>
                   void updateSettings({
                     ...settings,
                     transcription: {
@@ -1598,7 +1867,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               <Textarea
                 placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
                 value={settings.transcription.dictationCustomPrompt ?? ""}
-                onChange={(e: any) =>
+                onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
                   void updateSettings({
                     ...settings,
                     transcription: {
@@ -1620,7 +1889,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               <Textarea
                 placeholder="e.g. Summarize the meeting and list action items..."
                 value={settings.transcription.meetingCustomPrompt ?? ""}
-                onChange={(e: any) =>
+                onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
                   void updateSettings({
                     ...settings,
                     transcription: {
@@ -1793,7 +2062,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   step={1}
                   className="w-full"
                   value={Math.round(settings.audio.silenceTimeoutSeconds / 60)}
-                  onChange={(e: any) => {
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
                     const minutes = parseInt(e.target.value, 10);
                     void updateSettings({
                       ...settings,
@@ -1888,7 +2157,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                   step={0.5}
                   value={settings.audio.manualGainDb}
                   className="w-full"
-                  onChange={(e: any) =>
+                  onChange={(e: ChangeEvent<HTMLInputElement>) =>
                     void updateSettings({
                       ...settings,
                       audio: {
@@ -2148,7 +2417,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               <div className="flex items-center gap-2">
                 <select
                   value={provider}
-                  onChange={(e: any) => {
+                  onChange={(e: ChangeEvent<HTMLSelectElement>) => {
                     const next = e.target.value;
                     setProvider(next);
                     updateSettings({
@@ -2434,7 +2703,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               <Label>Search mode</Label>
               <select
                 value={settings.transcription.memorySearchMode}
-                onChange={(e: any) =>
+                onChange={(e: ChangeEvent<HTMLSelectElement>) =>
                   void updateSettings({
                     ...settings,
                     transcription: {
@@ -3253,7 +3522,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                             <select
                               className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                               value={settings.transcription.speakerNamingMethod}
-                              onChange={(e: any) =>
+                              onChange={(e: ChangeEvent<HTMLSelectElement>) =>
                                 void updateSettings({
                                   ...settings,
                                   transcription: {
@@ -3284,7 +3553,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           <select
                             className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                             value={settings.transcription.language ?? ""}
-                            onChange={(e: any) =>
+                            onChange={(e: ChangeEvent<HTMLSelectElement>) =>
                               void updateSettings({
                                 ...settings,
                                 transcription: {
@@ -3487,7 +3756,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                 aria-label="Color scheme"
                                 className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                                 value={currentScheme}
-                                onChange={(e: any) => {
+                                onChange={(e: ChangeEvent<HTMLSelectElement>) => {
                                   const scheme = e.target.value as string;
                                   const normalized =
                                     normalizeThemeSchemeForAccess(
@@ -3847,7 +4116,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                               <select
                                 className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                                 value={settings.export.defaultFormat}
-                                onChange={(e: any) =>
+                                onChange={(e: ChangeEvent<HTMLSelectElement>) =>
                                   void updateSettings({
                                     ...settings,
                                     export: {
@@ -4012,12 +4281,12 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                               settings.transcription.dictationRetentionPreset ??
                               "never"
                             }
-                            onChange={(e: any) =>
+                            onChange={(e: ChangeEvent<HTMLSelectElement>) =>
                               void updateSettings({
                                 ...settings,
                                 transcription: {
                                   ...settings.transcription,
-                                  dictationRetentionPreset: e.target.value,
+                                  dictationRetentionPreset: e.target.value as "custom" | "immediate" | "24h" | "72h" | "never",
                                 },
                               })
                             }
@@ -4069,12 +4338,12 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                               settings.transcription.meetingAudioStorageMode ??
                               "always"
                             }
-                            onChange={(e: any) =>
+                            onChange={(e: ChangeEvent<HTMLSelectElement>) =>
                               void updateSettings({
                                 ...settings,
                                 transcription: {
                                   ...settings.transcription,
-                                  meetingAudioStorageMode: e.target.value,
+                                  meetingAudioStorageMode: e.target.value as "always" | "transcript_only",
                                 },
                               })
                             }
@@ -4094,12 +4363,12 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                               settings.transcription.meetingRetentionPreset ??
                               "never"
                             }
-                            onChange={(e: any) =>
+                            onChange={(e: ChangeEvent<HTMLSelectElement>) =>
                               void updateSettings({
                                 ...settings,
                                 transcription: {
                                   ...settings.transcription,
-                                  meetingRetentionPreset: e.target.value,
+                                  meetingRetentionPreset: e.target.value as "custom" | "never" | "1m" | "2m" | "3m",
                                 },
                               })
                             }
@@ -4151,12 +4420,12 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                               settings.transcription
                                 .meetingRetentionDeleteMode ?? "audio_only"
                             }
-                            onChange={(e: any) =>
+                            onChange={(e: ChangeEvent<HTMLSelectElement>) =>
                               void updateSettings({
                                 ...settings,
                                 transcription: {
                                   ...settings.transcription,
-                                  meetingRetentionDeleteMode: e.target.value,
+                                  meetingRetentionDeleteMode: e.target.value as "audio_only" | "audio_and_transcript",
                                 },
                               })
                             }
@@ -4298,6 +4567,14 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           </DialogContent>
                         </Dialog>
 
+                        {backupConfigLoading && !backupConfig && (
+                          <div className="pt-4 border-t">
+                            <div className="rounded-2xl border border-border/60 bg-background/70 p-4 text-sm text-muted-foreground">
+                              Loading backup controls...
+                            </div>
+                          </div>
+                        )}
+
                         {backupConfig && (
                           <div className="pt-4 border-t space-y-5">
                             <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
@@ -4410,7 +4687,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                 <Label>Provider</Label>
                                 <select
                                   value={backupConfig.cloudProvider ?? ""}
-                                  onChange={(e: any) =>
+                                  onChange={(e: ChangeEvent<HTMLSelectElement>) =>
                                     setBackupConfig({
                                       ...backupConfig,
                                       cloudProvider: (e.target.value ||
@@ -4861,13 +5138,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                           <select
                             value={settings.privacy.llmProvider}
                             onChange={(event) =>
-                              void updateSettings({
-                                ...settings,
-                                privacy: {
-                                  ...settings.privacy,
-                                  llmProvider: event.target.value,
-                                },
-                              })
+                              void updateAnalysisProvider(event.target.value)
                             }
                             className="w-full p-2 border rounded-md bg-background"
                           >
@@ -4906,14 +5177,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                   ollamaModels[0] ??
                                   ""
                                 }
-                                onChange={(e: any) =>
-                                  void updateSettings({
-                                    ...settings,
-                                    privacy: {
-                                      ...settings.privacy,
-                                      llmModelId: e.target.value || null,
-                                    },
-                                  })
+                                onChange={(
+                                  event: ChangeEvent<HTMLSelectElement>,
+                                ) =>
+                                  updateAnalysisModel(event.target.value || null)
                                 }
                                 className="w-full p-2 border rounded-md bg-background"
                               >
@@ -4940,14 +5207,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                 value={
                                   settings.privacy.llmModelId ?? openaiModels[0]
                                 }
-                                onChange={(e: any) =>
-                                  void updateSettings({
-                                    ...settings,
-                                    privacy: {
-                                      ...settings.privacy,
-                                      llmModelId: e.target.value || null,
-                                    },
-                                  })
+                                onChange={(
+                                  event: ChangeEvent<HTMLSelectElement>,
+                                ) =>
+                                  updateAnalysisModel(event.target.value || null)
                                 }
                                 className="w-full p-2 border rounded-md bg-background"
                               >
@@ -4981,14 +5244,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                   settings.privacy.llmModelId ??
                                   anthropicModels[0]
                                 }
-                                onChange={(e: any) =>
-                                  void updateSettings({
-                                    ...settings,
-                                    privacy: {
-                                      ...settings.privacy,
-                                      llmModelId: e.target.value || null,
-                                    },
-                                  })
+                                onChange={(
+                                  event: ChangeEvent<HTMLSelectElement>,
+                                ) =>
+                                  updateAnalysisModel(event.target.value || null)
                                 }
                                 className="w-full p-2 border rounded-md bg-background"
                               >
@@ -5011,21 +5270,16 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                               <select
                                 value={
                                   settings.privacy.llmModelId ??
-                                  geminiModels[0].replace("models/", "")
+                                  geminiModels[0]
                                 }
-                                onChange={(e: any) =>
-                                  void updateSettings({
-                                    ...settings,
-                                    privacy: {
-                                      ...settings.privacy,
-                                      llmModelId: e.target.value || null,
-                                    },
-                                  })
+                                onChange={(
+                                  event: ChangeEvent<HTMLSelectElement>,
+                                ) =>
+                                  updateAnalysisModel(event.target.value || null)
                                 }
                                 className="w-full p-2 border rounded-md bg-background"
                               >
-                                {geminiModels
-                                  .map((m) => m.replace("models/", ""))
+                              {geminiModels
                                   .filter((m) => m.includes("gemini"))
                                   .map((model) => (
                                     <option key={model} value={model}>
@@ -5048,14 +5302,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                   settings.privacy.llmModelId ??
                                   deepseekModels[0]
                                 }
-                                onChange={(e: any) =>
-                                  void updateSettings({
-                                    ...settings,
-                                    privacy: {
-                                      ...settings.privacy,
-                                      llmModelId: e.target.value || null,
-                                    },
-                                  })
+                                onChange={(
+                                  event: ChangeEvent<HTMLSelectElement>,
+                                ) =>
+                                  updateAnalysisModel(event.target.value || null)
                                 }
                                 className="w-full p-2 border rounded-md bg-background"
                               >
@@ -5081,14 +5331,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                   settings.privacy.llmModelId ??
                                   ollamaCloudModels[0]
                                 }
-                                onChange={(e: any) =>
-                                  void updateSettings({
-                                    ...settings,
-                                    privacy: {
-                                      ...settings.privacy,
-                                      llmModelId: e.target.value || null,
-                                    },
-                                  })
+                                onChange={(
+                                  event: ChangeEvent<HTMLSelectElement>,
+                                ) =>
+                                  updateAnalysisModel(event.target.value || null)
                                 }
                                 className="w-full p-2 border rounded-md bg-background"
                               >

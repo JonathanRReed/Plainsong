@@ -83,6 +83,12 @@ Any of these conditions force `NO-GO`:
 - app or language claims exceeding packaged evidence,
 - privacy, local-first, backup, or update claims broader than the artifacts prove.
 
+## Release Credential Preflight
+
+`bun run gate:release-credentials:preflight` is a secret-safe readiness check for `RG-01`. It writes `artifacts/release-credential-preflight.json` and `artifacts/release-credential-preflight.md`.
+
+This preflight is not signing evidence. It only confirms whether the expected Apple, Windows, and GitHub release inputs appear to be present without recording secret values or certificate contents. `RG-01` remains blocked until signed macOS and Windows artifacts pass the validation commands in `docs/CODE_SIGNING.md`.
+
 ## Public Boundary As Of 2026-04-18
 
 Allowed public/prelaunch posture:
