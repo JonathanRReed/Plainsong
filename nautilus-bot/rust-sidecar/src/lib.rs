@@ -1694,7 +1694,7 @@ fn push_relationship_evidence(
     next: models::RelationshipMemoryEvidence,
 ) {
     evidence.push(next);
-    evidence.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    evidence.sort_by_key(|item| std::cmp::Reverse(item.created_at));
     evidence.truncate(3);
 }
 
@@ -16267,11 +16267,10 @@ pub async fn dispatch_command(
                 }
             }
             insights.active_days = active_days.len() as u64;
-            insights.average_words_per_dictation = if insights.total_dictations > 0 {
-                insights.dictated_words / insights.total_dictations
-            } else {
-                0
-            };
+            insights.average_words_per_dictation = insights
+                .dictated_words
+                .checked_div(insights.total_dictations)
+                .unwrap_or(0);
             if let Some((app_target, count)) = app_target_counts.into_iter().max_by_key(|(_, c)| *c)
             {
                 insights.top_app_target = Some(app_target);
