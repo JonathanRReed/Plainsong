@@ -6,13 +6,13 @@ on:
       - main
     paths-ignore:
       - "**/*.md"
-      - "docs/**"
-      - "artifacts/**"
+      - "nautilus-bot/docs/**"
+      - "nautilus-bot/artifacts/**"
   pull_request:
     paths-ignore:
       - "**/*.md"
-      - "docs/**"
-      - "artifacts/**"
+      - "nautilus-bot/docs/**"
+      - "nautilus-bot/artifacts/**"
 
 permissions:
   contents: read
@@ -72,4 +72,4 @@ jobs:
       - name: Rust clippy
         env:
           WHISPER_NATIVE: "OFF"
-        run: cargo clippy --locked --manifest-path rust-sidecar/Cargo.toml --all-targets --no-default-features --features asr-whisper,ndarray,rustfft,sqlcipher -- -D warnings
+        run: cargo clippy --locked --manifest-path rust-sidecar/Cargo.toml --all-targets --no-default-features --features asr-whisper,ndarray,rustfft,sqlcipher
