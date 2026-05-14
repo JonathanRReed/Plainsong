@@ -3,7 +3,6 @@ use super::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "asr-parakeet")]
 use std::{cell::RefCell, thread_local};
