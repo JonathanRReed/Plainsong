@@ -598,9 +598,10 @@ impl AsrProvider for MoonshineProvider {
                 writer.finalize().context("Failed to finalize temp WAV")?;
             }
             let temp_path_for_cleanup = temp_path.clone();
-            let result = tokio::task::spawn_blocking(move || run_moonshine_onnx(&model_dir, &temp_path))
-                .await
-                .context("Moonshine inference task panicked");
+            let result =
+                tokio::task::spawn_blocking(move || run_moonshine_onnx(&model_dir, &temp_path))
+                    .await
+                    .context("Moonshine inference task panicked");
             let _ = std::fs::remove_file(&temp_path_for_cleanup);
             result??
         } else {
