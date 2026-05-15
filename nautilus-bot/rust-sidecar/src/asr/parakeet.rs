@@ -4,7 +4,6 @@ use super::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "asr-parakeet")]
 use ort::session::Session;
