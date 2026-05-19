@@ -547,6 +547,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const micTestStreamRef = useRef<MediaStream | null>(null);
   const micTestRecorderRef = useRef<MediaRecorder | null>(null);
   const micTestChunksRef = useRef<BlobPart[]>([]);
+  const backupConfigLoadInFlightRef = useRef(false);
   const [openaiModels, setOpenaiModels] = useState<string[]>([]);
   const [anthropicModels, setAnthropicModels] = useState<string[]>([]);
   const [geminiModels, setGeminiModels] = useState<string[]>([]);
@@ -822,11 +823,12 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   }, [flushPendingSettingsSave]);
 
   useEffect(() => {
-    if (!settings || backupConfig || backupConfigLoading) {
+    if (!settings || backupConfig || backupConfigLoadInFlightRef.current) {
       return;
     }
 
     let mounted = true;
+    backupConfigLoadInFlightRef.current = true;
     setBackupConfigLoading(true);
     markSettingsPerf("settings-backup-config-load-start");
 
@@ -846,6 +848,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
           markSettingsPerf("settings-backup-config-load-failed");
         }
       } finally {
+        backupConfigLoadInFlightRef.current = false;
         if (mounted && mountedRef.current) {
           setBackupConfigLoading(false);
         }
@@ -856,7 +859,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
     return () => {
       mounted = false;
     };
-  }, [backupConfig, backupConfigLoading, settings]);
+  }, [backupConfig, settings]);
 
   useEffect(() => {
     let mounted = true;

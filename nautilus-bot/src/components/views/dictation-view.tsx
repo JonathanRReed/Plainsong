@@ -1255,7 +1255,7 @@ export function DictationView() {
     null,
   );
   const [currentAiModelId, setCurrentAiModelId] = useState<string | null>(null);
-  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const modeDefinitionById = useMemo(
     () =>

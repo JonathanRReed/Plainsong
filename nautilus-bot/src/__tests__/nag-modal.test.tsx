@@ -11,12 +11,12 @@ function resetNagStorage() {
 }
 
 describe("shouldShowNag", () => {
-  const originalLocalStorage = global.localStorage;
+  const originalLocalStorage = globalThis.localStorage;
   const originalDateNow = Date.now;
 
   beforeEach(() => {
     resetNagStorage();
-    global.localStorage = {
+    globalThis.localStorage = {
       getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => {
         storage.set(key, value);
@@ -31,7 +31,7 @@ describe("shouldShowNag", () => {
 
   afterEach(() => {
     resetNagStorage();
-    global.localStorage = originalLocalStorage;
+    globalThis.localStorage = originalLocalStorage;
     Date.now = originalDateNow;
   });
 

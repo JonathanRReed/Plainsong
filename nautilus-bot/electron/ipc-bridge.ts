@@ -26,7 +26,7 @@ type PendingRequest = {
   args?: unknown;
   resolve: (value: unknown) => void;
   reject: (reason: unknown) => void;
-  timeout: NodeJS.Timeout;
+  timeout: ReturnType<typeof setTimeout>;
 };
 
 type EventCallback = (eventName: string, payload: unknown) => void;
