@@ -19,7 +19,7 @@ use ort::{
 use rustfft::FftPlanner;
 #[cfg(feature = "diarization")]
 use std::f32::consts::PI;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // Re-export Array1 for use in mod.rs
 
