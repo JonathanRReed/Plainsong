@@ -82,6 +82,43 @@ const baseSettings = {
   theme: "system" as const,
 };
 
+const storageMocks = vi.hoisted(() => ({
+  createBackupDefault: vi.fn(),
+  createSettingsBackupDefault: vi.fn(),
+  getBackupConfig: vi.fn(async () => ({
+    enabled: true,
+    intervalHours: 24,
+    maxBackups: 7,
+    backupDir: null,
+    cloudSync: false,
+    cloudProvider: null,
+    cloudRemoteName: null,
+    cloudFolder: "NautilusBackups",
+    icloudPath: null,
+  })),
+  getBackupSetupReport: vi.fn(),
+  listBackups: vi.fn(async () => [
+    {
+      id: "settings_20260314_120000",
+      timestamp: "2026-03-14T12:00:00.000Z",
+      sizeBytes: 1024,
+      itemsCount: 6,
+      backupType: "settings",
+    },
+    {
+      id: "backup_20260314_110000",
+      timestamp: "2026-03-14T11:00:00.000Z",
+      sizeBytes: 2048,
+      itemsCount: 20,
+      backupType: "full",
+    },
+  ]),
+  restoreBackupDefault: vi.fn(async () => {}),
+  saveBackupConfig: vi.fn(),
+  syncBackupToCloud: vi.fn(),
+  verifyBackupCloudConnection: vi.fn(),
+}));
+
 vi.mock("@/components/asr-provider-manager", () => ({
   AsrProviderManager: () => <div>ASR</div>,
 }));
@@ -94,8 +131,7 @@ vi.mock("@/components/theme-provider", () => ({
 }));
 
 vi.mock("@/lib/backend", () => ({
-  createBackupDefault: vi.fn(),
-  createSettingsBackupDefault: vi.fn(),
+  ...storageMocks,
   clearProviderSecret: vi.fn(),
   listAudioInputDevices: vi.fn(async () => ({
     devices: [
@@ -116,17 +152,6 @@ vi.mock("@/lib/backend", () => ({
     meetingOverrideEnabled: false,
     meetingSelectedDeviceId: null,
   })),
-  getBackupConfig: vi.fn(async () => ({
-    enabled: true,
-    intervalHours: 24,
-    maxBackups: 7,
-    backupDir: null,
-    cloudSync: false,
-    cloudProvider: null,
-    cloudRemoteName: null,
-    cloudFolder: "NautilusBackups",
-    icloudPath: null,
-  })),
   getPermissionDiagnostics: vi.fn(async () => ({
     microphoneReady: true,
     speechRecognitionReady: true,
@@ -141,7 +166,6 @@ vi.mock("@/lib/backend", () => ({
     automationReady: true,
     notes: [],
   })),
-  getBackupSetupReport: vi.fn(),
   getOllamaStatus: vi.fn(async () => true),
   getSecurityStatus: vi.fn(async () => ({
     vaultInitialized: false,
@@ -155,22 +179,6 @@ vi.mock("@/lib/backend", () => ({
   getSettings: vi.fn(async () => ({ ...baseSettings })),
   hasProviderSecret: vi.fn(async () => false),
   lockVault: vi.fn(),
-  listBackups: vi.fn(async () => [
-    {
-      id: "settings_20260314_120000",
-      timestamp: "2026-03-14T12:00:00.000Z",
-      sizeBytes: 1024,
-      itemsCount: 6,
-      backupType: "settings",
-    },
-    {
-      id: "backup_20260314_110000",
-      timestamp: "2026-03-14T11:00:00.000Z",
-      sizeBytes: 2048,
-      itemsCount: 20,
-      backupType: "full",
-    },
-  ]),
   listOllamaModels: vi.fn(async () => ["llama3.2"]),
   listOllamaCloudModels: vi.fn(async () => []),
   listOpenAiModels: vi.fn(async () => []),
@@ -193,12 +201,8 @@ vi.mock("@/lib/backend", () => ({
     notes: [],
   })),
   saveSettings: vi.fn(async () => { }),
-  saveBackupConfig: vi.fn(),
   setProviderSecret: vi.fn(async () => { }),
-  restoreBackupDefault: vi.fn(async () => {}),
-  syncBackupToCloud: vi.fn(),
   unlockVault: vi.fn(),
-  verifyBackupCloudConnection: vi.fn(),
   validateLicense: vi.fn(async () => ({
     tier: "none",
     valid: false,
@@ -223,6 +227,66 @@ vi.mock("@/lib/backend", () => ({
   })),
   deactivateLicense: vi.fn(async () => { }),
 }));
+
+vi.mock("@/lib/backend/settings", async () => {
+  const backend = await import("@/lib/backend");
+  return {
+    clearProviderSecret: backend.clearProviderSecret,
+    getPermissionDiagnostics: backend.getPermissionDiagnostics,
+    getSecurityStatus: backend.getSecurityStatus,
+    getSettings: backend.getSettings,
+    hasProviderSecret: backend.hasProviderSecret,
+    lockVault: backend.lockVault,
+    migrateToEncryptedStorage: backend.migrateToEncryptedStorage,
+    openPermissionSettings: backend.openPermissionSettings,
+    repairCursorInsertPermissions: backend.repairCursorInsertPermissions,
+    requestDictationPermissions: backend.requestDictationPermissions,
+    resetAppState: vi.fn(),
+    saveSettings: backend.saveSettings,
+    setProviderSecret: backend.setProviderSecret,
+    unlockVault: backend.unlockVault,
+  };
+});
+
+vi.mock("@/lib/backend/storage", () => storageMocks);
+
+vi.mock("@/lib/backend/ai", async () => {
+  const backend = await import("@/lib/backend");
+  return {
+    getOllamaStatus: backend.getOllamaStatus,
+    listAnthropicModels: backend.listAnthropicModels,
+    listDeepSeekModels: backend.listDeepSeekModels,
+    listGeminiModels: backend.listGeminiModels,
+    listOpenAiModels: backend.listOpenAiModels,
+    listOllamaCloudModels: backend.listOllamaCloudModels,
+    listOllamaModels: backend.listOllamaModels,
+  };
+});
+
+vi.mock("@/lib/backend/asr", async () => {
+  const backend = await import("@/lib/backend");
+  return {
+    downloadDiarizationModel: backend.downloadDiarizationModel,
+    isDiarizationModelAvailable: backend.isDiarizationModelAvailable,
+    listDiarizationModels: backend.listDiarizationModels,
+  };
+});
+
+vi.mock("@/lib/backend/recordings", async () => {
+  const backend = await import("@/lib/backend");
+  return {
+    listAudioInputDevices: backend.listAudioInputDevices,
+  };
+});
+
+vi.mock("@/lib/backend/license", async () => {
+  const backend = await import("@/lib/backend");
+  return {
+    activateLicense: backend.activateLicense,
+    deactivateLicense: backend.deactivateLicense,
+    validateLicense: backend.validateLicense,
+  };
+});
 
 describe("SettingsView performance behavior", () => {
   beforeEach(() => {
@@ -371,7 +435,11 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     fireEvent.click(screen.getByText("Storage"));
-    await screen.findByText("Personal Profile Sync");
+    await waitFor(() => {
+      expect(backend.getBackupConfig).toHaveBeenCalled();
+    });
+    await screen.findByText("Retention, backups, export paths, and cleanup tools");
+    await screen.findByText("Personal Profile Sync", {}, { timeout: 3000 });
 
     expect(screen.getByText("Latest profile snapshot")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create Profile Snapshot" })).toBeInTheDocument();

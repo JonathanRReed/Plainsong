@@ -1,4 +1,6 @@
 use super::{EngineProbe, PlatformEngine};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use std::path::PathBuf;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub fn probe() -> EngineProbe {

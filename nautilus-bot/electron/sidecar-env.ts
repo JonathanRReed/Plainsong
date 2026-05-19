@@ -36,8 +36,10 @@ const SIDECAR_ENV_ALLOWLIST = new Set([
   "OLLAMA_CLOUD_API_KEY",
 ]);
 
-export function buildSidecarEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
+type SidecarProcessEnv = Record<string, string | undefined>;
+
+export function buildSidecarEnv(source: SidecarProcessEnv): SidecarProcessEnv {
+  const env: SidecarProcessEnv = {};
   for (const [key, value] of Object.entries(source)) {
     if (value !== undefined && SIDECAR_ENV_ALLOWLIST.has(key)) {
       env[key] = value;
