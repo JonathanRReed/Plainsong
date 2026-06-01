@@ -103,7 +103,7 @@
     "url": "https://github.com/nautilusbot/nautilus"
   },
   "dependencies": {
-    "@base-ui/react": "^1.4.1",
+    "@base-ui/react": "^1.5.0",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
     "@radix-ui/react-popover": "^1.1.4",
@@ -117,10 +117,10 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.0.4",
     "electron-updater": "^6.8.3",
-    "lucide-react": "^1.16.0",
+    "lucide-react": "^1.17.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "shadcn": "^4.7.0",
+    "shadcn": "^4.10.0",
     "tailwind-merge": "^3.6.0",
     "tailwindcss-animate": "^1.0.7",
     "tw-animate-css": "^1.4.0"
@@ -130,19 +130,19 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^25.8.0",
-    "@types/react": "^19.2.11",
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
     "autoprefixer": "^10.5.0",
-    "electron": "^42.1.0",
+    "electron": "^42.3.0",
     "electron-builder": "^26.8.1",
     "esbuild": "^0.28.0",
     "jsdom": "^29.1.1",
-    "postcss": "^8.5.14",
+    "postcss": "^8.5.15",
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
-    "vite": "^8.0.13",
-    "vitest": "4.1.6"
+    "vite": "^8.0.16",
+    "vitest": "4.1.8"
   }
 }
