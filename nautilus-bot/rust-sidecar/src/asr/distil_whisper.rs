@@ -181,7 +181,7 @@ impl AsrProvider for DistilWhisperProvider {
 
         // Cleanup temp file (even if inference fails)
         let _ = std::fs::remove_file(&audio_for_dur);
-        text?
+        let text = text??;
 
         let duration = Self::wav_duration_seconds(audio_path);
         let segment = TranscriptSegment {
