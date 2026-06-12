@@ -198,7 +198,6 @@ const rows = matrixRows.map((row) => {
   const canAttemptManualCapture =
     row.status === "PENDING" &&
     installedPaths.length > 0 &&
-    packagedScenarioIds.length > 0 &&
     openBlockedEntries.length === 0;
   const captureCommand = canAttemptManualCapture ? captureCommandFor(row.app) : null;
 
