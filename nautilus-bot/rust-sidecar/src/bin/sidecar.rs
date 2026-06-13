@@ -129,11 +129,20 @@ async fn run_sidecar() {
             std::process::exit(0);
         }
 
+        // Dispatch each request on its own task so a slow command (model
+        // download, meeting summarization, AI formatting) never blocks reading
+        // and handling the next request — most importantly the dictation
+        // hotkey's start/stop commands. Shared state is guarded by the mutexes
+        // inside AppState, and responses carry their request id, so out-of-order
+        // completion is safe for the Electron side.
         let id = request.id.clone().unwrap_or(Value::Null);
-        let result =
-            nautilus_bot_lib::dispatch_command(&state, &handle, &request.method, request.params)
-                .await;
-
-        write_response(id, result);
+        let state = Arc::clone(&state);
+        let handle = handle.clone();
+        let method = request.method;
+        let params = request.params;
+        tokio::spawn(async move {
+            let result = nautilus_bot_lib::dispatch_command(&state, &handle, &method, params).await;
+            write_response(id, result);
+        });
     }
 }

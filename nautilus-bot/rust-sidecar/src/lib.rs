@@ -10980,7 +10980,6 @@ fn reactivate_target_application(
             "Target app '{}' is already frontmost; skipping app reactivation to preserve field focus",
             trimmed_name.or(trimmed_bundle_id).unwrap_or("unknown")
         );
-        std::thread::sleep(std::time::Duration::from_millis(60));
         return Ok(());
     }
 
@@ -11166,7 +11165,10 @@ fn dispatch_macos_keystroke(keycode: u16, modifiers: MacosKeyModifiers) -> Resul
     const SHIFT_KEYCODE: CGKeyCode = 56;
     const OPTION_KEYCODE: CGKeyCode = 58;
     const CONTROL_KEYCODE: CGKeyCode = 59;
-    const KEYSTROKE_DELAY_MS: u64 = 50;
+    // Gap between synthetic key events. Long enough for target apps to register
+    // the modifier/key sequence, short enough that a Cmd+V costs ~32ms of sleep
+    // rather than ~200ms. (Was 50ms.)
+    const KEYSTROKE_DELAY_MS: u64 = 8;
     const MAX_ATTEMPTS: usize = 2;
 
     let mut last_error: Option<String> = None;
@@ -13376,14 +13378,23 @@ async fn stop_dictation_for_sidecar(
                         models::DictationProfile::PowerRewrite
                     )
                 {
-                    match run_dictation_formatting_with_selected_provider(
-                        state,
-                        final_text.as_str(),
-                        &dictation_options,
+                    // Cap how long AI formatting may delay insertion. The local
+                    // pipeline output in `final_text` is already a good result,
+                    // so on timeout or error we insert that rather than making
+                    // the user wait on a slow/stuck LLM.
+                    const DICTATION_FORMAT_TIMEOUT: std::time::Duration =
+                        std::time::Duration::from_secs(6);
+                    let formatting = tokio::time::timeout(
+                        DICTATION_FORMAT_TIMEOUT,
+                        run_dictation_formatting_with_selected_provider(
+                            state,
+                            final_text.as_str(),
+                            &dictation_options,
+                        ),
                     )
-                    .await
-                    {
-                        Ok(output) => {
+                    .await;
+                    match formatting {
+                        Ok(Ok(output)) => {
                             final_text =
                                 sanitize_dictation_output(output.trim(), final_text.as_str())
                                     .trim()
@@ -13401,10 +13412,16 @@ async fn stop_dictation_for_sidecar(
                             }
                             formatting_applied = true;
                         }
-                        Err(error) => {
+                        Ok(Err(error)) => {
                             tracing::warn!(
                                 "LLM dictation formatting failed, keeping local pipeline output: {}",
                                 error
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "LLM dictation formatting timed out after {}s, keeping local pipeline output",
+                                DICTATION_FORMAT_TIMEOUT.as_secs()
                             );
                         }
                     }
@@ -13820,24 +13837,33 @@ async fn stop_dictation_for_sidecar(
         }),
     );
 
-    // After a brief display window, hide the overlay and reset to idle.
-    tokio::time::sleep(std::time::Duration::from_millis(
-        DICTATION_IDLE_RESET_SUCCESS_MS,
-    ))
-    .await;
+    // Keep the result visible briefly, then reset to idle — but do it on a
+    // detached task so this command returns immediately. Otherwise the stop
+    // handler blocks for ~1.8s, which (a) delays the response and (b) prevented
+    // starting the next dictation until the display window elapsed.
+    let overlay_state = Arc::clone(&state.dictation_overlay_state);
+    let idle_handle = handle.clone();
+    let idle_session_id = session_id;
+    let idle_stop_reason = stop_reason.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(
+            DICTATION_IDLE_RESET_SUCCESS_MS,
+        ))
+        .await;
 
-    if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
-        *overlay = DictationOverlayState::default();
-    }
-    handle.emit_event(
-        "dictation-state-changed",
-        serde_json::json!({
-            "phase": "idle",
-            "sessionId": session_id,
-            "stopReason": stop_reason,
-        }),
-    );
-    handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
+        if let Ok(mut overlay) = overlay_state.lock() {
+            *overlay = DictationOverlayState::default();
+        }
+        idle_handle.emit_event(
+            "dictation-state-changed",
+            serde_json::json!({
+                "phase": "idle",
+                "sessionId": idle_session_id,
+                "stopReason": idle_stop_reason,
+            }),
+        );
+        idle_handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
+    });
 
     Ok(final_text)
 }
