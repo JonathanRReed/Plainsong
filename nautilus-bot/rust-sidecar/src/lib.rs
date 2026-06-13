@@ -12348,6 +12348,35 @@ fn cleanup_legacy_license_artifacts() {
     }
 }
 
+/// Write a transactionally-consistent snapshot of the live database to a temp
+/// file for inclusion in a backup. Returns None if the database has no on-disk
+/// file yet (nothing to snapshot). The caller is responsible for deleting the
+/// returned path once the backup has consumed it.
+async fn snapshot_live_database(state: &AppState) -> Result<Option<std::path::PathBuf>, String> {
+    let snapshot_path =
+        std::env::temp_dir().join(format!("nautilus-db-snapshot-{}.db", uuid::Uuid::new_v4()));
+    let db = state.db.lock().await;
+    match db.backup_to(&snapshot_path) {
+        Ok(()) => Ok(Some(snapshot_path)),
+        Err(err) => {
+            tracing::warn!("Database snapshot failed, backup will skip the database: {err}");
+            Ok(None)
+        }
+    }
+}
+
+/// Reopen the database connection after a restore replaced the on-disk file.
+/// Without this, AppState keeps reading/writing the old inode and the restored
+/// data is invisible until the next launch.
+async fn reopen_database_after_restore(state: &AppState) -> Result<(), String> {
+    let db_key = secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
+        .map_err(|e| format!("Could not read secure database key after restore: {e}"))?;
+    let reopened = db::Database::new_with_key(db_key.as_deref())
+        .map_err(|e| format!("Failed to reopen database after restore: {e}"))?;
+    *state.db.lock().await = reopened;
+    Ok(())
+}
+
 pub async fn build_app_state() -> Result<AppState, String> {
     cleanup_legacy_license_artifacts();
 
@@ -16986,19 +17015,32 @@ pub async fn dispatch_command(
                     path.display()
                 ));
             }
+            let snapshot = snapshot_live_database(state.as_ref()).await?;
             let bm = state.backup_manager.lock().await;
-            let info = bm.create_backup(&path).await.map_err(|e| e.to_string())?;
+            let info = bm
+                .create_backup(&path, snapshot.as_deref())
+                .await
+                .map_err(|e| e.to_string())?;
+            drop(bm);
+            if let Some(snapshot_path) = snapshot {
+                let _ = std::fs::remove_file(snapshot_path);
+            }
             serde_json::to_value(info).map_err(|e| e.to_string())
         }
         "create_backup_default" => {
             let data_dir = dirs::data_dir()
                 .ok_or("Could not find data directory")?
                 .join("Nautilus");
+            let snapshot = snapshot_live_database(state.as_ref()).await?;
             let bm = state.backup_manager.lock().await;
             let info = bm
-                .create_backup(&data_dir)
+                .create_backup(&data_dir, snapshot.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
+            drop(bm);
+            if let Some(snapshot_path) = snapshot {
+                let _ = std::fs::remove_file(snapshot_path);
+            }
             serde_json::to_value(info).map_err(|e| e.to_string())
         }
         "create_settings_backup_default" => {
@@ -17030,6 +17072,8 @@ pub async fn dispatch_command(
             bm.restore_backup(&backup_id, &path)
                 .await
                 .map_err(|e| e.to_string())?;
+            drop(bm);
+            reopen_database_after_restore(state.as_ref()).await?;
             Ok(serde_json::Value::Null)
         }
         "restore_backup_default" => {
@@ -17042,6 +17086,8 @@ pub async fn dispatch_command(
             bm.restore_backup(&backup_id, &data_dir)
                 .await
                 .map_err(|e| e.to_string())?;
+            drop(bm);
+            reopen_database_after_restore(state.as_ref()).await?;
             Ok(serde_json::Value::Null)
         }
         "verify_backup_cloud_connection" => {

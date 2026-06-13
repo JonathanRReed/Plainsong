@@ -54,8 +54,6 @@ pub struct ResolvedAudioInputDevice {
 pub struct AudioCapture {
     is_dictating: Arc<AtomicBool>,
     dictation_buffer: Arc<crossbeam::queue::SegQueue<f32>>,
-    /// Streaming queue for real-time partial transcription during dictation
-    dictation_stream_queue: Arc<crossbeam::queue::SegQueue<Vec<f32>>>,
     dictation_thread: Option<JoinHandle<()>>,
     dictation_sample_rate: u32,
     dictation_channels: u16,
@@ -231,7 +229,6 @@ impl AudioCapture {
         Self {
             is_dictating: Arc::new(AtomicBool::new(false)),
             dictation_buffer: Arc::new(crossbeam::queue::SegQueue::new()),
-            dictation_stream_queue: Arc::new(crossbeam::queue::SegQueue::new()),
             dictation_thread: None,
             dictation_sample_rate: 16000,
             dictation_channels: 1,
@@ -401,7 +398,6 @@ impl AudioCapture {
         }
 
         while self.dictation_buffer.pop().is_some() {}
-        while self.dictation_stream_queue.pop().is_some() {}
 
         let (device, resolved_device) = self.resolve_input_device(preference)?;
 
@@ -439,7 +435,6 @@ impl AudioCapture {
 
         let is_dictating = Arc::clone(&self.is_dictating);
         let buffer = Arc::clone(&self.dictation_buffer);
-        let stream_queue = Arc::clone(&self.dictation_stream_queue);
         let callback_count = Arc::clone(&self.dictation_callback_count);
         let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
         let audio_level = Arc::clone(&self.dictation_audio_level);
@@ -465,9 +460,6 @@ impl AudioCapture {
             let is_dictating_f32 = Arc::clone(&is_dictating);
             let is_dictating_i16 = Arc::clone(&is_dictating);
             let is_dictating_u8 = Arc::clone(&is_dictating);
-            let stream_queue_f32 = Arc::clone(&stream_queue);
-            let stream_queue_i16 = Arc::clone(&stream_queue);
-            let stream_queue_u8 = Arc::clone(&stream_queue);
             let audio_level_f32 = Arc::clone(&audio_level);
             let audio_level_i16 = Arc::clone(&audio_level);
             let audio_level_u8 = Arc::clone(&audio_level);
@@ -486,24 +478,17 @@ impl AudioCapture {
                         if is_dictating_f32.load(Ordering::SeqCst) {
                             callback_count.fetch_add(1, Ordering::Relaxed);
                             let mut sum_sq: f64 = 0.0;
-                            let mut stream_chunk =
-                                Vec::with_capacity(data.len() / num_channels.max(1));
                             if num_channels == 1 {
                                 for &sample in data {
                                     buffer.push(sample);
-                                    stream_chunk.push(sample);
                                     sum_sq += (sample as f64) * (sample as f64);
                                 }
                             } else {
                                 for chunk in data.chunks_exact(num_channels) {
                                     let mono: f32 = chunk.iter().sum::<f32>() / num_channels as f32;
                                     buffer.push(mono);
-                                    stream_chunk.push(mono);
                                     sum_sq += (mono as f64) * (mono as f64);
                                 }
-                            }
-                            if !stream_chunk.is_empty() {
-                                stream_queue_f32.push(stream_chunk);
                             }
                             let rms = (sum_sq / data.len() as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
@@ -526,13 +511,10 @@ impl AudioCapture {
                         if is_dictating_i16.load(Ordering::SeqCst) {
                             callback_count.fetch_add(1, Ordering::Relaxed);
                             let mut sum_sq: f64 = 0.0;
-                            let mut stream_chunk =
-                                Vec::with_capacity(data.len() / num_channels.max(1));
                             if num_channels == 1 {
                                 for &sample in data {
                                     let f = sample as f32 / i16::MAX as f32;
                                     buffer.push(f);
-                                    stream_chunk.push(f);
                                     sum_sq += (f as f64) * (f as f64);
                                 }
                             } else {
@@ -543,12 +525,8 @@ impl AudioCapture {
                                         .sum::<f32>()
                                         / num_channels as f32;
                                     buffer.push(mono);
-                                    stream_chunk.push(mono);
                                     sum_sq += (mono as f64) * (mono as f64);
                                 }
-                            }
-                            if !stream_chunk.is_empty() {
-                                stream_queue_i16.push(stream_chunk);
                             }
                             let rms = (sum_sq / data.len() as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
@@ -571,13 +549,10 @@ impl AudioCapture {
                         if is_dictating_u8.load(Ordering::SeqCst) {
                             callback_count.fetch_add(1, Ordering::Relaxed);
                             let mut sum_sq: f64 = 0.0;
-                            let mut stream_chunk =
-                                Vec::with_capacity(data.len() / num_channels.max(1));
                             if num_channels == 1 {
                                 for &sample in data {
                                     let f = (sample as f32 - 128.0) / 128.0;
                                     buffer.push(f);
-                                    stream_chunk.push(f);
                                     sum_sq += (f as f64) * (f as f64);
                                 }
                             } else {
@@ -588,12 +563,8 @@ impl AudioCapture {
                                         .sum::<f32>()
                                         / num_channels as f32;
                                     buffer.push(mono);
-                                    stream_chunk.push(mono);
                                     sum_sq += (mono as f64) * (mono as f64);
                                 }
-                            }
-                            if !stream_chunk.is_empty() {
-                                stream_queue_u8.push(stream_chunk);
                             }
                             let rms = (sum_sq / data.len() as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
@@ -944,12 +915,22 @@ impl AudioCapture {
                 let dropped_stream_i16 = Arc::clone(&dropped_stream_chunks);
                 let dropped_writer_f32 = Arc::clone(&dropped_writer_chunks);
                 let dropped_writer_i16 = Arc::clone(&dropped_writer_chunks);
+                // The recording is written as a 1-channel WAV, so interleaved
+                // multi-channel input must be downmixed to mono; otherwise a
+                // stereo device produces a double-length, half-speed recording.
+                let num_channels = config.channels() as usize;
                 let err_fn = |err| tracing::error!("Stream error: {}", err);
                 let stream_result = match config.sample_format() {
                     cpal::SampleFormat::F32 => device.build_input_stream(
                         &config.into(),
                         move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                            let chunk: Vec<f32> = data.to_vec();
+                            let chunk: Vec<f32> = if num_channels <= 1 {
+                                data.to_vec()
+                            } else {
+                                data.chunks_exact(num_channels)
+                                    .map(|frame| frame.iter().sum::<f32>() / num_channels as f32)
+                                    .collect()
+                            };
 
                             if let Ok(mut waveform) = wf_buffer.lock() {
                                 for &sample in data.iter().step_by(data.len() / 100 + 1).take(100) {
@@ -981,8 +962,19 @@ impl AudioCapture {
                     cpal::SampleFormat::I16 => device.build_input_stream(
                         &config.into(),
                         move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                            let chunk: Vec<f32> =
-                                data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                            let chunk: Vec<f32> = if num_channels <= 1 {
+                                data.iter().map(|&s| s as f32 / i16::MAX as f32).collect()
+                            } else {
+                                data.chunks_exact(num_channels)
+                                    .map(|frame| {
+                                        frame
+                                            .iter()
+                                            .map(|&s| s as f32 / i16::MAX as f32)
+                                            .sum::<f32>()
+                                            / num_channels as f32
+                                    })
+                                    .collect()
+                            };
 
                             if let Ok(mut waveform) = wf_buffer.lock() {
                                 for &sample in chunk.iter().step_by(chunk.len() / 100 + 1).take(100)

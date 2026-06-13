@@ -886,7 +886,26 @@ impl SettingsManager {
     pub fn new() -> Result<Self> {
         let config_path = Self::config_path()?;
         let mut settings = if config_path.exists() {
-            Self::load_from_file(&config_path)?
+            match Self::load_from_file(&config_path) {
+                Ok(settings) => settings,
+                Err(err) => {
+                    // A corrupt or truncated settings file must never block startup.
+                    // Move it aside for diagnostics and fall back to defaults.
+                    tracing::warn!(
+                        "Settings file at {} is unreadable ({}); backing it up and using defaults",
+                        config_path.display(),
+                        err
+                    );
+                    let backup_path = config_path.with_extension("json.corrupt");
+                    if let Err(rename_err) = std::fs::rename(&config_path, &backup_path) {
+                        tracing::warn!(
+                            "Failed to move corrupt settings file aside: {}",
+                            rename_err
+                        );
+                    }
+                    Settings::default()
+                }
+            }
         } else {
             Settings::default()
         };
@@ -911,12 +930,19 @@ impl SettingsManager {
         &mut self.settings
     }
 
-    /// Save settings to disk
+    /// Save settings to disk atomically (write to a temp file, then rename) so
+    /// a crash or power loss mid-write can never leave a truncated settings file.
     pub fn save(&self) -> Result<()> {
         let json =
             serde_json::to_string_pretty(&self.settings).context("Failed to serialize settings")?;
 
-        std::fs::write(&self.config_path, json).context("Failed to write settings file")?;
+        if let Some(parent) = self.config_path.parent() {
+            std::fs::create_dir_all(parent).context("Failed to create settings directory")?;
+        }
+
+        let tmp_path = self.config_path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, json).context("Failed to write temp settings file")?;
+        std::fs::rename(&tmp_path, &self.config_path).context("Failed to commit settings file")?;
 
         Ok(())
     }

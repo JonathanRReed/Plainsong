@@ -259,30 +259,43 @@ export class IpcBridge {
 
     this.process.on("exit", (code, signal) => {
       console.warn(`[sidecar] exited: code=${code} signal=${signal}`);
-      if (!this.shuttingDown && this.restartAttempts < this.maxRestarts) {
-        const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
-        this.restartAttempts++;
-        console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
-        setTimeout(() => this.spawnSidecar(), delay);
-      } else if (this.restartAttempts >= this.maxRestarts) {
-        console.error("[sidecar] max restarts reached, giving up");
-      }
-      // Reject all pending requests with a clear error message
-      const pendingCount = this.pending.size;
-      for (const [, pending] of this.pending) {
-        clearTimeout(pending.timeout);
-        pending.reject(new Error(`Sidecar process exited (code=${code}, signal=${signal})`));
-      }
-      this.pending.clear();
-      if (pendingCount > 0) {
-        console.warn(`[sidecar] rejected ${pendingCount} pending request(s) due to process exit`);
-      }
+      this.handleSidecarTermination(`Sidecar process exited (code=${code}, signal=${signal})`);
+    });
+
+    this.process.on("error", (err) => {
+      console.error(`[sidecar] failed to start: path=${this.sidecarPath}`, err);
+      this.handleSidecarTermination(
+        `Sidecar process failed to start (${this.sidecarPath}): ${err.message}`
+      );
     });
 
     this.process.on("spawn", () => {
       console.log("[sidecar] connected");
       this.restartAttempts = 0;
     });
+  }
+
+  // Shared termination path for both 'exit' and 'error': schedule a backoff
+  // restart and reject all pending requests with a clear message.
+  private handleSidecarTermination(reason: string): void {
+    if (!this.shuttingDown && this.restartAttempts < this.maxRestarts) {
+      const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
+      this.restartAttempts++;
+      console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
+      setTimeout(() => this.spawnSidecar(), delay);
+    } else if (this.restartAttempts >= this.maxRestarts) {
+      console.error("[sidecar] max restarts reached, giving up");
+    }
+    // Reject all pending requests with a clear error message
+    const pendingCount = this.pending.size;
+    for (const [, pending] of this.pending) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error(reason));
+    }
+    this.pending.clear();
+    if (pendingCount > 0) {
+      console.warn(`[sidecar] rejected ${pendingCount} pending request(s): ${reason}`);
+    }
   }
 
   private handleSidecarMessage(msg: JsonRpcResponse): void {

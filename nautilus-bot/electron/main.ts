@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   globalShortcut,
   ipcMain,
   net,
@@ -90,7 +91,8 @@ function findWindowByLabel(label: string): BrowserWindow | null {
 }
 
 function showAndFocusMainWindow(): void {
-  if (!mainWindow) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = createMainWindow();
     return;
   }
 
@@ -525,11 +527,7 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
 
   if (openWindowShortcut) {
     const registered = globalShortcut.register(openWindowShortcut, () => {
-      if (mainWindow) {
-        if (mainWindow.isMinimized()) mainWindow.restore();
-        mainWindow.show();
-        mainWindow.focus();
-      }
+      showAndFocusMainWindow();
     });
 
     if (!registered) {
@@ -629,6 +627,10 @@ function createMainWindow(): BrowserWindow {
   });
   configureWindowSecurity(win);
 
+  win.on("closed", () => {
+    mainWindow = null;
+  });
+
   if (isDev) {
     win.webContents.on("did-start-loading", () => {
       console.log("[renderer] did-start-loading", win.webContents.getURL());
@@ -682,6 +684,14 @@ function createMainWindow(): BrowserWindow {
   return win;
 }
 
+process.on("uncaughtException", (error) => {
+  console.error("[main] uncaught exception", error);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[main] unhandled rejection", reason);
+});
+
 app.on("before-quit", () => {
   globalShortcut.unregisterAll();
   ipcBridge?.shutdown();
@@ -698,7 +708,7 @@ app.on("activate", () => {
     // Bootstrap hasn't completed yet, wait for it to finish
     return;
   }
-  if (mainWindow === null) {
+  if (mainWindow === null || mainWindow.isDestroyed()) {
     mainWindow = createMainWindow();
   } else if (!mainWindow.isVisible()) {
     mainWindow.show();
@@ -717,6 +727,16 @@ ipcMain.handle("window:get-label", (event) => {
 
 
 async function bootstrap() {
+  const gotLock = app.requestSingleInstanceLock();
+  if (!gotLock) {
+    app.quit();
+    return;
+  }
+
+  app.on("second-instance", () => {
+    showAndFocusMainWindow();
+  });
+
   await app.whenReady();
 
   if (isDev && rendererMode === "server") {
@@ -738,6 +758,16 @@ async function bootstrap() {
   }
 
   const sidecarPath = getSidecarPath();
+
+  if (!existsSync(sidecarPath)) {
+    const message =
+      `The NautilusBot sidecar binary was not found at:\n${sidecarPath}\n\n` +
+      "Build it from source with:\n  bun run sidecar:build:release";
+    console.error("[sidecar] missing binary", { sidecarPath });
+    dialog.showErrorBox("NautilusBot sidecar not found", message);
+    broadcastRendererEvent("sidecar-error", { reason: "missing-binary", path: sidecarPath, message });
+  }
+
   ipcBridge = new IpcBridge(sidecarPath);
   ipcBridge.onLocalCommand(handleLocalCommand);
   configureAutoUpdater(autoUpdater);

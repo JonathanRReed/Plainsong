@@ -106,7 +106,11 @@ impl IntelligentPunctuator {
         result
     }
 
-    /// Add sentence boundaries based on conjunctions and pauses
+    /// Add sentence boundaries before formal discourse markers that almost
+    /// always begin a new sentence. Coordinating conjunctions ("and", "but",
+    /// "so", "or", "yet") and bare ordinals ("first", "next") are deliberately
+    /// excluded: inserting a period before them mangles ordinary compound
+    /// speech ("I went to the store and bought milk").
     fn add_sentence_boundaries(&self, text: &str) -> String {
         let sentence_starters = vec![
             "however",
@@ -115,26 +119,7 @@ impl IntelligentPunctuator {
             "moreover",
             "consequently",
             "nevertheless",
-            "meanwhile",
             "additionally",
-            "specifically",
-            "basically",
-            "essentially",
-            "technically",
-            "realistically",
-            "first",
-            "second",
-            "third",
-            "next",
-            "finally",
-            "lastly",
-            "so",
-            "but",
-            "and",
-            "or",
-            "yet",
-            "still",
-            "anyway",
         ];
 
         let mut result = text.to_string();
@@ -824,6 +809,28 @@ mod tests {
         let result = punctuator.punctuate(input);
         assert!(result.contains("First sentence"));
         assert!(result.contains("Second sentence"));
+    }
+
+    #[test]
+    fn coordinating_conjunctions_do_not_start_new_sentences() {
+        // Regression: the punctuator must not turn ordinary compound speech into
+        // broken sentences (e.g. "...store and bought milk" -> "...store. And bought milk").
+        let punctuator = IntelligentPunctuator::default();
+        for input in [
+            "i went to the store and bought milk",
+            "it was late but i kept working",
+            "we can ship today or wait until friday",
+            "i finished the draft so i sent it over",
+        ] {
+            let result = punctuator.punctuate(input);
+            assert!(
+                !result.contains(". And")
+                    && !result.contains(". But")
+                    && !result.contains(". Or")
+                    && !result.contains(". So"),
+                "conjunction was wrongly promoted to a sentence start: {result:?}"
+            );
+        }
     }
 
     #[test]
