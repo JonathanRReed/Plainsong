@@ -30,4 +30,4 @@ Status surfaces must make the current state, cause, and next action visible. Dic
 
 ## Release Discipline
 
-UI copy must separate implemented workflows from launch-certified workflows. Never make competitor-parity claims unless repo evidence supports them. Prefer narrow, useful labels over broad confidence language.
+UI copy must describe what the app actually does. Don't make competitor-parity or capability claims the product can't back up. Prefer narrow, useful labels over broad confidence language.

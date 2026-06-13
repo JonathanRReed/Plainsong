@@ -24,6 +24,8 @@
     "electron:build:win": "node scripts/assert-host-platform.mjs win32 && bun run sidecar:build:release && bun run build:renderer && bun run build:electron && electron-builder --win nsis --publish never",
     "electron:build:dmg": "node scripts/assert-host-platform.mjs darwin && bun run electron:build:mac && node scripts/build-dmg.mjs",
     "electron:pack": "bun run sidecar:build:release && bun run build:renderer && bun run build:electron && node scripts/build-electron-release.mjs pack",
+    "release:mac": "node scripts/assert-host-platform.mjs darwin && bun run sidecar:build:release && bun run build:renderer && bun run build:electron && electron-builder --mac --publish always",
+    "release:win": "node scripts/assert-host-platform.mjs win32 && bun run sidecar:build:release && bun run build:renderer && bun run build:electron && electron-builder --win --publish always",
     "test:rust": "cargo test --manifest-path rust-sidecar/Cargo.toml --lib",
     "gate:size": "node scripts/size-gate.mjs --app release/mac-arm64/Nautilus.app --max-mb 450",
     "gate:cold-start": "node scripts/cold-start-gate.mjs",
