@@ -23,7 +23,7 @@ export const MEETING_TEMPLATES: MeetingTemplateOption[] = [
   {
     value: "auto",
     label: "Auto",
-    description: "Let Nautilus shape the meeting based on transcript and notes.",
+    description: "Let Plainsong shape the meeting based on transcript and notes.",
     summaryPrompt:
       "Provide a concise but complete meeting summary with key discussion points, decisions, and concrete outcomes.",
     notesOutline: ["Goals", "Key discussion points", "Decisions", "Follow-ups"],

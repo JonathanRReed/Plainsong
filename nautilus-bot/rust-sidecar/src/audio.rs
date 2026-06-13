@@ -215,7 +215,7 @@ impl AudioCapture {
     pub fn new() -> Self {
         let recordings_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("Nautilus")
+            .join("Plainsong")
             .join("recordings");
 
         std::fs::create_dir_all(&recordings_dir).ok();
@@ -343,7 +343,7 @@ impl AudioCapture {
             let transport_type = infer_transport_type(&name);
             let advisory = match preference {
                 Some(saved) => Some(format!(
-                    "{} is unavailable, so Nautilus fell back to {}.",
+                    "{} is unavailable, so Plainsong fell back to {}.",
                     saved.device_name, name
                 )),
                 None => bluetooth_advisory_for_device(&name, Some(&transport_type)),

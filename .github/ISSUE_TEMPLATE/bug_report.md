@@ -19,7 +19,7 @@ What should have happened instead.
 
 **Environment**
 - OS and version (e.g. macOS 26.1):
-- Nautilus version:
+- Plainsong version:
 - Transcription provider/model (e.g. local Whisper base, OpenAI cloud):
 - Hotkey mode (push-to-talk / toggle):
 

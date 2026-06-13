@@ -787,7 +787,7 @@ export async function openPermissionSettings(
   await invoke("open_permission_settings", { section });
 }
 
-export async function openInstalledNautilusApp(): Promise<void> {
+export async function openInstalledPlainsongApp(): Promise<void> {
   await invoke("open_installed_nautilus_app");
 }
 

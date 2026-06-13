@@ -32,7 +32,7 @@ impl WhisperProvider {
     pub fn new(selected_model_id: Option<&str>) -> Self {
         let models_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("Nautilus")
+            .join("Plainsong")
             .join("models")
             .join("whisper");
 

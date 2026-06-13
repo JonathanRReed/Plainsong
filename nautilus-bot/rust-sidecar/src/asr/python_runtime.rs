@@ -16,7 +16,7 @@ fn python_probe_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
 fn managed_runtime_root() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Nautilus")
+        .join("Plainsong")
         .join("runtime")
         .join("python")
 }
@@ -265,7 +265,7 @@ fn command_success(program: &str, args: &[&str]) -> bool {
 
 fn bootstrap_python_candidates() -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();
-    if let Ok(value) = std::env::var("NAUTILUS_PYTHON") {
+    if let Ok(value) = std::env::var("PLAINSONG_PYTHON") {
         if !value.trim().is_empty() {
             candidates.push(value);
         }
@@ -460,7 +460,7 @@ fn ensure_managed_runtime(provider: &str) -> Result<String> {
 /// Find a Python executable that can import the required runtime probe modules.
 ///
 /// Resolution order:
-/// 1. `NAUTILUS_PYTHON` env var (if set)
+/// 1. `PLAINSONG_PYTHON` env var (if set)
 /// 2. common versioned python commands
 /// 3. common absolute Homebrew / system paths
 pub fn find_python_with_imports(import_probe: &str) -> Option<String> {
@@ -481,7 +481,7 @@ pub fn find_python_with_imports(import_probe: &str) -> Option<String> {
         candidates.push(managed);
     }
 
-    if let Ok(value) = std::env::var("NAUTILUS_PYTHON") {
+    if let Ok(value) = std::env::var("PLAINSONG_PYTHON") {
         if !value.trim().is_empty() {
             candidates.push(value);
         }
@@ -533,7 +533,7 @@ pub fn find_python_for_provider(provider: &str) -> Option<String> {
 }
 
 fn runner_script_path() -> PathBuf {
-    if let Ok(path) = std::env::var("NAUTILUS_ASR_RUNNER") {
+    if let Ok(path) = std::env::var("PLAINSONG_ASR_RUNNER") {
         let candidate = PathBuf::from(path);
         if candidate.exists() {
             return candidate;

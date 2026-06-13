@@ -15,14 +15,14 @@ function valueFor(name, fallback = null) {
 
 const appPath = path.resolve(
   repoRoot,
-  valueFor("--app", "release/mac-arm64/Nautilus.app")
+  valueFor("--app", "release/mac-arm64/Plainsong.app")
 );
 const sidecarPath = path.join(
   appPath,
   "Contents",
   "Resources",
   "sidecar",
-  "nautilus-sidecar"
+  "plainsong-sidecar"
 );
 const targetApp = valueFor("--target-app", "")?.trim() ?? "";
 const observedArg = valueFor("--observed", "")?.trim().toLowerCase() ?? "";
@@ -33,7 +33,7 @@ const prepareDelayMs = Number(valueFor("--prepare-delay-ms", "4000"));
 const activateTarget = !args.includes("--no-activate-target");
 const generatedAt = new Date().toISOString();
 const sampleText =
-  valueFor("--text", `Nautilus app matrix smoke ${generatedAt.replaceAll(/[:.]/g, "-")}`)
+  valueFor("--text", `Plainsong app matrix smoke ${generatedAt.replaceAll(/[:.]/g, "-")}`)
     ?.trim() ?? "";
 
 function slugFor(value) {
@@ -44,7 +44,7 @@ function slugFor(value) {
 }
 
 function envNameForScratchTarget(app) {
-  return `NAUTILUS_QA_SCRATCH_${String(app ?? "")
+  return `PLAINSONG_QA_SCRATCH_${String(app ?? "")
     .replace(/\s+\((Chrome|Edge\/Chrome)\)$/i, "")
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, "_")

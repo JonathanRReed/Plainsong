@@ -58,7 +58,7 @@ function normalizeAppName(value) {
 }
 
 function envNameForScratchTarget(app) {
-  return `NAUTILUS_QA_SCRATCH_${String(app ?? "")
+  return `PLAINSONG_QA_SCRATCH_${String(app ?? "")
     .replace(/\s+\((Chrome|Edge\/Chrome)\)$/i, "")
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, "_")

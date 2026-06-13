@@ -35,7 +35,7 @@ impl DownloadManager {
     pub fn new() -> Result<Self> {
         let models_dir = dirs::data_dir()
             .context("Could not find data directory")?
-            .join("Nautilus")
+            .join("Plainsong")
             .join("models");
 
         std::fs::create_dir_all(&models_dir)?;
@@ -681,7 +681,7 @@ impl Default for DownloadManager {
             Ok(manager) => manager,
             Err(error) => {
                 tracing::error!("Failed to create download manager in data dir: {}", error);
-                let models_dir = std::env::temp_dir().join("Nautilus").join("models");
+                let models_dir = std::env::temp_dir().join("Plainsong").join("models");
                 if let Err(create_error) = std::fs::create_dir_all(&models_dir) {
                     tracing::error!(
                         "Failed to create fallback model directory {}: {}",

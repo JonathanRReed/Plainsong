@@ -19,8 +19,8 @@ import { IpcBridge } from "./ipc-bridge";
 import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
 
 const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
-const devServerUrl = process.env.NAUTILUS_DEV_SERVER_URL ?? "http://127.0.0.1:1420";
-const rendererMode = process.env.NAUTILUS_RENDERER_MODE ?? "file";
+const devServerUrl = process.env.PLAINSONG_DEV_SERVER_URL ?? "http://127.0.0.1:1420";
+const rendererMode = process.env.PLAINSONG_RENDERER_MODE ?? "file";
 
 if (isDev) {
   app.commandLine.appendSwitch("no-proxy-server");
@@ -35,7 +35,7 @@ let updateReadyToInstall = false;
 let bootstrapComplete = false;
 
 function qaLog(message: string, payload?: unknown): void {
-  if (process.env.NAUTILUS_QA_PACKAGED_HOTKEY === "1") {
+  if (process.env.PLAINSONG_QA_PACKAGED_HOTKEY === "1") {
     console.log(`[qa] ${message}`, payload ?? "");
   }
 }
@@ -540,7 +540,7 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
 }
 
 function getSidecarBinaryName(): string {
-  return process.platform === "win32" ? "nautilus-sidecar.exe" : "nautilus-sidecar";
+  return process.platform === "win32" ? "plainsong-sidecar.exe" : "plainsong-sidecar";
 }
 
 function getSidecarPath(): string {
@@ -761,10 +761,10 @@ async function bootstrap() {
 
   if (!existsSync(sidecarPath)) {
     const message =
-      `The NautilusBot sidecar binary was not found at:\n${sidecarPath}\n\n` +
+      `The Plainsong sidecar binary was not found at:\n${sidecarPath}\n\n` +
       "Build it from source with:\n  bun run sidecar:build:release";
     console.error("[sidecar] missing binary", { sidecarPath });
-    dialog.showErrorBox("NautilusBot sidecar not found", message);
+    dialog.showErrorBox("Plainsong sidecar not found", message);
     broadcastRendererEvent("sidecar-error", { reason: "missing-binary", path: sidecarPath, message });
   }
 

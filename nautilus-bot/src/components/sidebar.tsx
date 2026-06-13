@@ -156,7 +156,7 @@ export function Sidebar({
           )}
         >
           <div className={cn("min-w-0", isCollapsed && "hidden")}>
-            <p className="text-lg font-semibold tracking-tight">Nautilus</p>
+            <p className="text-lg font-semibold tracking-tight">Plainsong</p>
             <p className="mt-1 text-[11px] font-medium text-muted-foreground">
               Voice workspace
             </p>

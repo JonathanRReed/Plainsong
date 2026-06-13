@@ -17,7 +17,7 @@ function valueFor(name, fallback = null) {
 
 const appPath = path.resolve(
   repoRoot,
-  valueFor("--app", "release/mac-arm64/Nautilus.app")
+  valueFor("--app", "release/mac-arm64/Plainsong.app")
 );
 const outPath = path.resolve(
   repoRoot,
@@ -37,7 +37,7 @@ const timeoutMs = Number(
 const speakFixture = args.includes("--speak-fixture");
 const speakFixtureText = valueFor(
   "--speak-fixture-text",
-  "Nautilus packaged meeting soak fixture. The transcript should contain this repeated launch readiness sentence."
+  "Plainsong packaged meeting soak fixture. The transcript should contain this repeated launch readiness sentence."
 );
 const speakFixtureIntervalMs = Number(valueFor("--speak-fixture-interval-ms", "15000"));
 const includeSystemAudio = !args.includes("--mic-only");
@@ -47,11 +47,11 @@ const sidecarPath = path.join(
   "Contents",
   "Resources",
   "sidecar",
-  "nautilus-sidecar"
+  "plainsong-sidecar"
 );
-const configDir = path.join(os.homedir(), "Library", "Application Support", "Nautilus");
+const configDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
 const settingsPath = path.join(configDir, "settings.json");
-const dbPath = path.join(configDir, "nautilus.db");
+const dbPath = path.join(configDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
 const dbBackups = new Map();
 const originalSettingsBytes = fs.existsSync(settingsPath)
@@ -70,7 +70,7 @@ if (!fs.existsSync(sidecarPath)) {
   fail(`Packaged sidecar not found at ${sidecarPath}`);
 }
 if (!fs.existsSync(dbPath)) {
-  fail(`Nautilus database not found at ${dbPath}`);
+  fail(`Plainsong database not found at ${dbPath}`);
 }
 for (const [label, value] of [
   ["--record-ms", recordMs],

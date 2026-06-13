@@ -1,6 +1,6 @@
 # Apple Developer Setup
 
-This guide covers the Apple-side prerequisites for shipping the Electron build of Nautilus on macOS.
+This guide covers the Apple-side prerequisites for shipping the Electron build of Plainsong on macOS.
 
 ## Prerequisites
 
@@ -19,8 +19,8 @@ This guide covers the Apple-side prerequisites for shipping the Electron build o
 Generate a private key and certificate signing request:
 
 ```bash
-openssl genrsa -out NautilusPrivate.key 2048
-openssl req -new -key NautilusPrivate.key -out Nautilus.csr \
+openssl genrsa -out PlainsongPrivate.key 2048
+openssl req -new -key PlainsongPrivate.key -out Plainsong.csr \
   -subj "/emailAddress=your-email@example.com, CN=Your Name, C=US"
 ```
 
@@ -28,17 +28,17 @@ Then in the Apple developer portal:
 
 1. Open Certificates.
 2. Create a new `Developer ID Application` certificate.
-3. Upload `Nautilus.csr`.
+3. Upload `Plainsong.csr`.
 4. Download the generated certificate.
 
 Export the certificate and private key as a `.p12` bundle for CI:
 
 ```bash
-openssl x509 -in developerID_application.cer -inform DER -out NautilusCert.pem -outform PEM
-openssl pkcs12 -export -out NautilusCert.p12 \
-  -inkey NautilusPrivate.key \
-  -in NautilusCert.pem \
-  -name "Nautilus Developer ID"
+openssl x509 -in developerID_application.cer -inform DER -out PlainsongCert.pem -outform PEM
+openssl pkcs12 -export -out PlainsongCert.p12 \
+  -inkey PlainsongPrivate.key \
+  -in PlainsongCert.pem \
+  -name "Plainsong Developer ID"
 ```
 
 ## 3. Create notarization credentials
@@ -64,13 +64,13 @@ bun install
 bun run electron:build:dmg
 ```
 
-Expected outputs land in `release/`, including `Nautilus.app` and a DMG.
+Expected outputs land in `release/`, including `Plainsong.app` and a DMG.
 
 ## 6. Verify signing and notarization
 
 ```bash
-codesign --verify --deep --strict --verbose=2 "release/mac-arm64/Nautilus.app"
-spctl --assess --verbose=4 "release/mac-arm64/Nautilus.app"
+codesign --verify --deep --strict --verbose=2 "release/mac-arm64/Plainsong.app"
+spctl --assess --verbose=4 "release/mac-arm64/Plainsong.app"
 ```
 
 For a release-ready build, `spctl` should report `accepted`.

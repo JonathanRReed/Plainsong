@@ -1,6 +1,6 @@
 # Cloud Sync, Bring Your Own Cloud (BYOC)
 
-Nautilus is **local-first**: recordings, transcripts, and local secrets stay on your machine by default. Cloud sync is optional, uses *your* storage, and is not a hosted Nautilus cloud service.
+Plainsong is **local-first**: recordings, transcripts, and local secrets stay on your machine by default. Cloud sync is optional, uses *your* storage, and is not a hosted Plainsong cloud service.
 
 Current product note:
 
@@ -22,9 +22,9 @@ Current product note:
 
 1. Open **Settings → Storage**.
 2. Set **Export root** to a folder inside your cloud provider's sync folder:
-   - iCloud: `~/Library/Mobile Documents/com~apple~CloudDocs/Nautilus`
-   - Dropbox: `~/Dropbox/Nautilus`
-   - Google Drive: `~/Google Drive/My Drive/Nautilus`
+   - iCloud: `~/Library/Mobile Documents/com~apple~CloudDocs/Plainsong`
+   - Dropbox: `~/Dropbox/Plainsong`
+   - Google Drive: `~/Google Drive/My Drive/Plainsong`
 3. Enable **Auto-export** so new transcripts are written there automatically.
 4. Your recordings and transcripts sync across any Mac with the same cloud folder.
 
@@ -59,16 +59,16 @@ For users who want programmatic access or cross-platform sync via S3-compatible 
 For maximum privacy, use [Syncthing](https://syncthing.net/) to sync directly between your devices with no cloud intermediary:
 
 1. Install Syncthing on all devices.
-2. Share the Nautilus data folder (`~/Library/Application Support/Nautilus`).
+2. Share the Plainsong data folder (`~/Library/Application Support/Plainsong`).
 3. Syncthing handles conflict resolution and versioning automatically.
 
-> **Warning**: Do not sync the SQLite database file while Nautilus is running. Only sync the `exports/` and `audio/` directories, or stop Nautilus before syncing.
+> **Warning**: Do not sync the SQLite database file while Plainsong is running. Only sync the `exports/` and `audio/` directories, or stop Plainsong before syncing.
 
 ## Security Considerations
 
 - **Vault encryption**: Always enable Vault encryption before syncing sensitive recordings to any cloud provider.
-- **API keys**: Nautilus stores cloud credentials in OS secure storage, not plain text files.
-- **Zero-knowledge**: We have no access to your cloud storage. Nautilus talks directly to your provider.
+- **API keys**: Plainsong stores cloud credentials in OS secure storage, not plain text files.
+- **Zero-knowledge**: We have no access to your cloud storage. Plainsong talks directly to your provider.
 - **Selective sync**: You can choose to sync only transcripts (small) and skip audio files (large) to save bandwidth.
 
 ## Troubleshooting
@@ -76,7 +76,7 @@ For maximum privacy, use [Syncthing](https://syncthing.net/) to sync directly be
 | Issue | Solution |
 |-------|---------|
 | Files not syncing | Verify the export root path exists and your cloud app is running |
-| Duplicate files | Check that only one Nautilus instance writes to the sync folder at a time |
+| Duplicate files | Check that only one Plainsong instance writes to the sync folder at a time |
 | Large audio files slow to sync | Use selective sync to skip `.wav` files, or compress exports |
 | Encryption key mismatch | Re-enter your Vault passphrase on the new machine, or export/import the keychain entry |
 

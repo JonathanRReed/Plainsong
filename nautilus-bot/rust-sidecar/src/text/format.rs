@@ -458,13 +458,13 @@ fn restore_structural_breaks(text: &str) -> String {
 }
 
 fn preserve_structural_break_tokens(text: &str) -> String {
-    text.replace("\n\n", " __NAUTILUS_PARAGRAPH_BREAK__ ")
-        .replace('\n', " __NAUTILUS_LINE_BREAK__ ")
+    text.replace("\n\n", " __PLAINSONG_PARAGRAPH_BREAK__ ")
+        .replace('\n', " __PLAINSONG_LINE_BREAK__ ")
 }
 
 fn restore_structural_break_tokens(text: &str) -> String {
-    text.replace("__NAUTILUS_PARAGRAPH_BREAK__", "\n\n")
-        .replace("__NAUTILUS_LINE_BREAK__", "\n")
+    text.replace("__PLAINSONG_PARAGRAPH_BREAK__", "\n\n")
+        .replace("__PLAINSONG_LINE_BREAK__", "\n")
 }
 
 fn capitalize_standalone_i(text: &str) -> String {
@@ -637,8 +637,8 @@ pub fn smart_format_dictation_text_for_app(
     let normalized = preserve_structural_break_tokens(&normalized);
     let app_style = resolve_dictation_app_style(app_target);
 
-    if normalized.contains("__NAUTILUS_LINE_BREAK__")
-        || normalized.contains("__NAUTILUS_PARAGRAPH_BREAK__")
+    if normalized.contains("__PLAINSONG_LINE_BREAK__")
+        || normalized.contains("__PLAINSONG_PARAGRAPH_BREAK__")
     {
         let structured = compact_structural_symbol_spacing(&capitalize_after_bullet_markers(
             &capitalize_after_line_breaks(&restore_structural_breaks(

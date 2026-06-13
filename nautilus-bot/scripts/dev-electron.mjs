@@ -5,8 +5,8 @@ import path from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
-const DEV_SERVER_URL = process.env.NAUTILUS_DEV_SERVER_URL ?? "http://127.0.0.1:1420";
-const RENDERER_MODE = process.env.NAUTILUS_RENDERER_MODE ?? "file";
+const DEV_SERVER_URL = process.env.PLAINSONG_DEV_SERVER_URL ?? "http://127.0.0.1:1420";
+const RENDERER_MODE = process.env.PLAINSONG_RENDERER_MODE ?? "file";
 const devServer = new URL(DEV_SERVER_URL);
 const devPort = Number(devServer.port || (devServer.protocol === "https:" ? 443 : 80));
 const VITE_START_TIMEOUT_MS = 30_000;
@@ -22,7 +22,7 @@ function spawnChild(command, args, options = {}) {
     cwd: process.cwd(),
     env: {
       ...process.env,
-      NAUTILUS_DEV_SERVER_URL: DEV_SERVER_URL,
+      PLAINSONG_DEV_SERVER_URL: DEV_SERVER_URL,
       NODE_ENV: "development",
     },
     stdio: "inherit",
@@ -134,7 +134,7 @@ async function main() {
       console.log(`[dev] Reusing existing renderer at ${DEV_SERVER_URL}`);
     } else if (await isPortListening(devServer.hostname, devPort)) {
       console.error(
-        `[dev] Port ${devPort} is already in use, but ${DEV_SERVER_URL} is not serving NautilusBot. Stop the stale process and retry.`
+        `[dev] Port ${devPort} is already in use, but ${DEV_SERVER_URL} is not serving Plainsong. Stop the stale process and retry.`
       );
       process.exit(1);
     } else {

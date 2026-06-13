@@ -1,20 +1,20 @@
 [package]
-name = "nautilus-bot"
+name = "plainsong"
 version = "1.0.0"
-description = "Nautilus - Verifiable Memory Layer for dictation and meeting capture"
-authors = ["NautilusBot"]
+description = "Plainsong - free, open-source, local-first dictation and meeting capture"
+authors = ["Jonathan Reed"]
 edition = "2021"
 rust-version = "1.70"
-default-run = "nautilus-sidecar"
+default-run = "plainsong-sidecar"
 license = "MIT"
-repository = "https://github.com/nautilusbot/nautilus"
+repository = "https://github.com/JonathanRReed/Plainsong"
 
 [lib]
-name = "nautilus_bot_lib"
+name = "plainsong_lib"
 path = "src/lib.rs"
 
 [[bin]]
-name = "nautilus-sidecar"
+name = "plainsong-sidecar"
 path = "src/bin/sidecar.rs"
 
 [dependencies]

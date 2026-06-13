@@ -17,7 +17,7 @@ function valueFor(name, fallback = null) {
 
 const appPath = path.resolve(
   repoRoot,
-  valueFor("--app", "release/mac-arm64/Nautilus.app")
+  valueFor("--app", "release/mac-arm64/Plainsong.app")
 );
 const outPath = path.resolve(
   repoRoot,
@@ -28,16 +28,16 @@ const workDir = path.resolve(
   valueFor("--work-dir", "artifacts/qa/macos/backup-create-restore-workdir")
 );
 const cloudRoot = path.join(workDir, "icloud-root");
-const cloudFolder = "NautilusQaCloudBackups";
+const cloudFolder = "PlainsongQaCloudBackups";
 const timeoutMs = Number(valueFor("--timeout-ms", "90000"));
 const sidecarPath = path.join(
   appPath,
   "Contents",
   "Resources",
   "sidecar",
-  "nautilus-sidecar"
+  "plainsong-sidecar"
 );
-const configDir = path.join(os.homedir(), "Library", "Application Support", "Nautilus");
+const configDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
 const settingsPath = path.join(configDir, "settings.json");
 const backupConfigPath = path.join(configDir, "backup-config.json");
 const originalSettingsBytes = fs.existsSync(settingsPath)
@@ -214,7 +214,7 @@ Generated: ${artifact.generatedAt}
 
 ## Verification
 
-- Launched the packaged sidecar from \`release/mac-arm64/Nautilus.app\`.
+- Launched the packaged sidecar from \`release/mac-arm64/Plainsong.app\`.
 - Saved an isolated backup config pointing to \`artifacts/qa/macos/backup-create-restore-workdir\`.
 - Created a settings-only backup through packaged \`create_settings_backup_default\`.
 - Verified the backup directory contains \`settings.json\` and \`manifest.json\` with the \`settings\` component.
@@ -246,7 +246,7 @@ Generated: ${artifact.generatedAt}
 
 ## Verification
 
-- Launched the packaged sidecar from \`release/mac-arm64/Nautilus.app\`.
+- Launched the packaged sidecar from \`release/mac-arm64/Plainsong.app\`.
 - Configured the iCloud backup provider against an isolated filesystem root under \`artifacts/qa/macos/backup-create-restore-workdir/icloud-root\`.
 - Verified cloud setup checks passed for cloud sync enabled, backup directory access, provider selection, cloud folder validation, iCloud path resolution, iCloud path existence, and iCloud write access.
 - Ran packaged \`verify_backup_cloud_connection\` successfully.
@@ -301,7 +301,7 @@ async function run() {
       cloudSync: false,
       cloudProvider: null,
       cloudRemoteName: null,
-      cloudFolder: "NautilusQaBackups",
+      cloudFolder: "PlainsongQaBackups",
       icloudPath: null,
     };
 

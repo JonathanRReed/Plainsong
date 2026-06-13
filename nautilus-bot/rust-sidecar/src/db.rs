@@ -30,11 +30,11 @@ impl Database {
     pub fn new_with_key(_key: Option<&str>) -> Result<Self> {
         let app_dir = dirs::data_dir()
             .context("Could not find data directory")?
-            .join("Nautilus");
+            .join("Plainsong");
 
         fs::create_dir_all(&app_dir)?;
 
-        let db_path = app_dir.join("nautilus.db");
+        let db_path = app_dir.join("plainsong.db");
         let conn = Connection::open(db_path)?;
 
         // Set up encryption if key provided and SQLCipher is enabled
@@ -3716,7 +3716,7 @@ mod tests {
                 &created.id,
                 &UpdateDictationDictionaryEntryRequest {
                     spoken_form: Some("nautilus bot".to_string()),
-                    replacement: Some("NautilusBot".to_string()),
+                    replacement: Some("Plainsong".to_string()),
                     app_scope: Some(None),
                     case_sensitive: Some(true),
                     enabled: Some(true),

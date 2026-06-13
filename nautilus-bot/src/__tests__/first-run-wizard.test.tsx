@@ -196,7 +196,7 @@ vi.mock("@/lib/backend/settings", () => ({
     runningFromDiskImage: false,
   })),
   getSettings: vi.fn(async () => structuredClone(currentSettings)),
-  openInstalledNautilusApp: vi.fn(async () => {}),
+  openInstalledPlainsongApp: vi.fn(async () => {}),
   openPermissionSettings: vi.fn(async () => {}),
   requestDictationPermissions: vi.fn(async () => ({
     microphoneReady: true,
@@ -362,7 +362,7 @@ describe("FirstRunWizard", () => {
   it("opens the installed app when the wizard detects the DMG copy", async () => {
     const backend = await import("@/lib/backend/settings");
     const getPermissionDiagnostics = vi.mocked(backend.getPermissionDiagnostics);
-    const openInstalledNautilusApp = vi.mocked(backend.openInstalledNautilusApp);
+    const openInstalledPlainsongApp = vi.mocked(backend.openInstalledPlainsongApp);
 
     getPermissionDiagnostics.mockResolvedValueOnce({
       microphoneReady: true,
@@ -379,10 +379,10 @@ describe("FirstRunWizard", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open installed app" }));
 
     await waitFor(() => {
-      expect(openInstalledNautilusApp).toHaveBeenCalledTimes(1);
+      expect(openInstalledPlainsongApp).toHaveBeenCalledTimes(1);
     });
     expect(
-      screen.getByText("Opened the installed Nautilus app from /Applications.")
+      screen.getByText("Opened the installed Plainsong app from /Applications.")
     ).toBeInTheDocument();
   });
 });

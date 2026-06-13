@@ -127,7 +127,7 @@ fn export_markdown(
     // Footer
     output.push_str("---\n\n");
     output.push_str(&format!(
-        "*Exported from Nautilus on {}*\n",
+        "*Exported from Plainsong on {}*\n",
         Utc::now().format("%Y-%m-%d %H:%M")
     ));
 
@@ -278,7 +278,7 @@ fn export_pdf(
     // Footer
     doc.push(Paragraph::new(""));
     doc.push(Paragraph::new(format!(
-        "Exported from Nautilus on {}",
+        "Exported from Plainsong on {}",
         Utc::now().format("%Y-%m-%d %H:%M")
     )));
 
@@ -322,7 +322,7 @@ fn format_time_range(start: f64, end: f64) -> String {
 pub fn get_default_export_path(recording: &Recording, format: ExportFormat) -> PathBuf {
     let exports_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Nautilus")
+        .join("Plainsong")
         .join("exports");
 
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");

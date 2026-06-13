@@ -14,7 +14,7 @@ function valueFor(name, fallback = null) {
 
 const appPath = path.resolve(
   repoRoot,
-  valueFor("--app", "release/mac-arm64/Nautilus.app")
+  valueFor("--app", "release/mac-arm64/Plainsong.app")
 );
 const outPath = path.resolve(
   repoRoot,
@@ -28,7 +28,7 @@ const warmupMs = Number(valueFor("--warmup-ms", "30000"));
 const sampleCount = Number(valueFor("--samples", "20"));
 const sampleIntervalMs = Number(valueFor("--sample-interval-ms", "1000"));
 const maxAverageCpuPct = Number(valueFor("--max-average-cpu-pct", "1"));
-const appExecutablePath = path.join(appPath, "Contents", "MacOS", "Nautilus");
+const appExecutablePath = path.join(appPath, "Contents", "MacOS", "Plainsong");
 
 function fail(message) {
   console.error(message);
@@ -66,8 +66,8 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function quitNautilus() {
-  runCommand("osascript", ["-e", 'tell application id "com.nautilus.bot" to quit']);
+function quitPlainsong() {
+  runCommand("osascript", ["-e", 'tell application id "com.plainsong.app" to quit']);
 }
 
 function childPids(parentPid) {
@@ -182,7 +182,7 @@ ${artifact.processTree.map((pid) => `- ${pid}`).join("\n")}
 }
 
 async function run() {
-  quitNautilus();
+  quitPlainsong();
   await sleep(1500);
 
   const stdout = [];
@@ -193,7 +193,7 @@ async function run() {
     env: {
       ...process.env,
       ELECTRON_ENABLE_LOGGING: "1",
-      NAUTILUS_QA_IDLE_CPU: "1",
+      PLAINSONG_QA_IDLE_CPU: "1",
     },
   });
 
@@ -248,7 +248,7 @@ async function run() {
       }
     }
   } finally {
-    quitNautilus();
+    quitPlainsong();
     const result = await Promise.race([
       childExit,
       new Promise((resolve) => setTimeout(() => resolve(null), 5000)),

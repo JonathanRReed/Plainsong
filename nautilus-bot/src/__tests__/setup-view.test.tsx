@@ -108,7 +108,7 @@ const backendMocks = vi.hoisted(() => ({
   repairLocalModelCache: vi.fn(async () => ({ repairedCount: 0, removedPaths: [], notes: [] })),
   requestDictationPermissions: vi.fn(async () => {}),
   smokeTestCursorInsert: vi.fn(async () => ({
-    text: "Nautilus insert test",
+    text: "Plainsong insert test",
     targetApp: "Notes",
     pasted: true,
     copied: false,
@@ -259,7 +259,7 @@ describe("SetupView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Test insert permissions" }));
 
     await waitFor(() => {
-      expect(backendMocks.smokeTestCursorInsert).toHaveBeenCalledWith("Nautilus insert test");
+      expect(backendMocks.smokeTestCursorInsert).toHaveBeenCalledWith("Plainsong insert test");
       expect(
         screen.getByText(/Insert permissions test: Sent a test insert to Notes/i)
       ).toBeInTheDocument();

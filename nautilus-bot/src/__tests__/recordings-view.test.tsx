@@ -784,7 +784,7 @@ describe("RecordingsView", () => {
         consentPromptShown: true,
         consentNoticeMode: "manual_required",
         consentNoticeMessage:
-          "Manual reminder only. Copy the consent notice from Nautilus before you continue.",
+          "Manual reminder only. Copy the consent notice from Plainsong before you continue.",
       },
     ];
     backend.getRecording.mockResolvedValue(recordings[0]);
@@ -796,7 +796,7 @@ describe("RecordingsView", () => {
 
     expect(screen.getByText("Manual reminder required")).toBeInTheDocument();
     expect(
-      screen.getByText("Manual reminder only. Copy the consent notice from Nautilus before you continue.")
+      screen.getByText("Manual reminder only. Copy the consent notice from Plainsong before you continue.")
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Copy Markdown" }));
