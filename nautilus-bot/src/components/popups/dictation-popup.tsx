@@ -514,6 +514,19 @@ export function DictationPopup() {
       return;
     }
 
+    // Ignore stale, out-of-order events from a prior dictation session (e.g. a
+    // late streaming partial whose decode outlived its session) so they can
+    // never demote the active session's phase or reset its clock.
+    const incomingSessionId =
+      typeof payload.sessionId === "number" ? payload.sessionId : null;
+    if (
+      incomingSessionId !== null &&
+      lastSessionIdRef.current !== null &&
+      incomingSessionId < lastSessionIdRef.current
+    ) {
+      return;
+    }
+
     applyRuntimeMetadata(payload);
     const sanitizedMessage = sanitizeUserFacingDictationMessage(
       payload.message,
