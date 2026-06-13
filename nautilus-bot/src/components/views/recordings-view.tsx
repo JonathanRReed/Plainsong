@@ -1697,7 +1697,7 @@ export function RecordingsView() {
   };
 
   const handleExportMeetingArtifact = async (
-    format: "markdown" | "text" | "evidence_bundle"
+    format: "markdown" | "text"
   ) => {
     if (!selectedRecording) {
       return;
@@ -1707,7 +1707,7 @@ export function RecordingsView() {
     setLastMeetingExportPath(null);
     try {
       const result = await exportRecordingV2(selectedRecording.id, format, {
-        redactionLevel: format === "evidence_bundle" ? "strict" : "basic",
+        redactionLevel: "basic",
         preview: false,
       });
       if (!result.exportPath) {
@@ -1715,11 +1715,9 @@ export function RecordingsView() {
       }
       setLastMeetingExportPath(result.exportPath);
       toast(
-        format === "evidence_bundle"
-          ? "Evidence bundle exported."
-          : format === "text"
-            ? "Plain-text export created."
-            : "Markdown export created.",
+        format === "text"
+          ? "Plain-text export created."
+          : "Markdown export created.",
         "success"
       );
     } catch (error) {
@@ -3745,22 +3743,12 @@ export function RecordingsView() {
                           onClick={() => void handleExportMeetingArtifact("text")}
                           disabled={!selectedRecording || isExportingMeeting}
                         >
-                          <FileOutput className="mr-2 h-4 w-4" />
-                          Export Text
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          onClick={() => void handleExportMeetingArtifact("evidence_bundle")}
-                          disabled={!selectedRecording || isExportingMeeting}
-                        >
                           {isExportingMeeting ? (
                             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                           ) : (
-                            <CheckCircle2 className="mr-2 h-4 w-4" />
+                            <FileOutput className="mr-2 h-4 w-4" />
                           )}
-                          Evidence Bundle
+                          Export Text
                         </Button>
                       </div>
                       {lastMeetingExportPath ? (

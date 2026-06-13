@@ -4,8 +4,6 @@ import {
   exportRecordingV2,
   exportWithTemplate,
   listExportTemplates,
-  verifyEvidenceBundle,
-  type EvidenceVerificationResult,
   type ExportTemplate,
 } from "@/lib/backend/exports";
 import { Button } from "@/components/ui/button";
@@ -21,9 +19,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { AlertCircle, CheckCircle2, FileOutput, Loader2, ShieldCheck, XCircle, Eye } from "lucide-react";
+import { AlertCircle, CheckCircle2, FileOutput, Loader2, Eye } from "lucide-react";
 
-type ExportFormat = "markdown" | "json" | "text" | "evidence_bundle";
+type ExportFormat = "markdown" | "json" | "text";
 type RedactionLevel = "none" | "basic" | "strict";
 
 export function ExportsView() {
@@ -35,9 +33,6 @@ export function ExportsView() {
   const [previewContent, setPreviewContent] = useState("");
   const [lastExportPath, setLastExportPath] = useState<string | null>(null);
   const [isWorking, setIsWorking] = useState(false);
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verifyPath, setVerifyPath] = useState("");
-  const [verificationResult, setVerificationResult] = useState<EvidenceVerificationResult | null>(null);
   const [templates, setTemplates] = useState<ExportTemplate[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [templatePreview, setTemplatePreview] = useState("");
@@ -98,30 +93,10 @@ export function ExportsView() {
         preview: false,
       });
       setLastExportPath(result.exportPath ?? null);
-      if (format === "evidence_bundle" && result.exportPath) {
-        setVerifyPath(result.exportPath);
-        setVerificationResult(null);
-      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Export failed");
     } finally {
       setIsWorking(false);
-    }
-  };
-
-  const verifyBundle = async () => {
-    setError(null);
-    setIsVerifying(true);
-    try {
-      if (!verifyPath.trim()) {
-        throw new Error("Provide an evidence bundle path to verify");
-      }
-      const result = await verifyEvidenceBundle(verifyPath.trim());
-      setVerificationResult(result);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Verification failed");
-    } finally {
-      setIsVerifying(false);
     }
   };
 
@@ -177,7 +152,7 @@ export function ExportsView() {
             Share
           </Badge>
         </div>
-        <p className="mt-1 text-sm text-muted-foreground">Create shareable transcripts, notes, and evidence-ready exports</p>
+        <p className="mt-1 text-sm text-muted-foreground">Create shareable transcripts, notes, and structured exports</p>
       </div>
 
       <ScrollArea className="flex-1">
@@ -215,7 +190,6 @@ export function ExportsView() {
                       <SelectItem value="markdown">Markdown</SelectItem>
                       <SelectItem value="json">JSON</SelectItem>
                       <SelectItem value="text">Plain Text</SelectItem>
-                      <SelectItem value="evidence_bundle">Signed Evidence Bundle</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -240,11 +214,7 @@ export function ExportsView() {
                 <Input
                   value={targetPath}
                   onChange={(e: ChangeEvent<HTMLInputElement>) => setTargetPath(e.target.value)}
-                  placeholder={
-                    format === "evidence_bundle"
-                      ? "/path/to/evidence_bundle.json"
-                      : "/path/to/export.md"
-                  }
+                  placeholder="/path/to/export.md"
                 />
               </div>
 
@@ -329,51 +299,6 @@ export function ExportsView() {
               <span>Export written to: <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs break-all">{lastExportPath}</code></span>
             </div>
           )}
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Evidence Verification</CardTitle>
-              <CardDescription>Verify signed evidence bundle integrity and signature</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="space-y-2">
-                <Label>Evidence bundle path</Label>
-                <Input
-                  value={verifyPath}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setVerifyPath(e.target.value)}
-                  placeholder="/path/to/evidence_bundle.json"
-                />
-              </div>
-              <Button variant="outline" onClick={verifyBundle} disabled={isVerifying || !verifyPath.trim()}>
-                {isVerifying ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-2 h-4 w-4" />}
-                Verify Bundle
-              </Button>
-
-              {verificationResult && (
-                <div className="space-y-2 pt-1">
-                  <div className="flex items-center justify-between rounded-md border p-2">
-                    <span className="text-sm font-medium">Verification status</span>
-                    <span className={`text-xs font-medium ${verificationResult.valid ? "text-emerald-600" : "text-amber-600"}`}>
-                      {verificationResult.valid ? "VALID" : "INVALID"}
-                    </span>
-                  </div>
-                  {verificationResult.checks.map((check) => (
-                    <div key={check.id} className="rounded-md border p-2">
-                      <div className="flex items-center gap-2">
-                        {check.status === "pass" ? (
-                          <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                        ) : (
-                          <XCircle className="h-4 w-4 text-amber-600" />
-                        )}
-                        <span className="text-sm font-medium">{check.label}</span>
-                      </div>
-                      <p className="pl-6 text-xs text-muted-foreground">{check.message}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
 
           <Card>
             <CardHeader>

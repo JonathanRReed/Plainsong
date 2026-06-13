@@ -1,8 +1,6 @@
 export {
-  canUseBetaChannel,
   checkForUpdates,
   getUpdateChannel,
-  getUpdateLockReason,
   getUpdateStatus,
   installUpdate,
   setUpdateChannel,

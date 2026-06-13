@@ -10,7 +10,6 @@ mod dictation_pipeline;
 mod download;
 mod events;
 mod export;
-mod license;
 mod llm;
 mod models;
 mod secrets;
@@ -20,7 +19,6 @@ mod store;
 mod streaming;
 pub mod text;
 mod transcription;
-pub mod update;
 
 use crate::asr::manager::RuntimeStatus;
 #[cfg(test)]
@@ -12330,7 +12328,29 @@ async fn execute_dictation_command_action(
 
 /// Build and return the application state without starting the desktop shell.
 /// Used by the sidecar binary to initialize the backend independently.
+/// Remove keychain entries and on-disk state left over from the former
+/// commercial licensing system. Best-effort and idempotent: it runs on every
+/// startup but only does work for users upgrading from a licensed build.
+fn cleanup_legacy_license_artifacts() {
+    const LEGACY_LICENSE_SECRETS: [&str; 4] = [
+        "license_key",
+        "license_instance_id",
+        "license_device_id",
+        "license_first_run_at",
+    ];
+    for key in LEGACY_LICENSE_SECRETS {
+        let _ = secrets::clear_internal_secret(key);
+    }
+    if let Some(state_file) =
+        dirs::data_dir().map(|d| d.join("NautilusBot").join("nautilus_license.json"))
+    {
+        let _ = std::fs::remove_file(state_file);
+    }
+}
+
 pub async fn build_app_state() -> Result<AppState, String> {
+    cleanup_legacy_license_artifacts();
+
     let initial_db_key = secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
         .map_err(|e| format!("Could not read secure database key: {}", e))?;
 
@@ -15053,10 +15073,6 @@ pub async fn dispatch_command(
         "ask_memory" => {
             let query: String =
                 serde_json::from_value(params["query"].clone()).map_err(|e| e.to_string())?;
-            let entitlement = license::get_current_entitlement();
-            if !entitlement.pro_enabled {
-                return Err("Memory requires a Pro license or active trial".to_string());
-            }
             let (memory_search_mode, embedding_model) = {
                 let sm = state.settings_manager.lock().await;
                 let s = sm.settings();
@@ -15345,14 +15361,6 @@ pub async fn dispatch_command(
             let _ = std::fs::remove_file(&temp_path);
             persist_benchmark_results(state.as_ref(), &results).await;
             serde_json::to_value(results).map_err(|e| e.to_string())
-        }
-        "generate_dictation_benchmark_run" => {
-            let fixture: dictation_parity::DictationBenchmarkFixture =
-                serde_json::from_value(params["fixture"].clone()).map_err(|e| e.to_string())?;
-            let context: dictation_parity::DictationBenchmarkContext =
-                serde_json::from_value(params["context"].clone()).map_err(|e| e.to_string())?;
-            let run = dictation_parity::generate_dictation_benchmark_run(&fixture, &context);
-            serde_json::to_value(run).map_err(|e| e.to_string())
         }
         "set_default_asr_provider" => {
             let provider_type: asr::AsrProviderType =
@@ -17077,30 +17085,6 @@ pub async fn dispatch_command(
             Ok(serde_json::Value::Null)
         }
 
-        // ── License ────────────────────────────────────────────────────────
-        "activate_license" => {
-            let key: String =
-                serde_json::from_value(params["key"].clone()).map_err(|e| e.to_string())?;
-            let result = license::activate_license(&key)
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "validate_license" => {
-            let result = license::validate_license().await;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "deactivate_license" => {
-            license::deactivate_license()
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::Value::Null)
-        }
-        "get_entitlement" => {
-            let result = license::get_current_entitlement();
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-
         // ── Updates (check and install are handled by Electron main) ─────────
         "check_for_updates" => Ok(serde_json::Value::Null),
         "install_update" => Ok(serde_json::Value::Null),
@@ -17112,30 +17096,11 @@ pub async fn dispatch_command(
         "set_update_channel" => {
             let channel: String =
                 serde_json::from_value(params["channel"].clone()).map_err(|e| e.to_string())?;
-            let entitlement = license::get_current_entitlement();
-            if channel.eq_ignore_ascii_case("beta") && !entitlement.experimental_enabled {
-                return Err("Beta updates require Friends Club.".to_string());
-            }
-
             let mut settings_manager = state.settings_manager.lock().await;
             settings_manager.settings_mut().updates.channel =
                 settings::UpdateChannel::from(channel);
             settings_manager.save().map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Null)
-        }
-        "can_use_beta_channel" => {
-            let entitlement = license::get_current_entitlement();
-            Ok(serde_json::json!(entitlement.experimental_enabled))
-        }
-        "get_update_lock_reason" => {
-            let entitlement = license::get_current_entitlement();
-            if entitlement.can_update {
-                Ok(serde_json::Value::Null)
-            } else {
-                Ok(serde_json::json!(
-                    "Updates require an active NautilusBot license."
-                ))
-            }
         }
 
         _ => Err(format!("Unknown command: {}", method)),

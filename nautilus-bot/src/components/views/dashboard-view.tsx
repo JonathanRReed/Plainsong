@@ -15,15 +15,12 @@ import {
   getRelationshipMemory,
   searchTranscripts,
 } from "@/lib/backend/ai";
-import { validateLicense } from "@/lib/backend/license";
 import type {
   CompanyMemoryProfile,
   MeetingChatMessage,
   PersonMemoryProfile,
   RelationshipMemory,
 } from "@/lib/backend/ai";
-import type { LicenseInfo } from "@/lib/backend/license";
-import { deriveEntitlement } from "@/hooks/use-license-features";
 import { useSetupStatus } from "@/hooks/use-setup-status";
 import { requestMainView } from "@/lib/navigation";
 import { requestOnboarding } from "@/lib/onboarding";
@@ -44,7 +41,6 @@ import {
   Building2,
   Zap,
 } from "lucide-react";
-import { TierBadge } from "@/components/tier-badge";
 
 const QUICK_STATS = [
   {
@@ -103,14 +99,7 @@ export function DashboardView() {
   const [relationshipMemory, setRelationshipMemory] = useState<RelationshipMemory | null>(null);
   const [relationshipMemoryLoading, setRelationshipMemoryLoading] = useState(true);
   const [relationshipMemoryError, setRelationshipMemoryError] = useState<string | null>(null);
-  const [license, setLicense] = useState<LicenseInfo | null>(null);
   const { dictationReady, meetingReady, loading: setupLoading } = useSetupStatus();
-
-  const entitlement = deriveEntitlement(license);
-
-  useEffect(() => {
-    void validateLicense().then(setLicense).catch(() => {});
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -295,7 +284,7 @@ export function DashboardView() {
                     <Badge variant={dictationReady && meetingReady ? "success" : "warning"}>
                       {setupLoading ? "Checking setup" : dictationReady && meetingReady ? "Ready" : "Needs attention"}
                     </Badge>
-                    <Badge variant="outline">{entitlement.proEnabled ? "Pro memory" : "Trial workspace"}</Badge>
+                    <Badge variant="outline">Local memory</Badge>
                   </div>
                   <p className="text-2xl font-semibold tracking-tight text-card-foreground sm:text-3xl">
                     {setupHeadline}
@@ -322,7 +311,7 @@ export function DashboardView() {
                   {[
                     { label: "Dictation", ready: dictationReady, action: () => requestOnboarding("dictation") },
                     { label: "Meetings", ready: meetingReady, action: () => requestOnboarding("meetings") },
-                    { label: "Local memory", ready: entitlement.proEnabled, action: () => requestMainView("settings") },
+                    { label: "Local memory", ready: true, action: () => requestMainView("settings") },
                   ].map((item) => (
                     <button
                       key={item.label}
@@ -478,7 +467,7 @@ export function DashboardView() {
           </section>
 
           {/* Second Brain - Memory */}
-          <Card className={cn(!entitlement.proEnabled && "opacity-60", "border-primary/20 hover-lift")}>
+          <Card className="border-primary/20 hover-lift">
             <CardHeader>
               <div className="flex items-center justify-between">
                 <CardTitle className="flex items-center gap-2">
@@ -486,7 +475,6 @@ export function DashboardView() {
                     <Brain className="h-4 w-4 text-primary" />
                   </div>
                   Second Brain
-                  <TierBadge required="pro" unlocked={entitlement.proEnabled} />
                 </CardTitle>
                 {memoryMessages.length > 0 && (
                   <Button
@@ -513,12 +501,11 @@ export function DashboardView() {
                   onChange={(e: ChangeEvent<HTMLInputElement>) => setMemoryQuery(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter") void runMemoryQuery(); }}
                   placeholder="Ask about your meetings..."
-                  disabled={!entitlement.proEnabled}
                 />
                 <Button
                   aria-label="Send"
                   onClick={() => void runMemoryQuery()}
-                  disabled={!entitlement.proEnabled || memoryLoading || !memoryQuery.trim()}
+                  disabled={memoryLoading || !memoryQuery.trim()}
                 >
                   {memoryLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                 </Button>
@@ -613,7 +600,7 @@ export function DashboardView() {
                             size="sm"
                             className="shrink-0 text-xs"
                             onClick={() => void runMemoryQuery(buildRelationshipPrompt(person, "person"))}
-                            disabled={!entitlement.proEnabled || memoryLoading}
+                            disabled={memoryLoading}
                           >
                             Ask
                           </Button>
@@ -654,7 +641,7 @@ export function DashboardView() {
                             size="sm"
                             className="shrink-0 text-xs"
                             onClick={() => void runMemoryQuery(buildRelationshipPrompt(company, "company"))}
-                            disabled={!entitlement.proEnabled || memoryLoading}
+                            disabled={memoryLoading}
                           >
                             Ask
                           </Button>

@@ -15,11 +15,8 @@ import { RecordingProvider } from "@/hooks/use-recording";
 import { DataCacheProvider } from "@/hooks/data-cache-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/theme-provider";
-import { ActivationModal } from "@/components/activation-modal";
-import { NagModal, shouldShowNag } from "@/components/nag-modal";
 import { FirstRunWizard } from "@/components/first-run-wizard";
 import { ToastProvider, useToast } from "@/components/toast";
-import { validateLicense } from "@/lib/backend/license";
 import {
   MEETING_ONBOARDING_STORAGE_KEY,
   ONBOARDING_STORAGE_KEY,
@@ -31,8 +28,6 @@ import {
   OPEN_RECORDING_WORKSPACE_EVENT as OPEN_RECORDING_WORKSPACE_CUSTOM_EVENT,
   type MainViewId,
 } from "@/lib/navigation";
-import type { LicenseInfo } from "@/lib/backend/license";
-import { usePeriodicLicenseCheck } from "@/hooks/use-periodic-license-check";
 
 const DashboardView = lazy(() =>
   import("@/components/views/dashboard-view").then((m) => ({ default: m.DashboardView }))
@@ -183,46 +178,8 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const firstViewMarked = useRef(false);
 
-  // License state
-  const [licenseChecked, setLicenseChecked] = useState(false);
-  const [license, setLicense] = useState<LicenseInfo | null>(null);
-
   // UI overlays
-  const [showActivationModal, setShowActivationModal] = useState(false);
   const [wizardMode, setWizardMode] = useState<OnboardingMode | null>(null);
-  const [showNag, setShowNag] = useState(false);
-
-  // Check license on startup
-  useEffect(() => {
-    void validateLicense()
-      .then((info) => {
-        setLicense(info);
-        setLicenseChecked(true);
-        if (info.nagRequired && shouldShowNag()) {
-          setShowNag(true);
-        }
-      })
-      .catch((err) => {
-        // Electron not available or error, proceed in trial mode
-        console.error("License validation failed:", err);
-        setLicense(null);
-        setLicenseChecked(true);
-      });
-  }, []);
-
-  // Periodic license validation (every 4 hours)
-  usePeriodicLicenseCheck({
-    license,
-    onLicenseChange: (info) => {
-      setLicense(info);
-      if (!info.valid && info.nagRequired && shouldShowNag()) {
-        setShowNag(true);
-      }
-    },
-    onLicenseRevoked: () => {
-      setShowNag(true);
-    },
-  });
 
   useEffect(() => {
     if (!import.meta.env.DEV || typeof performance === "undefined") return;
@@ -242,12 +199,9 @@ function App() {
   }, [activeView]);
 
   useEffect(() => {
-    if (!licenseChecked) {
-      return;
-    }
     const alreadyOnboarded = localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
     setWizardMode(alreadyOnboarded ? null : "full");
-  }, [licenseChecked]);
+  }, []);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -317,12 +271,6 @@ function App() {
     setPendingRecordingWorkspaceId(null);
   }, [activeView, pendingRecordingWorkspaceId]);
 
-  const handleActivated = (info: LicenseInfo) => {
-    setLicense(info);
-    setShowActivationModal(false);
-    setShowNag(false);
-  };
-
   const handleWizardComplete = (result?: {
     markOnboardingComplete?: boolean;
     meetingsCompleted?: boolean;
@@ -335,17 +283,6 @@ function App() {
     }
     setWizardMode(null);
   };
-
-  // ── Startup splash while license is being checked ────────────────────────
-  if (!licenseChecked) {
-    return (
-      <ThemeProvider>
-        <div className="flex h-screen items-center justify-center bg-background">
-          <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-        </div>
-      </ThemeProvider>
-    );
-  }
 
   const ActiveView = VIEW_COMPONENTS[activeView] ?? VIEW_COMPONENTS.dashboard;
 
@@ -363,8 +300,6 @@ function App() {
                     onViewChange={(v) => setActiveView(v as ViewId)}
                     isCollapsed={sidebarCollapsed}
                     onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
-                    license={license}
-                    onActivateClick={() => setShowActivationModal(true)}
                   />
 
                   <main className="app-main-surface min-w-0 flex-1 overflow-hidden">
@@ -375,29 +310,12 @@ function App() {
                         </div>
                       }
                     >
-                      {activeView === "settings" ? (
-                        <SettingsView onLicenseChange={setLicense} />
-                      ) : (
-                        <ActiveView />
-                      )}
+                      <ActiveView />
                     </Suspense>
                   </main>
                 </div>
 
-                {/* Dismissible nag (no license + trial expired) */}
-                {showNag && !license?.valid && license?.nagRequired && (
-                  <NagModal onActivate={() => { setShowNag(false); setShowActivationModal(true); }} />
-                )}
-
-                {/* Activation modal (user-triggered or from nag) */}
-                {showActivationModal && (
-                  <ActivationModal
-                    onActivated={handleActivated}
-                    onCancel={() => setShowActivationModal(false)}
-                  />
-                )}
-
-                {/* First-run wizard (shown once after first activation) */}
+                {/* First-run wizard (shown once on first launch) */}
                 {wizardMode && <FirstRunWizard mode={wizardMode} onComplete={handleWizardComplete} />}
               </DataCacheProvider>
             </RecordingProvider>

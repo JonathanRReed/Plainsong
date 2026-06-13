@@ -54,8 +54,7 @@ type UpdateStatusPayload = {
     | "updateAvailable"
     | "downloading"
     | "installing"
-    | "error"
-    | "locked";
+    | "error";
   info?: UpdateInfoPayload;
   progress?: number;
   error?: string;
@@ -185,20 +184,6 @@ async function getUpdateChannelFromSidecar(): Promise<UpdateChannel> {
   }
 }
 
-async function getUpdateLockReasonFromSidecar(): Promise<string | null> {
-  if (!ipcBridge) {
-    return null;
-  }
-
-  try {
-    const result = await ipcBridge.invokeSidecar("get_update_lock_reason");
-    return typeof result === "string" && result.trim() ? result : null;
-  } catch (error) {
-    console.error("[updater] failed to read update lock reason", error);
-    return null;
-  }
-}
-
 function configureAutoUpdater(updater: AppUpdater): void {
   if (updaterConfigured) {
     return;
@@ -262,12 +247,6 @@ function configureAutoUpdater(updater: AppUpdater): void {
 }
 
 async function checkForUpdatesInElectron(): Promise<UpdateInfoPayload | null> {
-  const lockReason = await getUpdateLockReasonFromSidecar();
-  if (lockReason) {
-    setUpdateStatus({ status: "locked", error: lockReason });
-    return null;
-  }
-
   if (!app.isPackaged) {
     const error = "Updates are only available in packaged builds.";
     setUpdateStatus({ status: "error", error });

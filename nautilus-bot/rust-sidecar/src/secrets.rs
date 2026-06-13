@@ -120,13 +120,14 @@ fn migrate_legacy_file_if_needed() {
 
 fn migrate_legacy_file_inner() -> Result<()> {
     let path = legacy_secrets_file_path()?;
-    
+
     // Open file with exclusive access to prevent TOCTOU attacks
     let file = std::fs::File::open(&path)
         .with_context(|| format!("Failed to open legacy secrets file {}", path.display()))?;
-    
+
     // Validate it's a regular file (not a symlink)
-    let metadata = file.metadata()
+    let metadata = file
+        .metadata()
         .with_context(|| format!("Failed to read metadata for {}", path.display()))?;
     if !metadata.is_file() {
         return Err(anyhow::anyhow!("Legacy secrets path is not a regular file"));
@@ -202,13 +203,6 @@ pub fn get_internal_secret(key: &str) -> Result<Option<String>> {
     get_secret_for_account(&account)
 }
 
-#[cfg_attr(
-    test,
-    expect(
-        dead_code,
-        reason = "license cleanup path is not exercised in unit tests"
-    )
-)]
 pub fn clear_internal_secret(key: &str) -> Result<()> {
     migrate_legacy_file_if_needed();
     let account = internal_account_name(key)?;

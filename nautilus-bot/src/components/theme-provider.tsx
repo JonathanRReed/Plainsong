@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
 import { invoke } from "@/lib/electron";
-import { normalizeThemeSchemeForAccess } from "@/lib/theme-schemes";
+import { normalizeThemeScheme } from "@/lib/theme-schemes";
 
 type Theme = "light" | "dark" | "system";
 
@@ -18,7 +18,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>("system");
   const [isDark, setIsDark] = useState(false);
   const [colorScheme, setColorSchemeState] = useState<string>("default");
-  const [themeAccess, setThemeAccess] = useState<"basic" | "pro" | "friends">("basic");
 
   const applyColorScheme = (scheme: string) => {
     const root = window.document.documentElement;
@@ -34,18 +33,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const loadTheme = async () => {
       try {
         const settings = await invoke<Record<string, unknown>>("get_settings");
-        const license = await invoke<{ valid?: boolean; tier?: string }>("validate_license");
-        const resolvedAccess = !license?.valid
-          ? "basic"
-          : license.tier === "friends_club"
-            ? "friends"
-            : "pro";
         const savedTheme = (settings.theme as Theme) || "system";
         const ui = (settings.ui as Record<string, unknown> | undefined) ?? {};
         const rawColorScheme = typeof ui.colorScheme === "string" ? ui.colorScheme : "default";
-        const savedColorScheme = normalizeThemeSchemeForAccess(rawColorScheme, resolvedAccess);
+        const savedColorScheme = normalizeThemeScheme(rawColorScheme);
         setThemeState(savedTheme);
-        setThemeAccess(resolvedAccess);
         setColorSchemeState(savedColorScheme);
         if (savedColorScheme !== rawColorScheme) {
           await invoke("save_settings", {
@@ -61,7 +53,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       } catch {
         // If settings not available, default to system
         setThemeState("system");
-        setThemeAccess("basic");
         setColorSchemeState("default");
       }
     };
@@ -118,7 +109,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   };
 
   const setColorScheme = async (scheme: string) => {
-    const normalized = normalizeThemeSchemeForAccess(scheme, themeAccess);
+    const normalized = normalizeThemeScheme(scheme);
     setColorSchemeState(normalized);
     applyColorScheme(normalized);
 

@@ -850,15 +850,6 @@ impl From<String> for UpdateChannel {
     }
 }
 
-impl From<crate::update::UpdateChannel> for UpdateChannel {
-    fn from(channel: crate::update::UpdateChannel) -> Self {
-        match channel {
-            crate::update::UpdateChannel::Beta => UpdateChannel::Beta,
-            crate::update::UpdateChannel::Stable => UpdateChannel::Stable,
-        }
-    }
-}
-
 /// Update settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
