@@ -42,29 +42,6 @@ import {
   Zap,
 } from "lucide-react";
 
-const QUICK_STATS = [
-  {
-    label: "Projects",
-    icon: Folder,
-    accentClass: "bg-primary/10 text-primary",
-  },
-  {
-    label: "Meetings",
-    icon: FileAudio,
-    accentClass: "bg-info/10 text-info",
-  },
-  {
-    label: "Duration",
-    icon: Clock,
-    accentClass: "bg-warning/10 text-warning",
-  },
-  {
-    label: "Dictation Speed",
-    icon: Zap,
-    accentClass: "bg-success/10 text-success",
-  },
-] as const;
-
 export function DashboardView() {
   const { projects } = useProjects();
   const { recordings } = useRecordings();
@@ -370,100 +347,6 @@ export function DashboardView() {
                 </div>
               </CardContent>
             </Card>
-          </section>
-
-          {/* Quick Stats */}
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            {QUICK_STATS.map((stat) => {
-              const Icon = stat.icon;
-              const value =
-                stat.label === "Projects"
-                  ? String(projects.length)
-                  : stat.label === "Meetings"
-                    ? String(recordings.length)
-                    : stat.label === "Duration"
-                      ? `${Math.floor(totalDuration / 3600)}h ${Math.floor((totalDuration % 3600) / 60)}m`
-                      : "4x";
-              const supportingCopy = stat.label === "Dictation Speed" ? "than typing" : null;
-              return (
-                <Card
-                  key={stat.label}
-                  variant="interactive"
-                  className="overflow-hidden border-border/70 bg-card/78"
-                >
-                  <CardContent className="flex min-h-32 flex-col gap-5 p-5">
-                    <div className="flex items-start justify-between gap-3">
-                      <p className="quiet-label">
-                        {stat.label}
-                      </p>
-                      <div className={cn("flex size-9 items-center justify-center rounded-xl", stat.accentClass)}>
-                        <Icon className="h-4 w-4" />
-                      </div>
-                    </div>
-                    <div className="mt-auto min-w-0">
-                      <p className="text-3xl font-semibold tracking-tight text-card-foreground">{value}</p>
-                      {supportingCopy && (
-                        <p className="mt-1 text-sm text-muted-foreground">{supportingCopy}</p>
-                      )}
-                    </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </div>
-
-          {/* Setup Status */}
-          <section className="surface-panel-subtle grid gap-3 rounded-2xl p-4 md:grid-cols-[1fr_auto] md:items-center">
-            <div>
-              <p className="quiet-label">Readiness</p>
-              <p className="mt-1 text-base font-medium text-card-foreground">
-                Daily capture checks stay close to the workflows they affect.
-              </p>
-            </div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {[
-                {
-                  label: "Dictation",
-                  ready: dictationReady,
-                  icon: Mic,
-                  action: () => requestOnboarding("dictation"),
-                },
-                {
-                  label: "Meetings",
-                  ready: meetingReady,
-                  icon: FileAudio,
-                  action: () => requestOnboarding("meetings"),
-                },
-              ].map((item) => {
-                const Icon = item.icon;
-                return (
-                  <div
-                    key={item.label}
-                    className="flex min-w-56 items-center gap-3 rounded-xl border border-border/70 bg-background/55 px-3 py-3"
-                  >
-                    <div
-                      className={cn(
-                        "flex size-9 shrink-0 items-center justify-center rounded-lg",
-                        item.ready ? "bg-success/15 text-success" : "bg-warning/15 text-warning"
-                      )}
-                    >
-                      {setupLoading ? <Loader2 className="size-4 animate-spin" /> : item.ready ? <CheckCircle2 className="size-4" /> : <Icon className="size-4" />}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-card-foreground">{item.label}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {setupLoading ? "Checking" : item.ready ? "Ready" : "Needs setup"}
-                      </p>
-                    </div>
-                    {!setupLoading && !item.ready && (
-                      <Button size="sm" variant="outline" onClick={item.action}>
-                        Fix
-                      </Button>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
           </section>
 
           {/* Second Brain - Memory */}
@@ -784,9 +667,11 @@ export function DashboardView() {
               ) : (
                 <div className="space-y-1.5">
                   {recentRecordings.map((recording) => (
-                    <div
+                    <button
+                      type="button"
                       key={recording.id}
-                      className="group flex items-center gap-3 rounded-lg border bg-card px-4 py-3 transition-colors hover:bg-accent/50 cursor-pointer"
+                      onClick={() => requestMainView("recordings")}
+                      className="group flex w-full items-center gap-3 rounded-lg border bg-card px-4 py-3 text-left transition-colors hover:bg-accent/50 cursor-pointer"
                     >
                       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted/50">
                         <FileAudio className="h-4 w-4 text-muted-foreground" />
@@ -801,7 +686,7 @@ export function DashboardView() {
                         {Math.floor(recording.duration / 60)}:{(recording.duration % 60).toString().padStart(2, '0')}
                       </Badge>
                       <ArrowRight className="h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
-                    </div>
+                    </button>
                   ))}
                 </div>
               )}
@@ -819,7 +704,11 @@ export function DashboardView() {
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                   {projects.map((project) => (
-                    <Card key={project.id} className="group cursor-pointer transition-colors hover:border-primary/30">
+                    <Card
+                      key={project.id}
+                      onClick={() => requestMainView("projects")}
+                      className="group cursor-pointer transition-colors hover:border-primary/30"
+                    >
                       <CardHeader className="pb-2">
                         <div className="flex items-center gap-2">
                           <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-500/10">

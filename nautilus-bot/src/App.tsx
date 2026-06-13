@@ -171,7 +171,7 @@ function AppRuntimeListeners() {
 }
 
 function App() {
-  const [activeView, setActiveView] = useState<ViewId>("dashboard");
+  const [activeView, setActiveView] = useState<ViewId>("dictation");
   const [pendingRecordingWorkspaceId, setPendingRecordingWorkspaceId] = useState<string | null>(
     null
   );
@@ -255,6 +255,46 @@ function App() {
     window.addEventListener(OPEN_MAIN_VIEW_EVENT, handleOpenMainView as EventListener);
     return () => {
       window.removeEventListener(OPEN_MAIN_VIEW_EVENT, handleOpenMainView as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
+    const SHORTCUT_VIEWS: Record<string, ViewId> = {
+      h: "dashboard",
+      d: "dictation",
+      m: "recordings",
+      p: "projects",
+      ",": "settings",
+    };
+
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+        return;
+      }
+
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.isContentEditable ||
+          target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT")
+      ) {
+        return;
+      }
+
+      const view = SHORTCUT_VIEWS[event.key.toLowerCase()];
+      if (!view) {
+        return;
+      }
+
+      event.preventDefault();
+      setActiveView(view);
+    };
+
+    window.addEventListener("keydown", handleShortcut);
+    return () => {
+      window.removeEventListener("keydown", handleShortcut);
     };
   }, []);
 

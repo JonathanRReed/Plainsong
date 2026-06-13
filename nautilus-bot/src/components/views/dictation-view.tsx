@@ -37,7 +37,6 @@ import {
   captureSelectedTextForPlayback,
   reprocessDictationText,
 } from "@/lib/backend/dictation";
-import { getAsrProviders } from "@/lib/backend/asr";
 import { deleteRecording, getTranscript } from "@/lib/backend/recordings";
 import { getSettings, saveSettings } from "@/lib/backend/settings";
 import {
@@ -47,10 +46,7 @@ import {
   matchesShortcut,
 } from "@/lib/shortcuts";
 import {
-  providerCapabilityLabel,
-  providerHostingLabel,
   providerHostingPreference,
-  providerRecommendation,
   type DictationRoutePreference,
 } from "@/lib/asr-capabilities";
 import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labels";
@@ -93,7 +89,6 @@ import {
 } from "@/components/ui/dialog";
 
 import type {
-  AsrProviderInfo,
   AsrProviderType,
   Recording,
   Transcript,
@@ -317,7 +312,6 @@ const ACTIVATION_DOMAIN_SUGGESTIONS = [
   "docs.google.com",
   "notion.so",
 ];
-const GA_LANGUAGE_CODES = new Set(["en", "es", "fr", "de", "pt"]);
 const DICTATION_SESSION_LANGUAGE_OPTIONS = [
   { value: "auto", label: "Auto detect" },
   { value: "en", label: "English" },
@@ -806,7 +800,7 @@ function getDictationPhaseSummary(
       };
     case "delivering":
       return {
-        title: "Delivering",
+        title: "Inserting",
         detail:
           message?.trim() ||
           "Nautilus is inserting or copying the final result.",
@@ -1006,59 +1000,6 @@ function summarizeMode(mode: {
   return summary;
 }
 
-function normalizeProviderLanguageTag(language: string): string {
-  return language.trim().toLowerCase();
-}
-
-function providerSupportsCaptureLanguage(
-  provider: AsrProviderInfo,
-  language: string | null,
-): boolean {
-  if (!language) {
-    return true;
-  }
-
-  const supported = provider.modelInfo.languages.map(
-    normalizeProviderLanguageTag,
-  );
-  const normalizedLanguage = normalizeProviderLanguageTag(language);
-  const baseLanguage = normalizedLanguage.split("-")[0] ?? normalizedLanguage;
-
-  return (
-    supported.includes(normalizedLanguage) ||
-    supported.includes(baseLanguage) ||
-    supported.includes("multilingual") ||
-    supported.includes("system")
-  );
-}
-
-function providerSupportsActiveLanguageSet(
-  provider: AsrProviderInfo,
-  languages: string[],
-): boolean {
-  if (languages.length === 0) {
-    return true;
-  }
-  return languages.some((language) =>
-    providerSupportsCaptureLanguage(provider, language),
-  );
-}
-
-function languageTrustLabel(
-  language: string | null,
-  activeLanguages: string[],
-): string {
-  if (language) {
-    return GA_LANGUAGE_CODES.has(language.toLowerCase())
-      ? "GA"
-      : "Experimental";
-  }
-  if (activeLanguages.length > 1) {
-    return "Active set";
-  }
-  return "Auto";
-}
-
 export function DictationView() {
   const {
     stateEvent: dictationStateEvent,
@@ -1214,9 +1155,6 @@ export function DictationView() {
     useState<DictationHistoryDetails | null>(null);
   const [dictationInsights, setDictationInsights] =
     useState<DictationInsights | null>(null);
-  const [dictationProviders, setDictationProviders] = useState<
-    AsrProviderInfo[]
-  >([]);
   const [latestCorrectionBaseline, setLatestCorrectionBaseline] = useState("");
   const [latestLearnStatus, setLatestLearnStatus] = useState<string | null>(
     null,
@@ -1497,38 +1435,6 @@ export function DictationView() {
     dictationModePreset,
     dictationSessionLanguage,
   ]);
-  const activeLanguageProviders = useMemo(
-    () =>
-      [...dictationProviders]
-        .filter((provider) =>
-          effectiveCaptureLanguage
-            ? providerSupportsCaptureLanguage(
-                provider,
-                effectiveCaptureLanguage,
-              )
-            : providerSupportsActiveLanguageSet(
-                provider,
-                dictationActiveLanguages,
-              ),
-        )
-        .sort((left, right) => {
-          if (
-            left.runtimeStatus === "ready" &&
-            right.runtimeStatus !== "ready"
-          ) {
-            return -1;
-          }
-          if (
-            left.runtimeStatus !== "ready" &&
-            right.runtimeStatus === "ready"
-          ) {
-            return 1;
-          }
-          return left.name.localeCompare(right.name);
-        })
-        .slice(0, 4),
-    [dictationActiveLanguages, dictationProviders, effectiveCaptureLanguage],
-  );
   const groupedCorrectionSuggestions = useMemo<
     CorrectionSuggestionGroup[]
   >(() => {
@@ -1983,25 +1889,6 @@ export function DictationView() {
       })
       .catch((error) => {
         console.warn("Failed to load dictation dictionary entries:", error);
-      });
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let mounted = true;
-    void getAsrProviders()
-      .then((providers) => {
-        if (mounted) {
-          setDictationProviders(providers);
-        }
-      })
-      .catch((error) => {
-        console.warn("Failed to load ASR providers for dictation:", error);
-        if (mounted) {
-          setDictationProviders([]);
-        }
       });
     return () => {
       mounted = false;
@@ -4155,7 +4042,7 @@ export function DictationView() {
                               : "border-border bg-background text-muted-foreground",
                       )}
                     >
-                      {dictationPhase}
+                      {dictationPhaseSummary.title}
                     </div>
                   </div>
                   {dictationPhasePreview ? (
@@ -4244,7 +4131,7 @@ export function DictationView() {
                         >
                           <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
                           {dictationPhase === "delivering"
-                            ? "Delivering..."
+                            ? "Inserting..."
                             : "Working..."}
                         </Button>
                       </div>
@@ -5164,8 +5051,7 @@ export function DictationView() {
                     <option value="power_rewrite">Power Rewrite</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Uses the transcription route selected in Settings →
-                    Transcription.
+                    Uses the transcription method you chose in Settings.
                   </p>
                 </div>
 
@@ -5391,42 +5277,6 @@ export function DictationView() {
                   </p>
                 </div>
 
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-sm font-medium">
-                    Provider fit for this session
-                  </label>
-                  <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                    {activeLanguageProviders.length > 0 ? (
-                      activeLanguageProviders.map((provider) => (
-                        <div
-                          key={provider.providerType}
-                          className="rounded-md border bg-muted/20 px-3 py-3"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <p className="text-sm font-medium">
-                              {provider.name}
-                            </p>
-                            <span className="text-[11px] text-muted-foreground">
-                              {provider.runtimeStatus === "ready"
-                                ? "Ready"
-                                : provider.runtimeStatus}
-                            </span>
-                          </div>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {providerCapabilityLabel(provider.providerType)} ·{" "}
-                            {providerRecommendation(provider)}
-                          </p>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="rounded-md border bg-muted/20 px-3 py-3 text-xs text-muted-foreground md:col-span-2 xl:col-span-4">
-                        No ready providers matched the current language/session
-                        filters yet.
-                      </div>
-                    )}
-                  </div>
-                </div>
-
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Keep warm</label>
                   <select
@@ -5475,66 +5325,6 @@ export function DictationView() {
                           ? " from the active language set."
                           : " from provider auto-detect."}
                   </p>
-                </div>
-
-                <div className="rounded-md border bg-background/80 px-3 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium">Language routing</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Provider guidance for the current capture language or
-                        active auto-detect set.
-                      </p>
-                    </div>
-                    <span className="rounded-full border px-2 py-1 text-[11px] text-muted-foreground">
-                      {languageTrustLabel(
-                        effectiveCaptureLanguage,
-                        dictationActiveLanguages,
-                      )}
-                    </span>
-                  </div>
-                  <div className="mt-3 space-y-2">
-                    {activeLanguageProviders.length > 0 ? (
-                      activeLanguageProviders.map((provider) => (
-                        <div
-                          key={provider.providerType}
-                          className="rounded-md border bg-muted/20 px-3 py-2"
-                        >
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <p className="text-sm font-medium">
-                              {provider.name}
-                            </p>
-                            <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                              <span>
-                                {providerHostingLabel(
-                                  provider.providerType,
-                                  provider.selectedModelId,
-                                )}
-                              </span>
-                              <span>
-                                {providerCapabilityLabel(provider.providerType)}
-                              </span>
-                              <span>
-                                {provider.runtimeStatus === "ready"
-                                  ? "Ready"
-                                  : "Needs setup"}
-                              </span>
-                            </div>
-                          </div>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {providerRecommendation(provider)}
-                          </p>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-xs text-muted-foreground">
-                        No installed providers currently advertise coverage for
-                        this language view. Nautilus will still use the active
-                        dictation path, but non-GA languages and multi-language
-                        auto-detect sets should be treated as experimental.
-                      </p>
-                    )}
-                  </div>
                 </div>
 
                 <div className="space-y-2">
