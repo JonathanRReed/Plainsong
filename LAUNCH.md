@@ -26,7 +26,17 @@ explicitly so nothing is assumed.
 - **Renamed to Plainsong** end-to-end (bundle id `com.plainsong.app`, data dir,
   binary `plainsong-sidecar`, all brand text); pre-launch so no data migration.
 - **Release pipeline**: electron-builder workflow that signs/notarizes when the
-  secrets are present and otherwise publishes an unsigned build.
+  secrets are present and otherwise publishes an unsigned build. macOS is
+  **arm64-only for v1** (the Rust sidecar is host-arch; Intel needs per-arch
+  cross-compiles — tracked).
+- **Packaged build verified**: `electron:build:mac` produces `Plainsong.app`
+  with bundle id `com.plainsong.app`, both TCC usage strings in the Info.plist,
+  and the arm64 `plainsong-sidecar` bundled in `Resources/sidecar/`.
+- **Honest hotkey UI**: v1 exposes **toggle** mode only across all surfaces
+  (settings, dictation view, onboarding default); the broken hold-to-talk/
+  hands-free options are removed (they need a native key listener — fast-follow).
+- **App icon**: a clean Plainsong placeholder (single line + note). Replace with
+  final designed art before a marketing push, but it is no longer old-project art.
 
 ## Must be validated on a real Mac (cannot be done headlessly)
 
