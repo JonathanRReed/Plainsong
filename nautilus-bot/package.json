@@ -27,6 +27,7 @@
     "release:mac": "node scripts/assert-host-platform.mjs darwin && bun run sidecar:build:release && bun run build:renderer && bun run build:electron && electron-builder --mac --publish always",
     "release:win": "node scripts/assert-host-platform.mjs win32 && bun run sidecar:build:release && bun run build:renderer && bun run build:electron && electron-builder --win --publish always",
     "test:rust": "cargo test --manifest-path rust-sidecar/Cargo.toml --lib",
+    "benchmark:latency": "cargo run --release --manifest-path rust-sidecar/Cargo.toml --bin benchmark-latency --",
     "gate:size": "node scripts/size-gate.mjs --app release/mac-arm64/Nautilus.app --max-mb 450",
     "gate:cold-start": "node scripts/cold-start-gate.mjs",
     "gate:ipc-contract": "node scripts/verify-ipc-contract.mjs",

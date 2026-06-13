@@ -66,6 +66,20 @@ bun run gate:release:local   # full local pre-release pass
 
 Use `bun run test` (Vitest), not `bun test`.
 
+## Measuring real dictation latency
+
+`benchmark:latency` runs a fixture WAV through the actual transcription path and
+reports **measured** wall-clock latency and real-time factor (it requires the
+chosen model to be downloaded):
+
+```bash
+bun run benchmark:latency -- --provider whisper --model base.en --runs 5
+# → {"transcriptionMsP50":138,"realTimeFactor":217.4,...}
+```
+
+This replaces an earlier "benchmark" that multiplied fixture numbers by a CLI
+flag; the numbers here are real.
+
 ## ASR providers
 
 Speech recognition runs locally by default (Whisper via whisper.cpp, plus other
