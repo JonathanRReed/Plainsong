@@ -171,14 +171,22 @@ impl Database {
             let payload = match serde_json::from_str(&payload_json) {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!("Failed to parse runtime event payload for event {}: {}", row.get::<_, i64>(0).unwrap_or(0), e);
+                    tracing::warn!(
+                        "Failed to parse runtime event payload for event {}: {}",
+                        row.get::<_, i64>(0).unwrap_or(0),
+                        e
+                    );
                     serde_json::json!({})
                 }
             };
             let created_at = match chrono::DateTime::parse_from_rfc3339(&created_at) {
                 Ok(dt) => dt.with_timezone(&Utc),
                 Err(e) => {
-                    tracing::warn!("Failed to parse created_at for event {}: {}", row.get::<_, i64>(0).unwrap_or(0), e);
+                    tracing::warn!(
+                        "Failed to parse created_at for event {}: {}",
+                        row.get::<_, i64>(0).unwrap_or(0),
+                        e
+                    );
                     Utc::now()
                 }
             };

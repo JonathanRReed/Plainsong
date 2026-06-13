@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
   Mic,
@@ -9,17 +9,12 @@ import {
   Folder,
   PanelLeftClose,
   PanelLeftOpen,
-  Shield,
-  Star,
-  Clock,
-  KeyRound,
   Sparkles,
   MoreHorizontal,
   ChevronRight,
 } from "lucide-react";
 import type { ViewId } from "@/App";
 import { getSettings } from "@/lib/backend/settings";
-import type { LicenseInfo } from "@/lib/backend/license";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
@@ -32,8 +27,6 @@ interface SidebarProps {
   onViewChange: (view: ViewId) => void;
   isCollapsed?: boolean;
   onToggleCollapse?: () => void;
-  license?: LicenseInfo | null;
-  onActivateClick?(): void;
 }
 
 const primaryNavItems = [
@@ -91,104 +84,11 @@ function deriveLocalModeStatus(
   };
 }
 
-function LicenseBadge({
-  license,
-  isCollapsed,
-  onActivateClick,
-}: {
-  license: LicenseInfo | null | undefined;
-  isCollapsed: boolean;
-  onActivateClick?: () => void;
-}) {
-  if (!license) return null;
-
-  if (license.valid) {
-    const isFriends = license.tier === "friends_club";
-    const label = isFriends ? "Friends Club" : "Pro";
-    const icon = isFriends ? (
-      <Star className="h-3.5 w-3.5 shrink-0 text-amber-500" />
-    ) : (
-      <Shield className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
-    );
-
-    return (
-      <Tooltip delayDuration={0}>
-        <TooltipTrigger asChild>
-          <div
-            className={cn(
-              "flex items-center gap-1.5 text-xs cursor-default select-none",
-              isFriends ? "text-amber-600 dark:text-amber-400" : "text-emerald-600",
-              isCollapsed && "justify-center"
-            )}
-          >
-            {icon}
-            {!isCollapsed && <span>{label}</span>}
-          </div>
-        </TooltipTrigger>
-        <TooltipContent side="right" align="center">
-          {label} · {license.activationsUsage}/{license.activationsLimit} devices
-        </TooltipContent>
-      </Tooltip>
-    );
-  }
-
-  // Trial / unlicensed
-  if (license.trialDaysRemaining > 0) {
-    return (
-      <Tooltip delayDuration={0}>
-        <TooltipTrigger asChild>
-          <div
-            className={cn(
-              "flex items-center gap-1.5 text-xs text-muted-foreground cursor-default select-none",
-              isCollapsed && "justify-center"
-            )}
-          >
-            <Clock className="h-3.5 w-3.5 shrink-0" />
-            {!isCollapsed && <span>Trial · {license.trialDaysRemaining}d left</span>}
-          </div>
-        </TooltipTrigger>
-        <TooltipContent side="right">
-          {license.trialDaysRemaining} trial days remaining
-        </TooltipContent>
-      </Tooltip>
-    );
-  }
-
-  // Trial expired, show activate shortcut.
-  if (onActivateClick) {
-    return (
-      <Tooltip delayDuration={0}>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            onClick={onActivateClick}
-            aria-label="Activate license"
-            className={cn(
-              "flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400 hover:underline cursor-pointer",
-              isCollapsed && "justify-center"
-            )}
-          >
-            <KeyRound className="h-3.5 w-3.5 shrink-0" />
-            {!isCollapsed && <span>Activate</span>}
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="right">Enter your license key</TooltipContent>
-      </Tooltip>
-    );
-  }
-
-  return null;
-}
-
-const MemoizedLicenseBadge = React.memo(LicenseBadge);
-
 export function Sidebar({
   activeView,
   onViewChange,
   isCollapsed = false,
   onToggleCollapse,
-  license,
-  onActivateClick,
 }: SidebarProps) {
   const { isRecording, formattedDuration, recordingMode } = useRecording();
   const [localModeStatus, setLocalModeStatus] = useState<LocalModeStatus>(DEFAULT_LOCAL_MODE_STATUS);
@@ -470,12 +370,6 @@ export function Sidebar({
               )}
             </div>
           )}
-
-          <MemoizedLicenseBadge
-            license={license ?? undefined}
-            isCollapsed={isCollapsed}
-            onActivateClick={onActivateClick}
-          />
 
           <div className={cn("flex items-center gap-2 rounded-xl border border-border/60 bg-muted/30 px-2 py-1.5", isCollapsed && "h-10 w-10 justify-center px-0")}>
             <ThemeToggle />

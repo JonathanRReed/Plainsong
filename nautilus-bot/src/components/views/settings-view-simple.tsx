@@ -75,28 +75,17 @@ import {
   type AudioInputDeviceInfo,
   type AudioInputDeviceInventory,
 } from "@/lib/backend/recordings";
-import {
-  activateLicense,
-  deactivateLicense,
-  validateLicense,
-} from "@/lib/backend/license";
 import type {
   BackupConfig,
   BackupInfo,
   CloudSetupReport,
 } from "@/lib/backend/storage";
 import type { PermissionDiagnostics, SecurityStatus } from "@/lib/backend/settings";
-import type { LicenseInfo } from "@/lib/backend/license";
 import type { DiarizationModelOption } from "@/lib/backend/asr";
-import {
-  isFeatureAllowed,
-  canUseFormattingAssistant,
-  getThemeAccessLevel,
-} from "@/hooks/use-license-features";
 import type { Settings } from "@/types/settings";
 import {
-  normalizeThemeSchemeForAccess,
-  themeSchemesForAccess,
+  normalizeThemeScheme,
+  THEME_SCHEMES,
 } from "@/lib/theme-schemes";
 import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
 import { ONBOARDING_STORAGE_KEY, requestOnboarding } from "@/lib/onboarding";
@@ -113,8 +102,6 @@ import {
   Shield,
   Sun,
   Moon,
-  Star,
-  ExternalLink,
   Loader2,
   XCircle,
   Download,
@@ -129,7 +116,6 @@ type TabId =
   | "security"
   | "storage"
   | "ai"
-  | "license"
   | "updates";
 type QueuedSettingsSave = {
   version: number;
@@ -143,54 +129,6 @@ type SettingsSaveScheduler = {
   timer: ReturnType<typeof setTimeout> | null;
   flushing: boolean;
 };
-
-function describeLicenseAccess(license: LicenseInfo) {
-  if (license.valid) {
-    const isFriends = license.tier === "friends_club";
-    return {
-      label: isFriends ? "Friends Club" : "Pro",
-      summary: isFriends
-        ? "Friends Club license active"
-        : "Pro license active",
-      detail: isFriends
-        ? "Updates, Pro features, cloud sync, and priority support are available on this device."
-        : "Updates and Pro features are available on this device. Friends Club-only features stay gated.",
-      reminder: "No trial reminders",
-      updateAccess: "Updates enabled",
-      featureAccess: isFriends ? "Pro + Friends Club" : "Pro",
-    };
-  }
-
-  if (license.trialActive && license.trialDaysRemaining > 0) {
-    const daysLabel =
-      license.trialDaysRemaining === 1
-        ? "1 day remaining"
-        : `${license.trialDaysRemaining} days remaining`;
-    return {
-      label: "Free trial",
-      summary: `Free trial · ${daysLabel}`,
-      detail:
-        "Trial access includes updates and the current Pro feature set. Friends Club-only features stay gated.",
-      reminder: "No trial reminders",
-      updateAccess: "Updates enabled during trial",
-      featureAccess: "Trial Pro access",
-    };
-  }
-
-  return {
-    label: "Trial expired",
-    summary: license.nagRequired
-      ? "Trial expired · reminders active"
-      : "Trial expired",
-    detail:
-      "The 30-day trial has ended. Updates and paid Pro/Friends Club features are locked until a valid license is activated.",
-    reminder: license.nagRequired
-      ? "Activation reminders enabled"
-      : "Activation reminders paused",
-    updateAccess: "Updates locked",
-    featureAccess: "Free local access",
-  };
-}
 
 type ShortcutFieldKey =
   | "toggleRecording"
@@ -351,16 +289,6 @@ const SETTINGS_TABS = [
     railSummary: "Version status and update channels",
     icon: RefreshCw,
   },
-  {
-    id: "license" as TabId,
-    label: "License",
-    title: "Plan and activation",
-    eyebrow: "Entitlement",
-    summary:
-      "See trial state, activate a key, and manage this device without leaving Nautilus.",
-    railSummary: "Trial status, license key, and device activation",
-    icon: Shield,
-  },
 ] as const;
 
 function normalizeActiveLanguageSet(languages: string[] | undefined): string[] {
@@ -408,10 +336,6 @@ function renderDeviceOptionLabel(device: AudioInputDeviceInfo) {
   }
   return `${device.deviceName} - ${details.join(" - ")}`;
 }
-
-type SettingsViewProps = {
-  onLicenseChange?: (info: LicenseInfo) => void;
-};
 
 type DictationHotkeyBehavior = "hold_to_talk" | "toggle" | "hands_free";
 
@@ -494,7 +418,7 @@ function resolveDictationReadinessChip(
   };
 }
 
-export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
+export function SettingsView() {
   const { theme, setTheme } = useTheme();
   const [activeTab, setActiveTab] = useState<TabId>("general");
   const useDesktopSettingsRail = false;
@@ -557,14 +481,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   const [resettingApp, setResettingApp] = useState(false);
   const [showResetDialog, setShowResetDialog] = useState(false);
   const [resetPhrase, setResetPhrase] = useState("");
-  const [licenseInfo, setLicenseInfo] = useState<LicenseInfo | null>(null);
-  const [licenseKeyInput, setLicenseKeyInput] = useState("");
-  const [licenseActivating, setLicenseActivating] = useState(false);
-  const [licenseError, setLicenseError] = useState<string | null>(null);
-  const licenseAccess = useMemo(
-    () => (licenseInfo ? describeLicenseAccess(licenseInfo) : null),
-    [licenseInfo],
-  );
   const [capturingShortcut, setCapturingShortcut] =
     useState<ShortcutFieldKey | null>(null);
   const mountedRef = useRef(true);
@@ -977,35 +893,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   }, [activeTab, hasLoadedStorageTab]);
 
   useEffect(() => {
-    if (licenseInfo !== null) return;
-    let mounted = true;
-    void withSettingsSectionTimeout("License status", validateLicense())
-      .then((info) => {
-        if (mounted) {
-          setLicenseInfo(info);
-        }
-      })
-      .catch(() => {
-        if (mounted) {
-          setLicenseInfo({
-            tier: "none",
-            valid: false,
-            lsStatus: "",
-            activationsLimit: 5,
-            activationsUsage: 0,
-            lastValidatedAt: "",
-            trialDaysRemaining: 30,
-            nagRequired: false,
-            trialActive: true,
-          });
-        }
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [licenseInfo]);
-
-  useEffect(() => {
     if (!settings) return;
     const llmProvider = settings.privacy.llmProvider;
     if (
@@ -1342,14 +1229,10 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
   }, []);
 
   useEffect(() => {
-    if (!settings || licenseInfo === null) {
+    if (!settings) {
       return;
     }
-    const themeAccess = getThemeAccessLevel(licenseInfo);
-    const nextScheme = normalizeThemeSchemeForAccess(
-      settings.ui.colorScheme,
-      themeAccess,
-    );
+    const nextScheme = normalizeThemeScheme(settings.ui.colorScheme);
     applyColorScheme(nextScheme);
     if (nextScheme !== settings.ui.colorScheme) {
       void updateSettings(
@@ -1363,7 +1246,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         { immediate: true },
       );
     }
-  }, [applyColorScheme, licenseInfo, settings, updateSettings]);
+  }, [applyColorScheme, settings, updateSettings]);
 
   const refreshBackups = useCallback(async () => {
     const data = await listBackups();
@@ -1426,49 +1309,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
       : state
       ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
       : "border-amber-400/30 bg-amber-400/10 text-amber-100";
-
-  const renderLicenseAccessSummary = () => {
-    if (!licenseInfo || !licenseAccess) return null;
-
-    return (
-      <div className="rounded-lg border border-border bg-muted/20 p-4">
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Current access
-            </p>
-            <p className="text-sm font-semibold">{licenseAccess.summary}</p>
-            <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
-              {licenseAccess.detail}
-            </p>
-          </div>
-          <span className="shrink-0 rounded-full border border-border bg-background px-2.5 py-1 text-xs font-medium">
-            {licenseAccess.label}
-          </span>
-        </div>
-        <div className="mt-4 grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
-          <div>
-            <p className="text-muted-foreground">Updates</p>
-            <p className="font-medium">{licenseAccess.updateAccess}</p>
-          </div>
-          <div>
-            <p className="text-muted-foreground">Paid features</p>
-            <p className="font-medium">{licenseAccess.featureAccess}</p>
-          </div>
-          <div>
-            <p className="text-muted-foreground">Activation reminders</p>
-            <p className="font-medium">{licenseAccess.reminder}</p>
-          </div>
-          <div>
-            <p className="text-muted-foreground">Device slots</p>
-            <p className="font-medium">
-              {licenseInfo.activationsUsage} of {licenseInfo.activationsLimit} used
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  };
 
   const handleSettingsTextBlur = useCallback(() => {
     void flushPendingSettingsSave();
@@ -1724,12 +1564,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
           <>
             <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
               <div className="space-y-0.5">
-                <Label className="flex items-center gap-1.5">
-                  Smart Format
-                  {!canUseFormattingAssistant(licenseInfo) && (
-                    <span className="text-xs text-amber-600">Pro</span>
-                  )}
-                </Label>
+                <Label>Smart Format</Label>
                 <p className="text-sm text-muted-foreground">
                   Use the default LLM to format and correct dictation before
                   pasting.
@@ -1737,7 +1572,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
               </div>
               <Switch
                 checked={settings.transcription.dictationAiFormatting}
-                disabled={!canUseFormattingAssistant(licenseInfo)}
                 onCheckedChange={(checked) =>
                   void updateSettings({
                     ...settings,
@@ -2385,21 +2219,13 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
         {includeCloudSync && (
           <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
             <div className="space-y-0.5">
-              <Label className="flex items-center gap-2">
-                Cloud sync
-                {!isFeatureAllowed(licenseInfo, "cloudSync") && (
-                  <span className="text-xs text-amber-600">
-                    ⭐ Friends Club
-                  </span>
-                )}
-              </Label>
+              <Label>Cloud sync</Label>
               <p className="text-sm text-muted-foreground">
                 Enable external backup sync integrations.
               </p>
             </div>
             <Switch
               checked={settings.privacy.cloudSync}
-              disabled={!isFeatureAllowed(licenseInfo, "cloudSync")}
               onCheckedChange={(checked) =>
                 void updateSettings({
                   ...settings,
@@ -3736,33 +3562,20 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                         </div>
 
                         {(() => {
-                          const themeAccess = getThemeAccessLevel(licenseInfo);
-                          const options = themeSchemesForAccess(themeAccess);
-                          const currentScheme = normalizeThemeSchemeForAccess(
+                          const currentScheme = normalizeThemeScheme(
                             settings.ui.colorScheme,
-                            themeAccess,
                           );
                           return (
                             <div className="space-y-2">
-                              <Label className="flex items-center gap-1.5">
-                                Color scheme
-                                {themeAccess === "basic" && (
-                                  <span className="text-xs text-amber-600">
-                                    Pro unlocks more
-                                  </span>
-                                )}
-                              </Label>
+                              <Label>Color scheme</Label>
                               <select
                                 aria-label="Color scheme"
                                 className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                                 value={currentScheme}
                                 onChange={(e: ChangeEvent<HTMLSelectElement>) => {
-                                  const scheme = e.target.value as string;
-                                  const normalized =
-                                    normalizeThemeSchemeForAccess(
-                                      scheme,
-                                      themeAccess,
-                                    );
+                                  const normalized = normalizeThemeScheme(
+                                    e.target.value,
+                                  );
                                   applyColorScheme(normalized);
                                   void updateSettings({
                                     ...settings,
@@ -3773,7 +3586,7 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                   });
                                 }}
                               >
-                                {options.map((option) => (
+                                {THEME_SCHEMES.map((option) => (
                                   <option
                                     key={option.value}
                                     value={option.value}
@@ -3782,12 +3595,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                                   </option>
                                 ))}
                               </select>
-                              {themeAccess === "basic" && (
-                                <p className="text-xs text-muted-foreground">
-                                  Upgrade to Pro for Rosé Pine and Solarized
-                                  themes, Friends Club for all premium schemes.
-                                </p>
-                              )}
                             </div>
                           );
                         })()}
@@ -5471,362 +5278,6 @@ export function SettingsView({ onLicenseChange }: SettingsViewProps = {}) {
                       <CardContent className="space-y-6">
                         <UpdateStatusWidget />
                         <BetaChannelToggle />
-                      </CardContent>
-                    </Card>
-                  )}
-
-                  {activeTab === "license" && (
-                    <Card>
-                      <CardHeader>
-                        <CardTitle className="flex items-center gap-2">
-                          <Shield className="h-5 w-5 text-emerald-600" />
-                          License
-                        </CardTitle>
-                        <CardDescription>
-                          Lemon Squeezy license · 1 user · up to{" "}
-                          {licenseInfo?.tier === "friends_club" ? 10 : 5}{" "}
-                          computers
-                        </CardDescription>
-                      </CardHeader>
-                      <CardContent className="space-y-4">
-                        {licenseInfo === null ? (
-                          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Checking license…
-                          </div>
-                        ) : licenseInfo.valid ? (
-                          <>
-                            {renderLicenseAccessSummary()}
-                            <div
-                              className={`rounded-lg border p-4 space-y-3 ${
-                                licenseInfo.tier === "friends_club"
-                                  ? "border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800"
-                                  : "border-emerald-200 bg-emerald-50 dark:bg-emerald-950/20 dark:border-emerald-800"
-                              }`}
-                            >
-                              <div className="flex items-center gap-2">
-                                {licenseInfo.tier === "friends_club" ? (
-                                  <Star className="h-5 w-5 text-amber-500" />
-                                ) : (
-                                  <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-                                )}
-                                <span
-                                  className={`font-semibold ${
-                                    licenseInfo.tier === "friends_club"
-                                      ? "text-amber-700 dark:text-amber-400"
-                                      : "text-emerald-700 dark:text-emerald-400"
-                                  }`}
-                                >
-                                  {licenseInfo.tier === "friends_club"
-                                    ? "Friends Club ⭐"
-                                    : "Pro"}
-                                </span>
-                              </div>
-                              <div className="grid grid-cols-2 gap-2 text-sm">
-                                <span className="text-muted-foreground">
-                                  Devices
-                                </span>
-                                <span>
-                                  {licenseInfo.activationsUsage} of{" "}
-                                  {licenseInfo.activationsLimit} used
-                                </span>
-                                {licenseInfo.lastValidatedAt && (
-                                  <>
-                                    <span className="text-muted-foreground">
-                                      Last validated
-                                    </span>
-                                    <span>
-                                      {new Date(
-                                        licenseInfo.lastValidatedAt,
-                                      ).toLocaleDateString()}
-                                    </span>
-                                  </>
-                                )}
-                                <span className="text-muted-foreground">
-                                  Plan
-                                </span>
-                                <span>Lifetime</span>
-                              </div>
-                            </div>
-                            <div className="flex gap-2">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => {
-                                  setLicenseInfo(null);
-                                }}
-                              >
-                                Re-check
-                              </Button>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="text-destructive hover:bg-destructive/10"
-                                onClick={() => {
-                                  if (
-                                    !window.confirm(
-                                      "Deactivate Nautilus on this computer? You can reactivate later.",
-                                    )
-                                  )
-                                    return;
-                                  void deactivateLicense().then(() => {
-                                    setLicenseInfo(null);
-                                    void validateLicense().then((info) => {
-                                      setLicenseInfo(info);
-                                      onLicenseChange?.(info);
-                                    });
-                                  });
-                                }}
-                              >
-                                Deactivate this device
-                              </Button>
-                            </div>
-                          </>
-                        ) : licenseInfo.trialDaysRemaining > 0 ? (
-                          <div className="space-y-4">
-                            {renderLicenseAccessSummary()}
-                            <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-2">
-                              <div className="flex items-center gap-2 text-sm font-medium">
-                                <XCircle className="h-4 w-4 text-muted-foreground" />
-                                <span>
-                                  Free trial · {licenseInfo.trialDaysRemaining}{" "}
-                                  days remaining
-                                </span>
-                              </div>
-                              <p className="text-xs text-muted-foreground">
-                                Trial access includes the current Pro feature
-                                set. Friends Club-only features such as cloud
-                                sync and priority support stay gated.
-                              </p>
-                            </div>
-                            <div className="space-y-2">
-                              <Label className="text-sm">
-                                Already have a key?
-                              </Label>
-                              <div className="flex gap-2">
-                                <Input
-                                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                                  value={licenseKeyInput}
-                                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                                    setLicenseError(null);
-                                    setLicenseKeyInput(e.target.value);
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") {
-                                      void (async () => {
-                                        const key = licenseKeyInput.trim();
-                                        if (!key) return;
-                                        setLicenseActivating(true);
-                                        setLicenseError(null);
-                                        try {
-                                          const info =
-                                            await activateLicense(key);
-                                          setLicenseInfo(info);
-                                          onLicenseChange?.(info);
-                                          setLicenseKeyInput("");
-                                        } catch (err) {
-                                          setLicenseError(
-                                            err instanceof Error
-                                              ? err.message
-                                              : String(err),
-                                          );
-                                        } finally {
-                                          setLicenseActivating(false);
-                                        }
-                                      })();
-                                    }
-                                  }}
-                                  className="font-mono text-sm flex-1"
-                                  spellCheck={false}
-                                  autoComplete="off"
-                                  disabled={licenseActivating}
-                                />
-                                <Button
-                                  size="sm"
-                                  disabled={
-                                    licenseActivating || !licenseKeyInput.trim()
-                                  }
-                                  onClick={() => {
-                                    void (async () => {
-                                      const key = licenseKeyInput.trim();
-                                      if (!key) return;
-                                      setLicenseActivating(true);
-                                      setLicenseError(null);
-                                      try {
-                                        const info = await activateLicense(key);
-                                        setLicenseInfo(info);
-                                        onLicenseChange?.(info);
-                                        setLicenseKeyInput("");
-                                      } catch (err) {
-                                        setLicenseError(
-                                          err instanceof Error
-                                            ? err.message
-                                            : String(err),
-                                        );
-                                      } finally {
-                                        setLicenseActivating(false);
-                                      }
-                                    })();
-                                  }}
-                                >
-                                  {licenseActivating ? (
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                  ) : (
-                                    "Activate"
-                                  )}
-                                </Button>
-                              </div>
-                              {licenseError && (
-                                <div className="flex items-start gap-2 text-sm text-destructive">
-                                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                                  <span>{licenseError}</span>
-                                </div>
-                              )}
-                            </div>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="gap-1.5"
-                              onClick={() =>
-                                window.open(
-                                  "https://nautilusbot.lemonsqueezy.com/buy/basic",
-                                  "_blank",
-                                  "noopener,noreferrer",
-                                )
-                              }
-                            >
-                              <ExternalLink className="h-3.5 w-3.5" />
-                              Buy a license, $8 lifetime
-                            </Button>
-                          </div>
-                        ) : (
-                          <div className="space-y-4">
-                            {renderLicenseAccessSummary()}
-                            <div className="rounded-lg border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800 p-4 space-y-3">
-                              <p className="text-sm text-amber-700 dark:text-amber-400 font-medium">
-                                Trial expired
-                              </p>
-                              <p className="text-xs text-muted-foreground">
-                                Enter your license key below, or buy one to
-                                unlock updates and the Pro feature set. Friends
-                                Club adds cloud sync and priority support.
-                              </p>
-                            </div>
-                            <div className="space-y-2">
-                              <Label className="text-sm">License key</Label>
-                              <div className="flex gap-2">
-                                <Input
-                                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                                  value={licenseKeyInput}
-                                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                                    setLicenseError(null);
-                                    setLicenseKeyInput(e.target.value);
-                                  }}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") {
-                                      void (async () => {
-                                        const key = licenseKeyInput.trim();
-                                        if (!key) return;
-                                        setLicenseActivating(true);
-                                        setLicenseError(null);
-                                        try {
-                                          const info =
-                                            await activateLicense(key);
-                                          setLicenseInfo(info);
-                                          onLicenseChange?.(info);
-                                          setLicenseKeyInput("");
-                                        } catch (err) {
-                                          setLicenseError(
-                                            err instanceof Error
-                                              ? err.message
-                                              : String(err),
-                                          );
-                                        } finally {
-                                          setLicenseActivating(false);
-                                        }
-                                      })();
-                                    }
-                                  }}
-                                  className="font-mono text-sm flex-1"
-                                  spellCheck={false}
-                                  autoComplete="off"
-                                  disabled={licenseActivating}
-                                />
-                                <Button
-                                  size="sm"
-                                  disabled={
-                                    licenseActivating || !licenseKeyInput.trim()
-                                  }
-                                  onClick={() => {
-                                    void (async () => {
-                                      const key = licenseKeyInput.trim();
-                                      if (!key) return;
-                                      setLicenseActivating(true);
-                                      setLicenseError(null);
-                                      try {
-                                        const info = await activateLicense(key);
-                                        setLicenseInfo(info);
-                                        onLicenseChange?.(info);
-                                        setLicenseKeyInput("");
-                                      } catch (err) {
-                                        setLicenseError(
-                                          err instanceof Error
-                                            ? err.message
-                                            : String(err),
-                                        );
-                                      } finally {
-                                        setLicenseActivating(false);
-                                      }
-                                    })();
-                                  }}
-                                >
-                                  {licenseActivating ? (
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                  ) : (
-                                    "Activate"
-                                  )}
-                                </Button>
-                              </div>
-                              {licenseError && (
-                                <div className="flex items-start gap-2 text-sm text-destructive">
-                                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                                  <span>{licenseError}</span>
-                                </div>
-                              )}
-                            </div>
-                            <div className="flex gap-2">
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() =>
-                                  window.open(
-                                    "https://nautilusbot.lemonsqueezy.com/buy/basic",
-                                    "_blank",
-                                    "noopener,noreferrer",
-                                  )
-                                }
-                              >
-                                <ExternalLink className="mr-1 h-3.5 w-3.5" />
-                                Buy Pro
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="border-amber-300/60 text-amber-700 dark:text-amber-400"
-                                onClick={() =>
-                                  window.open(
-                                    "https://nautilusbot.lemonsqueezy.com/buy/friends-club",
-                                    "_blank",
-                                    "noopener,noreferrer",
-                                  )
-                                }
-                              >
-                                <ExternalLink className="mr-1 h-3.5 w-3.5" />
-                                Friends Club ⭐
-                              </Button>
-                            </div>
-                          </div>
-                        )}
                       </CardContent>
                     </Card>
                   )}

@@ -91,12 +91,10 @@ jobs:
       - name: Rust format
         run: cargo fmt --manifest-path rust-sidecar/Cargo.toml --check
 
+      # Build/lint/test the default feature set (asr-all + whisper-gpu + sqlcipher),
+      # i.e. the configuration shipped to users. macOS runners provide Metal/CoreML.
       - name: Rust clippy
-        env:
-          WHISPER_NATIVE: "OFF"
-        run: cargo clippy --locked --manifest-path rust-sidecar/Cargo.toml --all-targets --no-default-features --features asr-whisper,ndarray,rustfft,sqlcipher -- -D warnings
+        run: cargo clippy --locked --manifest-path rust-sidecar/Cargo.toml --all-targets -- -D warnings
 
       - name: Rust tests
-        env:
-          WHISPER_NATIVE: "OFF"
-        run: cargo test --locked --manifest-path rust-sidecar/Cargo.toml --lib --no-default-features --features asr-whisper,ndarray,rustfft,sqlcipher
+        run: cargo test --locked --manifest-path rust-sidecar/Cargo.toml --lib

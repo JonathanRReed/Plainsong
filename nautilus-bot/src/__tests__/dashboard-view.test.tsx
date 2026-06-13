@@ -47,12 +47,6 @@ vi.mock("@/hooks/use-setup-status", () => ({
   }),
 }));
 
-vi.mock("@/hooks/use-license-features", () => ({
-  deriveEntitlement: () => ({
-    proEnabled: true,
-  }),
-}));
-
 vi.mock("@/lib/navigation", () => ({
   requestMainView: vi.fn(),
 }));
@@ -66,17 +60,6 @@ vi.mock("@/lib/backend", () => ({
   askMemory,
   getRelationshipMemory,
   searchTranscripts: vi.fn(),
-  validateLicense: vi.fn(async () => ({
-    tier: "pro",
-    valid: true,
-    lsStatus: "active",
-    activationsLimit: 1,
-    activationsUsage: 1,
-    lastValidatedAt: "2026-03-12T11:00:00.000Z",
-    trialDaysRemaining: 0,
-    nagRequired: false,
-    trialActive: false,
-  })),
 }));
 
 describe("DashboardView memory chat", () => {
