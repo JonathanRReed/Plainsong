@@ -173,7 +173,9 @@ describe("DictationPopup", () => {
         payload: {
           phase: "recording",
           startedAtMs: Date.now(),
-          sessionId: 7,
+          // Newer than the hydrated overlay state (sessionId 9); session ids are
+          // monotonic, so a new session is always >= the hydrated one.
+          sessionId: 10,
           resolvedModePreset: "custom",
           resolvedCustomModeId: "slack-replies",
           resolvedModeLabel: "Slack Replies",

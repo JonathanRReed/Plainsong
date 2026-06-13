@@ -1513,7 +1513,8 @@ mod tests {
                 .expect_err("commit should fail");
             assert!(err.to_string().contains("Failed to commit restored"));
             assert_eq!(
-                fs::read_to_string(live_data_dir.join("plainsong.db")).expect("read rolled back db"),
+                fs::read_to_string(live_data_dir.join("plainsong.db"))
+                    .expect("read rolled back db"),
                 "old-db"
             );
             assert_eq!(

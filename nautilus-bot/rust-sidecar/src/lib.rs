@@ -5248,6 +5248,21 @@ mod tests {
     }
 
     #[test]
+    fn partial_should_decode_gates_correctly() {
+        let min_samples = 8000; // 0.5 s at 16 kHz
+
+        // Too short: never decode, even if it grew.
+        assert!(!partial_should_decode(4000, 0, min_samples));
+        // Long enough but unchanged since last decode: skip.
+        assert!(!partial_should_decode(8000, 8000, min_samples));
+        // Grown and long enough: decode.
+        assert!(partial_should_decode(8000, 0, min_samples));
+        assert!(partial_should_decode(20000, 8000, min_samples));
+        // Exactly at the threshold counts as long enough.
+        assert!(partial_should_decode(min_samples, 0, min_samples));
+    }
+
+    #[test]
     fn infers_speaker_name_from_intro_phrase() {
         let segments = vec![seg("S1", "This is jonathan speaking about the roadmap.")];
         let aliases = infer_speaker_aliases_from_segments(&segments);
@@ -8032,6 +8047,15 @@ async fn auto_name_meeting_recording(
         }),
     );
     Ok(Some(new_title))
+}
+
+/// Decide whether a streaming-partial tick should run a decode.
+///
+/// UI-only: this gates the live preview decode, never the final transcription.
+/// Decode only when the accumulated audio is long enough to be worth decoding
+/// (`>= min_samples`) and has grown since the previous decode.
+fn partial_should_decode(snapshot_len: usize, last_len: usize, min_samples: usize) -> bool {
+    snapshot_len >= min_samples && snapshot_len != last_len
 }
 
 fn mono_samples_to_wav_bytes(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
@@ -12732,6 +12756,10 @@ async fn reset_app_state_for_sidecar(
 
 /// Sidecar-compatible start_dictation: simplified version that emits events via SidecarHandle.
 /// Full overlay sync and tray updates are handled by Electron.
+/// Handles captured under the audio lock to drive the UI-only streaming-partial
+/// task: (partial sample buffer, is-dictating flag, capture sample rate).
+type PartialTaskHandles = (Arc<std::sync::Mutex<Vec<f32>>>, Arc<AtomicBool>, u32);
+
 async fn start_dictation_for_sidecar(
     state: &AppState,
     handle: &crate::sidecar_handle::SidecarHandle,
@@ -12974,12 +13002,31 @@ async fn start_dictation_for_sidecar(
         }
     };
 
+    // Streaming partials are UI-only and only run for local providers (cloud
+    // providers must not be hit per-tick). They never feed the final transcript.
+    let streaming_partials_enabled = settings_snapshot
+        .transcription
+        .dictation_live_preview_enabled
+        && !dictation_provider.is_remote();
+
+    // Handles captured under the audio lock when capture starts successfully, so
+    // the partial-decode task can be spawned after the lock is released.
+    let mut partial_task_handles: Option<PartialTaskHandles> = None;
+
     {
         let mut audio = state.audio_capture.lock().await;
+        audio.set_streaming_partials_enabled(streaming_partials_enabled);
         match audio.start_dictation(preferred_input_device.as_ref()) {
             Ok(resolved_input) => {
                 if let Some(advisory) = resolved_input.advisory.as_deref() {
                     handle.emit_event("audio-input-advisory", advisory.to_string());
+                }
+                if streaming_partials_enabled {
+                    partial_task_handles = Some((
+                        audio.dictation_partial_buffer_handle(),
+                        audio.is_dictating_handle(),
+                        audio.dictation_sample_rate(),
+                    ));
                 }
             }
             Err(e) => {
@@ -12997,6 +13044,83 @@ async fn start_dictation_for_sidecar(
                 return Err(format!("Failed to start audio capture: {}", e));
             }
         }
+    }
+
+    // Spawn the UI-only streaming-partial task. It re-decodes a copy of the audio
+    // periodically and emits live-preview text. It NEVER feeds the final transcript:
+    // the only thing it writes is a `partialText` field on `dictation-state-changed`.
+    // Best-effort and detached; it swallows all errors and stops when dictation does.
+    if let Some((partial_buffer, is_dictating, sample_rate)) = partial_task_handles {
+        let asr_manager = Arc::clone(&state.asr_manager);
+        let session_tracker = Arc::clone(&state.dictation_session_tracker);
+        let provider = dictation_provider;
+        let model_id = dictation_model_id.clone();
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let min_samples = (sample_rate as f32 * 0.5) as usize;
+            let mut last_decoded_len: usize = 0;
+            let mut last_emitted_text = String::new();
+            while is_dictating.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+
+                // Stop promptly if dictation ended or a NEWER session started.
+                // Gating on the monotonic active session id (not the shared
+                // is_dictating flag, which a rapid stop->restart flips back to
+                // true) prevents a stale in-flight task from emitting a
+                // wrong-session partial that would disrupt the new session's UI.
+                if session_tracker.lock().await.active_session_id != Some(session_id) {
+                    break;
+                }
+
+                let snapshot = {
+                    partial_buffer
+                        .lock()
+                        .map(|buffer| buffer.clone())
+                        .unwrap_or_default()
+                };
+
+                if !partial_should_decode(snapshot.len(), last_decoded_len, min_samples) {
+                    continue;
+                }
+
+                let bytes = match mono_samples_to_wav_bytes(&snapshot, sample_rate) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        tracing::debug!("Streaming partial wav encode failed: {}", error);
+                        continue;
+                    }
+                };
+
+                let result = asr_manager
+                    .transcribe_bytes_for_dictation(provider, &bytes, Some(&model_id))
+                    .await;
+                last_decoded_len = snapshot.len();
+
+                match result {
+                    Ok(transcription) => {
+                        let text = transcription.text.trim().to_string();
+                        // Re-check the live session id right before emit: the
+                        // decode may have outlived the session it was started for.
+                        let still_current =
+                            session_tracker.lock().await.active_session_id == Some(session_id);
+                        if still_current && !text.is_empty() && text != last_emitted_text {
+                            handle.emit_event(
+                                "dictation-state-changed",
+                                serde_json::json!({
+                                    "phase": "recording",
+                                    "sessionId": session_id,
+                                    "partialText": text,
+                                }),
+                            );
+                            last_emitted_text = text;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!("Streaming partial decode failed: {}", error);
+                    }
+                }
+            }
+        });
     }
 
     {
