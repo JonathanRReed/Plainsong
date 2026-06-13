@@ -1,6 +1,6 @@
 appId: com.nautilus.bot
 productName: Nautilus
-copyright: Copyright © 2026 NautilusBot
+copyright: Copyright © 2026 Jonathan Reed
 
 directories:
   output: release
@@ -51,5 +51,5 @@ dmg:
 
 publish:
   provider: github
-  owner: nautilusbot
-  repo: nautilus
+  owner: JonathanRReed
+  repo: NautilusBot
