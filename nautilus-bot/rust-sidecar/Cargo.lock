@@ -2277,6 +2277,7 @@ dependencies = [
  "indicatif",
  "keyring",
  "lazy_static",
+ "libc",
  "libsqlite3-sys",
  "ndarray",
  "objc2",

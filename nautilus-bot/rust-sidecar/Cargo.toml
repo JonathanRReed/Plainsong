@@ -35,6 +35,7 @@ cpal = "0.17"
 hound = "3.5"
 crossbeam = "0.8"
 ringbuf = "0.4"
+libc = "0.2"
 
 # ASR Dependencies
 # Whisper with Metal/CoreML GPU acceleration on macOS
