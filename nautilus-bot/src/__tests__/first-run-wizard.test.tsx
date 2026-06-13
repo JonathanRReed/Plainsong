@@ -263,15 +263,17 @@ describe("FirstRunWizard", () => {
     expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
   });
 
-  it("persists hands-free mode from onboarding", async () => {
+  it("persists toggle hotkey mode from onboarding", async () => {
     const onComplete = vi.fn();
 
     render(<FirstRunWizard mode="dictation" onComplete={onComplete} />);
 
     await clickPrimary(/continue/i);
     await clickPrimary(/continue/i);
+    // v1 ships toggle-only (the single honest mode; hold-to-talk/hands-free need
+    // a native key listener that isn't wired yet), so onboarding persists toggle.
     fireEvent.change(screen.getByLabelText("Hotkey behavior"), {
-      target: { value: "hands_free" },
+      target: { value: "toggle" },
     });
     await clickPrimary(/finish/i);
 
@@ -283,7 +285,7 @@ describe("FirstRunWizard", () => {
     });
 
     expect(currentSettings.transcription.dictationPushToTalk).toBe(false);
-    expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(true);
+    expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
   });
 
   it("repairs the meetings route in meetings-only onboarding", async () => {
