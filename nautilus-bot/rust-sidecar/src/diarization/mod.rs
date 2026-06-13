@@ -170,8 +170,8 @@ impl DiarizationEngine {
         diarization: &DiarizationResult,
         transcript_segments: &mut Vec<crate::models::TranscriptSegment>,
     ) {
-        println!(
-            "[NAUTILUS] Merging {} diarization segments with {} transcript segments",
+        tracing::debug!(
+            "Merging {} diarization segments with {} transcript segments",
             diarization.segments.len(),
             transcript_segments.len()
         );
@@ -192,9 +192,10 @@ impl DiarizationEngine {
         let mut new_segments: Vec<crate::models::TranscriptSegment> = Vec::new();
 
         for ts in transcript_segments.iter() {
-            println!(
-                "[NAUTILUS] Processing transcript segment {}-{}s",
-                ts.start_time, ts.end_time
+            tracing::debug!(
+                "Processing transcript segment {}-{}s",
+                ts.start_time,
+                ts.end_time
             );
 
             // Find all diarization segments that overlap with this transcript segment
@@ -227,8 +228,8 @@ impl DiarizationEngine {
             // Sort split points by time
             split_points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-            println!(
-                "[NAUTILUS] Split points for segment: {:?}",
+            tracing::debug!(
+                "Split points for segment: {:?}",
                 split_points.iter().map(|(t, _)| t).collect::<Vec<_>>()
             );
 
@@ -278,8 +279,8 @@ impl DiarizationEngine {
                     continue;
                 }
 
-                println!(
-                    "[NAUTILUS] Creating sub-segment {}-{}s speaker={} text='{}'",
+                tracing::debug!(
+                    "Creating sub-segment {}-{}s speaker={} text='{}'",
                     seg_start,
                     seg_end,
                     speaker,
@@ -302,8 +303,8 @@ impl DiarizationEngine {
         // Replace original segments with split segments
         *transcript_segments = new_segments;
 
-        println!(
-            "[NAUTILUS] Merge complete: {} segments after splitting",
+        tracing::debug!(
+            "Merge complete: {} segments after splitting",
             transcript_segments.len()
         );
     }

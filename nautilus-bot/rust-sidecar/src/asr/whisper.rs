@@ -227,7 +227,10 @@ impl AsrProvider for WhisperProvider {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        params.set_language(Some("en"));
+        // English-only models (".en") are forced to English; multilingual models
+        // auto-detect the spoken language rather than assuming English.
+        let english_only = self.model_id.ends_with(".en");
+        params.set_language(if english_only { Some("en") } else { None });
         params.set_translate(false);
 
         // Anti-repetition and hallucination mitigation
@@ -244,6 +247,17 @@ impl AsrProvider for WhisperProvider {
             .context("Failed to run Whisper transcription")?;
 
         let num_segments = state.full_n_segments();
+
+        // Report the actual language: forced "en" for English-only models,
+        // otherwise the language Whisper detected during decoding.
+        let detected_language = if english_only {
+            "en".to_string()
+        } else {
+            let lang_id = state.full_lang_id_from_state();
+            whisper_rs::get_lang_str(lang_id)
+                .unwrap_or("en")
+                .to_string()
+        };
 
         tracing::info!("Whisper produced {} segments", num_segments);
 
@@ -283,7 +297,7 @@ impl AsrProvider for WhisperProvider {
         Ok(TranscriptionResult {
             text: full_text,
             segments,
-            language: "en".to_string(),
+            language: detected_language,
             confidence: 0.9,
             processing_time_ms: processing_time,
             model_name: format!("whisper-{}", self.model_id),

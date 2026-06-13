@@ -13,6 +13,7 @@ use chrono::Utc;
 use rusqlite::{params, params_from_iter, types::Value, Connection};
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 
 pub type SpeakerAlias = (Option<String>, Option<String>, i64);
 
@@ -58,6 +59,25 @@ impl Database {
     /// Create new database (default, no encryption)
     pub fn new() -> Result<Self> {
         Self::new_with_key(None)
+    }
+
+    /// Write a transactionally-consistent snapshot of the live database to
+    /// `dest` using `VACUUM INTO`. Unlike a filesystem copy, this is safe to run
+    /// while the database is open and possibly mid-write, and (under SQLCipher)
+    /// produces an encrypted copy keyed with the same key as the live database.
+    /// `dest` must not already exist.
+    pub fn backup_to(&self, dest: &Path) -> Result<()> {
+        if dest.exists() {
+            std::fs::remove_file(dest)
+                .with_context(|| format!("Failed to clear stale snapshot at {}", dest.display()))?;
+        }
+        // VACUUM INTO does not accept bind parameters for the target path, so the
+        // path is inlined as a string literal with single quotes doubled.
+        let dest_str = dest.to_string_lossy().replace('\'', "''");
+        self.conn
+            .execute_batch(&format!("VACUUM INTO '{}';", dest_str))
+            .context("Failed to snapshot database via VACUUM INTO")?;
+        Ok(())
     }
 
     /// Check if database is encrypted

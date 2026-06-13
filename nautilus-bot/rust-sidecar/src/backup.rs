@@ -173,14 +173,22 @@ impl BackupManager {
     }
 
     /// Create a full data backup now.
-    pub async fn create_backup(&self, data_dir: &Path) -> Result<BackupInfo> {
-        self.create_backup_with_type(data_dir, BackupType::Full)
+    /// Create a full backup. `db_snapshot`, when provided, is a
+    /// transactionally-consistent copy of the live database (see
+    /// `Database::backup_to`) and is used as the source for the database
+    /// component instead of copying the live, possibly mid-write, file.
+    pub async fn create_backup(
+        &self,
+        data_dir: &Path,
+        db_snapshot: Option<&Path>,
+    ) -> Result<BackupInfo> {
+        self.create_backup_with_type(data_dir, BackupType::Full, db_snapshot)
             .await
     }
 
     /// Create a settings-only backup for profile sync and migration.
     pub async fn create_settings_backup(&self, data_dir: &Path) -> Result<BackupInfo> {
-        self.create_backup_with_type(data_dir, BackupType::Settings)
+        self.create_backup_with_type(data_dir, BackupType::Settings, None)
             .await
     }
 
@@ -188,6 +196,7 @@ impl BackupManager {
         &self,
         data_dir: &Path,
         backup_type: BackupType,
+        db_snapshot: Option<&Path>,
     ) -> Result<BackupInfo> {
         let backup_dir = self
             .config
@@ -218,9 +227,13 @@ impl BackupManager {
 
         if matches!(backup_type, BackupType::Full | BackupType::Incremental) {
             let db_path = data_dir.join("nautilus.db");
-            if db_path.exists() {
+            // Prefer a consistent VACUUM INTO snapshot of the live database;
+            // fall back to copying the file at rest only if no snapshot was
+            // provided (e.g. the database was never opened).
+            let db_source = db_snapshot.filter(|p| p.exists()).unwrap_or(&db_path);
+            if db_source.exists() {
                 let db_backup = backup_path.join("nautilus.db");
-                tokio::fs::copy(&db_path, db_backup).await?;
+                tokio::fs::copy(db_source, db_backup).await?;
                 components.push(BackupComponent::Database);
             }
 

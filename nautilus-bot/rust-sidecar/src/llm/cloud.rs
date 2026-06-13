@@ -27,7 +27,10 @@ impl OllamaCloudClient {
         Self {
             base_url: OLLAMA_CLOUD_URL.to_string(),
             api_key: resolved_api_key,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
         }
     }
 
@@ -84,21 +87,20 @@ impl OllamaCloudClient {
         Ok(models)
     }
 
-    /// Generate completion
+    /// Generate completion via the OpenAI-compatible chat completions endpoint
+    /// (base_url already ends in `/v1`, matching `list_models`'s `/models` path).
     pub async fn generate(&self, model: &str, prompt: &str) -> Result<String> {
         let request_body = serde_json::json!({
             "model": model,
-            "prompt": prompt,
+            "messages": [{ "role": "user", "content": prompt }],
             "stream": false,
-            "options": {
-                "temperature": 0.7,
-                "num_predict": 1024,
-            }
+            "temperature": 0.7,
+            "max_tokens": 1024,
         });
 
         let mut request = self
             .client
-            .post(format!("{}/v1/generate", self.base_url))
+            .post(format!("{}/chat/completions", self.base_url))
             .json(&request_body);
 
         if let Some(ref key) = self.api_key {
@@ -110,12 +112,21 @@ impl OllamaCloudClient {
             .await
             .context("Failed to send request to Ollama Cloud")?;
 
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Ollama Cloud returned status {}: {}", status, text);
+        }
+
         let data: serde_json::Value = response
             .json()
             .await
             .context("Failed to parse Ollama Cloud response")?;
 
-        Ok(data["response"].as_str().unwrap_or("").to_string())
+        Ok(data["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string())
     }
 
     /// Analyze transcript with specific query

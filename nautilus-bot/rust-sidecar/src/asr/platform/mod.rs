@@ -109,6 +109,7 @@ impl AsrProviderType {
             AsrProviderType::ElevenLabsScribe
                 | AsrProviderType::OpenAiCloud
                 | AsrProviderType::Groq
+                | AsrProviderType::CohereTranscribe
         )
     }
 
