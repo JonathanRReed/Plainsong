@@ -280,14 +280,19 @@ pub struct DictationCustomMode {
 impl Default for TranscriptionSettings {
     fn default() -> Self {
         Self {
-            // Distil-Whisper is 6x faster than Whisper for English with minimal accuracy loss
-            default_provider: "distil_whisper".to_string(),
-            selected_model_id: "distil-large-v3.5".to_string(),
+            // Default to whisper.cpp (Metal/CoreML-accelerated on Apple Silicon)
+            // with the small, fast base.en model. The previous default routed
+            // through a 756M Candle model on CPU in F32 — multi-second latency
+            // on the dictation hot path. whisper.cpp base.en is the fast,
+            // production-quality default; larger/multilingual models are one
+            // setting away.
+            default_provider: "whisper".to_string(),
+            selected_model_id: "base.en".to_string(),
             use_shared_asr_selection: true,
-            dictation_provider: "distil_whisper".to_string(),
-            dictation_model_id: "distil-large-v3.5".to_string(),
-            meeting_provider: "distil_whisper".to_string(),
-            meeting_model_id: "distil-large-v3.5".to_string(),
+            dictation_provider: "whisper".to_string(),
+            dictation_model_id: "base.en".to_string(),
+            meeting_provider: "whisper".to_string(),
+            meeting_model_id: "base.en".to_string(),
             meeting_route_policy: "prefer_local".to_string(),
             provider_model_ids: HashMap::new(),
             mlx_accelerated_providers: Vec::new(),
@@ -596,7 +601,7 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "elevenlabs_scribe" => "elevenlabs_scribe".to_string(),
         "openai_cloud" => "openai_cloud".to_string(),
         "groq" => "groq".to_string(),
-        _ => "distil_whisper".to_string(),
+        _ => "whisper".to_string(),
     }
 }
 
@@ -643,7 +648,7 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             "" => "whisper-large-v3-turbo".to_string(),
             value => value.to_string(),
         },
-        _ => "distil-large-v3.5".to_string(),
+        _ => "base.en".to_string(),
     }
 }
 
@@ -1009,8 +1014,8 @@ mod tests {
     fn dictation_command_defaults_are_stable() {
         let settings = Settings::default();
         assert!(settings.transcription.use_shared_asr_selection);
-        assert_eq!(settings.transcription.dictation_provider, "distil_whisper");
-        assert_eq!(settings.transcription.meeting_provider, "distil_whisper");
+        assert_eq!(settings.transcription.dictation_provider, "whisper");
+        assert_eq!(settings.transcription.meeting_provider, "whisper");
         assert!(settings.transcription.dictation_command_mode_enabled);
         assert_eq!(settings.transcription.dictation_command_prefix, "command");
         assert_eq!(settings.transcription.dictation_insertion_mode, "paste");
