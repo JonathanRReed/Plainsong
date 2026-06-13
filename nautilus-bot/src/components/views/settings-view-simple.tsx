@@ -1553,9 +1553,7 @@ export function SettingsView() {
                 )
               }
             >
-              <option value="hold_to_talk">Hold-to-talk</option>
-              <option value="toggle">Toggle press</option>
-              <option value="hands_free">Hands-free</option>
+              <option value="toggle">Toggle (press to start, press again to stop)</option>
             </select>
           </div>
         )}

@@ -158,7 +158,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   const [shortcutValue, setShortcutValue] = useState(defaultDictationShortcut());
   const [hotkeyMode, setHotkeyMode] =
-    useState<"hold_to_talk" | "toggle" | "hands_free">("hold_to_talk");
+    useState<"hold_to_talk" | "toggle" | "hands_free">("toggle");
   const [hotkeyDemoActive, setHotkeyDemoActive] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1052,9 +1052,7 @@ function HotkeyStep({
             onHotkeyModeChange(event.target.value as "hold_to_talk" | "toggle" | "hands_free")
           }
         >
-          <option value="hold_to_talk">Hold-to-talk</option>
-          <option value="toggle">Toggle press</option>
-          <option value="hands_free">Hands-free</option>
+          <option value="toggle">Toggle (press to start, press again to stop)</option>
         </select>
       </div>
 
