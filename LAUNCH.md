@@ -59,17 +59,25 @@ Expect this pass to surface a couple of small fixes; that's normal.
 - **Hold-to-talk / hands-free**: real press-and-hold needs a native key listener
   (Electron global shortcuts are press-only); v1 ships honest **toggle** mode.
   Real hold-to-talk is the top fast-follow (needs keyboard validation).
-- **App icon** is still placeholder/old-project art — needs a real Plainsong
-  icon (`build-resources/icon.icns` / `.ico` / `.png`).
+- **App icon** is a clean placeholder mark — replace with final designed art
+  before a marketing push (`build-resources/icon.icns` / `.ico` / `.png`).
 - **`nautilus-bot/` directory name** retained (CI working-directory depends on
   it); repo-flatten is a separate cleanup.
 
-## External steps you own (besides signing)
+## Done since the first checklist
 
-- **Rename the GitHub repo to `Plainsong`** — until then the publish/auto-update
-  URLs (`JonathanRReed/Plainsong`) point at a repo that doesn't exist.
-- Register `plainsong.app` + the GitHub org; grab `@plainsong` handles.
-- Attorney USPTO TSDR clearance (Classes 9 + 42) — confirmation, not
-  investigation; the name vetted clean in-category.
+- ✅ **`oss-relaunch` branch pushed** to `github.com/JonathanRReed/Plainsong`.
+- ✅ **GitHub repo renamed** `NautilusBot → Plainsong`; local remote updated, so
+  the publish/auto-update URLs now resolve.
+
+## Remaining — physically require a human (no AI can do these)
+
+- **One on-device validation run**: launch the app on a Mac, grant Microphone +
+  Accessibility, **speak into the mic**, confirm dictation inserts into real
+  apps, watch the first-run `base.en` download, feel the streaming. (Needs voice
+  + GUI permission grants — cannot be automated.)
+- **Register `plainsong.app` + grab `@plainsong` handles** (needs payment/accounts).
+- **Attorney USPTO TSDR clearance** (Classes 9 + 42) — confirmation, not
+  investigation; the name vetted clean in-category. (Needs a lawyer.)
 - **$99 Apple Developer ID** → signed + notarized releases (the pipeline already
   uses the secrets when present).
