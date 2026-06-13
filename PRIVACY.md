@@ -15,6 +15,29 @@ audio and text. The code is open — you can verify all of it.
 - **We never capture your screen.** Nautilus does not screenshot the active
   window or read other apps' contents to "add context."
 
+## How we compare
+
+Privacy here is a property of the architecture, not a setting you have to find.
+This is the one axis where the whole category is weak and we are not:
+
+| | Nautilus | Wispr Flow | Granola | superwhisper |
+|---|---|---|---|---|
+| Dictation audio leaves your machine | No (on-device by default) | Yes (cloud-only) | n/a | No |
+| Dictation audio written to disk | No (transient temp file, deleted immediately) | n/a (cloud) | n/a | **Yes, saved by default, no opt-out** |
+| Screenshots of your screen | **Never** | Yes — "Context Awareness" captured the active window (the 2026 scandal) | No | No |
+| Telemetry / analytics | None | Yes | Yes | Limited |
+| Account required | No | Yes | Yes | No |
+| API keys (BYOK) stored in | OS Keychain | n/a | n/a | **plaintext JSON** |
+| Notes/meetings shareable by default | No (local only) | n/a | Public-by-link drew an April-2026 backlash | Local |
+| Source you can audit | Yes (MIT) | No | No | No |
+
+Notes: "n/a" means the product doesn't offer that surface. Competitor facts are
+from public reporting as of mid-2026; verify current behavior against their docs.
+The point isn't that no one else is private — Handy (also MIT, on-device) is a
+fair tie — it's that **no cloud competitor can match this on all axes**, and we
+beat even local rivals on defaults (no audio saved to disk; keys in the Keychain,
+not a plaintext file).
+
 ## Where your data lives
 
 On your machine:
