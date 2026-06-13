@@ -2846,6 +2846,26 @@ async fn run_analysis_with_selected_provider(
 
 #[cfg(target_os = "macos")]
 fn workspace_frontmost_application() -> Option<WorkspaceFrontmostApplication> {
+    // In-process NSWorkspace lookup — no process spawn on the dictation hot
+    // path. NSWorkspace.sharedWorkspace and frontmostApplication are thread-safe
+    // per Apple's documentation. Falls back to osascript only if this yields
+    // nothing (e.g. a sandbox or future OS change).
+    {
+        use objc2_app_kit::NSWorkspace;
+        let workspace = NSWorkspace::sharedWorkspace();
+        if let Some(app) = workspace.frontmostApplication() {
+            let name = app.localizedName().map(|s| s.to_string());
+            let bundle_id = app.bundleIdentifier().map(|s| s.to_string());
+            if name.is_some() || bundle_id.is_some() {
+                return Some(WorkspaceFrontmostApplication { name, bundle_id });
+            }
+        }
+    }
+
+    workspace_frontmost_application_via_osascript()
+}
+
+fn workspace_frontmost_application_via_osascript() -> Option<WorkspaceFrontmostApplication> {
     let script = r#"
 ObjC.import("AppKit");
 const app = $.NSWorkspace.sharedWorkspace.frontmostApplication;
@@ -12857,6 +12877,20 @@ async fn start_dictation_for_sidecar(
         .asr_manager
         .set_provider_model_id(dictation_provider, dictation_model_id.clone())
         .await;
+
+    // Pre-warm the resolved model into cache while the user is speaking, so the
+    // first utterance doesn't pay a cold model load inside stop_dictation.
+    // Detached and best-effort; never blocks the start path.
+    {
+        let prewarm_provider = asr::AsrProviderFactory::create_with_model(
+            dictation_provider,
+            Some(&dictation_model_id),
+        );
+        tokio::spawn(async move {
+            prewarm_provider.prewarm().await;
+        });
+    }
+
     {
         let mut active_options = state.dictation_start_options.lock().await;
         *active_options = options.clone();
