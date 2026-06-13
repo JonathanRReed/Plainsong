@@ -21,6 +21,7 @@ pub(crate) fn clear_cached_model(model_id: &str) {
     }
 }
 
+#[derive(Clone)]
 pub struct WhisperProvider {
     model_path: PathBuf,
     model_id: String,
@@ -125,6 +126,23 @@ impl AsrProvider for WhisperProvider {
     fn is_available(&self) -> bool {
         // Model is available if either already loaded in cache OR file exists
         self.ctx.is_some() || self.model_path.exists()
+    }
+
+    async fn prewarm(&self) {
+        // Load the model into the global context cache on a blocking thread so
+        // the first utterance after dictation start doesn't pay a cold load.
+        // Best-effort: a missing/undownloaded model just no-ops here and the
+        // normal transcription path reports it.
+        if !self.model_path.exists() {
+            return;
+        }
+        let provider = self.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(error) = provider.load_model() {
+                tracing::debug!("Whisper prewarm skipped: {}", error);
+            }
+        })
+        .await;
     }
 
     fn model_info(&self) -> ModelInfo {

@@ -89,6 +89,9 @@ pub trait AsrProvider: Send + Sync {
     fn model_info(&self) -> ModelInfo;
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult>;
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult>;
+    /// Optionally pre-load the model into cache so the first transcription after
+    /// dictation start doesn't pay a cold model load. Best-effort; default no-op.
+    async fn prewarm(&self) {}
     fn download_status(&self) -> DownloadStatus;
     async fn download_models(&self, progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()>;
 }
