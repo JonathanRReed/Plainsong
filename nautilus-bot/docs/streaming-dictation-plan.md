@@ -1,10 +1,13 @@
 # Plan: live streaming partial transcription
 
-**Status:** designed, not yet implemented. This is the single highest-value
-feature for the "Cursor Tab of voice" feel — words appearing *as you speak*
-instead of after you release. It needs a real microphone to validate (chunk
-cadence, partial quality, perceived latency), so it is written up here to be
-implemented in one focused session with the app running.
+**Status: IMPLEMENTED** (the re-decode-a-separate-accumulator approach below),
+hardened via a 4-reviewer adversarial pass. The partial path is UI-only and
+provably never changes the final inserted text; it is gated behind the existing
+Live Preview setting and local providers only. What still needs a real
+microphone is *feel tuning* — the 700ms tick, 0.5s minimum, ~30s re-decode
+window, and greedy whole-window decode are first-cut values to validate and
+adjust on-device. The design notes below are retained as the rationale of
+record; see commit "feat: live streaming partial transcription".
 
 ## Why it isn't done blind
 
