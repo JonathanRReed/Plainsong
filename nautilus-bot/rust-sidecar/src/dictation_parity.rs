@@ -693,7 +693,7 @@ pub fn resolve_contextual_command_input(
 
     Err(match context_source {
         "selected_text" => format!(
-            "{} needs selected text, but Nautilus could not capture any selected text from the frontmost app.",
+            "{} needs selected text, but Plainsong could not capture any selected text from the frontmost app.",
             action_label
         ),
         "clipboard" => format!(
@@ -701,7 +701,7 @@ pub fn resolve_contextual_command_input(
             action_label
         ),
         "application_context" => format!(
-            "{} needs app context, but Nautilus could not capture useful text from the frontmost app.",
+            "{} needs app context, but Plainsong could not capture useful text from the frontmost app.",
             action_label
         ),
         _ => format!(

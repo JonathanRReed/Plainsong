@@ -5,13 +5,13 @@ use std::path::PathBuf;
 pub fn probe() -> EngineProbe {
     let sidecar = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Nautilus")
+        .join("Plainsong")
         .join("models")
         .join("mlx")
         .join("manifest.json");
 
     let ready =
-        sidecar.exists() || std::env::var("NAUTILUS_MLX_STUB_READY").ok().as_deref() == Some("1");
+        sidecar.exists() || std::env::var("PLAINSONG_MLX_STUB_READY").ok().as_deref() == Some("1");
     let mut notes = Vec::new();
     if ready {
         notes.push("MLX sidecar assets are ready".to_string());

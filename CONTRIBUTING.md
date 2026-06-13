@@ -1,6 +1,6 @@
-# Contributing to Nautilus
+# Contributing to Plainsong
 
-Thanks for your interest in making Nautilus better. It's a free, open-source,
+Thanks for your interest in making Plainsong better. It's a free, open-source,
 local-first voice-input app, and contributions of all sizes are welcome.
 
 ## Getting set up

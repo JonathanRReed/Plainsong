@@ -245,7 +245,7 @@ const SETTINGS_TABS = [
     title: "Workspace",
     eyebrow: "Desktop",
     summary:
-      "Shape the Nautilus shell, keyboard shortcuts, overlays, and launch behavior without hunting through unrelated controls.",
+      "Shape the Plainsong shell, keyboard shortcuts, overlays, and launch behavior without hunting through unrelated controls.",
     railSummary: "Appearance, shortcuts, and window behavior",
     icon: Monitor,
   },
@@ -255,7 +255,7 @@ const SETTINGS_TABS = [
     title: "Privacy and security",
     eyebrow: "Trust",
     summary:
-      "Keep Nautilus local-first, verify permissions, and manage vault access with clear status instead of warning-heavy clutter.",
+      "Keep Plainsong local-first, verify permissions, and manage vault access with clear status instead of warning-heavy clutter.",
     railSummary: "Permissions, vault access, and remote policy",
     icon: Shield,
   },
@@ -1435,7 +1435,7 @@ export function SettingsView() {
                   {error}
                 </p>
                 <p className="mt-3 text-xs leading-5 text-muted-foreground">
-                  Open Nautilus as the desktop app to use settings that require the local runtime.
+                  Open Plainsong as the desktop app to use settings that require the local runtime.
                 </p>
               </div>
             </div>
@@ -1735,7 +1735,7 @@ export function SettingsView() {
                 className="min-h-[96px]"
               />
               <p className="text-xs text-muted-foreground">
-                Overrides the default Nautilus-style meeting summary prompt.
+                Overrides the default Plainsong-style meeting summary prompt.
               </p>
             </div>
 
@@ -2901,7 +2901,7 @@ export function SettingsView() {
                           Transcription
                         </h3>
                         <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
-                          Choose how Nautilus transcribes dictation and
+                          Choose how Plainsong transcribes dictation and
                           meetings, then tune language, audio, and speaker
                           labeling.
                         </p>
@@ -3966,7 +3966,7 @@ export function SettingsView() {
                         <div className="space-y-2">
                           <Label>Export root limit (absolute path)</Label>
                           <Input
-                            placeholder="/Users/you/Documents/Nautilus"
+                            placeholder="/Users/you/Documents/Plainsong"
                             value={settings.privacy.exportRoot ?? ""}
                             onBlur={handleSettingsTextBlur}
                             onKeyDown={handleSettingsTextKeyDown}
@@ -4527,7 +4527,7 @@ export function SettingsView() {
                                       cloudFolder: e.target.value,
                                     })
                                   }
-                                  placeholder="NautilusBackups"
+                                  placeholder="PlainsongBackups"
                                 />
                               </div>
                             </div>

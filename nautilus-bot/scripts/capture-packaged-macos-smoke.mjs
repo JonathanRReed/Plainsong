@@ -15,7 +15,7 @@ function valueFor(name, fallback = null) {
 
 const appPath = path.resolve(
   repoRoot,
-  valueFor("--app", "release/mac-arm64/Nautilus.app")
+  valueFor("--app", "release/mac-arm64/Plainsong.app")
 );
 const outPath = path.resolve(
   repoRoot,
@@ -27,7 +27,7 @@ const sidecarPath = path.join(
   "Contents",
   "Resources",
   "sidecar",
-  "nautilus-sidecar"
+  "plainsong-sidecar"
 );
 
 const commands = [

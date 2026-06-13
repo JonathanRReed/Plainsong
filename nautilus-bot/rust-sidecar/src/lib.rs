@@ -101,7 +101,7 @@ const LAST_EXTERNAL_TARGET_MAX_AGE_MS: i64 = 120_000;
 #[cfg(target_os = "macos")]
 const MEETING_CONSENT_TARGET_MAX_AGE_MS: i64 = 12_000;
 const DICTATION_COMMAND_PREFIX_DEFAULT: &str = "command";
-const APP_BUNDLE_IDENTIFIER: &str = "com.nautilus.bot";
+const APP_BUNDLE_IDENTIFIER: &str = "com.plainsong.app";
 const STREAMING_PREVIEW_MAX_SECONDS: f64 = 90.0;
 const MIN_SILENCE_TIMEOUT_SECONDS: f32 = 60.0;
 const MAX_SILENCE_TIMEOUT_SECONDS: f32 = 1800.0;
@@ -554,14 +554,14 @@ async fn request_dictation_permissions_impl(
 
         if !request_accessibility_permission() {
             notes.push(
-                "Accessibility permission is still not granted for this app copy. macOS may require you to re-enable Nautilus under Privacy & Security > Accessibility after app updates."
+                "Accessibility permission is still not granted for this app copy. macOS may require you to re-enable Plainsong under Privacy & Security > Accessibility after app updates."
                     .to_string(),
             );
         }
 
         if !request_post_event_access() {
             notes.push(
-                "macOS native keyboard-event access is still not granted for this app copy. Nautilus may need direct Accessibility text insertion instead."
+                "macOS native keyboard-event access is still not granted for this app copy. Plainsong may need direct Accessibility text insertion instead."
                     .to_string(),
             );
         }
@@ -583,7 +583,7 @@ async fn repair_cursor_insert_permissions_impl(
 
         match reset_tcc_service("Accessibility", APP_BUNDLE_IDENTIFIER) {
             Ok(()) => notes.push(
-                "Reset the macOS Accessibility privacy decision for Nautilus. Re-enable Nautilus in Privacy & Security > Accessibility if macOS shows it turned off."
+                "Reset the macOS Accessibility privacy decision for Plainsong. Re-enable Plainsong in Privacy & Security > Accessibility if macOS shows it turned off."
                     .to_string(),
             ),
             Err(error) => notes.push(format!(
@@ -594,7 +594,7 @@ async fn repair_cursor_insert_permissions_impl(
 
         if !request_accessibility_permission() {
             notes.push(
-                "macOS still has not granted Accessibility to this Nautilus app copy. Turn Nautilus back on in Privacy & Security > Accessibility, then re-check readiness."
+                "macOS still has not granted Accessibility to this Plainsong app copy. Turn Plainsong back on in Privacy & Security > Accessibility, then re-check readiness."
                     .to_string(),
             );
         }
@@ -632,7 +632,7 @@ async fn collect_permission_diagnostics(
 
     if !microphone_permission_ready {
         notes.push(
-            "Microphone permission not granted yet. Enable Nautilus in Privacy & Security > Microphone."
+            "Microphone permission not granted yet. Enable Plainsong in Privacy & Security > Microphone."
                 .to_string(),
         );
     }
@@ -660,15 +660,15 @@ async fn collect_permission_diagnostics(
     if running_from_disk_image {
         let running_path = app_bundle_path
             .as_deref()
-            .unwrap_or("/Volumes/.../Nautilus.app");
+            .unwrap_or("/Volumes/.../Plainsong.app");
         if let Some(installed_path) = recommended_app_bundle_path.as_deref() {
             notes.push(format!(
-                "Nautilus is running from the mounted disk image at {}. macOS permissions granted to {} do not apply to this copy. Quit this DMG copy and open the installed app instead.",
+                "Plainsong is running from the mounted disk image at {}. macOS permissions granted to {} do not apply to this copy. Quit this DMG copy and open the installed app instead.",
                 running_path, installed_path
             ));
         } else {
             notes.push(format!(
-                "Nautilus is running from the mounted disk image at {}. Copy Nautilus.app into /Applications and open that installed copy so macOS permissions apply consistently.",
+                "Plainsong is running from the mounted disk image at {}. Copy Plainsong.app into /Applications and open that installed copy so macOS permissions apply consistently.",
                 running_path
             ));
         }
@@ -688,7 +688,7 @@ async fn collect_permission_diagnostics(
             }
             SpeechAuthorizationStatus::Denied => {
                 notes.push(
-                    "Speech recognition permission denied. Enable Nautilus in Privacy & Security > Speech Recognition.".to_string(),
+                    "Speech recognition permission denied. Enable Plainsong in Privacy & Security > Speech Recognition.".to_string(),
                 );
                 false
             }
@@ -735,7 +735,7 @@ async fn collect_permission_diagnostics(
         let accessibility_trusted = accessibility_probe_ready || cursor_insertion_observed;
         if !accessibility_probe_ready && accessibility_trusted {
             notes.push(
-                "Direct Accessibility insertion was verified by Nautilus in this session. The macOS permission probe may be stale for this app copy."
+                "Direct Accessibility insertion was verified by Plainsong in this session. The macOS permission probe may be stale for this app copy."
                     .to_string(),
             );
         }
@@ -744,7 +744,7 @@ async fn collect_permission_diagnostics(
                 let detail = status
                     .message
                     .as_deref()
-                    .unwrap_or("Nautilus copied the dictation result but could not post Cmd+V.");
+                    .unwrap_or("Plainsong copied the dictation result but could not post Cmd+V.");
                 notes.push(format!(
                     "Latest cursor insert attempt fell back to clipboard-only. {}",
                     detail
@@ -771,7 +771,7 @@ async fn collect_permission_diagnostics(
                 );
             } else {
                 notes.push(
-                    "Cursor insertion is not ready yet. Enable Nautilus in Privacy & Security > Accessibility so it can insert text into other apps."
+                    "Cursor insertion is not ready yet. Enable Plainsong in Privacy & Security > Accessibility so it can insert text into other apps."
                         .to_string(),
                 );
             }
@@ -883,15 +883,15 @@ fn open_installed_nautilus_app_impl() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let app_path = installed_nautilus_app_bundle_path()
-            .ok_or_else(|| "Installed Nautilus.app was not found in /Applications.".to_string())?;
+            .ok_or_else(|| "Installed Plainsong.app was not found in /Applications.".to_string())?;
 
         let status = std::process::Command::new("open")
             .arg(app_path)
             .status()
-            .map_err(|e| format!("Failed to open installed Nautilus.app: {}", e))?;
+            .map_err(|e| format!("Failed to open installed Plainsong.app: {}", e))?;
 
         if !status.success() {
-            return Err("Failed to open installed Nautilus.app".to_string());
+            return Err("Failed to open installed Plainsong.app".to_string());
         }
 
         Ok(())
@@ -899,7 +899,7 @@ fn open_installed_nautilus_app_impl() -> Result<(), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        Err("Opening the installed Nautilus app is supported on macOS only.".to_string())
+        Err("Opening the installed Plainsong app is supported on macOS only.".to_string())
     }
 }
 
@@ -917,7 +917,7 @@ struct DiarizationModelOption {
 fn diarization_model_path(model_id: &str) -> Option<std::path::PathBuf> {
     let models_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Nautilus")
+        .join("Plainsong")
         .join("models")
         .join("diarization");
     match model_id {
@@ -970,7 +970,7 @@ async fn smoke_test_cursor_insert_impl(
     text: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let sample = text
-        .unwrap_or_else(|| "Nautilus cursor insert smoke test".to_string())
+        .unwrap_or_else(|| "Plainsong cursor insert smoke test".to_string())
         .trim()
         .to_string();
     if sample.is_empty() {
@@ -3078,15 +3078,15 @@ fn get_frontmost_app_name() -> Option<String> {
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public static class NautilusWin32 {
+public static class PlainsongWin32 {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 }
 "@;
-$hwnd = [NautilusWin32]::GetForegroundWindow();
+$hwnd = [PlainsongWin32]::GetForegroundWindow();
 if ($hwnd -eq [IntPtr]::Zero) { return }
 $pid = 0
-[void][NautilusWin32]::GetWindowThreadProcessId($hwnd, [ref]$pid)
+[void][PlainsongWin32]::GetWindowThreadProcessId($hwnd, [ref]$pid)
 if ($pid -eq 0) { return }
 $process = Get-Process -Id $pid -ErrorAction SilentlyContinue
 if ($null -ne $process -and -not [string]::IsNullOrWhiteSpace($process.ProcessName)) {
@@ -3125,15 +3125,15 @@ Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class NautilusWin32 {
+public static class PlainsongWin32 {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
 }
 "@;
-$hwnd = [NautilusWin32]::GetForegroundWindow();
+$hwnd = [PlainsongWin32]::GetForegroundWindow();
 if ($hwnd -eq [IntPtr]::Zero) { return }
 $builder = New-Object System.Text.StringBuilder 1024
-[void][NautilusWin32]::GetWindowText($hwnd, $builder, $builder.Capacity)
+[void][PlainsongWin32]::GetWindowText($hwnd, $builder, $builder.Capacity)
 $title = $builder.ToString().Trim()
 if (-not [string]::IsNullOrWhiteSpace($title)) { $title }
 "#;
@@ -3203,7 +3203,7 @@ fn get_frontmost_browser_url() -> Option<String> {
 }
 
 fn meeting_consent_notice_text() -> &'static str {
-    "Heads up: I’m recording and transcribing this meeting with Nautilus for my notes. Please let me know now if you want me to stop."
+    "Heads up: I’m recording and transcribing this meeting with Plainsong for my notes. Please let me know now if you want me to stop."
 }
 
 #[cfg(target_os = "macos")]
@@ -3275,7 +3275,7 @@ fn meeting_consent_automation_status(state: &AppState) -> MeetingConsentAutomati
             app_bundle_id: None,
             browser_url: None,
             can_automate: false,
-            message: "Manual reminder only. Open Zoom or the active Google Meet tab before starting if you want Nautilus to post the consent notice for you.".to_string(),
+            message: "Manual reminder only. Open Zoom or the active Google Meet tab before starting if you want Plainsong to post the consent notice for you.".to_string(),
             notice_text,
         };
     };
@@ -3287,19 +3287,19 @@ fn meeting_consent_automation_status(state: &AppState) -> MeetingConsentAutomati
         .unwrap_or(false);
     let message = match surface.as_deref() {
         Some("zoom") if can_automate => {
-            "Zoom chat auto-notice is ready. Nautilus will open chat, focus the message box, and send the consent notice when recording starts.".to_string()
+            "Zoom chat auto-notice is ready. Plainsong will open chat, focus the message box, and send the consent notice when recording starts.".to_string()
         }
         Some("google_meet") if can_automate => {
-            "Google Meet consent automation is ready. Nautilus will open chat and post the notice when recording starts while Accessibility remains enabled.".to_string()
+            "Google Meet consent automation is ready. Plainsong will open chat and post the notice when recording starts while Accessibility remains enabled.".to_string()
         }
         Some("google_meet") => {
-            "Manual reminder only right now. Google Meet automation needs both keyboard-event access and Accessibility so Nautilus can open chat and insert the notice reliably.".to_string()
+            "Manual reminder only right now. Google Meet automation needs both keyboard-event access and Accessibility so Plainsong can open chat and insert the notice reliably.".to_string()
         }
         Some("zoom") => {
-            "Manual reminder only right now. Nautilus found Zoom, but macOS still needs keyboard-event permission before it can post the consent notice automatically.".to_string()
+            "Manual reminder only right now. Plainsong found Zoom, but macOS still needs keyboard-event permission before it can post the consent notice automatically.".to_string()
         }
         _ => {
-            "Manual reminder only. Nautilus can auto-post consent notices in Zoom and Google Meet on macOS; everything else falls back to a manual reminder.".to_string()
+            "Manual reminder only. Plainsong can auto-post consent notices in Zoom and Google Meet on macOS; everything else falls back to a manual reminder.".to_string()
         }
     };
 
@@ -10226,10 +10226,10 @@ pub(crate) fn canonicalize_existing_absolute_path(
 pub(crate) fn nautilus_data_root() -> Result<PathBuf, String> {
     let root = dirs::data_dir()
         .ok_or("Could not find data directory")?
-        .join("Nautilus");
+        .join("Plainsong");
     std::fs::create_dir_all(&root).map_err(|e| {
         format!(
-            "Failed to prepare Nautilus data root '{}': {}",
+            "Failed to prepare Plainsong data root '{}': {}",
             root.display(),
             e
         )
@@ -10244,10 +10244,10 @@ fn approved_path_roots() -> Result<Vec<PathBuf>, String> {
 
     let config_root = dirs::config_dir()
         .ok_or("Could not find config directory")?
-        .join("Nautilus");
+        .join("Plainsong");
     if let Err(e) = std::fs::create_dir_all(&config_root) {
         tracing::warn!(
-            "Failed to prepare Nautilus config root '{}': {}",
+            "Failed to prepare Plainsong config root '{}': {}",
             config_root.display(),
             e
         );
@@ -10258,10 +10258,10 @@ fn approved_path_roots() -> Result<Vec<PathBuf>, String> {
     let documents_base = dirs::document_dir()
         .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
         .ok_or("Could not find documents directory")?;
-    let documents_root = documents_base.join("Nautilus");
+    let documents_root = documents_base.join("Plainsong");
     if let Err(e) = std::fs::create_dir_all(&documents_root) {
         tracing::warn!(
-            "Failed to prepare Nautilus documents root '{}': {}",
+            "Failed to prepare Plainsong documents root '{}': {}",
             documents_root.display(),
             e
         );
@@ -10270,7 +10270,7 @@ fn approved_path_roots() -> Result<Vec<PathBuf>, String> {
     }
 
     if roots.is_empty() {
-        return Err("No approved Nautilus roots are available".to_string());
+        return Err("No approved Plainsong roots are available".to_string());
     }
     Ok(roots)
 }
@@ -10282,7 +10282,7 @@ pub(crate) fn ensure_path_in_approved_roots(path: &Path, label: &str) -> Result<
     }
 
     Err(format!(
-        "{} '{}' is outside approved Nautilus roots",
+        "{} '{}' is outside approved Plainsong roots",
         label,
         path.display()
     ))
@@ -10499,7 +10499,7 @@ fn ensure_microphone_permission(prompt_if_needed: bool) -> Result<(), String> {
 
     if status == AVAuthorizationStatus::Denied {
         return Err(
-            "Microphone permission denied. Enable Nautilus in Privacy & Security > Microphone."
+            "Microphone permission denied. Enable Plainsong in Privacy & Security > Microphone."
                 .to_string(),
         );
     }
@@ -10517,7 +10517,7 @@ fn ensure_microphone_permission(prompt_if_needed: bool) -> Result<(), String> {
 
     if !prompt_if_needed {
         return Err(
-            "Microphone permission has not been granted yet. Enable auto-request permissions or allow Nautilus in Privacy & Security > Microphone."
+            "Microphone permission has not been granted yet. Enable auto-request permissions or allow Plainsong in Privacy & Security > Microphone."
                 .to_string(),
         );
     }
@@ -10525,7 +10525,7 @@ fn ensure_microphone_permission(prompt_if_needed: bool) -> Result<(), String> {
     match request_microphone_permission() {
         Ok(true) => Ok(()),
         Ok(false) => Err(
-            "Microphone permission was not granted. Enable Nautilus in Privacy & Security > Microphone."
+            "Microphone permission was not granted. Enable Plainsong in Privacy & Security > Microphone."
                 .to_string(),
         ),
         Err(error) => Err(error),
@@ -10567,7 +10567,7 @@ fn current_app_bundle_path() -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn installed_nautilus_app_bundle_path() -> Option<PathBuf> {
-    let path = PathBuf::from("/Applications/Nautilus.app");
+    let path = PathBuf::from("/Applications/Plainsong.app");
     path.exists().then_some(path)
 }
 
@@ -10577,7 +10577,7 @@ fn is_self_activation_target(app_name: Option<&str>, app_bundle_id: Option<&str>
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| {
-            value.eq_ignore_ascii_case("Nautilus") || value.eq_ignore_ascii_case("nautilus-bot")
+            value.eq_ignore_ascii_case("Plainsong") || value.eq_ignore_ascii_case("nautilus-bot")
         })
         .unwrap_or(false);
     let bundle_matches = app_bundle_id
@@ -10966,7 +10966,7 @@ fn insert_text_via_accessibility(
 
     unsafe { CFRelease(focused_element) };
     Err(format!(
-        "Focused element role '{}' is not settable through macOS Accessibility, so Nautilus must fall back to paste.",
+        "Focused element role '{}' is not settable through macOS Accessibility, so Plainsong must fall back to paste.",
         role
     ))
 }
@@ -11456,14 +11456,14 @@ fn send_meeting_consent_notice_internal(state: &AppState) -> MeetingConsentNotic
     let Some(surface) = match_meeting_consent_surface(&target).map(str::to_string) else {
         return manual_return(
             None,
-            "Manual reminder only. This meeting surface is not one Nautilus can post into automatically.".to_string(),
+            "Manual reminder only. This meeting surface is not one Plainsong can post into automatically.".to_string(),
         );
     };
 
     if !consent_surface_can_automate(&surface) {
         return manual_return(
             Some(surface),
-            "Manual reminder only. Copy the consent notice from Nautilus before you continue."
+            "Manual reminder only. Copy the consent notice from Plainsong before you continue."
                 .to_string(),
         );
     }
@@ -11494,7 +11494,7 @@ fn send_meeting_consent_notice_internal(state: &AppState) -> MeetingConsentNotic
             manual_return(
                 Some(surface),
                 format!(
-                    "Automatic consent posting did not complete. {} Copy the notice from Nautilus and send it manually.",
+                    "Automatic consent posting did not complete. {} Copy the notice from Plainsong and send it manually.",
                     error
                 ),
             )
@@ -11508,7 +11508,7 @@ fn send_meeting_consent_notice_internal(_state: &AppState) -> MeetingConsentNoti
         mode: "manual_required".to_string(),
         surface: None,
         message:
-            "Consent reminder stayed manual. Copy the notice from Nautilus before you continue."
+            "Consent reminder stayed manual. Copy the notice from Plainsong before you continue."
                 .to_string(),
         notice_text: meeting_consent_notice_text().to_string(),
     }
@@ -11597,12 +11597,12 @@ fn dispatch_paste_from_clipboard(
             Err(
                 if !(check_accessibility_permission() || check_post_event_access()) {
                     format!(
-                    "Direct macOS text insertion is not enabled for Nautilus, and macOS also blocked the native Cmd+V fallback ({}). Grant Accessibility for this app copy.",
+                    "Direct macOS text insertion is not enabled for Plainsong, and macOS also blocked the native Cmd+V fallback ({}). Grant Accessibility for this app copy.",
                     error
                 )
                 } else if error.to_ascii_lowercase().contains("activate target") {
                     format!(
-                    "Nautilus copied to the clipboard, but macOS could not reactivate the target app before sending Cmd+V ({}). Click back into the destination app and press Cmd+V manually.",
+                    "Plainsong copied to the clipboard, but macOS could not reactivate the target app before sending Cmd+V ({}). Click back into the destination app and press Cmd+V manually.",
                     error
                 )
                 } else {
@@ -12364,7 +12364,7 @@ fn cleanup_legacy_license_artifacts() {
         let _ = secrets::clear_internal_secret(key);
     }
     if let Some(state_file) =
-        dirs::data_dir().map(|d| d.join("NautilusBot").join("nautilus_license.json"))
+        dirs::data_dir().map(|d| d.join("Plainsong").join("nautilus_license.json"))
     {
         let _ = std::fs::remove_file(state_file);
     }
@@ -15395,7 +15395,7 @@ pub async fn dispatch_command(
         "repair_local_model_cache" => {
             let models_root = dirs::data_dir()
                 .ok_or_else(|| "Could not find data directory".to_string())?
-                .join("Nautilus")
+                .join("Plainsong")
                 .join("models");
             repair_local_model_cache_at(&models_root);
             asr::python_runtime::shutdown_python_workers().await;
@@ -17053,7 +17053,7 @@ pub async fn dispatch_command(
             let expected = nautilus_data_root()?;
             if path != expected {
                 return Err(format!(
-                    "data_dir must be Nautilus data directory '{}', got '{}'",
+                    "data_dir must be Plainsong data directory '{}', got '{}'",
                     expected.display(),
                     path.display()
                 ));
@@ -17073,7 +17073,7 @@ pub async fn dispatch_command(
         "create_backup_default" => {
             let data_dir = dirs::data_dir()
                 .ok_or("Could not find data directory")?
-                .join("Nautilus");
+                .join("Plainsong");
             let snapshot = snapshot_live_database(state.as_ref()).await?;
             let bm = state.backup_manager.lock().await;
             let info = bm
@@ -17089,7 +17089,7 @@ pub async fn dispatch_command(
         "create_settings_backup_default" => {
             let data_dir = dirs::data_dir()
                 .ok_or("Could not find data directory")?
-                .join("Nautilus");
+                .join("Plainsong");
             let bm = state.backup_manager.lock().await;
             let info = bm
                 .create_settings_backup(&data_dir)
@@ -17106,7 +17106,7 @@ pub async fn dispatch_command(
             let expected = nautilus_data_root()?;
             if path != expected {
                 return Err(format!(
-                    "data_dir must be Nautilus data directory '{}', got '{}'",
+                    "data_dir must be Plainsong data directory '{}', got '{}'",
                     expected.display(),
                     path.display()
                 ));
@@ -17124,7 +17124,7 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["backupId"].clone()).map_err(|e| e.to_string())?;
             let data_dir = dirs::data_dir()
                 .ok_or("Could not find data directory")?
-                .join("Nautilus");
+                .join("Plainsong");
             let bm = state.backup_manager.lock().await;
             bm.restore_backup(&backup_id, &data_dir)
                 .await

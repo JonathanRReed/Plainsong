@@ -152,7 +152,7 @@ describe("RecordingPopup", () => {
       meetingTemplateId: "standup",
       consentPromptShown: true,
       consentNoticeMode: "manual_required",
-      consentNoticeMessage: "Manual reminder only. Copy the notice from Nautilus before you continue.",
+      consentNoticeMessage: "Manual reminder only. Copy the notice from Plainsong before you continue.",
       metadata: {
         sampleRate: 16000,
         channels: 1,

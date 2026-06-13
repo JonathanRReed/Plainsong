@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-const SERVICE_NAME: &str = "com.nautilus.bot";
+const SERVICE_NAME: &str = "com.plainsong.app";
 const PROVIDER_PREFIX: &str = "provider:";
 const INTERNAL_PREFIX: &str = "internal:";
 

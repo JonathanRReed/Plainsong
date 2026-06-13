@@ -14,7 +14,7 @@ coordinated disclosure before any public write-up.
 
 ## Scope
 
-Nautilus is local-first. The areas most relevant to security:
+Plainsong is local-first. The areas most relevant to security:
 
 - **Credential storage** — provider API keys and internal secrets are stored in
   the OS keychain/credential manager, not in plaintext files.

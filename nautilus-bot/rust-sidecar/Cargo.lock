@@ -2250,66 +2250,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nautilus-bot"
-version = "1.0.0"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "argon2",
- "async-trait",
- "base64 0.22.1",
- "block2",
- "candle-core",
- "candle-nn",
- "candle-transformers",
- "chrono",
- "core-foundation 0.10.1",
- "core-foundation-sys",
- "core-graphics",
- "cpal",
- "crossbeam",
- "dirs",
- "futures-util",
- "genpdf",
- "hex",
- "hostname",
- "hound",
- "indicatif",
- "keyring",
- "lazy_static",
- "libc",
- "libsqlite3-sys",
- "ndarray",
- "objc2",
- "objc2-app-kit",
- "objc2-av-foundation",
- "objc2-foundation",
- "objc2-speech",
- "ort",
- "rand",
- "regex",
- "reqwest",
- "ringbuf",
- "rubato",
- "rusqlite",
- "rustfft",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "tokenizers",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "urlencoding",
- "uuid",
- "walkdir",
- "whisper-rs",
- "zeroize",
- "zip",
-]
-
-[[package]]
 name = "ndarray"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2914,6 +2854,66 @@ name = "pkg-config"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
+
+[[package]]
+name = "plainsong"
+version = "1.0.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "argon2",
+ "async-trait",
+ "base64 0.22.1",
+ "block2",
+ "candle-core",
+ "candle-nn",
+ "candle-transformers",
+ "chrono",
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "core-graphics",
+ "cpal",
+ "crossbeam",
+ "dirs",
+ "futures-util",
+ "genpdf",
+ "hex",
+ "hostname",
+ "hound",
+ "indicatif",
+ "keyring",
+ "lazy_static",
+ "libc",
+ "libsqlite3-sys",
+ "ndarray",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-av-foundation",
+ "objc2-foundation",
+ "objc2-speech",
+ "ort",
+ "rand",
+ "regex",
+ "reqwest",
+ "ringbuf",
+ "rubato",
+ "rusqlite",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokenizers",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "uuid",
+ "walkdir",
+ "whisper-rs",
+ "zeroize",
+ "zip",
+]
 
 [[package]]
 name = "polyval"

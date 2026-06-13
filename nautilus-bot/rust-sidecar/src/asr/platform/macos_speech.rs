@@ -109,7 +109,7 @@ pub fn probe() -> EngineProbe {
                     "Apple Speech helper is missing or not executable: {}",
                     error
                 ),
-                "Rebuild Nautilus on macOS to regenerate the helper sidecar.".to_string(),
+                "Rebuild Plainsong on macOS to regenerate the helper sidecar.".to_string(),
             ],
         },
     }
@@ -275,7 +275,7 @@ pub fn transcribe_file(audio_path: &Path) -> Result<(String, String, f64)> {
         let trimmed = stderr.trim();
         if trimmed.to_ascii_lowercase().contains("not authorized") {
             return Err(anyhow::anyhow!(
-                "macOS Speech permission is not authorized. Open System Settings > Privacy & Security > Speech Recognition and enable Nautilus."
+                "macOS Speech permission is not authorized. Open System Settings > Privacy & Security > Speech Recognition and enable Plainsong."
             ));
         }
         return Err(anyhow::anyhow!(
@@ -545,7 +545,7 @@ fn run_helper_with_timeout(helper: &Path, audio_path: &Path, timeout: Duration) 
 pub fn ensure_speech_authorized(prompt_if_needed: bool) -> Result<()> {
     if prompt_if_needed && !is_packaged_app_context() {
         return Err(anyhow::anyhow!(
-            "Speech recognition permission has not been granted yet. Run the packaged Nautilus app and allow Speech Recognition access, then retry."
+            "Speech recognition permission has not been granted yet. Run the packaged Plainsong app and allow Speech Recognition access, then retry."
         ));
     }
 
@@ -555,7 +555,7 @@ pub fn ensure_speech_authorized(prompt_if_needed: bool) -> Result<()> {
             "Speech recognition permission has not been granted yet. Enable auto-request permissions or grant it in System Settings > Privacy & Security > Speech Recognition."
         )),
         SpeechAuthorizationStatus::Denied => Err(anyhow::anyhow!(
-            "macOS Speech permission denied. Enable Nautilus in System Settings > Privacy & Security > Speech Recognition."
+            "macOS Speech permission denied. Enable Plainsong in System Settings > Privacy & Security > Speech Recognition."
         )),
         SpeechAuthorizationStatus::Restricted => Err(anyhow::anyhow!(
             "macOS Speech permission is restricted by system policy."
@@ -700,7 +700,7 @@ pub fn speech_authorization_status() -> SpeechAuthorizationStatus {
     nautilus_macos_speech_helper
 ))]
 fn resolve_helper_binary_path() -> Result<PathBuf> {
-    if let Ok(override_path) = std::env::var("NAUTILUS_MACOS_SPEECH_HELPER_PATH") {
+    if let Ok(override_path) = std::env::var("PLAINSONG_MACOS_SPEECH_HELPER_PATH") {
         let candidate = PathBuf::from(override_path.trim());
         if is_executable_file(&candidate) {
             return Ok(candidate);

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 pub(crate) fn nautilus_config_dir() -> Result<PathBuf> {
     let config_dir = dirs::config_dir()
         .context("Could not find config directory")?
-        .join("Nautilus");
+        .join("Plainsong");
 
     std::fs::create_dir_all(&config_dir)?;
 
@@ -246,7 +246,7 @@ pub struct TranscriptionSettings {
     pub memory_search_mode: String,
     /// Ollama embedding model name (e.g. "nomic-embed-text")
     pub embedding_model: String,
-    /// Auto-run Nautilus-style summary + action items after recording transcription
+    /// Auto-run Plainsong-style summary + action items after recording transcription
     pub enable_auto_analysis: bool,
     /// Platform-specific ASR optimization policy and engine preferences.
     pub platform_optimization: PlatformOptimizationSettings,

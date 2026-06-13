@@ -1,6 +1,6 @@
-/// Nautilus sidecar binary entrypoint.
+/// Plainsong sidecar binary entrypoint.
 ///
-/// Runs the full Nautilus backend as a stdio JSON-RPC server.
+/// Runs the full Plainsong backend as a stdio JSON-RPC server.
 /// The Electron main process spawns this binary, writes requests to its stdin,
 /// and reads responses/events from its stdout.
 ///
@@ -9,7 +9,7 @@
 ///   Response: { "jsonrpc":"2.0", "id":"<uuid>", "result":<value> }
 ///   Error:    { "jsonrpc":"2.0", "id":"<uuid>", "error":{"code":-32000,"message":"..."} }
 ///   Event:    { "jsonrpc":"2.0", "id":null, "method":"event", "params":{"event":"<name>","payload":<value>} }
-use nautilus_bot_lib::sidecar_handle::SidecarHandle;
+use plainsong_lib::sidecar_handle::SidecarHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, BufRead, Write};
@@ -78,7 +78,7 @@ fn main() {
 }
 
 async fn run_sidecar() {
-    let state = match nautilus_bot_lib::build_app_state().await {
+    let state = match plainsong_lib::build_app_state().await {
         Ok(s) => Arc::new(s),
         Err(e) => {
             eprintln!("[sidecar] Failed to initialize state: {}", e);
@@ -141,7 +141,7 @@ async fn run_sidecar() {
         let method = request.method;
         let params = request.params;
         tokio::spawn(async move {
-            let result = nautilus_bot_lib::dispatch_command(&state, &handle, &method, params).await;
+            let result = plainsong_lib::dispatch_command(&state, &handle, &method, params).await;
             write_response(id, result);
         });
     }

@@ -11,14 +11,14 @@ describe("buildSidecarEnv", () => {
       OPENAI_API_KEY: "sk-test-secret",
       ELEVENLABS_API_KEY: "xi-test-secret",
       GITHUB_TOKEN: "ghp_secret",
-      NAUTILUS_DATA_DIR: "/tmp/nautilus",
+      PLAINSONG_DATA_DIR: "/tmp/nautilus",
     });
 
     expect(env).toMatchObject({
       HOME: "/Users/test",
       PATH: "/usr/bin",
       RUST_LOG: "info",
-      NAUTILUS_DATA_DIR: "/tmp/nautilus",
+      PLAINSONG_DATA_DIR: "/tmp/nautilus",
       OPENAI_API_KEY: "sk-test-secret",
       ELEVENLABS_API_KEY: "xi-test-secret",
     });

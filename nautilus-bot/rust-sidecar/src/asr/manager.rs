@@ -58,7 +58,7 @@ impl AsrManager {
     pub fn new() -> Self {
         let models_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("Nautilus")
+            .join("Plainsong")
             .join("models");
 
         std::fs::create_dir_all(&models_dir).ok();
@@ -1199,7 +1199,7 @@ fn runtime_diagnostics_for_provider(
 ) -> RuntimeDiagnosticsInternal {
     let models_root = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Nautilus")
+        .join("Plainsong")
         .join("models");
 
     match provider_type {
@@ -1484,7 +1484,7 @@ fn runtime_diagnostics_for_provider(
                 ),
                 crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Denied => (
                     RuntimeStatus::Error,
-                    "Apple native speech permission is denied. Enable Nautilus in System Settings > Privacy & Security > Speech Recognition.".to_string(),
+                    "Apple native speech permission is denied. Enable Plainsong in System Settings > Privacy & Security > Speech Recognition.".to_string(),
                 ),
                 crate::asr::platform::macos_speech::SpeechAuthorizationStatus::Restricted => (
                     RuntimeStatus::Error,

@@ -1,10 +1,10 @@
-# NautilusBot Product Context
+# Plainsong Product Context
 
 register: product
 
 ## Purpose
 
-NautilusBot is a desktop speech app for people who want fast dictation, trustworthy insertion, and bot-free meeting capture without sending every workflow through hosted cloud infrastructure. Dictation is the hero surface. Meetings are the second surface, centered on capture, transcript review, summaries, action items, follow-up drafts, and retrieval.
+Plainsong is a desktop speech app for people who want fast dictation, trustworthy insertion, and bot-free meeting capture without sending every workflow through hosted cloud infrastructure. Dictation is the hero surface. Meetings are the second surface, centered on capture, transcript review, summaries, action items, follow-up drafts, and retrieval.
 
 ## Users
 
@@ -12,7 +12,7 @@ Primary users are solo operators, builders, consultants, writers, and technical 
 
 ## Position
 
-NautilusBot should feel like a precise desktop instrument, not a generic SaaS dashboard. It competes with polished dictation products on speed, insertion confidence, modes, snippets, and correction workflows. It competes with meeting tools on bot-free capture, consent clarity, transcript-first review, and practical follow-through. Its strongest lane is hybrid local-first dictation plus meeting memory for macOS and Windows.
+Plainsong should feel like a precise desktop instrument, not a generic SaaS dashboard. It competes with polished dictation products on speed, insertion confidence, modes, snippets, and correction workflows. It competes with meeting tools on bot-free capture, consent clarity, transcript-first review, and practical follow-through. Its strongest lane is hybrid local-first dictation plus meeting memory for macOS and Windows.
 
 ## Tone
 

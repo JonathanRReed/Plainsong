@@ -2468,7 +2468,7 @@ export function RecordingsView() {
                     <div>
                       <p className="text-sm font-medium text-active">Recording in progress</p>
                       <p className="text-xs text-muted-foreground">
-                        Keep notes current while Nautilus captures the meeting.
+                        Keep notes current while Plainsong captures the meeting.
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -2588,7 +2588,7 @@ export function RecordingsView() {
                       Solo operator tip
                     </p>
                     <p className="mt-2 text-sm text-muted-foreground">
-                      Capture decisions and owners in notes now. Nautilus can clean them up after the call, but only if the raw facts are here.
+                      Capture decisions and owners in notes now. Plainsong can clean them up after the call, but only if the raw facts are here.
                     </p>
                   </div>
                   <div className="rounded-lg border bg-background/70 p-3">
@@ -3461,7 +3461,7 @@ export function RecordingsView() {
                           {selectedMeetingRelationshipMatches.people.length === 0 &&
                           selectedMeetingRelationshipMatches.companies.length === 0 ? (
                             <p className="mt-2 text-sm text-muted-foreground">
-                              No strong matches yet. Nautilus will start surfacing people and companies as meetings accumulate.
+                              No strong matches yet. Plainsong will start surfacing people and companies as meetings accumulate.
                             </p>
                           ) : (
                             <div className="mt-2 space-y-2">

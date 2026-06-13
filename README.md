@@ -1,8 +1,8 @@
-# Nautilus
+# Plainsong
 
 **Free, open-source, local-first voice input for your whole computer.**
 
-Nautilus is a desktop app for fast system-wide dictation and bot-free meeting
+Plainsong is a desktop app for fast system-wide dictation and bot-free meeting
 capture. Press a hotkey, speak, and your words appear at the cursor in any app —
 transcribed on your own machine. Meetings are recorded, transcribed, and turned
 into searchable notes without sending a bot into your call.

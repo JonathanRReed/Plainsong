@@ -124,7 +124,7 @@ vi.mock("@/lib/backend", () => ({
     cloudSync: false,
     cloudProvider: null,
     cloudRemoteName: null,
-    cloudFolder: "NautilusBackups",
+    cloudFolder: "PlainsongBackups",
     icloudPath: null,
   })),
   getPermissionDiagnostics: vi.fn(async () => ({
@@ -266,7 +266,7 @@ describe("SettingsView performance behavior", () => {
       cloudSync: false,
       cloudProvider: null,
       cloudRemoteName: null,
-      cloudFolder: "NautilusBackups",
+      cloudFolder: "PlainsongBackups",
       icloudPath: null,
     });
   });
@@ -331,9 +331,9 @@ describe("SettingsView performance behavior", () => {
     fireEvent.click(screen.getByText("Storage"));
     await screen.findByText("Retention, backups, export paths, and cleanup tools");
 
-    const exportRootInput = screen.getByPlaceholderText("/Users/you/Documents/Nautilus");
+    const exportRootInput = screen.getByPlaceholderText("/Users/you/Documents/Plainsong");
     fireEvent.change(exportRootInput, {
-      target: { value: "/Users/test/Nautilus" },
+      target: { value: "/Users/test/Plainsong" },
     });
     fireEvent.blur(exportRootInput);
 

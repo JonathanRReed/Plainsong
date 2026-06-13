@@ -102,7 +102,7 @@ mod tests {
     fn test_encrypt_decrypt_roundtrip() {
         let salt = [7u8; SALT_LEN];
         let key = ProjectKeyManager::derive_key("test-password", &salt).unwrap();
-        let plaintext = b"Hello, Nautilus!";
+        let plaintext = b"Hello, Plainsong!";
 
         let encrypted = ProjectKeyManager::encrypt(plaintext, &key).unwrap();
         let decrypted = ProjectKeyManager::decrypt(&encrypted, &key).unwrap();

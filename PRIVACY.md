@@ -1,18 +1,18 @@
 # Privacy
 
-Nautilus is local-first. This document describes, plainly, what happens to your
+Plainsong is local-first. This document describes, plainly, what happens to your
 audio and text. The code is open — you can verify all of it.
 
 ## The short version
 
 - **By default, your audio is transcribed on your machine** and never leaves it.
-- **There is no telemetry or analytics.** Nautilus does not phone home, count
+- **There is no telemetry or analytics.** Plainsong does not phone home, count
   usage, or report crashes anywhere. (Verified: no analytics/telemetry SDKs in
   the codebase.)
-- **There are no Nautilus servers.** We don't host an API, an account system, or
+- **There are no Plainsong servers.** We don't host an API, an account system, or
   cloud storage. There is nothing for us to collect because there is nowhere for
   it to go.
-- **We never capture your screen.** Nautilus does not screenshot the active
+- **We never capture your screen.** Plainsong does not screenshot the active
   window or read other apps' contents to "add context."
 
 ## How we compare
@@ -20,7 +20,7 @@ audio and text. The code is open — you can verify all of it.
 Privacy here is a property of the architecture, not a setting you have to find.
 This is the one axis where the whole category is weak and we are not:
 
-| | Nautilus | Wispr Flow | Granola | superwhisper |
+| | Plainsong | Wispr Flow | Granola | superwhisper |
 |---|---|---|---|---|
 | Dictation audio leaves your machine | No (on-device by default) | Yes (cloud-only) | n/a | No |
 | Dictation audio written to disk | No (transient temp file, deleted immediately) | n/a (cloud) | n/a | **Yes, saved by default, no opt-out** |
@@ -49,18 +49,18 @@ On your machine:
   keychain / credential manager — not in plaintext.
 
 You can delete this data at any time by removing recordings in the app or
-deleting the app's data directory. Retention is under your control; Nautilus
+deleting the app's data directory. Retention is under your control; Plainsong
 does not automatically upload or sync anything.
 
 ## When data does leave your machine (only if you choose)
 
-Nautilus supports optional **bring-your-own-key (BYOK)** cloud providers for
+Plainsong supports optional **bring-your-own-key (BYOK)** cloud providers for
 transcription and AI cleanup — for example OpenAI, Anthropic, Mistral,
 ElevenLabs, or Groq. These are off by default. If you select one:
 
 - The relevant audio or text is sent **directly from your machine to that
   provider**, authenticated with **your own API key**, and billed to you.
-- It is **not** proxied through any Nautilus server.
+- It is **not** proxied through any Plainsong server.
 - That provider's privacy policy and data-handling then apply to what you send.
 
 Similarly, optional local AI analysis uses [Ollama](https://ollama.com) running

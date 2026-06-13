@@ -63,7 +63,7 @@ impl OpenAIClient {
             .collect())
     }
 
-    /// List available chat/reasoning models used by Nautilus analysis flows.
+    /// List available chat/reasoning models used by Plainsong analysis flows.
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let models: Vec<String> = self
             .list_all_models()
@@ -179,7 +179,7 @@ impl OpenAIClient {
 
     /// Summarize meeting
     pub async fn summarize(&self, transcript: &str, model: &str) -> Result<String> {
-        let system_prompt = "You are Nautilus, a precise and forensic meeting intelligence assistant. \
+        let system_prompt = "You are Plainsong, a precise and forensic meeting intelligence assistant. \
 Your task is to produce a comprehensive, well-structured, and highly readable summary of the following meeting transcript. \
 \
 Organize the summary into the following sections:\

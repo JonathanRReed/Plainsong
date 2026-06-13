@@ -1,5 +1,5 @@
-appId: com.nautilus.bot
-productName: Nautilus
+appId: com.plainsong.app
+productName: Plainsong
 copyright: Copyright © 2026 Jonathan Reed
 
 directories:
@@ -16,8 +16,8 @@ extraResources:
   - from: rust-sidecar/target/release/
     to: sidecar
     filter:
-      - nautilus-sidecar
-      - nautilus-sidecar.exe
+      - plainsong-sidecar
+      - plainsong-sidecar.exe
   - from: rust-sidecar/python/
     to: python
     filter:
@@ -52,4 +52,4 @@ dmg:
 publish:
   provider: github
   owner: JonathanRReed
-  repo: NautilusBot
+  repo: Plainsong

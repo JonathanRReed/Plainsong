@@ -15,12 +15,12 @@ function valueFor(name, fallback = null) {
   return args[index + 1];
 }
 
-const appPath = path.resolve(repoRoot, valueFor("--app", "release/mac-arm64/Nautilus.app"));
+const appPath = path.resolve(repoRoot, valueFor("--app", "release/mac-arm64/Plainsong.app"));
 const outPath = path.resolve(repoRoot, valueFor("--out", "artifacts/qa/macos/exports.json"));
 const timeoutMs = Number(valueFor("--timeout-ms", "300000"));
-const sidecarPath = path.join(appPath, "Contents", "Resources", "sidecar", "nautilus-sidecar");
-const dataDir = path.join(os.homedir(), "Library", "Application Support", "Nautilus");
-const dbPath = path.join(dataDir, "nautilus.db");
+const sidecarPath = path.join(appPath, "Contents", "Resources", "sidecar", "plainsong-sidecar");
+const dataDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
+const dbPath = path.join(dataDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
 const dbBackups = new Map();
 const recordingId = `qa-exports-${Date.now()}`;
@@ -29,7 +29,7 @@ const now = new Date().toISOString();
 const exportDir = path.join(
   os.homedir(),
   "Documents",
-  "Nautilus",
+  "Plainsong",
   `qa-packaged-exports-${Date.now()}`
 );
 const transcriptText =
@@ -75,7 +75,7 @@ if (!fs.existsSync(sidecarPath)) {
   fail(`Packaged sidecar not found at ${sidecarPath}`);
 }
 if (!fs.existsSync(dbPath)) {
-  fail(`Nautilus database not found at ${dbPath}`);
+  fail(`Plainsong database not found at ${dbPath}`);
 }
 
 function hashBytes(bytes) {

@@ -43,7 +43,7 @@ impl SpeakerEmbeddingExtractor {
     pub fn with_model(model_id: &str) -> Result<Self> {
         let models_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("Nautilus")
+            .join("Plainsong")
             .join("models")
             .join("diarization");
 

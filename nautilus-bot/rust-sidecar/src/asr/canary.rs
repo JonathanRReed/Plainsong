@@ -97,7 +97,7 @@ impl CanaryProvider {
     pub fn new(_selected_model_id: Option<&str>) -> Self {
         let model_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("Nautilus")
+            .join("Plainsong")
             .join("models")
             .join("canary");
         Self { model_dir }

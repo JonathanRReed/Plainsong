@@ -11,7 +11,7 @@
 //! Defaults: the bundled fixture, provider `whisper`, model `base.en`, 5 runs.
 //! Output: a JSON line on stdout plus a human-readable summary on stderr.
 
-use nautilus_bot_lib::asr::{AsrProviderFactory, AsrProviderType};
+use plainsong_lib::asr::{AsrProviderFactory, AsrProviderType};
 use std::time::Instant;
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {

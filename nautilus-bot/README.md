@@ -1,6 +1,6 @@
-# Nautilus (app)
+# Plainsong (app)
 
-This directory contains the Nautilus desktop app: the Electron main process,
+This directory contains the Plainsong desktop app: the Electron main process,
 the React/TypeScript renderer, and the Rust transcription sidecar.
 
 For the product overview, privacy posture, and contribution guide, see the
@@ -86,4 +86,4 @@ Speech recognition runs locally by default (Whisper via whisper.cpp, plus other
 native engines). Optional bring-your-own-key cloud providers (OpenAI,
 ElevenLabs, Mistral, Groq, Cohere) and local Ollama are supported — keys are
 stored in the OS keychain and requests go directly to the provider, never
-through a Nautilus server.
+through a Plainsong server.

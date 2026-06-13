@@ -69,7 +69,7 @@ export function RecordingPopup() {
   const [meetingNotes, setMeetingNotes] = useState("");
   const [meetingTemplateLabel, setMeetingTemplateLabel] = useState("Auto");
   const [meetingTemplateDescription, setMeetingTemplateDescription] = useState(
-    "Nautilus chooses the note format based on what you captured.",
+    "Plainsong chooses the note format based on what you captured.",
   );
   const [consentPromptShown, setConsentPromptShown] = useState(false);
   const [consentNoticeMode, setConsentNoticeMode] = useState<string | null>(
@@ -252,7 +252,7 @@ export function RecordingPopup() {
       setMeetingNotes("");
       setMeetingTemplateLabel("Auto");
       setMeetingTemplateDescription(
-        "Nautilus chooses the note format based on what you captured.",
+        "Plainsong chooses the note format based on what you captured.",
       );
       setConsentNoticeMode(null);
       setConsentNoticeMessage(null);
@@ -397,7 +397,7 @@ export function RecordingPopup() {
     transcriptionPreview.trim() ||
     (isTranscribing
       ? "Generating the first transcript preview for this meeting."
-      : "Capture is live. Stop when you want Nautilus to save and process the meeting.");
+      : "Capture is live. Stop when you want Plainsong to save and process the meeting.");
 
   const statusLabel = isTranscribing ? "Processing" : "Live meeting";
   const captureModeLabel = systemAudioActive ? "Me + Them" : "Mic only";
@@ -587,7 +587,7 @@ export function RecordingPopup() {
                   ? "Stopping capture and handing off to transcription."
                   : message ||
                     (isTranscribing
-                      ? "Nautilus is preparing the transcript and summary."
+                      ? "Plainsong is preparing the transcript and summary."
                       : meetingTemplateDescription)}
               </p>
             </div>
