@@ -116,25 +116,27 @@ const INSERTION_META: Record<
   },
 };
 
+const CLOUD_PROVIDER_LABELS: Record<string, string> = {
+  openai_cloud: "OpenAI",
+  groq: "Groq",
+  elevenlabs_scribe: "ElevenLabs",
+  cohere_transcribe: "Cohere",
+};
+
 function formatRouteLabel(
-  providerModelLabel: string | null,
-  resolvedRoute: string | null,
+  resolvedHosting: DictationRoutePreference | null,
   provider: string | null,
-  modelId: string | null,
 ) {
-  if (providerModelLabel) {
-    return providerModelLabel;
+  const isCloud =
+    resolvedHosting === "cloud" ||
+    (resolvedHosting === null && provider !== null && provider in CLOUD_PROVIDER_LABELS);
+
+  if (!isCloud) {
+    return "On this Mac";
   }
-  if (resolvedRoute) {
-    return resolvedRoute;
-  }
-  if (!provider && !modelId) {
-    return "Current transcription route";
-  }
-  if (provider && modelId) {
-    return `${provider} · ${modelId}`;
-  }
-  return provider || modelId || "Current transcription route";
+
+  const cloudName = provider ? CLOUD_PROVIDER_LABELS[provider] : undefined;
+  return cloudName ? `Cloud (${cloudName})` : "Cloud";
 }
 
 function normalizePopupModeLabel(label: string | null): string | null {
@@ -386,7 +388,6 @@ export function DictationPopup() {
   const [preview, setPreview] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<string | null>(null);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("full");
-  const [_pushToTalk, _setPushToTalk] = useState(true);
   const [_handsFreeEnabled, _setHandsFreeEnabled] = useState(false);
   const [handsFreeSilenceTimeoutSeconds, setHandsFreeSilenceTimeoutSeconds] =
     useState(0);
@@ -401,21 +402,10 @@ export function DictationPopup() {
   const [dictationProvider, setDictationProvider] = useState<string | null>(
     null,
   );
-  const [dictationModelId, setDictationModelId] = useState<string | null>(null);
-  const [, setRequestedRoute] = useState<DictationRoutePreference | null>(null);
-  const [resolvedRoute, setResolvedRoute] = useState<string | null>(null);
-  const [providerModelLabel, setProviderModelLabel] = useState<string | null>(
-    null,
-  );
-  const [_dictationRoutePreference, _setDictationRoutePreference] =
-    useState<DictationRoutePreference>("local");
-  const [_dictationResolvedHosting, _setDictationResolvedHosting] =
+  const [dictationResolvedHosting, setDictationResolvedHosting] =
     useState<DictationRoutePreference | null>(null);
   const [dictationInsertionMode, setDictationInsertionMode] =
     useState<DictationInsertionMode>("paste");
-  const [, setUseSharedAsrSelection] = useState(true);
-  const [, setMeetingProvider] = useState<string | null>(null);
-  const [, setMeetingModelId] = useState<string | null>(null);
   const [dictationCommandPrefix, setDictationCommandPrefix] =
     useState("command");
   const [resolvedModeLabel, setResolvedModeLabel] = useState<string | null>(
@@ -432,8 +422,6 @@ export function DictationPopup() {
   const [finalSnippetAppliedCount, setFinalSnippetAppliedCount] = useState(0);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [isSpeakingAloud, setIsSpeakingAloud] = useState(false);
-  // @ts-ignore - Used for latency tracking, will be displayed in future UI
-  const [startupLatencyMs, setStartupLatencyMs] = useState<number | null>(null);
   const [transcriptionLatencyMs, setTranscriptionLatencyMs] = useState<number | null>(null);
   const [insertLatencyMs, setInsertLatencyMs] = useState<number | null>(null);
   const lastSessionIdRef = useRef<number | null>(null);
@@ -443,7 +431,6 @@ export function DictationPopup() {
 
   const refreshPopupSettings = async () => {
     const settings = await getSettings();
-    _setPushToTalk(Boolean(settings.transcription.dictationPushToTalk));
     _setHandsFreeEnabled(
       Boolean(settings.transcription.dictationHandsFreeEnabled),
     );
@@ -460,8 +447,7 @@ export function DictationPopup() {
         "none") as DictationContextSource,
     );
     setDictationProvider(settings.transcription.dictationProvider ?? null);
-    setDictationModelId(settings.transcription.dictationModelId ?? null);
-    _setDictationRoutePreference(
+    setDictationResolvedHosting(
       settings.transcription.dictationRoutePreference === "cloud"
         ? "cloud"
         : "local",
@@ -469,18 +455,6 @@ export function DictationPopup() {
     setDictationInsertionMode(
       (settings.transcription.dictationInsertionMode ??
         "paste") as DictationInsertionMode,
-    );
-    const shared = settings.transcription.useSharedAsrSelection ?? true;
-    setUseSharedAsrSelection(shared);
-    setMeetingProvider(
-      shared
-        ? (settings.transcription.defaultProvider ?? null)
-        : (settings.transcription.meetingProvider ?? null),
-    );
-    setMeetingModelId(
-      shared
-        ? (settings.transcription.selectedModelId ?? null)
-        : (settings.transcription.meetingModelId ?? null),
     );
     setDictationCommandPrefix(
       settings.transcription.dictationCommandPrefix ?? "command",
@@ -496,7 +470,6 @@ export function DictationPopup() {
     setFinalSnippetAppliedCount(0);
     setActionFeedback(null);
     setIsSpeakingAloud(false);
-    setStartupLatencyMs(null);
     setTranscriptionLatencyMs(null);
     setInsertLatencyMs(null);
     stopSpeakingText();
@@ -526,26 +499,8 @@ export function DictationPopup() {
     if (typeof payload.actualProvider !== "undefined") {
       setDictationProvider(payload.actualProvider ?? null);
     }
-    if (typeof payload.dictationModelId !== "undefined") {
-      setDictationModelId(payload.dictationModelId ?? null);
-    }
-    if (typeof payload.actualModelId !== "undefined") {
-      setDictationModelId(payload.actualModelId ?? null);
-    }
-    if (typeof payload.requestedRoute !== "undefined") {
-      setRequestedRoute(payload.requestedRoute ?? null);
-    }
-    if (typeof payload.resolvedRoute !== "undefined") {
-      setResolvedRoute(payload.resolvedRoute ?? null);
-    }
-    if (typeof payload.providerModelLabel !== "undefined") {
-      setProviderModelLabel(payload.providerModelLabel ?? null);
-    }
-    if (typeof payload.dictationRoutePreference !== "undefined") {
-      _setDictationRoutePreference(payload.dictationRoutePreference ?? "local");
-    }
     if (typeof payload.dictationResolvedHosting !== "undefined") {
-      _setDictationResolvedHosting(payload.dictationResolvedHosting ?? null);
+      setDictationResolvedHosting(payload.dictationResolvedHosting ?? null);
     }
   };
 
@@ -677,17 +632,8 @@ export function DictationPopup() {
     if (payload.contextSource) {
       setContextSource(payload.contextSource);
     }
-    if (typeof payload.resolvedRoute !== "undefined") {
-      setResolvedRoute(payload.resolvedRoute ?? null);
-    }
-    if (typeof payload.providerModelLabel !== "undefined") {
-      setProviderModelLabel(payload.providerModelLabel ?? null);
-    }
-    if (typeof payload.routePreference !== "undefined") {
-      setRequestedRoute(payload.routePreference ?? null);
-    }
     if (typeof payload.resolvedHosting !== "undefined") {
-      _setDictationResolvedHosting(payload.resolvedHosting ?? null);
+      setDictationResolvedHosting(payload.resolvedHosting ?? null);
     }
     if (
       typeof payload.insertionModeUsed !== "undefined" &&
@@ -705,12 +651,6 @@ export function DictationPopup() {
       payload.actualProvider
     ) {
       setDictationProvider(payload.actualProvider);
-    }
-    if (typeof payload.modelId !== "undefined" && payload.modelId) {
-      setDictationModelId(payload.modelId);
-    }
-    if (typeof payload.startupLatencyMs !== "undefined") {
-      setStartupLatencyMs(payload.startupLatencyMs ?? null);
     }
     if (typeof payload.latencyMs !== "undefined") {
       setTranscriptionLatencyMs(payload.latencyMs);
@@ -815,10 +755,8 @@ export function DictationPopup() {
     const insertionMetaValue =
       INSERTION_META[dictationInsertionMode] ?? INSERTION_META.auto;
     const routeLabelValue = formatRouteLabel(
-      providerModelLabel,
-      resolvedRoute,
+      dictationResolvedHosting,
       dictationProvider,
-      dictationModelId,
     );
     const targetDetailValue = runtimeAppTarget ? ` for ${runtimeAppTarget}` : "";
     const autoActivationDetailValue =
@@ -846,10 +784,8 @@ export function DictationPopup() {
     selectedCustomModeId,
     contextSource,
     dictationInsertionMode,
-    providerModelLabel,
-    resolvedRoute,
+    dictationResolvedHosting,
     dictationProvider,
-    dictationModelId,
     runtimeAppTarget,
     activationMatcher,
     phase,
