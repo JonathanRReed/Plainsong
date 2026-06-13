@@ -190,7 +190,6 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "upsert_dictation_command_preset",
   "verify_backup_cloud_connection",
   "verify_dictation_setup",
-  "verify_evidence_bundle",
   "verify_meeting_setup",
   "verify_system_audio_setup",
 ]);

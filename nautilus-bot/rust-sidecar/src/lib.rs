@@ -16842,7 +16842,7 @@ pub async fn dispatch_command(
                 .get("preview")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let (recording, transcript, audit_log) = {
+            let (recording, transcript) = {
                 let db = state.db.lock().await;
                 let recording = db
                     .get_recording(&recording_id)
@@ -16851,8 +16851,7 @@ pub async fn dispatch_command(
                 let transcript = db
                     .get_transcript(&recording_id)
                     .map_err(|e| e.to_string())?;
-                let audit_log = db.get_all_audit_log().map_err(|e| e.to_string())?;
-                (recording, transcript, audit_log)
+                (recording, transcript)
             };
             let validated_target = match target.as_deref() {
                 Some(path) => Some(validate_export_target_path(state.as_ref(), path).await?),
@@ -16861,7 +16860,6 @@ pub async fn dispatch_command(
             let result = transcription::export_with_policy(
                 &recording,
                 transcript.as_ref(),
-                &audit_log,
                 &format,
                 validated_target.as_deref(),
                 &redaction_level,
@@ -16870,21 +16868,6 @@ pub async fn dispatch_command(
             .map_err(|e| e.to_string())?;
             let mut db = state.db.lock().await;
             let _ = db.log_audit_event("recording_exported_v2", Some(serde_json::json!({"recording_id": &recording_id, "format": &format, "preview": preview_mode, "export_path": &result.export_path})), "info");
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "verify_evidence_bundle" => {
-            let target_path: String =
-                serde_json::from_value(params["targetPath"].clone()).map_err(|e| e.to_string())?;
-            let canonical = canonicalize_existing_absolute_path(&target_path, "targetPath")?;
-            if !canonical.is_file() {
-                return Err(format!(
-                    "targetPath must be a file, got: {}",
-                    canonical.display()
-                ));
-            }
-            ensure_path_in_approved_roots(&canonical, "targetPath")?;
-            let result = transcription::verify_evidence_bundle_file(&canonical.to_string_lossy())
-                .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "export_with_template" => {
