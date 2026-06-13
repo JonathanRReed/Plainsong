@@ -74,13 +74,10 @@ impl AsrManager {
             platform_optimization: RwLock::new(
                 crate::settings::PlatformOptimizationSettings::default(),
             ),
-            // Distil-Whisper is 6x faster than Whisper for English
-            default_provider: RwLock::new(AsrProviderType::DistilWhisper),
-            selected_model_id: RwLock::new(
-                AsrProviderType::DistilWhisper
-                    .default_model_id()
-                    .to_string(),
-            ),
+            // whisper.cpp (Metal/CoreML) with base.en is the fast default route;
+            // the Candle/Distil path runs on CPU in F32 and is multi-second.
+            default_provider: RwLock::new(AsrProviderType::Whisper),
+            selected_model_id: RwLock::new(AsrProviderType::Whisper.default_model_id().to_string()),
             provider_model_ids: RwLock::new(provider_model_ids),
             mlx_accelerated_providers: RwLock::new(HashSet::new()),
             dictation_mlx_enabled: RwLock::new(false),
