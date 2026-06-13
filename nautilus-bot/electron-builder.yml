@@ -35,6 +35,11 @@ mac:
   entitlements: build-resources/entitlements.mac.plist
   entitlementsInherit: build-resources/entitlements.mac.inherit.plist
   icon: build-resources/icon.icns
+  # Required TCC usage strings — without these macOS terminates the app the
+  # moment it accesses the microphone / speech recognition.
+  extendInfo:
+    NSMicrophoneUsageDescription: "Plainsong transcribes your speech on your Mac for dictation and meeting capture. Audio stays on your device."
+    NSSpeechRecognitionUsageDescription: "Plainsong can use Apple's on-device speech recognition to transcribe your dictation."
 
 win:
   target:
