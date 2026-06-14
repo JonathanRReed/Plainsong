@@ -11,6 +11,13 @@ manifests/
 dist-ssr/
 *.local
 
+# Generated QA/benchmark evidence (never commit)
+artifacts/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Rust sidecar
 /rust-sidecar/target/
 /rust-sidecar/WixTools/

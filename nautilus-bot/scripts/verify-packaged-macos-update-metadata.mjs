@@ -14,7 +14,7 @@ function valueFor(name, fallback = null) {
 
 const appPath = path.resolve(
   repoRoot,
-  valueFor("--app", "release/mac-arm64/Nautilus.app")
+  valueFor("--app", "release/mac-arm64/Plainsong.app")
 );
 const latestPath = path.resolve(repoRoot, valueFor("--latest", "release/latest-mac.yml"));
 const outPath = path.resolve(

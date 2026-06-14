@@ -6,9 +6,7 @@
     "electron/main.ts",
     "electron/preload.ts",
     "scripts/capture-packaged-macos-app-matrix-insertion.mjs",
-    "scripts/capture-packaged-macos-license-activation.mjs",
-    "scripts/verify-packaged-macos-app-matrix-insertion.mjs",
-    "scripts/verify-packaged-macos-license-live.mjs"
+    "scripts/verify-packaged-macos-app-matrix-insertion.mjs"
   ],
   "project": [
     "src/**/*.{ts,tsx}",
@@ -23,7 +21,7 @@
     "release/**"
   ],
   "ignoreDependencies": [
-    "shadcn",
+    "tailwindcss",
     "tw-animate-css"
   ]
 }

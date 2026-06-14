@@ -4,7 +4,6 @@ const LONG_COMMAND_TIMEOUT_MS = 5 * 60_000;
 const EXTENDED_COMMAND_TIMEOUT_MS = 15 * 60_000;
 
 const FAST_COMMANDS = new Set<string>([
-  "can_use_beta_channel",
   "check_for_updates",
   "check_system_audio_availability",
   "get_asr_provider_model",
@@ -13,20 +12,17 @@ const FAST_COMMANDS = new Set<string>([
   "get_default_asr_provider",
   "get_dictation_audio_level",
   "get_dictation_overlay_state",
-  "get_entitlement",
   "get_loopback_device_name",
   "get_permission_diagnostics",
   "get_recording_overlay_state",
   "get_security_status",
   "get_settings",
   "get_update_channel",
-  "get_update_lock_reason",
   "get_update_status",
   "has_provider_secret",
   "is_diarization_model_available",
   "list_audio_input_devices",
   "list_diarization_models",
-  "validate_license",
 ]);
 
 const EXTENDED_COMMANDS = new Set<string>([
@@ -58,11 +54,9 @@ const EXTENDED_COMMANDS = new Set<string>([
 ]);
 
 const LONG_COMMANDS = new Set<string>([
-  "activate_license",
   "apply_global_shortcuts_now",
   "ask_memory",
   "capture_selected_text_for_playback",
-  "deactivate_license",
   "extract_action_items",
   "extract_action_items_grounded",
   "force_stop_dictation",
@@ -81,7 +75,6 @@ const LONG_COMMANDS = new Set<string>([
   "unlock_vault",
   "verify_backup_cloud_connection",
   "verify_dictation_setup",
-  "verify_evidence_bundle",
   "verify_meeting_setup",
   "verify_system_audio_setup",
 ]);

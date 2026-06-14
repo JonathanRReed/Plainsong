@@ -62,7 +62,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
         <DialogHeader>
           <DialogTitle>Start Meeting</DialogTitle>
           <DialogDescription>
-            Choose the capture mode and note format. Nautilus will carry these choices into the live recorder and review view.
+            Choose the capture mode and note format. Plainsong will carry these choices into the live recorder and review view.
           </DialogDescription>
         </DialogHeader>
 
@@ -121,7 +121,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
                     ? "Checking system audio availability..."
                     : systemAudioAvailable
                       ? `Ready via ${loopbackDevice || "system audio capture"}.`
-                      : "System audio is not ready, so Nautilus will fall back to Mic only."}
+                      : "System audio is not ready, so Plainsong will fall back to Mic only."}
                 </p>
               </button>
             </div>
@@ -187,7 +187,7 @@ export function ConsentDialog({ open, onOpenChange, onStart }: ConsentDialogProp
                 <p className="font-medium text-foreground">Consent notice delivery</p>
                 <p className="mt-1 text-muted-foreground">
                   {consentAutomation?.message ??
-                    "Nautilus checks whether it can post the consent notice automatically before the meeting starts."}
+                    "Plainsong checks whether it can post the consent notice automatically before the meeting starts."}
                 </p>
               </div>
               <span className="rounded-full border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground">

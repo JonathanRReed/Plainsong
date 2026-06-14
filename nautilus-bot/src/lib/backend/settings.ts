@@ -6,7 +6,7 @@ export {
   hasProviderSecret,
   lockVault,
   migrateToEncryptedStorage,
-  openInstalledNautilusApp,
+  openInstalledPlainsongApp,
   openPermissionSettings,
   requestDictationPermissions,
   repairCursorInsertPermissions,

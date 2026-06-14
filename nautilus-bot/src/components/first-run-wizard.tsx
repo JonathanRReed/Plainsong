@@ -24,7 +24,7 @@ import {
 import {
   getPermissionDiagnostics,
   getSettings,
-  openInstalledNautilusApp,
+  openInstalledPlainsongApp,
   openPermissionSettings,
   requestDictationPermissions,
   saveSettings,
@@ -158,7 +158,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   const [shortcutValue, setShortcutValue] = useState(defaultDictationShortcut());
   const [hotkeyMode, setHotkeyMode] =
-    useState<"hold_to_talk" | "toggle" | "hands_free">("hold_to_talk");
+    useState<"hold_to_talk" | "toggle" | "hands_free">("toggle");
   const [hotkeyDemoActive, setHotkeyDemoActive] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -324,7 +324,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     try {
       const diagnostics = await requestDictationPermissions();
       setPerms(diagnostics);
-      setPermissionRequestStatus("Requested macOS permissions and refreshed Nautilus readiness.");
+      setPermissionRequestStatus("Requested macOS permissions and refreshed Plainsong readiness.");
     } catch (error) {
       setPermissionRequestError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -350,8 +350,8 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     setPermissionRequestError(null);
     setPermissionRequestStatus(null);
     try {
-      await openInstalledNautilusApp();
-      setPermissionRequestStatus("Opened the installed Nautilus app from /Applications.");
+      await openInstalledPlainsongApp();
+      setPermissionRequestStatus("Opened the installed Plainsong app from /Applications.");
     } catch (error) {
       setPermissionRequestError(error instanceof Error ? error.message : String(error));
     }
@@ -510,7 +510,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   const subtitle =
     step === "welcome"
-      ? "Set up Nautilus the way you actually plan to use it."
+      ? "Set up Plainsong the way you actually plan to use it."
       : step === "meeting-setup"
         ? "Meetings can be configured now or revisited later from Setup."
         : `Step ${stepIndex + 1} of ${steps.length}, ${STEP_LABELS[step]}`;
@@ -758,7 +758,7 @@ function PermissionsStep({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Nautilus needs microphone access and cursor-control permissions before dictation feels correct.
+        Plainsong needs microphone access and cursor-control permissions before dictation feels correct.
       </p>
 
       {perms?.runningFromDiskImage ? (
@@ -767,7 +767,7 @@ function PermissionsStep({
             You are running the DMG copy
           </p>
           <p className="text-xs text-amber-800 dark:text-amber-100/90">
-            macOS permissions granted to the installed app do not apply to the disk image copy. Move Nautilus into
+            macOS permissions granted to the installed app do not apply to the disk image copy. Move Plainsong into
             /Applications and reopen that installed app.
           </p>
           <div className="flex flex-wrap gap-2">
@@ -915,7 +915,7 @@ function DictationModelStep({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Set up the actual local dictation route Nautilus will use for solo work. Distil Whisper is the recommended default.
+        Set up the actual local dictation route Plainsong will use for solo work. Distil Whisper is the recommended default.
       </p>
 
       <div className="space-y-2">
@@ -1032,7 +1032,7 @@ function HotkeyStep({
           className="font-mono text-center"
         />
         <p className="text-xs text-muted-foreground">
-          Click the field and press the shortcut you want Nautilus to use.
+          Click the field and press the shortcut you want Plainsong to use.
         </p>
       </div>
 
@@ -1052,9 +1052,7 @@ function HotkeyStep({
             onHotkeyModeChange(event.target.value as "hold_to_talk" | "toggle" | "hands_free")
           }
         >
-          <option value="hold_to_talk">Hold-to-talk</option>
-          <option value="toggle">Toggle press</option>
-          <option value="hands_free">Hands-free</option>
+          <option value="toggle">Toggle (press to start, press again to stop)</option>
         </select>
       </div>
 
@@ -1214,7 +1212,7 @@ function MeetingSetupStep({
           </div>
           {!systemAudioAvailable ? (
             <p className="mt-2 text-xs text-muted-foreground">
-              Install and configure a loopback device such as BlackHole if you want Nautilus to capture both sides of calls. Mic-only meetings remain usable immediately.
+              Install and configure a loopback device such as BlackHole if you want Plainsong to capture both sides of calls. Mic-only meetings remain usable immediately.
             </p>
           ) : null}
         </div>

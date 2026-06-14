@@ -1,15 +1,15 @@
 # Code Signing and Distribution
 
-App bundle identifier: `com.nautilus.bot`
+App bundle identifier: `com.plainsong.app`
 
-Nautilus ships as an Electron app packaged with `electron-builder`, with the Rust backend distributed as the `rust-sidecar` binary.
+Plainsong ships as an Electron app packaged with `electron-builder`, with the Rust backend distributed as the `rust-sidecar` binary.
 
 ## Release Inputs
 
 - Packaging config: `electron-builder.yml`
 - macOS entitlements: `build-resources/entitlements.mac.plist`
 - macOS inherited entitlements: `build-resources/entitlements.mac.inherit.plist`
-- Packaged sidecar source: `rust-sidecar/target/release/nautilus-sidecar`
+- Packaged sidecar source: `rust-sidecar/target/release/plainsong-sidecar`
 - Release output directory: `release/`
 
 ## macOS
@@ -44,15 +44,15 @@ bun run electron:build:dmg
 ### Verify a packaged app
 
 ```bash
-codesign --verify --deep --strict --verbose=2 "release/mac-arm64/Nautilus.app"
-spctl --assess --verbose=4 "release/mac-arm64/Nautilus.app"
+codesign --verify --deep --strict --verbose=2 "release/mac-arm64/Plainsong.app"
+spctl --assess --verbose=4 "release/mac-arm64/Plainsong.app"
 ```
 
 Expected `spctl` result for a release-signed build: `accepted`.
 
 ### Entitlements in source control
 
-Nautilus currently requests:
+Plainsong currently requests:
 
 - microphone access
 - speech recognition access
@@ -76,7 +76,7 @@ SmartScreen can still show first-download reputation warnings for a newly signed
 ### Verify a signed installer
 
 ```powershell
-Get-AuthenticodeSignature ".\\release\\Nautilus Setup 1.0.0.exe" | Format-List
+Get-AuthenticodeSignature ".\\release\\Plainsong Setup 1.0.0.exe" | Format-List
 ```
 
 Status should be `Valid` for a properly signed installer.

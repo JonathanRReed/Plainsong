@@ -165,7 +165,7 @@ impl ParakeetProvider {
             normalize_parakeet_model_id(selected_model_id.unwrap_or(PARAKEET_CTC_06B_V3_MODEL_ID));
         let models_root = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("Nautilus")
+            .join("Plainsong")
             .join("models");
         let model_dir = if model_id == PARAKEET_LEGACY_MODEL_ID {
             models_root.join("parakeet")

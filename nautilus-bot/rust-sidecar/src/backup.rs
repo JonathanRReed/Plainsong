@@ -69,7 +69,7 @@ impl Default for BackupConfig {
             cloud_sync: false,
             cloud_provider: None,
             cloud_remote_name: None,
-            cloud_folder: "NautilusBackups".to_string(),
+            cloud_folder: "PlainsongBackups".to_string(),
             icloud_path: None,
         }
     }
@@ -173,14 +173,22 @@ impl BackupManager {
     }
 
     /// Create a full data backup now.
-    pub async fn create_backup(&self, data_dir: &Path) -> Result<BackupInfo> {
-        self.create_backup_with_type(data_dir, BackupType::Full)
+    /// Create a full backup. `db_snapshot`, when provided, is a
+    /// transactionally-consistent copy of the live database (see
+    /// `Database::backup_to`) and is used as the source for the database
+    /// component instead of copying the live, possibly mid-write, file.
+    pub async fn create_backup(
+        &self,
+        data_dir: &Path,
+        db_snapshot: Option<&Path>,
+    ) -> Result<BackupInfo> {
+        self.create_backup_with_type(data_dir, BackupType::Full, db_snapshot)
             .await
     }
 
     /// Create a settings-only backup for profile sync and migration.
     pub async fn create_settings_backup(&self, data_dir: &Path) -> Result<BackupInfo> {
-        self.create_backup_with_type(data_dir, BackupType::Settings)
+        self.create_backup_with_type(data_dir, BackupType::Settings, None)
             .await
     }
 
@@ -188,6 +196,7 @@ impl BackupManager {
         &self,
         data_dir: &Path,
         backup_type: BackupType,
+        db_snapshot: Option<&Path>,
     ) -> Result<BackupInfo> {
         let backup_dir = self
             .config
@@ -217,10 +226,14 @@ impl BackupManager {
         let mut components = Vec::new();
 
         if matches!(backup_type, BackupType::Full | BackupType::Incremental) {
-            let db_path = data_dir.join("nautilus.db");
-            if db_path.exists() {
-                let db_backup = backup_path.join("nautilus.db");
-                tokio::fs::copy(&db_path, db_backup).await?;
+            let db_path = data_dir.join("plainsong.db");
+            // Prefer a consistent VACUUM INTO snapshot of the live database;
+            // fall back to copying the file at rest only if no snapshot was
+            // provided (e.g. the database was never opened).
+            let db_source = db_snapshot.filter(|p| p.exists()).unwrap_or(&db_path);
+            if db_source.exists() {
+                let db_backup = backup_path.join("plainsong.db");
+                tokio::fs::copy(db_source, db_backup).await?;
                 components.push(BackupComponent::Database);
             }
 
@@ -628,7 +641,7 @@ impl BackupManager {
 }
 
 fn infer_backup_type(path: &Path) -> BackupType {
-    let has_database = path.join("nautilus.db").exists();
+    let has_database = path.join("plainsong.db").exists();
     let has_recordings = path.join("recordings").exists();
     let has_settings = path.join(SETTINGS_BACKUP_FILENAME).exists();
 
@@ -649,7 +662,7 @@ impl Default for BackupManager {
 fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Nautilus")
+        .join("Plainsong")
 }
 
 fn default_backup_dir() -> PathBuf {
@@ -659,7 +672,7 @@ fn default_backup_dir() -> PathBuf {
 fn backup_config_path() -> Result<PathBuf> {
     let config_dir = dirs::config_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?
-        .join("Nautilus");
+        .join("Plainsong");
     Ok(config_dir.join("backup-config.json"))
 }
 
@@ -817,7 +830,7 @@ async fn read_backup_manifest(backup_path: &Path) -> Result<Option<BackupManifes
 
 fn detect_backup_components(backup_path: &Path) -> Vec<BackupComponent> {
     let mut components = Vec::new();
-    if backup_path.join("nautilus.db").exists() {
+    if backup_path.join("plainsong.db").exists() {
         components.push(BackupComponent::Database);
     }
     if backup_path.join("recordings").exists() {
@@ -869,17 +882,17 @@ fn build_restore_units(
         .map(|component| match component {
             BackupComponent::Database => RestoreUnit {
                 component: BackupComponent::Database,
-                source_path: backup_path.join("nautilus.db"),
-                live_path: data_dir.join("nautilus.db"),
+                source_path: backup_path.join("plainsong.db"),
+                live_path: data_dir.join("plainsong.db"),
                 staged_path: restore_artifact_path(
                     data_dir,
-                    "nautilus.db",
+                    "plainsong.db",
                     "restore-stage",
                     transaction_id,
                 ),
                 rollback_path: restore_artifact_path(
                     data_dir,
-                    "nautilus.db",
+                    "plainsong.db",
                     "restore-rollback",
                     transaction_id,
                 ),
@@ -1419,19 +1432,19 @@ mod tests {
     #[test]
     fn cloud_folder_rejects_relative_segments() {
         assert!(validate_cloud_folder("../backups").is_err());
-        assert!(validate_cloud_folder("Nautilus/../Backups").is_err());
+        assert!(validate_cloud_folder("Plainsong/../Backups").is_err());
     }
 
     #[test]
     fn cloud_folder_rejects_unsafe_characters() {
-        assert!(validate_cloud_folder("Nautilus:Backups").is_err());
-        assert!(validate_cloud_folder("Nautilus\nBackups").is_err());
+        assert!(validate_cloud_folder("Plainsong:Backups").is_err());
+        assert!(validate_cloud_folder("Plainsong\nBackups").is_err());
     }
 
     #[test]
     fn cloud_folder_accepts_nested_safe_paths() {
-        let value = validate_cloud_folder("Nautilus/Backups/2026").expect("valid folder");
-        assert_eq!(value, "Nautilus/Backups/2026");
+        let value = validate_cloud_folder("Plainsong/Backups/2026").expect("valid folder");
+        assert_eq!(value, "Plainsong/Backups/2026");
     }
 
     #[test]
@@ -1471,13 +1484,13 @@ mod tests {
             fs::create_dir_all(&live_data_dir).expect("create live data dir");
             fs::create_dir_all(&config_dir).expect("create config dir");
 
-            fs::write(backup_dir.join("nautilus.db"), "new-db").expect("write backup db");
+            fs::write(backup_dir.join("plainsong.db"), "new-db").expect("write backup db");
             fs::write(
                 backup_dir.join(SETTINGS_BACKUP_FILENAME),
                 "{\"theme\":\"new\"}",
             )
             .expect("write backup settings");
-            fs::write(live_data_dir.join("nautilus.db"), "old-db").expect("write live db");
+            fs::write(live_data_dir.join("plainsong.db"), "old-db").expect("write live db");
             fs::write(&settings_path, "{\"theme\":\"old\"}").expect("write live settings");
 
             let units = build_restore_units(
@@ -1500,7 +1513,8 @@ mod tests {
                 .expect_err("commit should fail");
             assert!(err.to_string().contains("Failed to commit restored"));
             assert_eq!(
-                fs::read_to_string(live_data_dir.join("nautilus.db")).expect("read rolled back db"),
+                fs::read_to_string(live_data_dir.join("plainsong.db"))
+                    .expect("read rolled back db"),
                 "old-db"
             );
             assert_eq!(
@@ -1518,7 +1532,7 @@ mod tests {
         runtime.block_on(async {
             let backup_dir = unique_test_dir("manifest");
             fs::create_dir_all(&backup_dir).expect("create backup dir");
-            fs::write(backup_dir.join("nautilus.db"), "db").expect("write db");
+            fs::write(backup_dir.join("plainsong.db"), "db").expect("write db");
             write_backup_manifest(
                 &backup_dir,
                 "backup_20260409_120000",
@@ -1545,7 +1559,7 @@ mod tests {
             let root = unique_test_dir("icloud-sync");
             let source = root.join("source-backup");
             let icloud_root = root.join("icloud");
-            let destination = icloud_root.join("NautilusBackups").join("source-backup");
+            let destination = icloud_root.join("PlainsongBackups").join("source-backup");
 
             fs::create_dir_all(&source).expect("create source dir");
             fs::create_dir_all(&destination).expect("create destination dir");
@@ -1569,7 +1583,7 @@ mod tests {
                 fs::read_to_string(destination.join("settings.json")).expect("read synced backup"),
                 "{\"version\":\"new\"}"
             );
-            let temp_entries = fs::read_dir(icloud_root.join("NautilusBackups"))
+            let temp_entries = fs::read_dir(icloud_root.join("PlainsongBackups"))
                 .expect("read icloud folder")
                 .filter_map(|entry| entry.ok())
                 .filter(|entry| {

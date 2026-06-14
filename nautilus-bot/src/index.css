@@ -264,7 +264,7 @@
 }
 
 @layer base {
-  /* Premium themes, applied via data-theme attribute. */
+  /* Additional color schemes, applied via data-theme attribute. */
   [data-theme="rose-pine"] {
     --background: 249 22% 12%;
     --foreground: 245 50% 91%;

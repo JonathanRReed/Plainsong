@@ -21,6 +21,7 @@ pub(crate) fn clear_cached_model(model_id: &str) {
     }
 }
 
+#[derive(Clone)]
 pub struct WhisperProvider {
     model_path: PathBuf,
     model_id: String,
@@ -31,7 +32,7 @@ impl WhisperProvider {
     pub fn new(selected_model_id: Option<&str>) -> Self {
         let models_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("Nautilus")
+            .join("Plainsong")
             .join("models")
             .join("whisper");
 
@@ -125,6 +126,23 @@ impl AsrProvider for WhisperProvider {
     fn is_available(&self) -> bool {
         // Model is available if either already loaded in cache OR file exists
         self.ctx.is_some() || self.model_path.exists()
+    }
+
+    async fn prewarm(&self) {
+        // Load the model into the global context cache on a blocking thread so
+        // the first utterance after dictation start doesn't pay a cold load.
+        // Best-effort: a missing/undownloaded model just no-ops here and the
+        // normal transcription path reports it.
+        if !self.model_path.exists() {
+            return;
+        }
+        let provider = self.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Err(error) = provider.load_model() {
+                tracing::debug!("Whisper prewarm skipped: {}", error);
+            }
+        })
+        .await;
     }
 
     fn model_info(&self) -> ModelInfo {
@@ -227,7 +245,10 @@ impl AsrProvider for WhisperProvider {
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        params.set_language(Some("en"));
+        // English-only models (".en") are forced to English; multilingual models
+        // auto-detect the spoken language rather than assuming English.
+        let english_only = self.model_id.ends_with(".en");
+        params.set_language(if english_only { Some("en") } else { None });
         params.set_translate(false);
 
         // Anti-repetition and hallucination mitigation
@@ -244,6 +265,17 @@ impl AsrProvider for WhisperProvider {
             .context("Failed to run Whisper transcription")?;
 
         let num_segments = state.full_n_segments();
+
+        // Report the actual language: forced "en" for English-only models,
+        // otherwise the language Whisper detected during decoding.
+        let detected_language = if english_only {
+            "en".to_string()
+        } else {
+            let lang_id = state.full_lang_id_from_state();
+            whisper_rs::get_lang_str(lang_id)
+                .unwrap_or("en")
+                .to_string()
+        };
 
         tracing::info!("Whisper produced {} segments", num_segments);
 
@@ -283,7 +315,7 @@ impl AsrProvider for WhisperProvider {
         Ok(TranscriptionResult {
             text: full_text,
             segments,
-            language: "en".to_string(),
+            language: detected_language,
             confidence: 0.9,
             processing_time_ms: processing_time,
             model_name: format!("whisper-{}", self.model_id),

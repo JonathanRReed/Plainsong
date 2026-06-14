@@ -13,6 +13,7 @@ use chrono::Utc;
 use rusqlite::{params, params_from_iter, types::Value, Connection};
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 
 pub type SpeakerAlias = (Option<String>, Option<String>, i64);
 
@@ -29,11 +30,11 @@ impl Database {
     pub fn new_with_key(_key: Option<&str>) -> Result<Self> {
         let app_dir = dirs::data_dir()
             .context("Could not find data directory")?
-            .join("Nautilus");
+            .join("Plainsong");
 
         fs::create_dir_all(&app_dir)?;
 
-        let db_path = app_dir.join("nautilus.db");
+        let db_path = app_dir.join("plainsong.db");
         let conn = Connection::open(db_path)?;
 
         // Set up encryption if key provided and SQLCipher is enabled
@@ -58,6 +59,25 @@ impl Database {
     /// Create new database (default, no encryption)
     pub fn new() -> Result<Self> {
         Self::new_with_key(None)
+    }
+
+    /// Write a transactionally-consistent snapshot of the live database to
+    /// `dest` using `VACUUM INTO`. Unlike a filesystem copy, this is safe to run
+    /// while the database is open and possibly mid-write, and (under SQLCipher)
+    /// produces an encrypted copy keyed with the same key as the live database.
+    /// `dest` must not already exist.
+    pub fn backup_to(&self, dest: &Path) -> Result<()> {
+        if dest.exists() {
+            std::fs::remove_file(dest)
+                .with_context(|| format!("Failed to clear stale snapshot at {}", dest.display()))?;
+        }
+        // VACUUM INTO does not accept bind parameters for the target path, so the
+        // path is inlined as a string literal with single quotes doubled.
+        let dest_str = dest.to_string_lossy().replace('\'', "''");
+        self.conn
+            .execute_batch(&format!("VACUUM INTO '{}';", dest_str))
+            .context("Failed to snapshot database via VACUUM INTO")?;
+        Ok(())
     }
 
     /// Check if database is encrypted
@@ -3696,7 +3716,7 @@ mod tests {
                 &created.id,
                 &UpdateDictationDictionaryEntryRequest {
                     spoken_form: Some("nautilus bot".to_string()),
-                    replacement: Some("NautilusBot".to_string()),
+                    replacement: Some("Plainsong".to_string()),
                     app_scope: Some(None),
                     case_sensitive: Some(true),
                     enabled: Some(true),

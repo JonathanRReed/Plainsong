@@ -196,7 +196,7 @@ vi.mock("@/lib/backend/settings", () => ({
     runningFromDiskImage: false,
   })),
   getSettings: vi.fn(async () => structuredClone(currentSettings)),
-  openInstalledNautilusApp: vi.fn(async () => {}),
+  openInstalledPlainsongApp: vi.fn(async () => {}),
   openPermissionSettings: vi.fn(async () => {}),
   requestDictationPermissions: vi.fn(async () => ({
     microphoneReady: true,
@@ -263,15 +263,17 @@ describe("FirstRunWizard", () => {
     expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
   });
 
-  it("persists hands-free mode from onboarding", async () => {
+  it("persists toggle hotkey mode from onboarding", async () => {
     const onComplete = vi.fn();
 
     render(<FirstRunWizard mode="dictation" onComplete={onComplete} />);
 
     await clickPrimary(/continue/i);
     await clickPrimary(/continue/i);
+    // v1 ships toggle-only (the single honest mode; hold-to-talk/hands-free need
+    // a native key listener that isn't wired yet), so onboarding persists toggle.
     fireEvent.change(screen.getByLabelText("Hotkey behavior"), {
-      target: { value: "hands_free" },
+      target: { value: "toggle" },
     });
     await clickPrimary(/finish/i);
 
@@ -283,7 +285,7 @@ describe("FirstRunWizard", () => {
     });
 
     expect(currentSettings.transcription.dictationPushToTalk).toBe(false);
-    expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(true);
+    expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
   });
 
   it("repairs the meetings route in meetings-only onboarding", async () => {
@@ -362,7 +364,7 @@ describe("FirstRunWizard", () => {
   it("opens the installed app when the wizard detects the DMG copy", async () => {
     const backend = await import("@/lib/backend/settings");
     const getPermissionDiagnostics = vi.mocked(backend.getPermissionDiagnostics);
-    const openInstalledNautilusApp = vi.mocked(backend.openInstalledNautilusApp);
+    const openInstalledPlainsongApp = vi.mocked(backend.openInstalledPlainsongApp);
 
     getPermissionDiagnostics.mockResolvedValueOnce({
       microphoneReady: true,
@@ -379,10 +381,10 @@ describe("FirstRunWizard", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Open installed app" }));
 
     await waitFor(() => {
-      expect(openInstalledNautilusApp).toHaveBeenCalledTimes(1);
+      expect(openInstalledPlainsongApp).toHaveBeenCalledTimes(1);
     });
     expect(
-      screen.getByText("Opened the installed Nautilus app from /Applications.")
+      screen.getByText("Opened the installed Plainsong app from /Applications.")
     ).toBeInTheDocument();
   });
 });

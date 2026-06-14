@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   globalShortcut,
   ipcMain,
   net,
@@ -18,8 +19,8 @@ import { IpcBridge } from "./ipc-bridge";
 import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
 
 const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
-const devServerUrl = process.env.NAUTILUS_DEV_SERVER_URL ?? "http://127.0.0.1:1420";
-const rendererMode = process.env.NAUTILUS_RENDERER_MODE ?? "file";
+const devServerUrl = process.env.PLAINSONG_DEV_SERVER_URL ?? "http://127.0.0.1:1420";
+const rendererMode = process.env.PLAINSONG_RENDERER_MODE ?? "file";
 
 if (isDev) {
   app.commandLine.appendSwitch("no-proxy-server");
@@ -34,7 +35,7 @@ let updateReadyToInstall = false;
 let bootstrapComplete = false;
 
 function qaLog(message: string, payload?: unknown): void {
-  if (process.env.NAUTILUS_QA_PACKAGED_HOTKEY === "1") {
+  if (process.env.PLAINSONG_QA_PACKAGED_HOTKEY === "1") {
     console.log(`[qa] ${message}`, payload ?? "");
   }
 }
@@ -54,8 +55,7 @@ type UpdateStatusPayload = {
     | "updateAvailable"
     | "downloading"
     | "installing"
-    | "error"
-    | "locked";
+    | "error";
   info?: UpdateInfoPayload;
   progress?: number;
   error?: string;
@@ -91,7 +91,8 @@ function findWindowByLabel(label: string): BrowserWindow | null {
 }
 
 function showAndFocusMainWindow(): void {
-  if (!mainWindow) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = createMainWindow();
     return;
   }
 
@@ -185,20 +186,6 @@ async function getUpdateChannelFromSidecar(): Promise<UpdateChannel> {
   }
 }
 
-async function getUpdateLockReasonFromSidecar(): Promise<string | null> {
-  if (!ipcBridge) {
-    return null;
-  }
-
-  try {
-    const result = await ipcBridge.invokeSidecar("get_update_lock_reason");
-    return typeof result === "string" && result.trim() ? result : null;
-  } catch (error) {
-    console.error("[updater] failed to read update lock reason", error);
-    return null;
-  }
-}
-
 function configureAutoUpdater(updater: AppUpdater): void {
   if (updaterConfigured) {
     return;
@@ -262,12 +249,6 @@ function configureAutoUpdater(updater: AppUpdater): void {
 }
 
 async function checkForUpdatesInElectron(): Promise<UpdateInfoPayload | null> {
-  const lockReason = await getUpdateLockReasonFromSidecar();
-  if (lockReason) {
-    setUpdateStatus({ status: "locked", error: lockReason });
-    return null;
-  }
-
   if (!app.isPackaged) {
     const error = "Updates are only available in packaged builds.";
     setUpdateStatus({ status: "error", error });
@@ -546,11 +527,7 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
 
   if (openWindowShortcut) {
     const registered = globalShortcut.register(openWindowShortcut, () => {
-      if (mainWindow) {
-        if (mainWindow.isMinimized()) mainWindow.restore();
-        mainWindow.show();
-        mainWindow.focus();
-      }
+      showAndFocusMainWindow();
     });
 
     if (!registered) {
@@ -563,7 +540,7 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
 }
 
 function getSidecarBinaryName(): string {
-  return process.platform === "win32" ? "nautilus-sidecar.exe" : "nautilus-sidecar";
+  return process.platform === "win32" ? "plainsong-sidecar.exe" : "plainsong-sidecar";
 }
 
 function getSidecarPath(): string {
@@ -650,6 +627,10 @@ function createMainWindow(): BrowserWindow {
   });
   configureWindowSecurity(win);
 
+  win.on("closed", () => {
+    mainWindow = null;
+  });
+
   if (isDev) {
     win.webContents.on("did-start-loading", () => {
       console.log("[renderer] did-start-loading", win.webContents.getURL());
@@ -703,6 +684,14 @@ function createMainWindow(): BrowserWindow {
   return win;
 }
 
+process.on("uncaughtException", (error) => {
+  console.error("[main] uncaught exception", error);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[main] unhandled rejection", reason);
+});
+
 app.on("before-quit", () => {
   globalShortcut.unregisterAll();
   ipcBridge?.shutdown();
@@ -719,7 +708,7 @@ app.on("activate", () => {
     // Bootstrap hasn't completed yet, wait for it to finish
     return;
   }
-  if (mainWindow === null) {
+  if (mainWindow === null || mainWindow.isDestroyed()) {
     mainWindow = createMainWindow();
   } else if (!mainWindow.isVisible()) {
     mainWindow.show();
@@ -738,6 +727,16 @@ ipcMain.handle("window:get-label", (event) => {
 
 
 async function bootstrap() {
+  const gotLock = app.requestSingleInstanceLock();
+  if (!gotLock) {
+    app.quit();
+    return;
+  }
+
+  app.on("second-instance", () => {
+    showAndFocusMainWindow();
+  });
+
   await app.whenReady();
 
   if (isDev && rendererMode === "server") {
@@ -759,6 +758,16 @@ async function bootstrap() {
   }
 
   const sidecarPath = getSidecarPath();
+
+  if (!existsSync(sidecarPath)) {
+    const message =
+      `The Plainsong sidecar binary was not found at:\n${sidecarPath}\n\n` +
+      "Build it from source with:\n  bun run sidecar:build:release";
+    console.error("[sidecar] missing binary", { sidecarPath });
+    dialog.showErrorBox("Plainsong sidecar not found", message);
+    broadcastRendererEvent("sidecar-error", { reason: "missing-binary", path: sidecarPath, message });
+  }
+
   ipcBridge = new IpcBridge(sidecarPath);
   ipcBridge.onLocalCommand(handleLocalCommand);
   configureAutoUpdater(autoUpdater);

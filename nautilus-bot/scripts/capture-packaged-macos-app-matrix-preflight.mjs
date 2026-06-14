@@ -58,7 +58,7 @@ function normalizeAppName(value) {
 }
 
 function envNameForScratchTarget(app) {
-  return `NAUTILUS_QA_SCRATCH_${String(app ?? "")
+  return `PLAINSONG_QA_SCRATCH_${String(app ?? "")
     .replace(/\s+\((Chrome|Edge\/Chrome)\)$/i, "")
     .toUpperCase()
     .replace(/[^A-Z0-9]+/g, "_")
@@ -198,7 +198,6 @@ const rows = matrixRows.map((row) => {
   const canAttemptManualCapture =
     row.status === "PENDING" &&
     installedPaths.length > 0 &&
-    packagedScenarioIds.length > 0 &&
     openBlockedEntries.length === 0;
   const captureCommand = canAttemptManualCapture ? captureCommandFor(row.app) : null;
 

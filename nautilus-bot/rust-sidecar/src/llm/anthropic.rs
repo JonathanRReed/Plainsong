@@ -24,7 +24,10 @@ impl AnthropicClient {
 
         Self {
             api_key: resolved_api_key,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
         }
     }
 
@@ -158,7 +161,7 @@ impl AnthropicClient {
 
     /// Summarize meeting
     pub async fn summarize(&self, transcript: &str, model: &str) -> Result<String> {
-        let system_prompt = "You are Nautilus, a precise and forensic meeting intelligence assistant. \
+        let system_prompt = "You are Plainsong, a precise and forensic meeting intelligence assistant. \
 Your task is to produce a comprehensive, well-structured, and highly readable summary of the following meeting transcript. \
 \
 Organize the summary into the following sections:\

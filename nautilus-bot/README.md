@@ -1,158 +1,89 @@
-# Nautilus Bot
+# Plainsong (app)
 
-Nautilus is a local-first desktop app for dictation and meeting capture.
+This directory contains the Plainsong desktop app: the Electron main process,
+the React/TypeScript renderer, and the Rust transcription sidecar.
 
-Launch status on 2026-05-02: `NO-GO`.
+For the product overview, privacy posture, and contribution guide, see the
+[repository root](../README.md), [PRIVACY.md](../PRIVACY.md), and
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
-Launch readiness is tracked in:
+## Layout
 
-- `docs/launch-readiness-dashboard.md`
-- `artifacts/launch-readiness-report.json`
-- `docs/final-ship-checklist.md`
+```text
+nautilus-bot/
+  src/            React + TypeScript renderer (UI)
+  electron/       Electron main process (windows, hotkey, IPC bridge, updates)
+  rust-sidecar/   Rust backend: audio capture, ASR engines, dictation pipeline,
+                  meetings, diarization, LLM clients, storage
+  scripts/        dev, build, packaging, and packaged-app QA scripts
+  docs/           developer/setup docs (code signing, app compatibility)
+  build-resources/  icons and entitlements
+```
 
-## Implemented Product Surface (2026-04-09)
+The renderer talks to the sidecar through a sandboxed Electron preload that
+exposes only an explicit command allowlist (`electron/ipc-bridge.ts`); the
+allowlist is checked against the sidecar's actual command handlers in CI
+(`scripts/verify-ipc-contract.mjs`).
 
-- Dictation capture via global hotkey
-- Dictation push-to-talk and live partial preview
-- Dictation mini window and meeting mini window
-- Dictation command mode (prefix-triggered editing commands)
-- Dictation snippets (trigger phrase expansion with optional app scoping)
-- Context-aware custom modes with app and domain auto-activation
-- Dictation history with reprocessing and recovery metadata
-- Meeting recording (microphone, optional system-loopback when available)
-- Multi-provider transcription (Whisper, Parakeet, Canary, Distil-Whisper, Moonshine, Voxtral, OpenAI Cloud, ElevenLabs Scribe)
-- Transcript browsing, speaker labeling, and evidence export/verification
-- Local AI analysis via Ollama
-- Clipboard restore after paste success
-- Local backup plus cloud sync integrations (rclone/iCloud paths)
-- Bring-your-own API keys for cloud transcription and analysis providers
-
-This section describes what the codebase currently implements.
-It is not the same thing as launch-certified scope.
-
-## Launch-Certified Scope
-
-The certified launch scope is narrower than the implemented surface and is controlled by evidence, not code presence.
-
-- Frozen launch app matrix: `docs/dictation-app-compatibility-matrix.md`
-- Frozen launch language set: `docs/evals/dictation-language-certification-matrix.md`
-- Launch claim policy: `docs/launch-claim-scope.md`
-- Entitlement matrix: `docs/entitlement-matrix.md`
-
-Current state:
-
-- packaged macOS dictation benchmark evidence passes, but Windows packaged benchmark evidence is still missing
-- packaged meeting certification is partial and still has blocked rows
-- app-specific launch claims are not yet certified
-- language certification is frozen and macOS packaged benchmark evidence covers the frozen language set
-- cloud providers are optional bring-your-own-key integrations, not fully local workflows
-
-## Capability Status
-
-### ASR Providers
-
-- **Whisper**: enabled in this build (production path)
-- **Parakeet**: native ONNX inference (`encoder.onnx` + `tokens.txt`)
-- **Canary**: native Candle inference
-- **Distil-Whisper**: native Candle inference
-- **Moonshine**: native ONNX inference
-- **Voxtral**: explicit local mode (Python bridge) and cloud mode (Mistral API)
-- **OpenAI Cloud**: live API transcription
-- **ElevenLabs Scribe**: live API transcription
-
-### Diarization
-
-- Diarization command path exists and persists speaker aliases
-- Production quality still depends on local model/runtime availability
-
-### System Audio Capture
-
-- Supported through loopback/virtual devices where available
-- Availability is environment-dependent and validated at runtime
-
-## Claim Discipline
-
-- Do not treat implemented features as launch-certified features.
-- Do not claim app coverage beyond the frozen launch matrix.
-- Do not claim language coverage beyond the frozen certification matrix.
-- Do not describe cloud-backed workflows as fully local.
-- Do not describe cloud sync as hosted Nautilus storage; it is bring-your-own-cloud only.
-
-## Quick Start
-
-### Prerequisites
-
-- Bun
-- Rust toolchain (stable)
-- Ollama installed and running for AI analysis flows
-- macOS or Windows (Linux may work but is not a GA target in this launch audit)
-
-### Install and Run
+## Develop
 
 ```bash
-cd nautilus-bot
 bun install
 bun run dev
 ```
 
-### Optional AI Setup
+Optional, for on-device AI cleanup:
 
 ```bash
 ollama serve
 ollama pull llama3.2
 ```
 
-## Verification Commands
+## Build
 
 ```bash
-bun run lint
-bun run test
-bun run typecheck
-bun run electron:compile
-bun run electron:build
-bun run electron:build:mac
-bun run electron:build:win
-bun run gate:release:local
-bun run gate:blockers:refresh
-cargo build --manifest-path rust-sidecar/Cargo.toml --bin nautilus-sidecar --release
-cargo fmt --manifest-path rust-sidecar/Cargo.toml --check
-cargo clippy --manifest-path rust-sidecar/Cargo.toml --all-targets -- -D warnings
-cargo check --manifest-path rust-sidecar/Cargo.toml --all-targets
-cargo test --manifest-path rust-sidecar/Cargo.toml --lib
-cargo test --manifest-path rust-sidecar/Cargo.toml --tests
+bun run electron:build          # current platform
+bun run electron:build:mac      # macOS (run on macOS)
+bun run electron:build:win      # Windows (run on Windows)
+bun run release:mac             # build + publish a macOS release (CI)
+bun run release:win             # build + publish a Windows release (CI)
 ```
 
-Use `bun run test`, not `bun test`. The repo test runner is Vitest.
-Use `bun run gate:release:local` for the current-platform local release verification pass.
-Use `bun run gate:blockers:refresh` to regenerate the blocker JSON and packaged QA evidence bundle from the current repo state.
-Use `bun run gate:launch:report` to regenerate the launch dashboard and machine-readable launch status report.
-Use `bun run electron:build:mac` only on macOS, and `bun run electron:build:win` only on Windows.
+macOS releases are signed and notarized when Developer ID secrets are present in
+CI; otherwise an unsigned build is produced (users clear the quarantine
+attribute once). See [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) and
+[docs/APPLE_DEVELOPER_SETUP.md](docs/APPLE_DEVELOPER_SETUP.md).
 
-## Security Notes
+## Verify
 
-- API secrets are stored through OS credential storage
-- Sensitive filesystem command inputs are constrained to approved Nautilus roots
-- Renderer no longer directly invokes shell open for recording paths
-- Evidence bundle verification enforces approved path boundaries
-
-## Launch Audit Artifacts
-
-- `docs/launch-readiness-dashboard.md`
-- `docs/launch-claim-scope.md`
-- `docs/entitlement-matrix.md`
-- `docs/prelaunch-readiness.md`
-- `docs/prelaunch-action-checklist.md`
-- `docs/competitor-parity-gates.md`
-- `docs/release-gate-evidence.md`
-- `docs/packaged-app-qa-matrix.md`
-
-## Project Layout
-
-```text
-nautilus-bot/
-  src/          # React + TypeScript UI
-  rust-sidecar/ # Rust backend (sidecar binary)
-  electron/     # Electron main process
-  build-resources/
-  README.md
+```bash
+bun run lint        # typecheck + cargo fmt --check + clippy -D warnings
+bun run test        # Vitest (renderer + Electron)
+bun run test:rust   # Rust sidecar unit tests
+bun run gate:ipc-contract
+bun run gate:release:local   # full local pre-release pass
 ```
+
+Use `bun run test` (Vitest), not `bun test`.
+
+## Measuring real dictation latency
+
+`benchmark:latency` runs a fixture WAV through the actual transcription path and
+reports **measured** wall-clock latency and real-time factor (it requires the
+chosen model to be downloaded):
+
+```bash
+bun run benchmark:latency -- --provider whisper --model base.en --runs 5
+# → {"transcriptionMsP50":138,"realTimeFactor":217.4,...}
+```
+
+This replaces an earlier "benchmark" that multiplied fixture numbers by a CLI
+flag; the numbers here are real.
+
+## ASR providers
+
+Speech recognition runs locally by default (Whisper via whisper.cpp, plus other
+native engines). Optional bring-your-own-key cloud providers (OpenAI,
+ElevenLabs, Mistral, Groq, Cohere) and local Ollama are supported — keys are
+stored in the OS keychain and requests go directly to the provider, never
+through a Plainsong server.

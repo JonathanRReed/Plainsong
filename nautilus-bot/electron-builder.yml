@@ -1,6 +1,6 @@
-appId: com.nautilus.bot
-productName: Nautilus
-copyright: Copyright © 2026 NautilusBot
+appId: com.plainsong.app
+productName: Plainsong
+copyright: Copyright © 2026 Jonathan Reed
 
 directories:
   output: release
@@ -16,25 +16,34 @@ extraResources:
   - from: rust-sidecar/target/release/
     to: sidecar
     filter:
-      - nautilus-sidecar
-      - nautilus-sidecar.exe
+      - plainsong-sidecar
+      - plainsong-sidecar.exe
   - from: rust-sidecar/python/
     to: python
     filter:
       - asr/runner.py
 
 mac:
+  # arm64 only for v1: the Rust sidecar is compiled for the host arch by
+  # `sidecar:build:release`, so an x64 artifact would bundle an arm64 binary and
+  # be broken on Intel Macs. Intel support needs per-arch sidecar cross-compiles
+  # (aarch64- + x86_64-apple-darwin) wired into the build — tracked as a follow-up.
   target:
     - target: dmg
-      arch: [arm64, x64]
+      arch: [arm64]
     - target: zip
-      arch: [arm64, x64]
+      arch: [arm64]
   category: public.app-category.productivity
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: build-resources/entitlements.mac.plist
   entitlementsInherit: build-resources/entitlements.mac.inherit.plist
   icon: build-resources/icon.icns
+  # Required TCC usage strings — without these macOS terminates the app the
+  # moment it accesses the microphone / speech recognition.
+  extendInfo:
+    NSMicrophoneUsageDescription: "Plainsong transcribes your speech on your Mac for dictation and meeting capture. Audio stays on your device."
+    NSSpeechRecognitionUsageDescription: "Plainsong can use Apple's on-device speech recognition to transcribe your dictation."
 
 win:
   target:
@@ -51,5 +60,5 @@ dmg:
 
 publish:
   provider: github
-  owner: nautilusbot
-  repo: nautilus
+  owner: JonathanRReed
+  repo: Plainsong

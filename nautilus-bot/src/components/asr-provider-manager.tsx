@@ -28,7 +28,7 @@ import {
   saveSettings,
   getPermissionDiagnostics,
   openPermissionSettings,
-  openInstalledNautilusApp,
+  openInstalledPlainsongApp,
   requestDictationPermissions,
   repairCursorInsertPermissions,
   type PermissionDiagnostics,
@@ -606,7 +606,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
 
   const providerUiDescription = (provider: SelectionProvider) =>
     provider.providerType === "mlx_audio"
-      ? "Extra Apple Silicon MLX routes that do not map cleanly to another Nautilus provider family. Use the MLX toggle on Whisper, Moonshine, Parakeet, and Voxtral when you want the same family through mlx-audio."
+      ? "Extra Apple Silicon MLX routes that do not map cleanly to another Plainsong provider family. Use the MLX toggle on Whisper, Moonshine, Parakeet, and Voxtral when you want the same family through mlx-audio."
       : provider.description;
 
   const handleSetDefault = async (providerType: AsrProviderType) => {
@@ -848,9 +848,9 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       case "distil_whisper":
         return "Use the Download button to fetch the Distil-Whisper Large v3.5 model (no Python needed)";
       case "mlx_audio":
-        return "Use Download to fetch the selected advanced MLX Audio model. This Apple Silicon path bootstraps mlx-audio 0.4.1+ into Nautilus's managed runtime and exposes MLX-only families like Granite Speech, Qwen3-ASR, SenseVoice, FireRedASR2, MMS, GLM-ASR, Canary conversion, and additional Voxtral variants.";
+        return "Use Download to fetch the selected advanced MLX Audio model. This Apple Silicon path bootstraps mlx-audio 0.4.1+ into Plainsong's managed runtime and exposes MLX-only families like Granite Speech, Qwen3-ASR, SenseVoice, FireRedASR2, MMS, GLM-ASR, Canary conversion, and additional Voxtral variants.";
       case "macos_apple_speech":
-        return "Grant Nautilus Speech Recognition access in macOS System Settings > Privacy & Security > Speech Recognition";
+        return "Grant Plainsong Speech Recognition access in macOS System Settings > Privacy & Security > Speech Recognition";
       case "moonshine":
         return "Use the Download button to fetch the selected Moonshine bundle. Tiny is the smallest edge model; Base is the default stable option.";
       case "voxtral":
@@ -1412,7 +1412,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       action: "Open Accessibility",
       onClick: () => void openPermissionSettings("accessibility"),
       detail: appleNativeUsedForDictation
-        ? "Preferred direct path so Nautilus can insert text directly into the focused field."
+        ? "Preferred direct path so Plainsong can insert text directly into the focused field."
         : "Needed when you later use Apple Native for dictation insertion.",
     },
     {
@@ -1443,7 +1443,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   const lastCursorInsertStatus = permissionDiagnostics?.lastCursorInsertStatus;
   const lastCursorInsertFailure = lastCursorInsertStatus?.copiedOnly
     ? (lastCursorInsertStatus.message ??
-      "Nautilus copied the dictation result, but macOS blocked the final paste.")
+      "Plainsong copied the dictation result, but macOS blocked the final paste.")
     : null;
   const needsInsertRepair =
     !permissionDiagnostics?.runningFromDiskImage &&
@@ -1510,8 +1510,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             <span className="text-sm font-medium">Apple Native setup</span>
           </div>
           <p className="text-sm text-muted-foreground">
-            {routeSummary} Nautilus will request speech access automatically.
-            For cursor insertion, Nautilus first tries direct Accessibility text
+            {routeSummary} Plainsong will request speech access automatically.
+            For cursor insertion, Plainsong first tries direct Accessibility text
             insertion and can fall back to a native Cmd+V keyboard path when
             macOS allows it for this app copy.
           </p>
@@ -1525,7 +1525,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               Apple Native transcription is ready.
             </p>
             <p className="text-xs text-amber-100/90">
-              Cursor insertion is not ready yet. Enable Nautilus in Privacy &
+              Cursor insertion is not ready yet. Enable Plainsong in Privacy &
               Security &gt; Accessibility so it can insert text into the target
               app.
             </p>
@@ -1562,7 +1562,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         {permissionDiagnostics?.runningFromDiskImage ? (
           <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 space-y-2">
             <p className="text-sm font-medium text-amber-200">
-              You are running Nautilus from the mounted DMG, not the installed
+              You are running Plainsong from the mounted DMG, not the installed
               app.
             </p>
             <p className="text-xs text-amber-100/90">
@@ -1574,7 +1574,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => void openInstalledNautilusApp()}
+                onClick={() => void openInstalledPlainsongApp()}
               >
                 Open installed app
               </Button>
@@ -1688,7 +1688,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     const insertDetail = lastCursorInsertFailure
       ? lastCursorInsertFailure
       : insertReady
-        ? "Nautilus is currently reporting that auto-insert can target the active app."
+        ? "Plainsong is currently reporting that auto-insert can target the active app."
         : "macOS is not currently exposing a working auto-insert path for this app copy.";
 
     return (
@@ -2199,7 +2199,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                   <div>
                     <p className="text-sm font-medium">Current routing</p>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      A quick summary of what Nautilus will use right now.
+                      A quick summary of what Plainsong will use right now.
                     </p>
                   </div>
                   <Badge variant="outline">

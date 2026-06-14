@@ -668,7 +668,7 @@ pub fn normalize_model_id(model_id: &str) -> String {
 pub fn model_dir_for(model_id: &str) -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Nautilus")
+        .join("Plainsong")
         .join("models")
         .join("mlx_audio")
         .join(sanitize_model_id(model_id))
@@ -769,7 +769,7 @@ impl AsrProvider for MlxAudioProvider {
     }
 
     fn description(&self) -> &str {
-        "Apple Silicon local route family powered by mlx-audio. Pick a model below and Nautilus runs that route locally with MLX."
+        "Apple Silicon local route family powered by mlx-audio. Pick a model below and Plainsong runs that route locally with MLX."
     }
 
     fn is_available(&self) -> bool {
