@@ -54,8 +54,6 @@ pub struct ResolvedAudioInputDevice {
 pub struct AudioCapture {
     is_dictating: Arc<AtomicBool>,
     dictation_buffer: Arc<crossbeam::queue::SegQueue<f32>>,
-    /// Streaming queue for real-time partial transcription during dictation
-    dictation_stream_queue: Arc<crossbeam::queue::SegQueue<Vec<f32>>>,
     dictation_thread: Option<JoinHandle<()>>,
     dictation_sample_rate: u32,
     dictation_channels: u16,
@@ -78,6 +76,12 @@ pub struct AudioCapture {
     last_speech_ms: Arc<std::sync::atomic::AtomicU64>,
     /// Dictation start instant for timing
     dictation_start: Arc<std::sync::Mutex<Option<Instant>>>,
+    /// UI-only accumulator of mono dictation samples for streaming partials.
+    /// Never feeds the final transcription; only read by the partial-decode task.
+    dictation_partial_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
+    /// When true, capture callbacks append mono samples to the partial buffer.
+    /// When false, callbacks do no extra work (no allocation, no lock).
+    dictation_streaming_active: Arc<AtomicBool>,
 }
 
 struct ActiveRecordingSession {
@@ -217,7 +221,7 @@ impl AudioCapture {
     pub fn new() -> Self {
         let recordings_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("Nautilus")
+            .join("Plainsong")
             .join("recordings");
 
         std::fs::create_dir_all(&recordings_dir).ok();
@@ -231,7 +235,6 @@ impl AudioCapture {
         Self {
             is_dictating: Arc::new(AtomicBool::new(false)),
             dictation_buffer: Arc::new(crossbeam::queue::SegQueue::new()),
-            dictation_stream_queue: Arc::new(crossbeam::queue::SegQueue::new()),
             dictation_thread: None,
             dictation_sample_rate: 16000,
             dictation_channels: 1,
@@ -246,6 +249,8 @@ impl AudioCapture {
             dictation_callback_count: Arc::new(AtomicU64::new(0)),
             last_speech_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             dictation_start: Arc::new(std::sync::Mutex::new(None)),
+            dictation_partial_buffer: Arc::new(std::sync::Mutex::new(Vec::new())),
+            dictation_streaming_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -346,7 +351,7 @@ impl AudioCapture {
             let transport_type = infer_transport_type(&name);
             let advisory = match preference {
                 Some(saved) => Some(format!(
-                    "{} is unavailable, so Nautilus fell back to {}.",
+                    "{} is unavailable, so Plainsong fell back to {}.",
                     saved.device_name, name
                 )),
                 None => bluetooth_advisory_for_device(&name, Some(&transport_type)),
@@ -401,7 +406,9 @@ impl AudioCapture {
         }
 
         while self.dictation_buffer.pop().is_some() {}
-        while self.dictation_stream_queue.pop().is_some() {}
+        if let Ok(mut partial) = self.dictation_partial_buffer.lock() {
+            partial.clear();
+        }
 
         let (device, resolved_device) = self.resolve_input_device(preference)?;
 
@@ -439,12 +446,13 @@ impl AudioCapture {
 
         let is_dictating = Arc::clone(&self.is_dictating);
         let buffer = Arc::clone(&self.dictation_buffer);
-        let stream_queue = Arc::clone(&self.dictation_stream_queue);
         let callback_count = Arc::clone(&self.dictation_callback_count);
         let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
         let audio_level = Arc::clone(&self.dictation_audio_level);
         let last_speech_ms = Arc::clone(&self.last_speech_ms);
         let dictation_start = Arc::clone(&self.dictation_start);
+        let partial_buffer = Arc::clone(&self.dictation_partial_buffer);
+        let streaming_active = Arc::clone(&self.dictation_streaming_active);
 
         let capture_handle = std::thread::spawn(move || {
             let capture_flag = Arc::clone(&is_dictating);
@@ -461,13 +469,16 @@ impl AudioCapture {
                 }
             };
             let num_channels = config.channels() as usize;
+            // Cap the UI-only partial buffer to a sliding window of recent audio
+            // so the per-tick clone (taken under a lock the RT callback also holds)
+            // and the partial re-decode stay O(window), not O(session length).
+            // Trim lazily (only past 2x the window) so the front-drain memmove is
+            // amortized to roughly once per window rather than every callback.
+            let max_partial_samples = (config.sample_rate() as usize).saturating_mul(30);
             let err_fn = |err| tracing::error!("Dictation stream error: {}", err);
             let is_dictating_f32 = Arc::clone(&is_dictating);
             let is_dictating_i16 = Arc::clone(&is_dictating);
             let is_dictating_u8 = Arc::clone(&is_dictating);
-            let stream_queue_f32 = Arc::clone(&stream_queue);
-            let stream_queue_i16 = Arc::clone(&stream_queue);
-            let stream_queue_u8 = Arc::clone(&stream_queue);
             let audio_level_f32 = Arc::clone(&audio_level);
             let audio_level_i16 = Arc::clone(&audio_level);
             let audio_level_u8 = Arc::clone(&audio_level);
@@ -477,6 +488,12 @@ impl AudioCapture {
             let dictation_start_f32 = Arc::clone(&dictation_start);
             let dictation_start_i16 = Arc::clone(&dictation_start);
             let dictation_start_u8 = Arc::clone(&dictation_start);
+            let partial_buffer_f32 = Arc::clone(&partial_buffer);
+            let partial_buffer_i16 = Arc::clone(&partial_buffer);
+            let partial_buffer_u8 = Arc::clone(&partial_buffer);
+            let streaming_active_f32 = Arc::clone(&streaming_active);
+            let streaming_active_i16 = Arc::clone(&streaming_active);
+            let streaming_active_u8 = Arc::clone(&streaming_active);
             const SPEECH_THRESHOLD: f32 = 0.02;
 
             let stream_result = match config.sample_format() {
@@ -485,25 +502,43 @@ impl AudioCapture {
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         if is_dictating_f32.load(Ordering::SeqCst) {
                             callback_count.fetch_add(1, Ordering::Relaxed);
+                            let streaming = streaming_active_f32.load(Ordering::Relaxed);
+                            let mut partial: Vec<f32> = if streaming {
+                                Vec::with_capacity(if num_channels == 1 {
+                                    data.len()
+                                } else {
+                                    data.len() / num_channels
+                                })
+                            } else {
+                                Vec::new()
+                            };
                             let mut sum_sq: f64 = 0.0;
-                            let mut stream_chunk =
-                                Vec::with_capacity(data.len() / num_channels.max(1));
                             if num_channels == 1 {
                                 for &sample in data {
                                     buffer.push(sample);
-                                    stream_chunk.push(sample);
+                                    if streaming {
+                                        partial.push(sample);
+                                    }
                                     sum_sq += (sample as f64) * (sample as f64);
                                 }
                             } else {
                                 for chunk in data.chunks_exact(num_channels) {
                                     let mono: f32 = chunk.iter().sum::<f32>() / num_channels as f32;
                                     buffer.push(mono);
-                                    stream_chunk.push(mono);
+                                    if streaming {
+                                        partial.push(mono);
+                                    }
                                     sum_sq += (mono as f64) * (mono as f64);
                                 }
                             }
-                            if !stream_chunk.is_empty() {
-                                stream_queue_f32.push(stream_chunk);
+                            if streaming {
+                                if let Ok(mut shared) = partial_buffer_f32.lock() {
+                                    shared.extend_from_slice(&partial);
+                                    if shared.len() > max_partial_samples * 2 {
+                                        let overflow = shared.len() - max_partial_samples;
+                                        shared.drain(0..overflow);
+                                    }
+                                }
                             }
                             let rms = (sum_sq / data.len() as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
@@ -525,14 +560,24 @@ impl AudioCapture {
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
                         if is_dictating_i16.load(Ordering::SeqCst) {
                             callback_count.fetch_add(1, Ordering::Relaxed);
+                            let streaming = streaming_active_i16.load(Ordering::Relaxed);
+                            let mut partial: Vec<f32> = if streaming {
+                                Vec::with_capacity(if num_channels == 1 {
+                                    data.len()
+                                } else {
+                                    data.len() / num_channels
+                                })
+                            } else {
+                                Vec::new()
+                            };
                             let mut sum_sq: f64 = 0.0;
-                            let mut stream_chunk =
-                                Vec::with_capacity(data.len() / num_channels.max(1));
                             if num_channels == 1 {
                                 for &sample in data {
                                     let f = sample as f32 / i16::MAX as f32;
                                     buffer.push(f);
-                                    stream_chunk.push(f);
+                                    if streaming {
+                                        partial.push(f);
+                                    }
                                     sum_sq += (f as f64) * (f as f64);
                                 }
                             } else {
@@ -543,12 +588,20 @@ impl AudioCapture {
                                         .sum::<f32>()
                                         / num_channels as f32;
                                     buffer.push(mono);
-                                    stream_chunk.push(mono);
+                                    if streaming {
+                                        partial.push(mono);
+                                    }
                                     sum_sq += (mono as f64) * (mono as f64);
                                 }
                             }
-                            if !stream_chunk.is_empty() {
-                                stream_queue_i16.push(stream_chunk);
+                            if streaming {
+                                if let Ok(mut shared) = partial_buffer_i16.lock() {
+                                    shared.extend_from_slice(&partial);
+                                    if shared.len() > max_partial_samples * 2 {
+                                        let overflow = shared.len() - max_partial_samples;
+                                        shared.drain(0..overflow);
+                                    }
+                                }
                             }
                             let rms = (sum_sq / data.len() as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
@@ -570,14 +623,24 @@ impl AudioCapture {
                     move |data: &[u8], _: &cpal::InputCallbackInfo| {
                         if is_dictating_u8.load(Ordering::SeqCst) {
                             callback_count.fetch_add(1, Ordering::Relaxed);
+                            let streaming = streaming_active_u8.load(Ordering::Relaxed);
+                            let mut partial: Vec<f32> = if streaming {
+                                Vec::with_capacity(if num_channels == 1 {
+                                    data.len()
+                                } else {
+                                    data.len() / num_channels
+                                })
+                            } else {
+                                Vec::new()
+                            };
                             let mut sum_sq: f64 = 0.0;
-                            let mut stream_chunk =
-                                Vec::with_capacity(data.len() / num_channels.max(1));
                             if num_channels == 1 {
                                 for &sample in data {
                                     let f = (sample as f32 - 128.0) / 128.0;
                                     buffer.push(f);
-                                    stream_chunk.push(f);
+                                    if streaming {
+                                        partial.push(f);
+                                    }
                                     sum_sq += (f as f64) * (f as f64);
                                 }
                             } else {
@@ -588,12 +651,20 @@ impl AudioCapture {
                                         .sum::<f32>()
                                         / num_channels as f32;
                                     buffer.push(mono);
-                                    stream_chunk.push(mono);
+                                    if streaming {
+                                        partial.push(mono);
+                                    }
                                     sum_sq += (mono as f64) * (mono as f64);
                                 }
                             }
-                            if !stream_chunk.is_empty() {
-                                stream_queue_u8.push(stream_chunk);
+                            if streaming {
+                                if let Ok(mut shared) = partial_buffer_u8.lock() {
+                                    shared.extend_from_slice(&partial);
+                                    if shared.len() > max_partial_samples * 2 {
+                                        let overflow = shared.len() - max_partial_samples;
+                                        shared.drain(0..overflow);
+                                    }
+                                }
                             }
                             let rms = (sum_sq / data.len() as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
@@ -705,6 +776,14 @@ impl AudioCapture {
             samples.push(sample);
         }
 
+        // The partial buffer is UI-only and never contributes to `samples`.
+        // Stop streaming and release its memory now that capture has ended.
+        self.dictation_streaming_active
+            .store(false, Ordering::SeqCst);
+        if let Ok(mut partial) = self.dictation_partial_buffer.lock() {
+            partial.clear();
+        }
+
         tracing::info!(
             "Collected {} samples from dictation buffer (sample rate: {} Hz)",
             samples.len(),
@@ -775,6 +854,8 @@ impl AudioCapture {
 
     pub fn abort_dictation(&mut self) {
         self.is_dictating.store(false, Ordering::SeqCst);
+        self.dictation_streaming_active
+            .store(false, Ordering::SeqCst);
 
         if let Some(handle) = self.dictation_thread.take() {
             std::thread::spawn(move || {
@@ -785,6 +866,9 @@ impl AudioCapture {
         }
 
         while self.dictation_buffer.pop().is_some() {}
+        if let Ok(mut partial) = self.dictation_partial_buffer.lock() {
+            partial.clear();
+        }
     }
 
     /// Get the current audio level for dictation (0.0 to 1.0)
@@ -944,12 +1028,22 @@ impl AudioCapture {
                 let dropped_stream_i16 = Arc::clone(&dropped_stream_chunks);
                 let dropped_writer_f32 = Arc::clone(&dropped_writer_chunks);
                 let dropped_writer_i16 = Arc::clone(&dropped_writer_chunks);
+                // The recording is written as a 1-channel WAV, so interleaved
+                // multi-channel input must be downmixed to mono; otherwise a
+                // stereo device produces a double-length, half-speed recording.
+                let num_channels = config.channels() as usize;
                 let err_fn = |err| tracing::error!("Stream error: {}", err);
                 let stream_result = match config.sample_format() {
                     cpal::SampleFormat::F32 => device.build_input_stream(
                         &config.into(),
                         move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                            let chunk: Vec<f32> = data.to_vec();
+                            let chunk: Vec<f32> = if num_channels <= 1 {
+                                data.to_vec()
+                            } else {
+                                data.chunks_exact(num_channels)
+                                    .map(|frame| frame.iter().sum::<f32>() / num_channels as f32)
+                                    .collect()
+                            };
 
                             if let Ok(mut waveform) = wf_buffer.lock() {
                                 for &sample in data.iter().step_by(data.len() / 100 + 1).take(100) {
@@ -981,8 +1075,19 @@ impl AudioCapture {
                     cpal::SampleFormat::I16 => device.build_input_stream(
                         &config.into(),
                         move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                            let chunk: Vec<f32> =
-                                data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                            let chunk: Vec<f32> = if num_channels <= 1 {
+                                data.iter().map(|&s| s as f32 / i16::MAX as f32).collect()
+                            } else {
+                                data.chunks_exact(num_channels)
+                                    .map(|frame| {
+                                        frame
+                                            .iter()
+                                            .map(|&s| s as f32 / i16::MAX as f32)
+                                            .sum::<f32>()
+                                            / num_channels as f32
+                                    })
+                                    .collect()
+                            };
 
                             if let Ok(mut waveform) = wf_buffer.lock() {
                                 for &sample in chunk.iter().step_by(chunk.len() / 100 + 1).take(100)
@@ -1248,6 +1353,27 @@ impl AudioCapture {
 
     pub fn is_dictating(&self) -> bool {
         self.is_dictating.load(Ordering::SeqCst)
+    }
+
+    /// Enable or disable UI-only streaming partial accumulation for the next/active
+    /// dictation. When off, capture callbacks do no extra work (no allocation, no lock).
+    pub fn set_streaming_partials_enabled(&self, on: bool) {
+        self.dictation_streaming_active.store(on, Ordering::SeqCst);
+    }
+
+    /// Clone of the UI-only partial sample buffer Arc, for the partial-decode task.
+    pub fn dictation_partial_buffer_handle(&self) -> Arc<std::sync::Mutex<Vec<f32>>> {
+        Arc::clone(&self.dictation_partial_buffer)
+    }
+
+    /// Clone of the `is_dictating` Arc, so the partial-decode task can observe stop.
+    pub fn is_dictating_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.is_dictating)
+    }
+
+    /// Sample rate of the active dictation capture.
+    pub fn dictation_sample_rate(&self) -> u32 {
+        self.dictation_sample_rate
     }
 
     pub fn is_recording(&self) -> bool {

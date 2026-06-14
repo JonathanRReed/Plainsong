@@ -10,7 +10,6 @@ mod dictation_pipeline;
 mod download;
 mod events;
 mod export;
-mod license;
 mod llm;
 mod models;
 mod secrets;
@@ -20,7 +19,6 @@ mod store;
 mod streaming;
 pub mod text;
 mod transcription;
-pub mod update;
 
 use crate::asr::manager::RuntimeStatus;
 #[cfg(test)]
@@ -103,7 +101,7 @@ const LAST_EXTERNAL_TARGET_MAX_AGE_MS: i64 = 120_000;
 #[cfg(target_os = "macos")]
 const MEETING_CONSENT_TARGET_MAX_AGE_MS: i64 = 12_000;
 const DICTATION_COMMAND_PREFIX_DEFAULT: &str = "command";
-const APP_BUNDLE_IDENTIFIER: &str = "com.nautilus.bot";
+const APP_BUNDLE_IDENTIFIER: &str = "com.plainsong.app";
 const STREAMING_PREVIEW_MAX_SECONDS: f64 = 90.0;
 const MIN_SILENCE_TIMEOUT_SECONDS: f32 = 60.0;
 const MAX_SILENCE_TIMEOUT_SECONDS: f32 = 1800.0;
@@ -556,14 +554,14 @@ async fn request_dictation_permissions_impl(
 
         if !request_accessibility_permission() {
             notes.push(
-                "Accessibility permission is still not granted for this app copy. macOS may require you to re-enable Nautilus under Privacy & Security > Accessibility after app updates."
+                "Accessibility permission is still not granted for this app copy. macOS may require you to re-enable Plainsong under Privacy & Security > Accessibility after app updates."
                     .to_string(),
             );
         }
 
         if !request_post_event_access() {
             notes.push(
-                "macOS native keyboard-event access is still not granted for this app copy. Nautilus may need direct Accessibility text insertion instead."
+                "macOS native keyboard-event access is still not granted for this app copy. Plainsong may need direct Accessibility text insertion instead."
                     .to_string(),
             );
         }
@@ -585,7 +583,7 @@ async fn repair_cursor_insert_permissions_impl(
 
         match reset_tcc_service("Accessibility", APP_BUNDLE_IDENTIFIER) {
             Ok(()) => notes.push(
-                "Reset the macOS Accessibility privacy decision for Nautilus. Re-enable Nautilus in Privacy & Security > Accessibility if macOS shows it turned off."
+                "Reset the macOS Accessibility privacy decision for Plainsong. Re-enable Plainsong in Privacy & Security > Accessibility if macOS shows it turned off."
                     .to_string(),
             ),
             Err(error) => notes.push(format!(
@@ -596,7 +594,7 @@ async fn repair_cursor_insert_permissions_impl(
 
         if !request_accessibility_permission() {
             notes.push(
-                "macOS still has not granted Accessibility to this Nautilus app copy. Turn Nautilus back on in Privacy & Security > Accessibility, then re-check readiness."
+                "macOS still has not granted Accessibility to this Plainsong app copy. Turn Plainsong back on in Privacy & Security > Accessibility, then re-check readiness."
                     .to_string(),
             );
         }
@@ -634,7 +632,7 @@ async fn collect_permission_diagnostics(
 
     if !microphone_permission_ready {
         notes.push(
-            "Microphone permission not granted yet. Enable Nautilus in Privacy & Security > Microphone."
+            "Microphone permission not granted yet. Enable Plainsong in Privacy & Security > Microphone."
                 .to_string(),
         );
     }
@@ -662,15 +660,15 @@ async fn collect_permission_diagnostics(
     if running_from_disk_image {
         let running_path = app_bundle_path
             .as_deref()
-            .unwrap_or("/Volumes/.../Nautilus.app");
+            .unwrap_or("/Volumes/.../Plainsong.app");
         if let Some(installed_path) = recommended_app_bundle_path.as_deref() {
             notes.push(format!(
-                "Nautilus is running from the mounted disk image at {}. macOS permissions granted to {} do not apply to this copy. Quit this DMG copy and open the installed app instead.",
+                "Plainsong is running from the mounted disk image at {}. macOS permissions granted to {} do not apply to this copy. Quit this DMG copy and open the installed app instead.",
                 running_path, installed_path
             ));
         } else {
             notes.push(format!(
-                "Nautilus is running from the mounted disk image at {}. Copy Nautilus.app into /Applications and open that installed copy so macOS permissions apply consistently.",
+                "Plainsong is running from the mounted disk image at {}. Copy Plainsong.app into /Applications and open that installed copy so macOS permissions apply consistently.",
                 running_path
             ));
         }
@@ -690,7 +688,7 @@ async fn collect_permission_diagnostics(
             }
             SpeechAuthorizationStatus::Denied => {
                 notes.push(
-                    "Speech recognition permission denied. Enable Nautilus in Privacy & Security > Speech Recognition.".to_string(),
+                    "Speech recognition permission denied. Enable Plainsong in Privacy & Security > Speech Recognition.".to_string(),
                 );
                 false
             }
@@ -737,7 +735,7 @@ async fn collect_permission_diagnostics(
         let accessibility_trusted = accessibility_probe_ready || cursor_insertion_observed;
         if !accessibility_probe_ready && accessibility_trusted {
             notes.push(
-                "Direct Accessibility insertion was verified by Nautilus in this session. The macOS permission probe may be stale for this app copy."
+                "Direct Accessibility insertion was verified by Plainsong in this session. The macOS permission probe may be stale for this app copy."
                     .to_string(),
             );
         }
@@ -746,7 +744,7 @@ async fn collect_permission_diagnostics(
                 let detail = status
                     .message
                     .as_deref()
-                    .unwrap_or("Nautilus copied the dictation result but could not post Cmd+V.");
+                    .unwrap_or("Plainsong copied the dictation result but could not post Cmd+V.");
                 notes.push(format!(
                     "Latest cursor insert attempt fell back to clipboard-only. {}",
                     detail
@@ -773,7 +771,7 @@ async fn collect_permission_diagnostics(
                 );
             } else {
                 notes.push(
-                    "Cursor insertion is not ready yet. Enable Nautilus in Privacy & Security > Accessibility so it can insert text into other apps."
+                    "Cursor insertion is not ready yet. Enable Plainsong in Privacy & Security > Accessibility so it can insert text into other apps."
                         .to_string(),
                 );
             }
@@ -885,15 +883,15 @@ fn open_installed_nautilus_app_impl() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         let app_path = installed_nautilus_app_bundle_path()
-            .ok_or_else(|| "Installed Nautilus.app was not found in /Applications.".to_string())?;
+            .ok_or_else(|| "Installed Plainsong.app was not found in /Applications.".to_string())?;
 
         let status = std::process::Command::new("open")
             .arg(app_path)
             .status()
-            .map_err(|e| format!("Failed to open installed Nautilus.app: {}", e))?;
+            .map_err(|e| format!("Failed to open installed Plainsong.app: {}", e))?;
 
         if !status.success() {
-            return Err("Failed to open installed Nautilus.app".to_string());
+            return Err("Failed to open installed Plainsong.app".to_string());
         }
 
         Ok(())
@@ -901,7 +899,7 @@ fn open_installed_nautilus_app_impl() -> Result<(), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        Err("Opening the installed Nautilus app is supported on macOS only.".to_string())
+        Err("Opening the installed Plainsong app is supported on macOS only.".to_string())
     }
 }
 
@@ -919,7 +917,7 @@ struct DiarizationModelOption {
 fn diarization_model_path(model_id: &str) -> Option<std::path::PathBuf> {
     let models_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Nautilus")
+        .join("Plainsong")
         .join("models")
         .join("diarization");
     match model_id {
@@ -972,7 +970,7 @@ async fn smoke_test_cursor_insert_impl(
     text: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let sample = text
-        .unwrap_or_else(|| "Nautilus cursor insert smoke test".to_string())
+        .unwrap_or_else(|| "Plainsong cursor insert smoke test".to_string())
         .trim()
         .to_string();
     if sample.is_empty() {
@@ -2848,6 +2846,26 @@ async fn run_analysis_with_selected_provider(
 
 #[cfg(target_os = "macos")]
 fn workspace_frontmost_application() -> Option<WorkspaceFrontmostApplication> {
+    // In-process NSWorkspace lookup — no process spawn on the dictation hot
+    // path. NSWorkspace.sharedWorkspace and frontmostApplication are thread-safe
+    // per Apple's documentation. Falls back to osascript only if this yields
+    // nothing (e.g. a sandbox or future OS change).
+    {
+        use objc2_app_kit::NSWorkspace;
+        let workspace = NSWorkspace::sharedWorkspace();
+        if let Some(app) = workspace.frontmostApplication() {
+            let name = app.localizedName().map(|s| s.to_string());
+            let bundle_id = app.bundleIdentifier().map(|s| s.to_string());
+            if name.is_some() || bundle_id.is_some() {
+                return Some(WorkspaceFrontmostApplication { name, bundle_id });
+            }
+        }
+    }
+
+    workspace_frontmost_application_via_osascript()
+}
+
+fn workspace_frontmost_application_via_osascript() -> Option<WorkspaceFrontmostApplication> {
     let script = r#"
 ObjC.import("AppKit");
 const app = $.NSWorkspace.sharedWorkspace.frontmostApplication;
@@ -3060,15 +3078,15 @@ fn get_frontmost_app_name() -> Option<String> {
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
-public static class NautilusWin32 {
+public static class PlainsongWin32 {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 }
 "@;
-$hwnd = [NautilusWin32]::GetForegroundWindow();
+$hwnd = [PlainsongWin32]::GetForegroundWindow();
 if ($hwnd -eq [IntPtr]::Zero) { return }
 $pid = 0
-[void][NautilusWin32]::GetWindowThreadProcessId($hwnd, [ref]$pid)
+[void][PlainsongWin32]::GetWindowThreadProcessId($hwnd, [ref]$pid)
 if ($pid -eq 0) { return }
 $process = Get-Process -Id $pid -ErrorAction SilentlyContinue
 if ($null -ne $process -and -not [string]::IsNullOrWhiteSpace($process.ProcessName)) {
@@ -3107,15 +3125,15 @@ Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class NautilusWin32 {
+public static class PlainsongWin32 {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
 }
 "@;
-$hwnd = [NautilusWin32]::GetForegroundWindow();
+$hwnd = [PlainsongWin32]::GetForegroundWindow();
 if ($hwnd -eq [IntPtr]::Zero) { return }
 $builder = New-Object System.Text.StringBuilder 1024
-[void][NautilusWin32]::GetWindowText($hwnd, $builder, $builder.Capacity)
+[void][PlainsongWin32]::GetWindowText($hwnd, $builder, $builder.Capacity)
 $title = $builder.ToString().Trim()
 if (-not [string]::IsNullOrWhiteSpace($title)) { $title }
 "#;
@@ -3185,7 +3203,7 @@ fn get_frontmost_browser_url() -> Option<String> {
 }
 
 fn meeting_consent_notice_text() -> &'static str {
-    "Heads up: I’m recording and transcribing this meeting with Nautilus for my notes. Please let me know now if you want me to stop."
+    "Heads up: I’m recording and transcribing this meeting with Plainsong for my notes. Please let me know now if you want me to stop."
 }
 
 #[cfg(target_os = "macos")]
@@ -3257,7 +3275,7 @@ fn meeting_consent_automation_status(state: &AppState) -> MeetingConsentAutomati
             app_bundle_id: None,
             browser_url: None,
             can_automate: false,
-            message: "Manual reminder only. Open Zoom or the active Google Meet tab before starting if you want Nautilus to post the consent notice for you.".to_string(),
+            message: "Manual reminder only. Open Zoom or the active Google Meet tab before starting if you want Plainsong to post the consent notice for you.".to_string(),
             notice_text,
         };
     };
@@ -3269,19 +3287,19 @@ fn meeting_consent_automation_status(state: &AppState) -> MeetingConsentAutomati
         .unwrap_or(false);
     let message = match surface.as_deref() {
         Some("zoom") if can_automate => {
-            "Zoom chat auto-notice is ready. Nautilus will open chat, focus the message box, and send the consent notice when recording starts.".to_string()
+            "Zoom chat auto-notice is ready. Plainsong will open chat, focus the message box, and send the consent notice when recording starts.".to_string()
         }
         Some("google_meet") if can_automate => {
-            "Google Meet consent automation is ready. Nautilus will open chat and post the notice when recording starts while Accessibility remains enabled.".to_string()
+            "Google Meet consent automation is ready. Plainsong will open chat and post the notice when recording starts while Accessibility remains enabled.".to_string()
         }
         Some("google_meet") => {
-            "Manual reminder only right now. Google Meet automation needs both keyboard-event access and Accessibility so Nautilus can open chat and insert the notice reliably.".to_string()
+            "Manual reminder only right now. Google Meet automation needs both keyboard-event access and Accessibility so Plainsong can open chat and insert the notice reliably.".to_string()
         }
         Some("zoom") => {
-            "Manual reminder only right now. Nautilus found Zoom, but macOS still needs keyboard-event permission before it can post the consent notice automatically.".to_string()
+            "Manual reminder only right now. Plainsong found Zoom, but macOS still needs keyboard-event permission before it can post the consent notice automatically.".to_string()
         }
         _ => {
-            "Manual reminder only. Nautilus can auto-post consent notices in Zoom and Google Meet on macOS; everything else falls back to a manual reminder.".to_string()
+            "Manual reminder only. Plainsong can auto-post consent notices in Zoom and Google Meet on macOS; everything else falls back to a manual reminder.".to_string()
         }
     };
 
@@ -5227,6 +5245,21 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn partial_should_decode_gates_correctly() {
+        let min_samples = 8000; // 0.5 s at 16 kHz
+
+        // Too short: never decode, even if it grew.
+        assert!(!partial_should_decode(4000, 0, min_samples));
+        // Long enough but unchanged since last decode: skip.
+        assert!(!partial_should_decode(8000, 8000, min_samples));
+        // Grown and long enough: decode.
+        assert!(partial_should_decode(8000, 0, min_samples));
+        assert!(partial_should_decode(20000, 8000, min_samples));
+        // Exactly at the threshold counts as long enough.
+        assert!(partial_should_decode(min_samples, 0, min_samples));
     }
 
     #[test]
@@ -8016,6 +8049,15 @@ async fn auto_name_meeting_recording(
     Ok(Some(new_title))
 }
 
+/// Decide whether a streaming-partial tick should run a decode.
+///
+/// UI-only: this gates the live preview decode, never the final transcription.
+/// Decode only when the accumulated audio is long enough to be worth decoding
+/// (`>= min_samples`) and has grown since the previous decode.
+fn partial_should_decode(snapshot_len: usize, last_len: usize, min_samples: usize) -> bool {
+    snapshot_len >= min_samples && snapshot_len != last_len
+}
+
 fn mono_samples_to_wav_bytes(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
     let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
     let spec = hound::WavSpec {
@@ -10208,10 +10250,10 @@ pub(crate) fn canonicalize_existing_absolute_path(
 pub(crate) fn nautilus_data_root() -> Result<PathBuf, String> {
     let root = dirs::data_dir()
         .ok_or("Could not find data directory")?
-        .join("Nautilus");
+        .join("Plainsong");
     std::fs::create_dir_all(&root).map_err(|e| {
         format!(
-            "Failed to prepare Nautilus data root '{}': {}",
+            "Failed to prepare Plainsong data root '{}': {}",
             root.display(),
             e
         )
@@ -10226,10 +10268,10 @@ fn approved_path_roots() -> Result<Vec<PathBuf>, String> {
 
     let config_root = dirs::config_dir()
         .ok_or("Could not find config directory")?
-        .join("Nautilus");
+        .join("Plainsong");
     if let Err(e) = std::fs::create_dir_all(&config_root) {
         tracing::warn!(
-            "Failed to prepare Nautilus config root '{}': {}",
+            "Failed to prepare Plainsong config root '{}': {}",
             config_root.display(),
             e
         );
@@ -10240,10 +10282,10 @@ fn approved_path_roots() -> Result<Vec<PathBuf>, String> {
     let documents_base = dirs::document_dir()
         .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
         .ok_or("Could not find documents directory")?;
-    let documents_root = documents_base.join("Nautilus");
+    let documents_root = documents_base.join("Plainsong");
     if let Err(e) = std::fs::create_dir_all(&documents_root) {
         tracing::warn!(
-            "Failed to prepare Nautilus documents root '{}': {}",
+            "Failed to prepare Plainsong documents root '{}': {}",
             documents_root.display(),
             e
         );
@@ -10252,7 +10294,7 @@ fn approved_path_roots() -> Result<Vec<PathBuf>, String> {
     }
 
     if roots.is_empty() {
-        return Err("No approved Nautilus roots are available".to_string());
+        return Err("No approved Plainsong roots are available".to_string());
     }
     Ok(roots)
 }
@@ -10264,7 +10306,7 @@ pub(crate) fn ensure_path_in_approved_roots(path: &Path, label: &str) -> Result<
     }
 
     Err(format!(
-        "{} '{}' is outside approved Nautilus roots",
+        "{} '{}' is outside approved Plainsong roots",
         label,
         path.display()
     ))
@@ -10481,7 +10523,7 @@ fn ensure_microphone_permission(prompt_if_needed: bool) -> Result<(), String> {
 
     if status == AVAuthorizationStatus::Denied {
         return Err(
-            "Microphone permission denied. Enable Nautilus in Privacy & Security > Microphone."
+            "Microphone permission denied. Enable Plainsong in Privacy & Security > Microphone."
                 .to_string(),
         );
     }
@@ -10499,7 +10541,7 @@ fn ensure_microphone_permission(prompt_if_needed: bool) -> Result<(), String> {
 
     if !prompt_if_needed {
         return Err(
-            "Microphone permission has not been granted yet. Enable auto-request permissions or allow Nautilus in Privacy & Security > Microphone."
+            "Microphone permission has not been granted yet. Enable auto-request permissions or allow Plainsong in Privacy & Security > Microphone."
                 .to_string(),
         );
     }
@@ -10507,7 +10549,7 @@ fn ensure_microphone_permission(prompt_if_needed: bool) -> Result<(), String> {
     match request_microphone_permission() {
         Ok(true) => Ok(()),
         Ok(false) => Err(
-            "Microphone permission was not granted. Enable Nautilus in Privacy & Security > Microphone."
+            "Microphone permission was not granted. Enable Plainsong in Privacy & Security > Microphone."
                 .to_string(),
         ),
         Err(error) => Err(error),
@@ -10549,7 +10591,7 @@ fn current_app_bundle_path() -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn installed_nautilus_app_bundle_path() -> Option<PathBuf> {
-    let path = PathBuf::from("/Applications/Nautilus.app");
+    let path = PathBuf::from("/Applications/Plainsong.app");
     path.exists().then_some(path)
 }
 
@@ -10559,7 +10601,7 @@ fn is_self_activation_target(app_name: Option<&str>, app_bundle_id: Option<&str>
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| {
-            value.eq_ignore_ascii_case("Nautilus") || value.eq_ignore_ascii_case("nautilus-bot")
+            value.eq_ignore_ascii_case("Plainsong") || value.eq_ignore_ascii_case("nautilus-bot")
         })
         .unwrap_or(false);
     let bundle_matches = app_bundle_id
@@ -10948,7 +10990,7 @@ fn insert_text_via_accessibility(
 
     unsafe { CFRelease(focused_element) };
     Err(format!(
-        "Focused element role '{}' is not settable through macOS Accessibility, so Nautilus must fall back to paste.",
+        "Focused element role '{}' is not settable through macOS Accessibility, so Plainsong must fall back to paste.",
         role
     ))
 }
@@ -10982,7 +11024,6 @@ fn reactivate_target_application(
             "Target app '{}' is already frontmost; skipping app reactivation to preserve field focus",
             trimmed_name.or(trimmed_bundle_id).unwrap_or("unknown")
         );
-        std::thread::sleep(std::time::Duration::from_millis(60));
         return Ok(());
     }
 
@@ -11168,7 +11209,10 @@ fn dispatch_macos_keystroke(keycode: u16, modifiers: MacosKeyModifiers) -> Resul
     const SHIFT_KEYCODE: CGKeyCode = 56;
     const OPTION_KEYCODE: CGKeyCode = 58;
     const CONTROL_KEYCODE: CGKeyCode = 59;
-    const KEYSTROKE_DELAY_MS: u64 = 50;
+    // Gap between synthetic key events. Long enough for target apps to register
+    // the modifier/key sequence, short enough that a Cmd+V costs ~32ms of sleep
+    // rather than ~200ms. (Was 50ms.)
+    const KEYSTROKE_DELAY_MS: u64 = 8;
     const MAX_ATTEMPTS: usize = 2;
 
     let mut last_error: Option<String> = None;
@@ -11436,14 +11480,14 @@ fn send_meeting_consent_notice_internal(state: &AppState) -> MeetingConsentNotic
     let Some(surface) = match_meeting_consent_surface(&target).map(str::to_string) else {
         return manual_return(
             None,
-            "Manual reminder only. This meeting surface is not one Nautilus can post into automatically.".to_string(),
+            "Manual reminder only. This meeting surface is not one Plainsong can post into automatically.".to_string(),
         );
     };
 
     if !consent_surface_can_automate(&surface) {
         return manual_return(
             Some(surface),
-            "Manual reminder only. Copy the consent notice from Nautilus before you continue."
+            "Manual reminder only. Copy the consent notice from Plainsong before you continue."
                 .to_string(),
         );
     }
@@ -11474,7 +11518,7 @@ fn send_meeting_consent_notice_internal(state: &AppState) -> MeetingConsentNotic
             manual_return(
                 Some(surface),
                 format!(
-                    "Automatic consent posting did not complete. {} Copy the notice from Nautilus and send it manually.",
+                    "Automatic consent posting did not complete. {} Copy the notice from Plainsong and send it manually.",
                     error
                 ),
             )
@@ -11488,7 +11532,7 @@ fn send_meeting_consent_notice_internal(_state: &AppState) -> MeetingConsentNoti
         mode: "manual_required".to_string(),
         surface: None,
         message:
-            "Consent reminder stayed manual. Copy the notice from Nautilus before you continue."
+            "Consent reminder stayed manual. Copy the notice from Plainsong before you continue."
                 .to_string(),
         notice_text: meeting_consent_notice_text().to_string(),
     }
@@ -11577,12 +11621,12 @@ fn dispatch_paste_from_clipboard(
             Err(
                 if !(check_accessibility_permission() || check_post_event_access()) {
                     format!(
-                    "Direct macOS text insertion is not enabled for Nautilus, and macOS also blocked the native Cmd+V fallback ({}). Grant Accessibility for this app copy.",
+                    "Direct macOS text insertion is not enabled for Plainsong, and macOS also blocked the native Cmd+V fallback ({}). Grant Accessibility for this app copy.",
                     error
                 )
                 } else if error.to_ascii_lowercase().contains("activate target") {
                     format!(
-                    "Nautilus copied to the clipboard, but macOS could not reactivate the target app before sending Cmd+V ({}). Click back into the destination app and press Cmd+V manually.",
+                    "Plainsong copied to the clipboard, but macOS could not reactivate the target app before sending Cmd+V ({}). Click back into the destination app and press Cmd+V manually.",
                     error
                 )
                 } else {
@@ -12330,7 +12374,58 @@ async fn execute_dictation_command_action(
 
 /// Build and return the application state without starting the desktop shell.
 /// Used by the sidecar binary to initialize the backend independently.
+/// Remove keychain entries and on-disk state left over from the former
+/// commercial licensing system. Best-effort and idempotent: it runs on every
+/// startup but only does work for users upgrading from a licensed build.
+fn cleanup_legacy_license_artifacts() {
+    const LEGACY_LICENSE_SECRETS: [&str; 4] = [
+        "license_key",
+        "license_instance_id",
+        "license_device_id",
+        "license_first_run_at",
+    ];
+    for key in LEGACY_LICENSE_SECRETS {
+        let _ = secrets::clear_internal_secret(key);
+    }
+    if let Some(state_file) =
+        dirs::data_dir().map(|d| d.join("Plainsong").join("nautilus_license.json"))
+    {
+        let _ = std::fs::remove_file(state_file);
+    }
+}
+
+/// Write a transactionally-consistent snapshot of the live database to a temp
+/// file for inclusion in a backup. Returns None if the database has no on-disk
+/// file yet (nothing to snapshot). The caller is responsible for deleting the
+/// returned path once the backup has consumed it.
+async fn snapshot_live_database(state: &AppState) -> Result<Option<std::path::PathBuf>, String> {
+    let snapshot_path =
+        std::env::temp_dir().join(format!("nautilus-db-snapshot-{}.db", uuid::Uuid::new_v4()));
+    let db = state.db.lock().await;
+    match db.backup_to(&snapshot_path) {
+        Ok(()) => Ok(Some(snapshot_path)),
+        Err(err) => {
+            tracing::warn!("Database snapshot failed, backup will skip the database: {err}");
+            Ok(None)
+        }
+    }
+}
+
+/// Reopen the database connection after a restore replaced the on-disk file.
+/// Without this, AppState keeps reading/writing the old inode and the restored
+/// data is invisible until the next launch.
+async fn reopen_database_after_restore(state: &AppState) -> Result<(), String> {
+    let db_key = secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
+        .map_err(|e| format!("Could not read secure database key after restore: {e}"))?;
+    let reopened = db::Database::new_with_key(db_key.as_deref())
+        .map_err(|e| format!("Failed to reopen database after restore: {e}"))?;
+    *state.db.lock().await = reopened;
+    Ok(())
+}
+
 pub async fn build_app_state() -> Result<AppState, String> {
+    cleanup_legacy_license_artifacts();
+
     let initial_db_key = secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
         .map_err(|e| format!("Could not read secure database key: {}", e))?;
 
@@ -12661,6 +12756,10 @@ async fn reset_app_state_for_sidecar(
 
 /// Sidecar-compatible start_dictation: simplified version that emits events via SidecarHandle.
 /// Full overlay sync and tray updates are handled by Electron.
+/// Handles captured under the audio lock to drive the UI-only streaming-partial
+/// task: (partial sample buffer, is-dictating flag, capture sample rate).
+type PartialTaskHandles = (Arc<std::sync::Mutex<Vec<f32>>>, Arc<AtomicBool>, u32);
+
 async fn start_dictation_for_sidecar(
     state: &AppState,
     handle: &crate::sidecar_handle::SidecarHandle,
@@ -12806,6 +12905,20 @@ async fn start_dictation_for_sidecar(
         .asr_manager
         .set_provider_model_id(dictation_provider, dictation_model_id.clone())
         .await;
+
+    // Pre-warm the resolved model into cache while the user is speaking, so the
+    // first utterance doesn't pay a cold model load inside stop_dictation.
+    // Detached and best-effort; never blocks the start path.
+    {
+        let prewarm_provider = asr::AsrProviderFactory::create_with_model(
+            dictation_provider,
+            Some(&dictation_model_id),
+        );
+        tokio::spawn(async move {
+            prewarm_provider.prewarm().await;
+        });
+    }
+
     {
         let mut active_options = state.dictation_start_options.lock().await;
         *active_options = options.clone();
@@ -12889,12 +13002,31 @@ async fn start_dictation_for_sidecar(
         }
     };
 
+    // Streaming partials are UI-only and only run for local providers (cloud
+    // providers must not be hit per-tick). They never feed the final transcript.
+    let streaming_partials_enabled = settings_snapshot
+        .transcription
+        .dictation_live_preview_enabled
+        && !dictation_provider.is_remote();
+
+    // Handles captured under the audio lock when capture starts successfully, so
+    // the partial-decode task can be spawned after the lock is released.
+    let mut partial_task_handles: Option<PartialTaskHandles> = None;
+
     {
         let mut audio = state.audio_capture.lock().await;
+        audio.set_streaming_partials_enabled(streaming_partials_enabled);
         match audio.start_dictation(preferred_input_device.as_ref()) {
             Ok(resolved_input) => {
                 if let Some(advisory) = resolved_input.advisory.as_deref() {
                     handle.emit_event("audio-input-advisory", advisory.to_string());
+                }
+                if streaming_partials_enabled {
+                    partial_task_handles = Some((
+                        audio.dictation_partial_buffer_handle(),
+                        audio.is_dictating_handle(),
+                        audio.dictation_sample_rate(),
+                    ));
                 }
             }
             Err(e) => {
@@ -12912,6 +13044,83 @@ async fn start_dictation_for_sidecar(
                 return Err(format!("Failed to start audio capture: {}", e));
             }
         }
+    }
+
+    // Spawn the UI-only streaming-partial task. It re-decodes a copy of the audio
+    // periodically and emits live-preview text. It NEVER feeds the final transcript:
+    // the only thing it writes is a `partialText` field on `dictation-state-changed`.
+    // Best-effort and detached; it swallows all errors and stops when dictation does.
+    if let Some((partial_buffer, is_dictating, sample_rate)) = partial_task_handles {
+        let asr_manager = Arc::clone(&state.asr_manager);
+        let session_tracker = Arc::clone(&state.dictation_session_tracker);
+        let provider = dictation_provider;
+        let model_id = dictation_model_id.clone();
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            let min_samples = (sample_rate as f32 * 0.5) as usize;
+            let mut last_decoded_len: usize = 0;
+            let mut last_emitted_text = String::new();
+            while is_dictating.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+
+                // Stop promptly if dictation ended or a NEWER session started.
+                // Gating on the monotonic active session id (not the shared
+                // is_dictating flag, which a rapid stop->restart flips back to
+                // true) prevents a stale in-flight task from emitting a
+                // wrong-session partial that would disrupt the new session's UI.
+                if session_tracker.lock().await.active_session_id != Some(session_id) {
+                    break;
+                }
+
+                let snapshot = {
+                    partial_buffer
+                        .lock()
+                        .map(|buffer| buffer.clone())
+                        .unwrap_or_default()
+                };
+
+                if !partial_should_decode(snapshot.len(), last_decoded_len, min_samples) {
+                    continue;
+                }
+
+                let bytes = match mono_samples_to_wav_bytes(&snapshot, sample_rate) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        tracing::debug!("Streaming partial wav encode failed: {}", error);
+                        continue;
+                    }
+                };
+
+                let result = asr_manager
+                    .transcribe_bytes_for_dictation(provider, &bytes, Some(&model_id))
+                    .await;
+                last_decoded_len = snapshot.len();
+
+                match result {
+                    Ok(transcription) => {
+                        let text = transcription.text.trim().to_string();
+                        // Re-check the live session id right before emit: the
+                        // decode may have outlived the session it was started for.
+                        let still_current =
+                            session_tracker.lock().await.active_session_id == Some(session_id);
+                        if still_current && !text.is_empty() && text != last_emitted_text {
+                            handle.emit_event(
+                                "dictation-state-changed",
+                                serde_json::json!({
+                                    "phase": "recording",
+                                    "sessionId": session_id,
+                                    "partialText": text,
+                                }),
+                            );
+                            last_emitted_text = text;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!("Streaming partial decode failed: {}", error);
+                    }
+                }
+            }
+        });
     }
 
     {
@@ -13327,14 +13536,23 @@ async fn stop_dictation_for_sidecar(
                         models::DictationProfile::PowerRewrite
                     )
                 {
-                    match run_dictation_formatting_with_selected_provider(
-                        state,
-                        final_text.as_str(),
-                        &dictation_options,
+                    // Cap how long AI formatting may delay insertion. The local
+                    // pipeline output in `final_text` is already a good result,
+                    // so on timeout or error we insert that rather than making
+                    // the user wait on a slow/stuck LLM.
+                    const DICTATION_FORMAT_TIMEOUT: std::time::Duration =
+                        std::time::Duration::from_secs(6);
+                    let formatting = tokio::time::timeout(
+                        DICTATION_FORMAT_TIMEOUT,
+                        run_dictation_formatting_with_selected_provider(
+                            state,
+                            final_text.as_str(),
+                            &dictation_options,
+                        ),
                     )
-                    .await
-                    {
-                        Ok(output) => {
+                    .await;
+                    match formatting {
+                        Ok(Ok(output)) => {
                             final_text =
                                 sanitize_dictation_output(output.trim(), final_text.as_str())
                                     .trim()
@@ -13352,10 +13570,16 @@ async fn stop_dictation_for_sidecar(
                             }
                             formatting_applied = true;
                         }
-                        Err(error) => {
+                        Ok(Err(error)) => {
                             tracing::warn!(
                                 "LLM dictation formatting failed, keeping local pipeline output: {}",
                                 error
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "LLM dictation formatting timed out after {}s, keeping local pipeline output",
+                                DICTATION_FORMAT_TIMEOUT.as_secs()
                             );
                         }
                     }
@@ -13771,24 +13995,33 @@ async fn stop_dictation_for_sidecar(
         }),
     );
 
-    // After a brief display window, hide the overlay and reset to idle.
-    tokio::time::sleep(std::time::Duration::from_millis(
-        DICTATION_IDLE_RESET_SUCCESS_MS,
-    ))
-    .await;
+    // Keep the result visible briefly, then reset to idle — but do it on a
+    // detached task so this command returns immediately. Otherwise the stop
+    // handler blocks for ~1.8s, which (a) delays the response and (b) prevented
+    // starting the next dictation until the display window elapsed.
+    let overlay_state = Arc::clone(&state.dictation_overlay_state);
+    let idle_handle = handle.clone();
+    let idle_session_id = session_id;
+    let idle_stop_reason = stop_reason.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(
+            DICTATION_IDLE_RESET_SUCCESS_MS,
+        ))
+        .await;
 
-    if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
-        *overlay = DictationOverlayState::default();
-    }
-    handle.emit_event(
-        "dictation-state-changed",
-        serde_json::json!({
-            "phase": "idle",
-            "sessionId": session_id,
-            "stopReason": stop_reason,
-        }),
-    );
-    handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
+        if let Ok(mut overlay) = overlay_state.lock() {
+            *overlay = DictationOverlayState::default();
+        }
+        idle_handle.emit_event(
+            "dictation-state-changed",
+            serde_json::json!({
+                "phase": "idle",
+                "sessionId": idle_session_id,
+                "stopReason": idle_stop_reason,
+            }),
+        );
+        idle_handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
+    });
 
     Ok(final_text)
 }
@@ -15053,10 +15286,6 @@ pub async fn dispatch_command(
         "ask_memory" => {
             let query: String =
                 serde_json::from_value(params["query"].clone()).map_err(|e| e.to_string())?;
-            let entitlement = license::get_current_entitlement();
-            if !entitlement.pro_enabled {
-                return Err("Memory requires a Pro license or active trial".to_string());
-            }
             let (memory_search_mode, embedding_model) = {
                 let sm = state.settings_manager.lock().await;
                 let s = sm.settings();
@@ -15290,7 +15519,7 @@ pub async fn dispatch_command(
         "repair_local_model_cache" => {
             let models_root = dirs::data_dir()
                 .ok_or_else(|| "Could not find data directory".to_string())?
-                .join("Nautilus")
+                .join("Plainsong")
                 .join("models");
             repair_local_model_cache_at(&models_root);
             asr::python_runtime::shutdown_python_workers().await;
@@ -15345,14 +15574,6 @@ pub async fn dispatch_command(
             let _ = std::fs::remove_file(&temp_path);
             persist_benchmark_results(state.as_ref(), &results).await;
             serde_json::to_value(results).map_err(|e| e.to_string())
-        }
-        "generate_dictation_benchmark_run" => {
-            let fixture: dictation_parity::DictationBenchmarkFixture =
-                serde_json::from_value(params["fixture"].clone()).map_err(|e| e.to_string())?;
-            let context: dictation_parity::DictationBenchmarkContext =
-                serde_json::from_value(params["context"].clone()).map_err(|e| e.to_string())?;
-            let run = dictation_parity::generate_dictation_benchmark_run(&fixture, &context);
-            serde_json::to_value(run).map_err(|e| e.to_string())
         }
         "set_default_asr_provider" => {
             let provider_type: asr::AsrProviderType =
@@ -16744,7 +16965,7 @@ pub async fn dispatch_command(
                 .get("preview")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let (recording, transcript, audit_log) = {
+            let (recording, transcript) = {
                 let db = state.db.lock().await;
                 let recording = db
                     .get_recording(&recording_id)
@@ -16753,8 +16974,7 @@ pub async fn dispatch_command(
                 let transcript = db
                     .get_transcript(&recording_id)
                     .map_err(|e| e.to_string())?;
-                let audit_log = db.get_all_audit_log().map_err(|e| e.to_string())?;
-                (recording, transcript, audit_log)
+                (recording, transcript)
             };
             let validated_target = match target.as_deref() {
                 Some(path) => Some(validate_export_target_path(state.as_ref(), path).await?),
@@ -16763,7 +16983,6 @@ pub async fn dispatch_command(
             let result = transcription::export_with_policy(
                 &recording,
                 transcript.as_ref(),
-                &audit_log,
                 &format,
                 validated_target.as_deref(),
                 &redaction_level,
@@ -16772,21 +16991,6 @@ pub async fn dispatch_command(
             .map_err(|e| e.to_string())?;
             let mut db = state.db.lock().await;
             let _ = db.log_audit_event("recording_exported_v2", Some(serde_json::json!({"recording_id": &recording_id, "format": &format, "preview": preview_mode, "export_path": &result.export_path})), "info");
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "verify_evidence_bundle" => {
-            let target_path: String =
-                serde_json::from_value(params["targetPath"].clone()).map_err(|e| e.to_string())?;
-            let canonical = canonicalize_existing_absolute_path(&target_path, "targetPath")?;
-            if !canonical.is_file() {
-                return Err(format!(
-                    "targetPath must be a file, got: {}",
-                    canonical.display()
-                ));
-            }
-            ensure_path_in_approved_roots(&canonical, "targetPath")?;
-            let result = transcription::verify_evidence_bundle_file(&canonical.to_string_lossy())
-                .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "export_with_template" => {
@@ -16972,30 +17176,43 @@ pub async fn dispatch_command(
             let expected = nautilus_data_root()?;
             if path != expected {
                 return Err(format!(
-                    "data_dir must be Nautilus data directory '{}', got '{}'",
+                    "data_dir must be Plainsong data directory '{}', got '{}'",
                     expected.display(),
                     path.display()
                 ));
             }
+            let snapshot = snapshot_live_database(state.as_ref()).await?;
             let bm = state.backup_manager.lock().await;
-            let info = bm.create_backup(&path).await.map_err(|e| e.to_string())?;
+            let info = bm
+                .create_backup(&path, snapshot.as_deref())
+                .await
+                .map_err(|e| e.to_string())?;
+            drop(bm);
+            if let Some(snapshot_path) = snapshot {
+                let _ = std::fs::remove_file(snapshot_path);
+            }
             serde_json::to_value(info).map_err(|e| e.to_string())
         }
         "create_backup_default" => {
             let data_dir = dirs::data_dir()
                 .ok_or("Could not find data directory")?
-                .join("Nautilus");
+                .join("Plainsong");
+            let snapshot = snapshot_live_database(state.as_ref()).await?;
             let bm = state.backup_manager.lock().await;
             let info = bm
-                .create_backup(&data_dir)
+                .create_backup(&data_dir, snapshot.as_deref())
                 .await
                 .map_err(|e| e.to_string())?;
+            drop(bm);
+            if let Some(snapshot_path) = snapshot {
+                let _ = std::fs::remove_file(snapshot_path);
+            }
             serde_json::to_value(info).map_err(|e| e.to_string())
         }
         "create_settings_backup_default" => {
             let data_dir = dirs::data_dir()
                 .ok_or("Could not find data directory")?
-                .join("Nautilus");
+                .join("Plainsong");
             let bm = state.backup_manager.lock().await;
             let info = bm
                 .create_settings_backup(&data_dir)
@@ -17012,7 +17229,7 @@ pub async fn dispatch_command(
             let expected = nautilus_data_root()?;
             if path != expected {
                 return Err(format!(
-                    "data_dir must be Nautilus data directory '{}', got '{}'",
+                    "data_dir must be Plainsong data directory '{}', got '{}'",
                     expected.display(),
                     path.display()
                 ));
@@ -17021,6 +17238,8 @@ pub async fn dispatch_command(
             bm.restore_backup(&backup_id, &path)
                 .await
                 .map_err(|e| e.to_string())?;
+            drop(bm);
+            reopen_database_after_restore(state.as_ref()).await?;
             Ok(serde_json::Value::Null)
         }
         "restore_backup_default" => {
@@ -17028,11 +17247,13 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["backupId"].clone()).map_err(|e| e.to_string())?;
             let data_dir = dirs::data_dir()
                 .ok_or("Could not find data directory")?
-                .join("Nautilus");
+                .join("Plainsong");
             let bm = state.backup_manager.lock().await;
             bm.restore_backup(&backup_id, &data_dir)
                 .await
                 .map_err(|e| e.to_string())?;
+            drop(bm);
+            reopen_database_after_restore(state.as_ref()).await?;
             Ok(serde_json::Value::Null)
         }
         "verify_backup_cloud_connection" => {
@@ -17076,30 +17297,6 @@ pub async fn dispatch_command(
             Ok(serde_json::Value::Null)
         }
 
-        // ── License ────────────────────────────────────────────────────────
-        "activate_license" => {
-            let key: String =
-                serde_json::from_value(params["key"].clone()).map_err(|e| e.to_string())?;
-            let result = license::activate_license(&key)
-                .await
-                .map_err(|e| e.to_string())?;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "validate_license" => {
-            let result = license::validate_license().await;
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-        "deactivate_license" => {
-            license::deactivate_license()
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(serde_json::Value::Null)
-        }
-        "get_entitlement" => {
-            let result = license::get_current_entitlement();
-            serde_json::to_value(result).map_err(|e| e.to_string())
-        }
-
         // ── Updates (check and install are handled by Electron main) ─────────
         "check_for_updates" => Ok(serde_json::Value::Null),
         "install_update" => Ok(serde_json::Value::Null),
@@ -17111,30 +17308,11 @@ pub async fn dispatch_command(
         "set_update_channel" => {
             let channel: String =
                 serde_json::from_value(params["channel"].clone()).map_err(|e| e.to_string())?;
-            let entitlement = license::get_current_entitlement();
-            if channel.eq_ignore_ascii_case("beta") && !entitlement.experimental_enabled {
-                return Err("Beta updates require Friends Club.".to_string());
-            }
-
             let mut settings_manager = state.settings_manager.lock().await;
             settings_manager.settings_mut().updates.channel =
                 settings::UpdateChannel::from(channel);
             settings_manager.save().map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Null)
-        }
-        "can_use_beta_channel" => {
-            let entitlement = license::get_current_entitlement();
-            Ok(serde_json::json!(entitlement.experimental_enabled))
-        }
-        "get_update_lock_reason" => {
-            let entitlement = license::get_current_entitlement();
-            if entitlement.can_update {
-                Ok(serde_json::Value::Null)
-            } else {
-                Ok(serde_json::json!(
-                    "Updates require an active NautilusBot license."
-                ))
-            }
         }
 
         _ => Err(format!("Unknown command: {}", method)),

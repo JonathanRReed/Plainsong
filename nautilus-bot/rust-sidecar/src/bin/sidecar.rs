@@ -1,6 +1,6 @@
-/// Nautilus sidecar binary entrypoint.
+/// Plainsong sidecar binary entrypoint.
 ///
-/// Runs the full Nautilus backend as a stdio JSON-RPC server.
+/// Runs the full Plainsong backend as a stdio JSON-RPC server.
 /// The Electron main process spawns this binary, writes requests to its stdin,
 /// and reads responses/events from its stdout.
 ///
@@ -9,7 +9,7 @@
 ///   Response: { "jsonrpc":"2.0", "id":"<uuid>", "result":<value> }
 ///   Error:    { "jsonrpc":"2.0", "id":"<uuid>", "error":{"code":-32000,"message":"..."} }
 ///   Event:    { "jsonrpc":"2.0", "id":null, "method":"event", "params":{"event":"<name>","payload":<value>} }
-use nautilus_bot_lib::sidecar_handle::SidecarHandle;
+use plainsong_lib::sidecar_handle::SidecarHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, BufRead, Write};
@@ -78,7 +78,7 @@ fn main() {
 }
 
 async fn run_sidecar() {
-    let state = match nautilus_bot_lib::build_app_state().await {
+    let state = match plainsong_lib::build_app_state().await {
         Ok(s) => Arc::new(s),
         Err(e) => {
             eprintln!("[sidecar] Failed to initialize state: {}", e);
@@ -129,11 +129,20 @@ async fn run_sidecar() {
             std::process::exit(0);
         }
 
+        // Dispatch each request on its own task so a slow command (model
+        // download, meeting summarization, AI formatting) never blocks reading
+        // and handling the next request — most importantly the dictation
+        // hotkey's start/stop commands. Shared state is guarded by the mutexes
+        // inside AppState, and responses carry their request id, so out-of-order
+        // completion is safe for the Electron side.
         let id = request.id.clone().unwrap_or(Value::Null);
-        let result =
-            nautilus_bot_lib::dispatch_command(&state, &handle, &request.method, request.params)
-                .await;
-
-        write_response(id, result);
+        let state = Arc::clone(&state);
+        let handle = handle.clone();
+        let method = request.method;
+        let params = request.params;
+        tokio::spawn(async move {
+            let result = plainsong_lib::dispatch_command(&state, &handle, &method, params).await;
+            write_response(id, result);
+        });
     }
 }

@@ -339,27 +339,9 @@ interface ExportResult {
   content: string | null;
 }
 
-type EvidenceVerificationStatus = "pass" | "fail";
-
-interface EvidenceVerificationCheck {
-  id: string;
-  label: string;
-  status: EvidenceVerificationStatus;
-  message: string;
-}
-
-export interface EvidenceVerificationResult {
-  valid: boolean;
-  checkedAt: string;
-  schemaVersion: string | null;
-  format: string | null;
-  keyId: string | null;
-  checks: EvidenceVerificationCheck[];
-}
-
 export async function exportRecordingV2(
   recordingId: string,
-  format: "markdown" | "pdf" | "json" | "text" | "evidence_bundle",
+  format: "markdown" | "pdf" | "json" | "text",
   options?: {
     redactionLevel?: "none" | "basic" | "strict";
     target?: string;
@@ -373,10 +355,6 @@ export async function exportRecordingV2(
     target: options?.target,
     preview: options?.preview,
   });
-}
-
-export async function verifyEvidenceBundle(targetPath: string): Promise<EvidenceVerificationResult> {
-  return await invoke("verify_evidence_bundle", { targetPath });
 }
 
 export interface ExportTemplate {
@@ -699,7 +677,7 @@ export async function extractActionItemsGrounded(
   return await invoke("extract_action_items_grounded", { recordingId, model });
 }
 
-/** Ask a question across all meeting transcripts (AutoRAG Memory). Requires Pro or trial. */
+/** Ask a question across all meeting transcripts (AutoRAG Memory). */
 export async function askMemory(query: string): Promise<LlmAnalysisResult> {
   return await invoke("ask_memory", { query });
 }
@@ -809,7 +787,7 @@ export async function openPermissionSettings(
   await invoke("open_permission_settings", { section });
 }
 
-export async function openInstalledNautilusApp(): Promise<void> {
+export async function openInstalledPlainsongApp(): Promise<void> {
   await invoke("open_installed_nautilus_app");
 }
 
@@ -1010,38 +988,6 @@ export async function syncBackupToCloud(backupId: string): Promise<void> {
   await invoke("sync_backup_to_cloud", { backupId });
 }
 
-// ── License ───────────────────────────────────────────────────────────────────
-
-export type LicenseTier = "none" | "pro" | "friends_club";
-type LicenseLsStatus = "active" | "inactive" | "expired" | "disabled" | "";
-
-export interface LicenseInfo {
-  tier: LicenseTier;
-  valid: boolean;
-  lsStatus: LicenseLsStatus;
-  activationsLimit: number;
-  activationsUsage: number;
-  lastValidatedAt: string;
-  trialDaysRemaining: number;
-  nagRequired: boolean;
-  trialActive: boolean;
-}
-
-/** Called on startup to check cached license status against Lemon Squeezy. */
-export async function validateLicense(): Promise<LicenseInfo> {
-  return await invoke("validate_license");
-}
-
-/** Activate a new license key (calls LS activate endpoint). */
-export async function activateLicense(key: string): Promise<LicenseInfo> {
-  return await invoke("activate_license", { key });
-}
-
-/** Deactivate this device (calls LS deactivate endpoint, clears local state). */
-export async function deactivateLicense(): Promise<void> {
-  await invoke("deactivate_license");
-}
-
 // ── Update System ─────────────────────────────────────────────────────────────
 
 export type UpdateChannel = "stable" | "beta";
@@ -1052,8 +998,7 @@ type UpdateStatus =
   | "updateAvailable"
   | "downloading"
   | "installing"
-  | "error"
-  | "locked";
+  | "error";
 
 interface UpdateInfo {
   version: string;
@@ -1089,19 +1034,9 @@ export async function getUpdateChannel(): Promise<UpdateChannel> {
   return await invoke("get_update_channel");
 }
 
-/** Set update channel (requires appropriate license tier). */
+/** Set update channel. */
 export async function setUpdateChannel(channel: UpdateChannel): Promise<void> {
   await invoke("set_update_channel", { channel });
-}
-
-/** Check if user can use beta channel (Friends Club tier). */
-export async function canUseBetaChannel(): Promise<boolean> {
-  return await invoke("can_use_beta_channel");
-}
-
-/** Get reason why updates are locked, or null if not locked. */
-export async function getUpdateLockReason(): Promise<string | null> {
-  return await invoke("get_update_lock_reason");
 }
 
 // Dynamic Model Listing APIs

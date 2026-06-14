@@ -112,7 +112,7 @@ impl MoonshineProvider {
             normalize_moonshine_model_id(selected_model_id.unwrap_or(MOONSHINE_BASE_MODEL_ID));
         let root_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("Nautilus")
+            .join("Plainsong")
             .join("models");
         let model_dir = if model_id == MOONSHINE_BASE_MODEL_ID {
             root_dir.join("moonshine")

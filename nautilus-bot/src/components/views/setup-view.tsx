@@ -337,7 +337,7 @@ export function SetupView() {
                     variant="outline"
                     onClick={() =>
                       void runAction("verify-insert-permissions", async () => {
-                        const result = await smokeTestCursorInsert("Nautilus insert test");
+                        const result = await smokeTestCursorInsert("Plainsong insert test");
                         const target = result.targetApp ?? "the current app";
                         if (result.error) {
                           setStatusMessage(`Insert permissions test: ${result.error}`);
@@ -356,7 +356,7 @@ export function SetupView() {
                           return;
                         }
                         setStatusMessage(
-                          "Insert permissions test: Nautilus could not confirm insert behavior."
+                          "Insert permissions test: Plainsong could not confirm insert behavior."
                         );
                       })
                     }

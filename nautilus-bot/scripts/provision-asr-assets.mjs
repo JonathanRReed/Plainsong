@@ -40,14 +40,14 @@ function defaultDataDir() {
   return process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
 }
 
-const nautilusDataDir = path.join(defaultDataDir(), "Nautilus");
+const nautilusDataDir = path.join(defaultDataDir(), "Plainsong");
 const modelsRoot =
   valueFor("--models-root") ||
-  process.env.NAUTILUS_MODELS_ROOT ||
+  process.env.PLAINSONG_MODELS_ROOT ||
   path.join(nautilusDataDir, "models");
 const runtimeRoot =
   valueFor("--runtime-root") ||
-  process.env.NAUTILUS_RUNTIME_ROOT ||
+  process.env.PLAINSONG_RUNTIME_ROOT ||
   path.join(nautilusDataDir, "runtime", "python");
 
 const managedVenvDir = path.join(runtimeRoot, "asr");
@@ -56,8 +56,8 @@ const managedPythonPath =
     ? path.join(managedVenvDir, "Scripts", "python.exe")
     : path.join(managedVenvDir, "bin", "python3");
 
-const bundlePathArg = valueFor("--asset-bundle") || process.env.NAUTILUS_ASR_ASSET_BUNDLE || null;
-const bundleUrlArg = valueFor("--asset-bundle-url") || process.env.NAUTILUS_ASR_ASSET_BUNDLE_URL || null;
+const bundlePathArg = valueFor("--asset-bundle") || process.env.PLAINSONG_ASR_ASSET_BUNDLE || null;
+const bundleUrlArg = valueFor("--asset-bundle-url") || process.env.PLAINSONG_ASR_ASSET_BUNDLE_URL || null;
 
 function exists(pathname) {
   try {
@@ -323,7 +323,7 @@ function probePythonCandidate(candidate, probeCode) {
 }
 
 function resolvePython() {
-  const explicit = valueFor("--python") || process.env.NAUTILUS_PYTHON;
+  const explicit = valueFor("--python") || process.env.PLAINSONG_PYTHON;
   const candidates = [
     explicit,
     managedPythonPath,

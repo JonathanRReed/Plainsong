@@ -28,7 +28,7 @@ impl DistilWhisperProvider {
     pub fn new(_selected_model_id: Option<&str>) -> Self {
         let model_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("Nautilus")
+            .join("Plainsong")
             .join("models")
             .join("distil_whisper");
         Self { model_dir }
@@ -65,7 +65,7 @@ impl Default for DistilWhisperProvider {
 pub(crate) fn clear_cached_runtime() {
     let model_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Nautilus")
+        .join("Plainsong")
         .join("models")
         .join("distil_whisper");
     super::canary::clear_cached_runtime(&model_dir);

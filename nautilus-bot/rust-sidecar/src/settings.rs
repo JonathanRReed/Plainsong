@@ -15,7 +15,7 @@ use std::path::PathBuf;
 pub(crate) fn nautilus_config_dir() -> Result<PathBuf> {
     let config_dir = dirs::config_dir()
         .context("Could not find config directory")?
-        .join("Nautilus");
+        .join("Plainsong");
 
     std::fs::create_dir_all(&config_dir)?;
 
@@ -246,7 +246,7 @@ pub struct TranscriptionSettings {
     pub memory_search_mode: String,
     /// Ollama embedding model name (e.g. "nomic-embed-text")
     pub embedding_model: String,
-    /// Auto-run Nautilus-style summary + action items after recording transcription
+    /// Auto-run Plainsong-style summary + action items after recording transcription
     pub enable_auto_analysis: bool,
     /// Platform-specific ASR optimization policy and engine preferences.
     pub platform_optimization: PlatformOptimizationSettings,
@@ -280,14 +280,19 @@ pub struct DictationCustomMode {
 impl Default for TranscriptionSettings {
     fn default() -> Self {
         Self {
-            // Distil-Whisper is 6x faster than Whisper for English with minimal accuracy loss
-            default_provider: "distil_whisper".to_string(),
-            selected_model_id: "distil-large-v3.5".to_string(),
+            // Default to whisper.cpp (Metal/CoreML-accelerated on Apple Silicon)
+            // with the small, fast base.en model. The previous default routed
+            // through a 756M Candle model on CPU in F32 — multi-second latency
+            // on the dictation hot path. whisper.cpp base.en is the fast,
+            // production-quality default; larger/multilingual models are one
+            // setting away.
+            default_provider: "whisper".to_string(),
+            selected_model_id: "base.en".to_string(),
             use_shared_asr_selection: true,
-            dictation_provider: "distil_whisper".to_string(),
-            dictation_model_id: "distil-large-v3.5".to_string(),
-            meeting_provider: "distil_whisper".to_string(),
-            meeting_model_id: "distil-large-v3.5".to_string(),
+            dictation_provider: "whisper".to_string(),
+            dictation_model_id: "base.en".to_string(),
+            meeting_provider: "whisper".to_string(),
+            meeting_model_id: "base.en".to_string(),
             meeting_route_policy: "prefer_local".to_string(),
             provider_model_ids: HashMap::new(),
             mlx_accelerated_providers: Vec::new(),
@@ -596,7 +601,7 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "elevenlabs_scribe" => "elevenlabs_scribe".to_string(),
         "openai_cloud" => "openai_cloud".to_string(),
         "groq" => "groq".to_string(),
-        _ => "distil_whisper".to_string(),
+        _ => "whisper".to_string(),
     }
 }
 
@@ -643,7 +648,7 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             "" => "whisper-large-v3-turbo".to_string(),
             value => value.to_string(),
         },
-        _ => "distil-large-v3.5".to_string(),
+        _ => "base.en".to_string(),
     }
 }
 
@@ -850,15 +855,6 @@ impl From<String> for UpdateChannel {
     }
 }
 
-impl From<crate::update::UpdateChannel> for UpdateChannel {
-    fn from(channel: crate::update::UpdateChannel) -> Self {
-        match channel {
-            crate::update::UpdateChannel::Beta => UpdateChannel::Beta,
-            crate::update::UpdateChannel::Stable => UpdateChannel::Stable,
-        }
-    }
-}
-
 /// Update settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -895,7 +891,26 @@ impl SettingsManager {
     pub fn new() -> Result<Self> {
         let config_path = Self::config_path()?;
         let mut settings = if config_path.exists() {
-            Self::load_from_file(&config_path)?
+            match Self::load_from_file(&config_path) {
+                Ok(settings) => settings,
+                Err(err) => {
+                    // A corrupt or truncated settings file must never block startup.
+                    // Move it aside for diagnostics and fall back to defaults.
+                    tracing::warn!(
+                        "Settings file at {} is unreadable ({}); backing it up and using defaults",
+                        config_path.display(),
+                        err
+                    );
+                    let backup_path = config_path.with_extension("json.corrupt");
+                    if let Err(rename_err) = std::fs::rename(&config_path, &backup_path) {
+                        tracing::warn!(
+                            "Failed to move corrupt settings file aside: {}",
+                            rename_err
+                        );
+                    }
+                    Settings::default()
+                }
+            }
         } else {
             Settings::default()
         };
@@ -920,12 +935,19 @@ impl SettingsManager {
         &mut self.settings
     }
 
-    /// Save settings to disk
+    /// Save settings to disk atomically (write to a temp file, then rename) so
+    /// a crash or power loss mid-write can never leave a truncated settings file.
     pub fn save(&self) -> Result<()> {
         let json =
             serde_json::to_string_pretty(&self.settings).context("Failed to serialize settings")?;
 
-        std::fs::write(&self.config_path, json).context("Failed to write settings file")?;
+        if let Some(parent) = self.config_path.parent() {
+            std::fs::create_dir_all(parent).context("Failed to create settings directory")?;
+        }
+
+        let tmp_path = self.config_path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, json).context("Failed to write temp settings file")?;
+        std::fs::rename(&tmp_path, &self.config_path).context("Failed to commit settings file")?;
 
         Ok(())
     }
@@ -992,8 +1014,8 @@ mod tests {
     fn dictation_command_defaults_are_stable() {
         let settings = Settings::default();
         assert!(settings.transcription.use_shared_asr_selection);
-        assert_eq!(settings.transcription.dictation_provider, "distil_whisper");
-        assert_eq!(settings.transcription.meeting_provider, "distil_whisper");
+        assert_eq!(settings.transcription.dictation_provider, "whisper");
+        assert_eq!(settings.transcription.meeting_provider, "whisper");
         assert!(settings.transcription.dictation_command_mode_enabled);
         assert_eq!(settings.transcription.dictation_command_prefix, "command");
         assert_eq!(settings.transcription.dictation_insertion_mode, "paste");

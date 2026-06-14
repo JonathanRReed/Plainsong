@@ -17,7 +17,7 @@ function valueFor(name, fallback = null) {
 
 const appPath = path.resolve(
   repoRoot,
-  valueFor("--app", "release/mac-arm64/Nautilus.app")
+  valueFor("--app", "release/mac-arm64/Plainsong.app")
 );
 const outPath = path.resolve(
   repoRoot,
@@ -33,11 +33,11 @@ const sidecarPath = path.join(
   "Contents",
   "Resources",
   "sidecar",
-  "nautilus-sidecar"
+  "plainsong-sidecar"
 );
-const configDir = path.join(os.homedir(), "Library", "Application Support", "Nautilus");
+const configDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
 const settingsPath = path.join(configDir, "settings.json");
-const dbPath = path.join(configDir, "nautilus.db");
+const dbPath = path.join(configDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
 const dbBackups = new Map();
 const originalSettingsBytes = fs.existsSync(settingsPath)
@@ -58,7 +58,7 @@ if (!fs.existsSync(sidecarPath)) {
 }
 
 if (!fs.existsSync(dbPath)) {
-  fail(`Nautilus database not found at ${dbPath}`);
+  fail(`Plainsong database not found at ${dbPath}`);
 }
 
 function hashBytes(bytes) {
@@ -130,7 +130,7 @@ function scenarioSettings(base, scenario) {
 
 function writeAudioFixture(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, Buffer.from("Nautilus retention QA audio fixture\n", "utf8"));
+  fs.writeFileSync(filePath, Buffer.from("Plainsong retention QA audio fixture\n", "utf8"));
 }
 
 function seedScenario(scenario) {

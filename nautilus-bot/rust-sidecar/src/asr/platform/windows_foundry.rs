@@ -6,13 +6,13 @@ use std::path::PathBuf;
 pub fn probe() -> EngineProbe {
     let marker = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Nautilus")
+        .join("Plainsong")
         .join("models")
         .join("windows_foundry")
         .join("manifest.json");
 
     let ready = marker.exists()
-        || std::env::var("NAUTILUS_WINDOWS_FOUNDRY_READY")
+        || std::env::var("PLAINSONG_WINDOWS_FOUNDRY_READY")
             .ok()
             .as_deref()
             == Some("1");

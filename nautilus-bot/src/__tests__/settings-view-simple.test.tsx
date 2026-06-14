@@ -82,43 +82,6 @@ const baseSettings = {
   theme: "system" as const,
 };
 
-const storageMocks = vi.hoisted(() => ({
-  createBackupDefault: vi.fn(),
-  createSettingsBackupDefault: vi.fn(),
-  getBackupConfig: vi.fn(async () => ({
-    enabled: true,
-    intervalHours: 24,
-    maxBackups: 7,
-    backupDir: null,
-    cloudSync: false,
-    cloudProvider: null,
-    cloudRemoteName: null,
-    cloudFolder: "NautilusBackups",
-    icloudPath: null,
-  })),
-  getBackupSetupReport: vi.fn(),
-  listBackups: vi.fn(async () => [
-    {
-      id: "settings_20260314_120000",
-      timestamp: "2026-03-14T12:00:00.000Z",
-      sizeBytes: 1024,
-      itemsCount: 6,
-      backupType: "settings",
-    },
-    {
-      id: "backup_20260314_110000",
-      timestamp: "2026-03-14T11:00:00.000Z",
-      sizeBytes: 2048,
-      itemsCount: 20,
-      backupType: "full",
-    },
-  ]),
-  restoreBackupDefault: vi.fn(async () => {}),
-  saveBackupConfig: vi.fn(),
-  syncBackupToCloud: vi.fn(),
-  verifyBackupCloudConnection: vi.fn(),
-}));
-
 vi.mock("@/components/asr-provider-manager", () => ({
   AsrProviderManager: () => <div>ASR</div>,
 }));
@@ -131,7 +94,8 @@ vi.mock("@/components/theme-provider", () => ({
 }));
 
 vi.mock("@/lib/backend", () => ({
-  ...storageMocks,
+  createBackupDefault: vi.fn(),
+  createSettingsBackupDefault: vi.fn(),
   clearProviderSecret: vi.fn(),
   listAudioInputDevices: vi.fn(async () => ({
     devices: [
@@ -152,6 +116,17 @@ vi.mock("@/lib/backend", () => ({
     meetingOverrideEnabled: false,
     meetingSelectedDeviceId: null,
   })),
+  getBackupConfig: vi.fn(async () => ({
+    enabled: true,
+    intervalHours: 24,
+    maxBackups: 7,
+    backupDir: null,
+    cloudSync: false,
+    cloudProvider: null,
+    cloudRemoteName: null,
+    cloudFolder: "PlainsongBackups",
+    icloudPath: null,
+  })),
   getPermissionDiagnostics: vi.fn(async () => ({
     microphoneReady: true,
     speechRecognitionReady: true,
@@ -166,6 +141,7 @@ vi.mock("@/lib/backend", () => ({
     automationReady: true,
     notes: [],
   })),
+  getBackupSetupReport: vi.fn(),
   getOllamaStatus: vi.fn(async () => true),
   getSecurityStatus: vi.fn(async () => ({
     vaultInitialized: false,
@@ -179,6 +155,22 @@ vi.mock("@/lib/backend", () => ({
   getSettings: vi.fn(async () => ({ ...baseSettings })),
   hasProviderSecret: vi.fn(async () => false),
   lockVault: vi.fn(),
+  listBackups: vi.fn(async () => [
+    {
+      id: "settings_20260314_120000",
+      timestamp: "2026-03-14T12:00:00.000Z",
+      sizeBytes: 1024,
+      itemsCount: 6,
+      backupType: "settings",
+    },
+    {
+      id: "backup_20260314_110000",
+      timestamp: "2026-03-14T11:00:00.000Z",
+      sizeBytes: 2048,
+      itemsCount: 20,
+      backupType: "full",
+    },
+  ]),
   listOllamaModels: vi.fn(async () => ["llama3.2"]),
   listOllamaCloudModels: vi.fn(async () => []),
   listOpenAiModels: vi.fn(async () => []),
@@ -201,92 +193,13 @@ vi.mock("@/lib/backend", () => ({
     notes: [],
   })),
   saveSettings: vi.fn(async () => { }),
+  saveBackupConfig: vi.fn(),
   setProviderSecret: vi.fn(async () => { }),
+  restoreBackupDefault: vi.fn(async () => {}),
+  syncBackupToCloud: vi.fn(),
   unlockVault: vi.fn(),
-  validateLicense: vi.fn(async () => ({
-    tier: "none",
-    valid: false,
-    lsStatus: "",
-    activationsLimit: 5,
-    activationsUsage: 0,
-    lastValidatedAt: "",
-    trialDaysRemaining: 30,
-    nagRequired: false,
-    trialActive: true,
-  })),
-  activateLicense: vi.fn(async () => ({
-    tier: "pro",
-    valid: true,
-    lsStatus: "active",
-    activationsLimit: 5,
-    activationsUsage: 1,
-    lastValidatedAt: "",
-    trialDaysRemaining: 0,
-    nagRequired: false,
-    trialActive: false,
-  })),
-  deactivateLicense: vi.fn(async () => { }),
+  verifyBackupCloudConnection: vi.fn(),
 }));
-
-vi.mock("@/lib/backend/settings", async () => {
-  const backend = await import("@/lib/backend");
-  return {
-    clearProviderSecret: backend.clearProviderSecret,
-    getPermissionDiagnostics: backend.getPermissionDiagnostics,
-    getSecurityStatus: backend.getSecurityStatus,
-    getSettings: backend.getSettings,
-    hasProviderSecret: backend.hasProviderSecret,
-    lockVault: backend.lockVault,
-    migrateToEncryptedStorage: backend.migrateToEncryptedStorage,
-    openPermissionSettings: backend.openPermissionSettings,
-    repairCursorInsertPermissions: backend.repairCursorInsertPermissions,
-    requestDictationPermissions: backend.requestDictationPermissions,
-    resetAppState: vi.fn(),
-    saveSettings: backend.saveSettings,
-    setProviderSecret: backend.setProviderSecret,
-    unlockVault: backend.unlockVault,
-  };
-});
-
-vi.mock("@/lib/backend/storage", () => storageMocks);
-
-vi.mock("@/lib/backend/ai", async () => {
-  const backend = await import("@/lib/backend");
-  return {
-    getOllamaStatus: backend.getOllamaStatus,
-    listAnthropicModels: backend.listAnthropicModels,
-    listDeepSeekModels: backend.listDeepSeekModels,
-    listGeminiModels: backend.listGeminiModels,
-    listOpenAiModels: backend.listOpenAiModels,
-    listOllamaCloudModels: backend.listOllamaCloudModels,
-    listOllamaModels: backend.listOllamaModels,
-  };
-});
-
-vi.mock("@/lib/backend/asr", async () => {
-  const backend = await import("@/lib/backend");
-  return {
-    downloadDiarizationModel: backend.downloadDiarizationModel,
-    isDiarizationModelAvailable: backend.isDiarizationModelAvailable,
-    listDiarizationModels: backend.listDiarizationModels,
-  };
-});
-
-vi.mock("@/lib/backend/recordings", async () => {
-  const backend = await import("@/lib/backend");
-  return {
-    listAudioInputDevices: backend.listAudioInputDevices,
-  };
-});
-
-vi.mock("@/lib/backend/license", async () => {
-  const backend = await import("@/lib/backend");
-  return {
-    activateLicense: backend.activateLicense,
-    deactivateLicense: backend.deactivateLicense,
-    validateLicense: backend.validateLicense,
-  };
-});
 
 describe("SettingsView performance behavior", () => {
   beforeEach(() => {
@@ -353,7 +266,7 @@ describe("SettingsView performance behavior", () => {
       cloudSync: false,
       cloudProvider: null,
       cloudRemoteName: null,
-      cloudFolder: "NautilusBackups",
+      cloudFolder: "PlainsongBackups",
       icloudPath: null,
     });
   });
@@ -418,9 +331,9 @@ describe("SettingsView performance behavior", () => {
     fireEvent.click(screen.getByText("Storage"));
     await screen.findByText("Retention, backups, export paths, and cleanup tools");
 
-    const exportRootInput = screen.getByPlaceholderText("/Users/you/Documents/Nautilus");
+    const exportRootInput = screen.getByPlaceholderText("/Users/you/Documents/Plainsong");
     fireEvent.change(exportRootInput, {
-      target: { value: "/Users/test/Nautilus" },
+      target: { value: "/Users/test/Plainsong" },
     });
     fireEvent.blur(exportRootInput);
 
@@ -435,11 +348,7 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     fireEvent.click(screen.getByText("Storage"));
-    await waitFor(() => {
-      expect(backend.getBackupConfig).toHaveBeenCalled();
-    });
-    await screen.findByText("Retention, backups, export paths, and cleanup tools");
-    await screen.findByText("Personal Profile Sync", {}, { timeout: 3000 });
+    await screen.findByText("Personal Profile Sync");
 
     expect(screen.getByText("Latest profile snapshot")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create Profile Snapshot" })).toBeInTheDocument();
@@ -456,20 +365,7 @@ describe("SettingsView performance behavior", () => {
     });
   });
 
-  it("shows only basic color schemes for trial users", async () => {
-    const backend = await import("@/lib/backend");
-    vi.mocked(backend.validateLicense).mockResolvedValue({
-      tier: "none",
-      valid: false,
-      lsStatus: "",
-      activationsLimit: 5,
-      activationsUsage: 0,
-      lastValidatedAt: "",
-      trialDaysRemaining: 30,
-      nagRequired: false,
-      trialActive: true,
-    });
-
+  it("offers every color scheme to all users", async () => {
     render(
       <ToastProvider>
         <SettingsView />
@@ -479,22 +375,13 @@ describe("SettingsView performance behavior", () => {
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     const select = screen.getByLabelText("Color scheme");
     expect(select).toHaveValue("default");
-    expect(screen.queryByText("Rose Pine Night (Pro)")).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Rose Pine Night" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Catppuccin Mocha" })).toBeInTheDocument();
+    expect(screen.queryByText(/\(Pro\)/)).not.toBeInTheDocument();
   });
 
-  it("persists selected color scheme for paid users", async () => {
+  it("persists the selected color scheme", async () => {
     const backend = await import("@/lib/backend");
-    vi.mocked(backend.validateLicense).mockResolvedValue({
-      tier: "pro",
-      valid: true,
-      lsStatus: "active",
-      activationsLimit: 5,
-      activationsUsage: 1,
-      lastValidatedAt: "",
-      trialDaysRemaining: 0,
-      nagRequired: false,
-      trialActive: false,
-    });
 
     render(
       <ToastProvider>
@@ -519,43 +406,6 @@ describe("SettingsView performance behavior", () => {
     const calls = vi.mocked(backend.saveSettings).mock.calls;
     const lastCall = calls[calls.length - 1];
     expect(lastCall?.[0]?.ui?.colorScheme).toBe("rose-pine");
-  });
-
-  it("explains expired-trial reminders, lockout state, and activation options", async () => {
-    const backend = await import("@/lib/backend");
-    vi.mocked(backend.validateLicense).mockResolvedValueOnce({
-      tier: "none",
-      valid: false,
-      lsStatus: "",
-      activationsLimit: 5,
-      activationsUsage: 0,
-      lastValidatedAt: "",
-      trialDaysRemaining: 0,
-      nagRequired: true,
-      trialActive: false,
-    });
-
-    render(
-      <ToastProvider>
-        <SettingsView />
-      </ToastProvider>
-    );
-
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
-    fireEvent.click(screen.getByText("License"));
-
-    expect(await screen.findByText("Trial expired · reminders active")).toBeInTheDocument();
-    expect(screen.getByText("Updates locked")).toBeInTheDocument();
-    expect(screen.getByText("Free local access")).toBeInTheDocument();
-    expect(screen.getByText("Activation reminders enabled")).toBeInTheDocument();
-    expect(screen.getByText("0 of 5 used")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "The 30-day trial has ended. Updates and paid Pro/Friends Club features are locked until a valid license is activated."
-      )
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Buy Pro" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Friends Club/i })).toBeInTheDocument();
   });
 
   it("persists the always-on-top toggle from desktop settings", async () => {

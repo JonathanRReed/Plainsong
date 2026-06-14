@@ -2,33 +2,17 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, Download, Lock, RefreshCw } from "lucide-react";
+import { Loader2, Download, RefreshCw } from "lucide-react";
 import {
   checkForUpdates,
   installUpdate,
   getUpdateStatus,
-  getUpdateLockReason,
   type UpdateStatusInfo,
 } from "@/lib/backend/updates";
-import { validateLicense, type LicenseInfo } from "@/lib/backend/license";
 
 export function UpdateStatusWidget() {
-  const [license, setLicense] = useState<LicenseInfo | null>(null);
   const [status, setStatus] = useState<UpdateStatusInfo | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [lockReason, setLockReason] = useState<string | null>(null);
-
-  // Load license info
-  useEffect(() => {
-    validateLicense().then(setLicense).catch(console.error);
-  }, []);
-
-  // Check if updates are locked
-  useEffect(() => {
-    if (license && !license.valid && !license.trialActive) {
-      getUpdateLockReason().then(setLockReason);
-    }
-  }, [license]);
 
   // Load initial status
   useEffect(() => {
@@ -58,30 +42,6 @@ export function UpdateStatusWidget() {
       setIsLoading(false);
     }
   };
-
-  // If updates are locked, show lock message
-  if (lockReason) {
-    return (
-      <Card className="border-amber-200 bg-amber-50/50">
-        <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Lock className="h-4 w-4 text-amber-600" />
-            Updates Locked
-          </CardTitle>
-          <CardDescription>{lockReason}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => window.open("https://nautilusbot.lemonsqueezy.com", "_blank")}
-          >
-            Purchase License
-          </Button>
-        </CardContent>
-      </Card>
-    );
-  }
 
   const getStatusBadge = () => {
     switch (status?.status) {

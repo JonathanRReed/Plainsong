@@ -22,7 +22,10 @@ impl OllamaClient {
     pub fn new() -> Self {
         Self {
             base_url: OLLAMA_DEFAULT_URL.to_string(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default(),
         }
     }
 

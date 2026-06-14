@@ -47,7 +47,6 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "__window_set_size__",
   "__window_show__",
   "__window_start_drag__",
-  "activate_license",
   "analyze_recording",
   "analyze_recordings",
   "apply_global_shortcuts_now",
@@ -55,7 +54,6 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "ask_memory",
   "benchmark_asr_providers",
   "benchmark_asr_providers_bytes",
-  "can_use_beta_channel",
   "capture_selected_text_for_playback",
   "check_for_updates",
   "check_system_audio_availability",
@@ -65,7 +63,6 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "create_dictation_snippet",
   "create_project",
   "create_settings_backup_default",
-  "deactivate_license",
   "delete_dictation_command_preset",
   "delete_dictation_dictionary_entry",
   "delete_dictation_snippet",
@@ -102,7 +99,6 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_dictation_insights",
   "get_dictation_overlay_state",
   "get_embedding_status",
-  "get_entitlement",
   "get_loopback_device_name",
   "get_meeting_chat_messages",
   "get_meeting_consent_automation_status",
@@ -120,7 +116,6 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_speakers",
   "get_transcript",
   "get_update_channel",
-  "get_update_lock_reason",
   "get_update_status",
   "get_waveform_data",
   "has_provider_secret",
@@ -193,10 +188,8 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "update_recording_template",
   "update_transcript_segment",
   "upsert_dictation_command_preset",
-  "validate_license",
   "verify_backup_cloud_connection",
   "verify_dictation_setup",
-  "verify_evidence_bundle",
   "verify_meeting_setup",
   "verify_system_audio_setup",
 ]);
@@ -265,30 +258,43 @@ export class IpcBridge {
 
     this.process.on("exit", (code, signal) => {
       console.warn(`[sidecar] exited: code=${code} signal=${signal}`);
-      if (!this.shuttingDown && this.restartAttempts < this.maxRestarts) {
-        const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
-        this.restartAttempts++;
-        console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
-        setTimeout(() => this.spawnSidecar(), delay);
-      } else if (this.restartAttempts >= this.maxRestarts) {
-        console.error("[sidecar] max restarts reached, giving up");
-      }
-      // Reject all pending requests with a clear error message
-      const pendingCount = this.pending.size;
-      for (const [, pending] of this.pending) {
-        clearTimeout(pending.timeout);
-        pending.reject(new Error(`Sidecar process exited (code=${code}, signal=${signal})`));
-      }
-      this.pending.clear();
-      if (pendingCount > 0) {
-        console.warn(`[sidecar] rejected ${pendingCount} pending request(s) due to process exit`);
-      }
+      this.handleSidecarTermination(`Sidecar process exited (code=${code}, signal=${signal})`);
+    });
+
+    this.process.on("error", (err) => {
+      console.error(`[sidecar] failed to start: path=${this.sidecarPath}`, err);
+      this.handleSidecarTermination(
+        `Sidecar process failed to start (${this.sidecarPath}): ${err.message}`
+      );
     });
 
     this.process.on("spawn", () => {
       console.log("[sidecar] connected");
       this.restartAttempts = 0;
     });
+  }
+
+  // Shared termination path for both 'exit' and 'error': schedule a backoff
+  // restart and reject all pending requests with a clear message.
+  private handleSidecarTermination(reason: string): void {
+    if (!this.shuttingDown && this.restartAttempts < this.maxRestarts) {
+      const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
+      this.restartAttempts++;
+      console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
+      setTimeout(() => this.spawnSidecar(), delay);
+    } else if (this.restartAttempts >= this.maxRestarts) {
+      console.error("[sidecar] max restarts reached, giving up");
+    }
+    // Reject all pending requests with a clear error message
+    const pendingCount = this.pending.size;
+    for (const [, pending] of this.pending) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error(reason));
+    }
+    this.pending.clear();
+    if (pendingCount > 0) {
+      console.warn(`[sidecar] rejected ${pendingCount} pending request(s): ${reason}`);
+    }
   }
 
   private handleSidecarMessage(msg: JsonRpcResponse): void {

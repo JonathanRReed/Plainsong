@@ -17,7 +17,7 @@ function valueFor(name, fallback = null) {
 
 const appPath = path.resolve(
   repoRoot,
-  valueFor("--app", "release/mac-arm64/Nautilus.app")
+  valueFor("--app", "release/mac-arm64/Plainsong.app")
 );
 const outPath = path.resolve(
   repoRoot,
@@ -30,10 +30,10 @@ const sidecarPath = path.join(
   "Contents",
   "Resources",
   "sidecar",
-  "nautilus-sidecar"
+  "plainsong-sidecar"
 );
-const dataDir = path.join(os.homedir(), "Library", "Application Support", "Nautilus");
-const dbPath = path.join(dataDir, "nautilus.db");
+const dataDir = path.join(os.homedir(), "Library", "Application Support", "Plainsong");
+const dbPath = path.join(dataDir, "plainsong.db");
 const dbSidecarPaths = [dbPath, `${dbPath}-wal`, `${dbPath}-shm`];
 const dbBackups = new Map();
 const recordingId = `qa-ollama-${Date.now()}`;
@@ -84,7 +84,7 @@ if (!fs.existsSync(sidecarPath)) {
 }
 
 if (!fs.existsSync(dbPath)) {
-  fail(`Nautilus database not found at ${dbPath}`);
+  fail(`Plainsong database not found at ${dbPath}`);
 }
 
 function hashBytes(bytes) {

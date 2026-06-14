@@ -21,7 +21,7 @@ vi.mock("@/lib/backend", () => ({
   saveSettings: (...args: unknown[]) => saveSettingsMock(...args),
   getPermissionDiagnostics: (...args: unknown[]) => getPermissionDiagnosticsMock(...args),
   openPermissionSettings: vi.fn(async () => {}),
-  openInstalledNautilusApp: vi.fn(async () => {}),
+  openInstalledPlainsongApp: vi.fn(async () => {}),
   requestDictationPermissions: vi.fn(async () => ({})),
   repairCursorInsertPermissions: vi.fn(async () => ({})),
 }));
@@ -571,7 +571,7 @@ describe("Platform optimization settings", () => {
 
     expect(await screen.findByText("Apple Native setup")).toBeInTheDocument();
     expect(
-      screen.queryByText("Cursor insertion is not ready yet. Enable Nautilus in Privacy & Security > Accessibility so it can insert text into the target app.")
+      screen.queryByText("Cursor insertion is not ready yet. Enable Plainsong in Privacy & Security > Accessibility so it can insert text into the target app.")
     ).not.toBeInTheDocument();
   });
 });

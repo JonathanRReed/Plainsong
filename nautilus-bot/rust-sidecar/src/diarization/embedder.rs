@@ -19,7 +19,9 @@ use ort::{
 use rustfft::FftPlanner;
 #[cfg(feature = "diarization")]
 use std::f32::consts::PI;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "diarization")]
+use std::path::PathBuf;
 
 // Re-export Array1 for use in mod.rs
 
@@ -41,7 +43,7 @@ impl SpeakerEmbeddingExtractor {
     pub fn with_model(model_id: &str) -> Result<Self> {
         let models_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("Nautilus")
+            .join("Plainsong")
             .join("models")
             .join("diarization");
 
@@ -114,14 +116,14 @@ impl SpeakerEmbeddingExtractor {
                         let mean: f32 = embedding.iter().sum::<f32>() / embedding.len() as f32;
                         let min_val = embedding.iter().cloned().fold(f32::INFINITY, f32::min);
                         let max_val = embedding.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                        println!(
-                            "[NAUTILUS] Embedding {}-{}s: len={}, norm={:.4}, mean={:.4}, min={:.4}, max={:.4}",
+                        tracing::debug!(
+                            "Embedding {}-{}s: len={}, norm={:.4}, mean={:.4}, min={:.4}, max={:.4}",
                             start_sec, end_sec, embedding.len(), norm, mean, min_val, max_val
                         );
                         embeddings.push((start_sec, end_sec, embedding))
                     },
-                    Err(e) => println!(
-                        "[NAUTILUS] WARNING: Failed to extract embedding for segment {}-{}: {}",
+                    Err(e) => tracing::warn!(
+                        "Failed to extract embedding for segment {}-{}: {}",
                         start_sec,
                         end_sec,
                         e
@@ -145,10 +147,7 @@ fn load_embedding_session(model_path: &Path) -> Result<Session> {
         ));
     }
 
-    println!(
-        "[NAUTILUS] Loading diarization model from: {}",
-        model_path.display()
-    );
+    tracing::debug!("Loading diarization model from: {}", model_path.display());
 
     let session = Session::builder()
         .context("Failed to create ONNX session builder")?
@@ -166,22 +165,22 @@ fn load_embedding_session(model_path: &Path) -> Result<Session> {
         })?;
 
     // Log model input/output info
-    println!(
-        "[NAUTILUS] Model loaded. Inputs: {} outputs: {}",
+    tracing::debug!(
+        "Model loaded. Inputs: {} outputs: {}",
         session.inputs().len(),
         session.outputs().len()
     );
     for (i, input) in session.inputs().iter().enumerate() {
-        println!(
-            "[NAUTILUS] Input {}: name={}, shape={:?}",
+        tracing::debug!(
+            "Input {}: name={}, shape={:?}",
             i,
             input.name(),
             input.dtype()
         );
     }
     for (i, output) in session.outputs().iter().enumerate() {
-        println!(
-            "[NAUTILUS] Output {}: name={}, shape={:?}",
+        tracing::debug!(
+            "Output {}: name={}, shape={:?}",
             i,
             output.name(),
             output.dtype()
@@ -215,7 +214,7 @@ fn run_embedding_inference(session: &mut Session, samples: &[f32]) -> Result<Arr
         let num_frames = fbank_features.len() / 80;
         let input_shape = vec![1, num_frames, 80];
 
-        println!("[NAUTILUS] Feeding FBank features: {} frames", num_frames);
+        tracing::debug!("Feeding FBank features: {} frames", num_frames);
 
         let input_array = ndarray::Array::from_shape_vec(IxDyn(&input_shape), fbank_features)
             .context("Failed to shape FBank input tensor")?;
@@ -569,8 +568,8 @@ impl EmbeddingClusterer {
             return vec![0];
         }
 
-        println!(
-            "[NAUTILUS] Clustering {} embeddings with threshold {}",
+        tracing::debug!(
+            "Clustering {} embeddings with threshold {}",
             embeddings.len(),
             self.threshold
         );
@@ -602,9 +601,12 @@ impl EmbeddingClusterer {
             }
         }
         let avg_d = sum_d / count.max(1) as f32;
-        println!(
-            "[NAUTILUS] Distance stats: min={:.4}, max={:.4}, avg={:.4}, threshold={:.4}",
-            min_d, max_d, avg_d, self.threshold
+        tracing::debug!(
+            "Distance stats: min={:.4}, max={:.4}, avg={:.4}, threshold={:.4}",
+            min_d,
+            max_d,
+            avg_d,
+            self.threshold
         );
 
         // Agglomerative clustering
@@ -636,8 +638,8 @@ impl EmbeddingClusterer {
 
             // Stop if no pair found or distance exceeds threshold
             if closest_pair.is_none() || min_dist > self.threshold {
-                println!(
-                    "[NAUTILUS] Clustering stopped: min_dist={:.4}, threshold={:.4}, clusters={}",
+                tracing::debug!(
+                    "Clustering stopped: min_dist={:.4}, threshold={:.4}, clusters={}",
                     min_dist,
                     self.threshold,
                     clusters.len()

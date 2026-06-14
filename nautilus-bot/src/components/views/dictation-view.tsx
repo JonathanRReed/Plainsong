@@ -37,7 +37,6 @@ import {
   captureSelectedTextForPlayback,
   reprocessDictationText,
 } from "@/lib/backend/dictation";
-import { getAsrProviders } from "@/lib/backend/asr";
 import { deleteRecording, getTranscript } from "@/lib/backend/recordings";
 import { getSettings, saveSettings } from "@/lib/backend/settings";
 import {
@@ -47,10 +46,7 @@ import {
   matchesShortcut,
 } from "@/lib/shortcuts";
 import {
-  providerCapabilityLabel,
-  providerHostingLabel,
   providerHostingPreference,
-  providerRecommendation,
   type DictationRoutePreference,
 } from "@/lib/asr-capabilities";
 import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labels";
@@ -93,7 +89,6 @@ import {
 } from "@/components/ui/dialog";
 
 import type {
-  AsrProviderInfo,
   AsrProviderType,
   Recording,
   Transcript,
@@ -202,7 +197,7 @@ function describeDictationRecoveryState(
       tone: "attention",
       title: "Insertion needs a safer path",
       detail:
-        paste || fallback || "Nautilus could not deliver the result into the target app cleanly.",
+        paste || fallback || "Plainsong could not deliver the result into the target app cleanly.",
       hints: [
         "Switch to Clipboard only if the target app blocks direct insertion.",
         "Grant Accessibility or cursor-insertion permissions if you want automatic delivery.",
@@ -220,7 +215,7 @@ function describeDictationRecoveryState(
       tone: "warning",
       title: "Transcription route fell back",
       detail:
-        fallback || paste || "Nautilus used a different transcription route than requested.",
+        fallback || paste || "Plainsong used a different transcription route than requested.",
       hints: [
         "Download the requested local model or choose a route that is already ready.",
         "Keep an eye on the provider badge below so you know what actually ran.",
@@ -317,7 +312,6 @@ const ACTIVATION_DOMAIN_SUGGESTIONS = [
   "docs.google.com",
   "notion.so",
 ];
-const GA_LANGUAGE_CODES = new Set(["en", "es", "fr", "de", "pt"]);
 const DICTATION_SESSION_LANGUAGE_OPTIONS = [
   { value: "auto", label: "Auto detect" },
   { value: "en", label: "English" },
@@ -520,12 +514,12 @@ const DICTATION_COACH_CARDS: DictationCoachCard[] = [
   {
     id: "backtrack",
     title: "Fix the last insert with your voice",
-    body: "Say 'scratch that', 'actually ...', or 'replace X with Y' right after an insert. Nautilus already supports it, and this is one of the fastest ways to beat the keyboard.",
+    body: "Say 'scratch that', 'actually ...', or 'replace X with Y' right after an insert. Plainsong already supports it, and this is one of the fastest ways to beat the keyboard.",
     actionLabel: "Got it",
   },
   {
     id: "dictionary",
-    title: "Teach Nautilus names and jargon",
+    title: "Teach Plainsong names and jargon",
     body: "Edit the latest result, then choose Learn correction. Use the dictionary for words that need to stick across apps.",
     actionLabel: "Show me later",
   },
@@ -538,7 +532,7 @@ const DICTATION_COACH_CARDS: DictationCoachCard[] = [
   {
     id: "profiles",
     title: "Let app-aware flows switch for you",
-    body: "Install a lane or flow profile for the apps you use most so Nautilus automatically matches style, context, and insertion behavior.",
+    body: "Install a lane or flow profile for the apps you use most so Plainsong automatically matches style, context, and insertion behavior.",
     actionLabel: "I’ll use this",
   },
 ];
@@ -706,7 +700,7 @@ function describeActivationRules(
     return `Auto-switches when the frontmost app contains "${normalizedAppMatcher}".`;
   }
 
-  return "Manual only. This mode stays available, but Nautilus will not switch into it automatically.";
+  return "Manual only. This mode stays available, but Plainsong will not switch into it automatically.";
 }
 
 function describeSmartContextState(
@@ -715,18 +709,18 @@ function describeSmartContextState(
   contextChars: number | null,
 ): string {
   if (activationMatcher && appTarget) {
-    return `${activationMatcher} matched, and Nautilus captured context from ${appTarget}.`;
+    return `${activationMatcher} matched, and Plainsong captured context from ${appTarget}.`;
   }
   if (activationMatcher) {
-    return `${activationMatcher} matched before capture, so Nautilus used an app-aware flow.`;
+    return `${activationMatcher} matched before capture, so Plainsong used an app-aware flow.`;
   }
   if (appTarget && contextChars && contextChars > 0) {
-    return `Nautilus captured ${contextChars} chars of context from ${appTarget}.`;
+    return `Plainsong captured ${contextChars} chars of context from ${appTarget}.`;
   }
   if (appTarget) {
-    return `Nautilus targeted ${appTarget} for insertion.`;
+    return `Plainsong targeted ${appTarget} for insertion.`;
   }
-  return "Nautilus is ready for the active target and will use the current flow settings.";
+  return "Plainsong is ready for the active target and will use the current flow settings.";
 }
 
 function createCustomModeDraft(
@@ -767,7 +761,7 @@ function getDictationPhaseSummary(
   const fallbackDetail =
     preview?.trim() ||
     message?.trim() ||
-    "Nautilus is ready for the next capture.";
+    "Plainsong is ready for the next capture.";
 
   switch (phase) {
     case "primed":
@@ -775,7 +769,7 @@ function getDictationPhaseSummary(
         title: "Mic primed",
         detail:
           message?.trim() ||
-          "The route is warm and Nautilus is getting ready to listen.",
+          "The route is warm and Plainsong is getting ready to listen.",
         tone: "active",
       };
     case "recording":
@@ -806,10 +800,10 @@ function getDictationPhaseSummary(
       };
     case "delivering":
       return {
-        title: "Delivering",
+        title: "Inserting",
         detail:
           message?.trim() ||
-          "Nautilus is inserting or copying the final result.",
+          "Plainsong is inserting or copying the final result.",
         tone: "active",
       };
     case "done":
@@ -832,7 +826,7 @@ function getDictationPhaseSummary(
         title: "Ready to launch",
         detail:
           message?.trim() ||
-          "Start from the hotkey or the button below and Nautilus will take it from there.",
+          "Start from the hotkey or the button below and Plainsong will take it from there.",
         tone: "idle",
       };
   }
@@ -1006,59 +1000,6 @@ function summarizeMode(mode: {
   return summary;
 }
 
-function normalizeProviderLanguageTag(language: string): string {
-  return language.trim().toLowerCase();
-}
-
-function providerSupportsCaptureLanguage(
-  provider: AsrProviderInfo,
-  language: string | null,
-): boolean {
-  if (!language) {
-    return true;
-  }
-
-  const supported = provider.modelInfo.languages.map(
-    normalizeProviderLanguageTag,
-  );
-  const normalizedLanguage = normalizeProviderLanguageTag(language);
-  const baseLanguage = normalizedLanguage.split("-")[0] ?? normalizedLanguage;
-
-  return (
-    supported.includes(normalizedLanguage) ||
-    supported.includes(baseLanguage) ||
-    supported.includes("multilingual") ||
-    supported.includes("system")
-  );
-}
-
-function providerSupportsActiveLanguageSet(
-  provider: AsrProviderInfo,
-  languages: string[],
-): boolean {
-  if (languages.length === 0) {
-    return true;
-  }
-  return languages.some((language) =>
-    providerSupportsCaptureLanguage(provider, language),
-  );
-}
-
-function languageTrustLabel(
-  language: string | null,
-  activeLanguages: string[],
-): string {
-  if (language) {
-    return GA_LANGUAGE_CODES.has(language.toLowerCase())
-      ? "GA"
-      : "Experimental";
-  }
-  if (activeLanguages.length > 1) {
-    return "Active set";
-  }
-  return "Auto";
-}
-
 export function DictationView() {
   const {
     stateEvent: dictationStateEvent,
@@ -1214,9 +1155,6 @@ export function DictationView() {
     useState<DictationHistoryDetails | null>(null);
   const [dictationInsights, setDictationInsights] =
     useState<DictationInsights | null>(null);
-  const [dictationProviders, setDictationProviders] = useState<
-    AsrProviderInfo[]
-  >([]);
   const [latestCorrectionBaseline, setLatestCorrectionBaseline] = useState("");
   const [latestLearnStatus, setLatestLearnStatus] = useState<string | null>(
     null,
@@ -1407,7 +1345,7 @@ export function DictationView() {
       (entry) => entry.enabled && entry.appScope?.trim(),
     ).length;
     if (enabledEntries === 0) {
-      return "No custom words yet. Add names, brands, and recurring terms Nautilus should always get right.";
+      return "No custom words yet. Add names, brands, and recurring terms Plainsong should always get right.";
     }
     return `${enabledEntries} active dictionary entr${enabledEntries === 1 ? "y" : "ies"}${
       scopedEntries > 0 ? ` · ${scopedEntries} app-specific` : ""
@@ -1497,38 +1435,6 @@ export function DictationView() {
     dictationModePreset,
     dictationSessionLanguage,
   ]);
-  const activeLanguageProviders = useMemo(
-    () =>
-      [...dictationProviders]
-        .filter((provider) =>
-          effectiveCaptureLanguage
-            ? providerSupportsCaptureLanguage(
-                provider,
-                effectiveCaptureLanguage,
-              )
-            : providerSupportsActiveLanguageSet(
-                provider,
-                dictationActiveLanguages,
-              ),
-        )
-        .sort((left, right) => {
-          if (
-            left.runtimeStatus === "ready" &&
-            right.runtimeStatus !== "ready"
-          ) {
-            return -1;
-          }
-          if (
-            left.runtimeStatus !== "ready" &&
-            right.runtimeStatus === "ready"
-          ) {
-            return 1;
-          }
-          return left.name.localeCompare(right.name);
-        })
-        .slice(0, 4),
-    [dictationActiveLanguages, dictationProviders, effectiveCaptureLanguage],
-  );
   const groupedCorrectionSuggestions = useMemo<
     CorrectionSuggestionGroup[]
   >(() => {
@@ -1983,25 +1889,6 @@ export function DictationView() {
       })
       .catch((error) => {
         console.warn("Failed to load dictation dictionary entries:", error);
-      });
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let mounted = true;
-    void getAsrProviders()
-      .then((providers) => {
-        if (mounted) {
-          setDictationProviders(providers);
-        }
-      })
-      .catch((error) => {
-        console.warn("Failed to load ASR providers for dictation:", error);
-        if (mounted) {
-          setDictationProviders([]);
-        }
       });
     return () => {
       mounted = false;
@@ -3389,7 +3276,7 @@ export function DictationView() {
               <CardTitle>Flow Profiles</CardTitle>
               <CardDescription>
                 Start with a profile tuned for your workflow, then save private
-                app-aware flows when you want Nautilus to switch styles for you.
+                app-aware flows when you want Plainsong to switch styles for you.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -3400,7 +3287,7 @@ export function DictationView() {
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Pick the lane that matches what you are doing right now.
-                  Nautilus keeps the deep controls below, but these presets are
+                  Plainsong keeps the deep controls below, but these presets are
                   the fastest way to feel dialed in.
                 </p>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -3863,7 +3750,7 @@ export function DictationView() {
                             customPrompt: event.target.value,
                           }))
                         }
-                        placeholder="Optional. Tell Nautilus how this mode should rewrite dictation for this app or workflow."
+                        placeholder="Optional. Tell Plainsong how this mode should rewrite dictation for this app or workflow."
                       />
                       <p className="text-xs text-muted-foreground">
                         Optional. Overrides the global Smart Format prompt only
@@ -3907,7 +3794,7 @@ export function DictationView() {
                         />
                         <p className="text-xs text-muted-foreground">
                           Optional. When the frontmost app name matches,
-                          Nautilus can switch to this profile automatically for
+                          Plainsong can switch to this profile automatically for
                           hotkey and tray dictation.
                         </p>
                         <div className="flex flex-wrap gap-2">
@@ -4112,7 +3999,7 @@ export function DictationView() {
                   </div>
                   <div className="rounded-xl border bg-background p-3">
                     <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                      Teaching Nautilus
+                      Teaching Plainsong
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       {dictionaryCoverageSummary}
@@ -4155,7 +4042,7 @@ export function DictationView() {
                               : "border-border bg-background text-muted-foreground",
                       )}
                     >
-                      {dictationPhase}
+                      {dictationPhaseSummary.title}
                     </div>
                   </div>
                   {dictationPhasePreview ? (
@@ -4244,7 +4131,7 @@ export function DictationView() {
                         >
                           <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
                           {dictationPhase === "delivering"
-                            ? "Delivering..."
+                            ? "Inserting..."
                             : "Working..."}
                         </Button>
                       </div>
@@ -4386,7 +4273,7 @@ export function DictationView() {
                   {
                     icon: Keyboard,
                     label: "Trigger",
-                    body: "Use the global hotkey without switching back to Nautilus.",
+                    body: "Use the global hotkey without switching back to Plainsong.",
                   },
                   {
                     icon: Zap,
@@ -4432,7 +4319,7 @@ export function DictationView() {
                   Dictation Coach
                 </CardTitle>
                 <CardDescription>
-                  Learn the highest-leverage moves that make Nautilus feel
+                  Learn the highest-leverage moves that make Plainsong feel
                   faster than typing.
                 </CardDescription>
               </CardHeader>
@@ -4767,7 +4654,7 @@ export function DictationView() {
                         Say “scratch that” after the next insert
                       </p>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        Nautilus can undo the last insert or replace it with a
+                        Plainsong can undo the last insert or replace it with a
                         corrected phrase.
                       </p>
                     </div>
@@ -4851,7 +4738,7 @@ export function DictationView() {
                       Quick add to dictionary
                     </Button>
                     <p className="text-xs text-muted-foreground">
-                      Edit a mistaken word here and Nautilus can remember it for
+                      Edit a mistaken word here and Plainsong can remember it for
                       next time.
                     </p>
                   </div>
@@ -5164,8 +5051,7 @@ export function DictationView() {
                     <option value="power_rewrite">Power Rewrite</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
-                    Uses the transcription route selected in Settings →
-                    Transcription.
+                    Uses the transcription method you chose in Settings.
                   </p>
                 </div>
 
@@ -5214,9 +5100,7 @@ export function DictationView() {
                       });
                     }}
                   >
-                    <option value="hold_to_talk">Hold-to-talk</option>
-                    <option value="toggle">Toggle press</option>
-                    <option value="hands_free">Hands-free</option>
+                    <option value="toggle">Toggle (press to start, press again to stop)</option>
                   </select>
                   <p className="text-xs text-muted-foreground">
                     Hands-free starts on press and stops after silence or a
@@ -5391,42 +5275,6 @@ export function DictationView() {
                   </p>
                 </div>
 
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-sm font-medium">
-                    Provider fit for this session
-                  </label>
-                  <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                    {activeLanguageProviders.length > 0 ? (
-                      activeLanguageProviders.map((provider) => (
-                        <div
-                          key={provider.providerType}
-                          className="rounded-md border bg-muted/20 px-3 py-3"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <p className="text-sm font-medium">
-                              {provider.name}
-                            </p>
-                            <span className="text-[11px] text-muted-foreground">
-                              {provider.runtimeStatus === "ready"
-                                ? "Ready"
-                                : provider.runtimeStatus}
-                            </span>
-                          </div>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {providerCapabilityLabel(provider.providerType)} ·{" "}
-                            {providerRecommendation(provider)}
-                          </p>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="rounded-md border bg-muted/20 px-3 py-3 text-xs text-muted-foreground md:col-span-2 xl:col-span-4">
-                        No ready providers matched the current language/session
-                        filters yet.
-                      </div>
-                    )}
-                  </div>
-                </div>
-
                 <div className="space-y-2">
                   <label className="text-sm font-medium">Keep warm</label>
                   <select
@@ -5475,66 +5323,6 @@ export function DictationView() {
                           ? " from the active language set."
                           : " from provider auto-detect."}
                   </p>
-                </div>
-
-                <div className="rounded-md border bg-background/80 px-3 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-medium">Language routing</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Provider guidance for the current capture language or
-                        active auto-detect set.
-                      </p>
-                    </div>
-                    <span className="rounded-full border px-2 py-1 text-[11px] text-muted-foreground">
-                      {languageTrustLabel(
-                        effectiveCaptureLanguage,
-                        dictationActiveLanguages,
-                      )}
-                    </span>
-                  </div>
-                  <div className="mt-3 space-y-2">
-                    {activeLanguageProviders.length > 0 ? (
-                      activeLanguageProviders.map((provider) => (
-                        <div
-                          key={provider.providerType}
-                          className="rounded-md border bg-muted/20 px-3 py-2"
-                        >
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <p className="text-sm font-medium">
-                              {provider.name}
-                            </p>
-                            <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                              <span>
-                                {providerHostingLabel(
-                                  provider.providerType,
-                                  provider.selectedModelId,
-                                )}
-                              </span>
-                              <span>
-                                {providerCapabilityLabel(provider.providerType)}
-                              </span>
-                              <span>
-                                {provider.runtimeStatus === "ready"
-                                  ? "Ready"
-                                  : "Needs setup"}
-                              </span>
-                            </div>
-                          </div>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {providerRecommendation(provider)}
-                          </p>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-xs text-muted-foreground">
-                        No installed providers currently advertise coverage for
-                        this language view. Nautilus will still use the active
-                        dictation path, but non-GA languages and multi-language
-                        auto-detect sets should be treated as experimental.
-                      </p>
-                    )}
-                  </div>
                 </div>
 
                 <div className="space-y-2">
@@ -5996,7 +5784,7 @@ export function DictationView() {
                   <div className="flex items-center gap-2">
                     <BookOpen className="h-4 w-4 text-primary" />
                     <p className="text-sm font-medium">
-                      Teach Nautilus your words
+                      Teach Plainsong your words
                     </p>
                   </div>
                   <p className="text-xs text-muted-foreground">
@@ -6489,7 +6277,7 @@ export function DictationView() {
                 <div>
                   <p className="text-sm font-medium">Prompt and context</p>
                   <p className="text-xs text-muted-foreground">
-                    Inspect the app context and prompt strategy Nautilus used
+                    Inspect the app context and prompt strategy Plainsong used
                     for this dictation.
                   </p>
                 </div>
@@ -6805,7 +6593,7 @@ export function DictationView() {
                       : "Raw transcript only"}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    Judge what Nautilus heard versus what you want to paste or
+                    Judge what Plainsong heard versus what you want to paste or
                     save.
                   </p>
                 </div>
@@ -6815,10 +6603,10 @@ export function DictationView() {
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="text-sm font-medium">What Nautilus heard</p>
+                      <p className="text-sm font-medium">What Plainsong heard</p>
                       <p className="text-xs text-muted-foreground">
                         The saved raw transcript from the original capture. Edit
-                        it to teach Nautilus a correction.
+                        it to teach Plainsong a correction.
                       </p>
                     </div>
                     <div className="flex items-center gap-2">

@@ -5,7 +5,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const packageJson = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
-const productName = packageJson.productName ?? "Nautilus";
+const productName = packageJson.productName ?? "Plainsong";
 const version = packageJson.version;
 const arch = process.argv.includes("--x64") ? "x64" : "arm64";
 

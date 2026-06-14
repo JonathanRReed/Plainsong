@@ -1,5 +1,5 @@
 export const MEETING_CONSENT_NOTICE_TEXT =
-  "Heads up: I’m recording and transcribing this meeting with Nautilus for my notes. Please let me know now if you want me to stop.";
+  "Heads up: I’m recording and transcribing this meeting with Plainsong for my notes. Please let me know now if you want me to stop.";
 
 interface MeetingConsentStateLike {
   consentPromptShown?: boolean | null;
