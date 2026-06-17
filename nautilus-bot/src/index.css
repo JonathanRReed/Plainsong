@@ -1,6 +1,5 @@
 @import "tailwindcss" source(".");
 @import "tw-animate-css";
-@import "shadcn/tailwind.css";
 
 @font-face {
   font-family: "Geist Variable";
