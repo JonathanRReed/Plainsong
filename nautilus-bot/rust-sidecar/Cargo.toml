@@ -54,7 +54,7 @@ candle-transformers = { version = "0.10", optional = true }
 tokenizers = { version = "0.23", optional = true }
 
 # Audio preprocessing
-rubato = { version = "2.0", optional = true }
+rubato = { version = "3.0", optional = true }
 
 # FFT for FBank feature extraction in diarization
 rustfft = { version = "6.2", optional = true }
