@@ -259,7 +259,9 @@ describe("FirstRunWizard", () => {
 
     expect(saveSettings).toHaveBeenCalledTimes(1);
     expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+Space");
-    expect(currentSettings.transcription.dictationPushToTalk).toBe(true);
+    // v1 ships toggle-only, so onboarding always persists toggle (push-to-talk
+    // and hands-free off) regardless of any stale persisted preference.
+    expect(currentSettings.transcription.dictationPushToTalk).toBe(false);
     expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
   });
 
@@ -271,10 +273,13 @@ describe("FirstRunWizard", () => {
     await clickPrimary(/continue/i);
     await clickPrimary(/continue/i);
     // v1 ships toggle-only (the single honest mode; hold-to-talk/hands-free need
-    // a native key listener that isn't wired yet), so onboarding persists toggle.
-    fireEvent.change(screen.getByLabelText("Hotkey behavior"), {
-      target: { value: "toggle" },
-    });
+    // a native key listener that isn't wired yet), so the hotkey behavior is
+    // shown as a calm static row rather than a one-option dropdown, and
+    // onboarding persists toggle.
+    expect(screen.getByText("Hotkey behavior")).toBeInTheDocument();
+    expect(
+      screen.getByText(/press to start, press again to stop/i)
+    ).toBeInTheDocument();
     await clickPrimary(/finish/i);
 
     await waitFor(() => {

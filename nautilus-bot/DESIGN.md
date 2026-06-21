@@ -1,16 +1,20 @@
 # Plainsong Design Context
 
+> **Visuals (color, type, motif, motion) are governed by [STYLE.md](STYLE.md)** — the Plainsong
+> brand bible translated for the app. This file governs register, interaction, state design, and
+> release discipline, which all still hold. Where the two once overlapped on *looks*, STYLE.md wins.
+
 ## Register
 
 Product UI. Design serves fast daily operation, clear trust signals, and low-friction recovery. The first screen should feel like an active control room for dictation and meetings, not a marketing page.
 
 ## Visual Direction
 
-Use a restrained dark desktop interface with warm tinted neutrals, quiet borders, focused panels, and one measured accent used for action or state. The app should feel composed, technical, and usable for long sessions. Avoid purple-blue gradient dominance, decorative glass, glow-heavy surfaces, large hero typography, and card grids that repeat the same visual idea.
+Plainsong is a **candle-lit scriptorium desk**: vellum/ink grounds, one gold accent, one rust rubric, no other hues (see [STYLE.md](STYLE.md) §0–1). It should feel composed, warm, and usable for long sessions — a control room, not a marketing page. Reserve burnished gold for the earned moment (the live "setting down" state, the one primary CTA); everything else stays quiet. Avoid the stoplight convention (no green/blue/amber status colors), decorative glass, glow-heavy surfaces, and card grids that repeat the same visual idea.
 
 ## Typography
 
-Use the current app font stack and keep it legible at desktop density. Headings should rely on weight, size, and spacing, not novelty display fonts. Body copy should stay short and practical. Labels use normal letter spacing unless a small uppercase status label is genuinely useful.
+Three self-hosted faces (see [STYLE.md](STYLE.md) §2): **Newsreader** (display serif — headings, wordmark, inked/transcript text, versals), **IBM Plex Mono** (rubrics, eyebrows, metadata, specs, keycaps, readouts — UPPERCASE, wide tracking, usually rust), and **IBM Plex Sans** (quiet running body). Body copy stays short and practical; section labels use the `.rubric` rubrication convention.
 
 ## Components
 

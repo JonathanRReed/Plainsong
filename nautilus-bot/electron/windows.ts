@@ -1,14 +1,13 @@
-import { BrowserWindow, screen } from "electron";
+import { BrowserWindow } from "electron";
 import path from "path";
 
+// Initial bounds are placeholders — the windows are created hidden (show: false)
+// and showOverlayWindow() repositions them onto the active display (the one under
+// the cursor, inside its notch-safe work area) before they are ever shown.
 export function createDictationOverlayWindow(): BrowserWindow {
-  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
-
   return new BrowserWindow({
     width: 420,
     height: 120,
-    x: Math.round(width / 2 - 210),
-    y: Math.round(height - 160),
     frame: false,
     transparent: true,
     hasShadow: false,
@@ -27,13 +26,9 @@ export function createDictationOverlayWindow(): BrowserWindow {
 }
 
 export function createRecordingOverlayWindow(): BrowserWindow {
-  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
-
   return new BrowserWindow({
     width: 320,
     height: 80,
-    x: Math.round(width - 340),
-    y: Math.round(height - 100),
     frame: false,
     transparent: true,
     hasShadow: false,

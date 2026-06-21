@@ -84,14 +84,17 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
     if (this.state.hasError) {
       return (
         <div className="flex-1 flex items-center justify-center p-8">
-          <div className="max-w-md text-center space-y-4">
-            <h2 className="text-xl font-semibold text-destructive">Something went wrong</h2>
-            <p className="text-sm text-muted-foreground">
+          <div className="surface-panel max-w-md rounded-xl border border-border/60 px-8 py-10 text-center">
+            <span className="neume neume-rust mx-auto mb-5 block" aria-hidden="true" />
+            <h2 className="font-serif text-xl font-semibold text-destructive">
+              Something went wrong
+            </h2>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">
               {this.state.error?.message ?? "An unexpected error occurred."}
             </p>
             <button
               type="button"
-              className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm"
+              className="transition-smooth mt-6 rounded-md border border-border/70 px-4 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
               onClick={() => this.setState({ hasError: false, error: null })}
             >
               Try Again
@@ -345,8 +348,11 @@ function App() {
                   <main className="app-main-surface min-w-0 flex-1 overflow-hidden">
                     <Suspense
                       fallback={
-                        <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
-                          Loading workspace...
+                        <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+                          <span className="neume" aria-hidden="true" />
+                          <p className="font-serif text-sm text-muted-foreground">
+                            Loading workspace...
+                          </p>
                         </div>
                       }
                     >

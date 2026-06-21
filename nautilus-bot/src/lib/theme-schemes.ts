@@ -3,18 +3,11 @@ interface ThemeSchemeOption {
   label: string;
 }
 
-export const THEME_SCHEMES: ThemeSchemeOption[] = [
-  { value: "default", label: "Default" },
-  { value: "rose-pine", label: "Rose Pine Night" },
-  { value: "rose-pine-dawn", label: "Rose Pine Dawn" },
-  { value: "solarized-dark", label: "Solarized Dark" },
-  { value: "solarized-light", label: "Solarized Light" },
-  { value: "dracula", label: "Dracula" },
-  { value: "tokyo-night", label: "Tokyo Night" },
-  { value: "gruvbox", label: "Gruvbox Dark" },
-  { value: "nord", label: "Nord" },
-  { value: "rose-pine-moon", label: "Rose Pine Moon" },
-  { value: "catppuccin", label: "Catppuccin Mocha" },
+// Plainsong ships one palette — vellum + ink, one gold accent, one rust
+// rubric, no other hues. Light/dark is the candle-lit-folio vs vellum toggle
+// handled by the theme provider; there are no alternate color schemes.
+const THEME_SCHEMES: ThemeSchemeOption[] = [
+  { value: "default", label: "Plainsong" },
 ];
 
 export function normalizeThemeScheme(value: string): string {

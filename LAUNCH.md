@@ -9,7 +9,7 @@ explicitly so nothing is assumed.
 - **Free & open-source**: all commercial licensing/trial/nag/entitlement code
   removed; MIT LICENSE present.
 - **Compiles & passes CI gates**: `cargo clippy -D warnings` clean, 235 Rust
-  unit tests, 173 vitest, typecheck (both tsconfigs), IPC contract, knip,
+  unit tests, 172 vitest, typecheck (both tsconfigs), IPC contract, knip,
   rustfmt — all green. CI runs the shipped default feature set + a production
   build.
 - **Fast default route**: whisper.cpp (Metal/CoreML) `base.en`; measured
@@ -35,8 +35,22 @@ explicitly so nothing is assumed.
 - **Honest hotkey UI**: v1 exposes **toggle** mode only across all surfaces
   (settings, dictation view, onboarding default); the broken hold-to-talk/
   hands-free options are removed (they need a native key listener — fast-follow).
-- **App icon**: a clean Plainsong placeholder (single line + note). Replace with
-  final designed art before a marketing push, but it is no longer old-project art.
+- **App icon**: a real designed Plainsong mark — a gilt-gradient versal “P” on a
+  candle-lit ink folio (Baskerville), regenerated at every size into
+  `build-resources/icon.icns` / `.ico` / `.png`, plus a black-on-transparent
+  menu-bar template icon.
+- **Manuscript UI**: the entire renderer was restyled to the Plainsong brand —
+  vellum/ink grounds, one gold accent, one rust rubric, Newsreader / IBM Plex
+  faces, neume state glyphs (see `nautilus-bot/STYLE.md`). Zero off-palette
+  colours; all UI gates green; both themes verified.
+- **Multi-monitor + notch HUD**: the dictation/recording overlays now open on the
+  display under the cursor, inside its notch-safe work area — not always the
+  primary display.
+- **Menu-bar tray**: a template-icon `Tray` with an Open / Quit menu (a menu, not
+  a popover, per Apple HIG), wired to the `minimizeToTray` setting so the window
+  hides to the tray instead of quitting when enabled.
+- **HUD dismissal**: the floating HUD persists until explicit dismissal and is
+  closed with `Escape` (it never vanishes on click-away).
 
 ## Must be validated on a real Mac (cannot be done headlessly)
 
@@ -53,14 +67,20 @@ Expect this pass to surface a couple of small fixes; that's normal.
    greedy decode on real speech; it's on by default via Live Preview.
 5. **Real-app insertion** across the apps you care about (Slack, browser, IDE,
    Notes).
+6. **Menu-bar tray + close-to-tray**: confirm the Tray icon appears, its menu
+   opens, "Open Plainsong" reshows the window, and enabling "Minimize to tray"
+   hides (not quits) the window on close. (Native — built and typechecked, but
+   the runtime behaviour needs a real launch.)
+7. **HUD on an external monitor / notched Mac**: confirm the dictation and
+   recording overlays appear on the *active* display, not the built-in one, and
+   clear of the notch.
 
 ## Known gaps (not hard blockers)
 
 - **Hold-to-talk / hands-free**: real press-and-hold needs a native key listener
-  (Electron global shortcuts are press-only); v1 ships honest **toggle** mode.
-  Real hold-to-talk is the top fast-follow (needs keyboard validation).
-- **App icon** is a clean placeholder mark — replace with final designed art
-  before a marketing push (`build-resources/icon.icns` / `.ico` / `.png`).
+  (Electron global shortcuts are press-only); v1 ships honest **toggle** mode
+  (shown as static text, no dead dropdown). Real hold-to-talk is the top
+  fast-follow (needs keyboard validation).
 - **`nautilus-bot/` directory name** retained (CI working-directory depends on
   it); repo-flatten is a separate cleanup.
 
@@ -69,6 +89,10 @@ Expect this pass to surface a couple of small fixes; that's normal.
 - ✅ **`oss-relaunch` branch pushed** to `github.com/JonathanRReed/Plainsong`.
 - ✅ **GitHub repo renamed** `NautilusBot → Plainsong`; local remote updated, so
   the publish/auto-update URLs now resolve.
+- ✅ **Site domain live**: https://plainsong.jonathanrreed.com is registered as a
+  subdomain of the maker's domain and wired into the docs/config. (The optional
+  `plainsong.app` apex + `@plainsong` social handles are separate and only if
+  still wanted.)
 
 ## Remaining — physically require a human (no AI can do these)
 
@@ -76,7 +100,9 @@ Expect this pass to surface a couple of small fixes; that's normal.
   Accessibility, **speak into the mic**, confirm dictation inserts into real
   apps, watch the first-run `base.en` download, feel the streaming. (Needs voice
   + GUI permission grants — cannot be automated.)
-- **Register `plainsong.app` + grab `@plainsong` handles** (needs payment/accounts).
+- **(Optional) Register `plainsong.app` apex + grab `@plainsong` handles** (needs
+  payment/accounts). Not a blocker: the live site already runs at
+  https://plainsong.jonathanrreed.com.
 - **Attorney USPTO TSDR clearance** (Classes 9 + 42) — confirmation, not
   investigation; the name vetted clean in-category. (Needs a lawyer.)
 - **$99 Apple Developer ID** → signed + notarized releases (the pipeline already

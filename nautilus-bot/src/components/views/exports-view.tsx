@@ -144,15 +144,16 @@ export function ExportsView() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="border-b px-6 py-5">
+      <div className="border-b border-border/70 bg-background/82 px-6 py-5 backdrop-blur-xl">
+        <p className="rubric mb-1.5">SHARE</p>
         <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight">Exports</h1>
+          <h1 className="font-serif text-2xl font-semibold tracking-tight">Exports</h1>
           <Badge variant="outline" className="text-[10px] font-medium uppercase tracking-widest">
             <FileOutput className="mr-1 h-3 w-3" />
             Share
           </Badge>
         </div>
-        <p className="mt-1 text-sm text-muted-foreground">Create shareable transcripts, notes, and structured exports</p>
+        <p className="mt-1 text-sm leading-6 text-muted-foreground">Create shareable transcripts, notes, and structured exports</p>
       </div>
 
       <ScrollArea className="flex-1">
@@ -281,7 +282,12 @@ export function ExportsView() {
                 </p>
               )}
               <pre className="text-xs leading-relaxed whitespace-pre-wrap rounded-lg border bg-muted/20 p-4 font-mono min-h-[180px]">
-                {templatePreview || <span className="text-muted-foreground">No template preview generated yet.</span>}
+                {templatePreview || (
+                  <span className="flex h-[148px] flex-col items-center justify-center gap-2 text-center font-sans">
+                    <span className="neume neume-hollow" />
+                    <span className="font-serif text-sm text-muted-foreground">No template preview generated yet.</span>
+                  </span>
+                )}
               </pre>
             </CardContent>
           </Card>
@@ -294,8 +300,8 @@ export function ExportsView() {
           )}
 
           {lastExportPath && (
-            <div className="flex items-center gap-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-sm">
-              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+            <div className="flex items-center gap-3 rounded-lg border border-gold/30 bg-gold/10 px-4 py-3 text-sm">
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-gold-text" />
               <span>Export written to: <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs break-all">{lastExportPath}</code></span>
             </div>
           )}
@@ -309,7 +315,12 @@ export function ExportsView() {
             </CardHeader>
             <CardContent>
               <pre className="text-xs leading-relaxed whitespace-pre-wrap rounded-lg border bg-muted/20 p-4 font-mono min-h-[240px]">
-                {previewContent || <span className="text-muted-foreground">No preview generated yet.</span>}
+                {previewContent || (
+                  <span className="flex h-[208px] flex-col items-center justify-center gap-2 text-center font-sans">
+                    <span className="neume neume-hollow" />
+                    <span className="font-serif text-sm text-muted-foreground">No preview generated yet.</span>
+                  </span>
+                )}
               </pre>
             </CardContent>
           </Card>

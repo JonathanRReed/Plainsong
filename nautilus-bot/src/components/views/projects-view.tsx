@@ -44,6 +44,7 @@ export function ProjectsView() {
   return (
     <div className="h-full flex flex-col">
       <PageHeader
+        eyebrow="LIBRARY"
         title="Projects"
         subtitle="Organize recordings and personal libraries"
         actions={
@@ -65,11 +66,10 @@ export function ProjectsView() {
           ) : null}
 
           {isLoading ? (
-            <Card variant="default">
-              <CardContent className="py-6 text-sm text-muted-foreground">
-                Loading projects...
-              </CardContent>
-            </Card>
+            <div className="flex flex-col items-center justify-center gap-2 py-20 text-center">
+              <span className="neume" />
+              <p className="font-serif text-sm text-muted-foreground">Loading projects...</p>
+            </div>
           ) : null}
 
           {!isLoading && !error && projects.length === 0 ? (
@@ -95,8 +95,8 @@ export function ProjectsView() {
                   <CardHeader className="pb-3">
                     <div className="flex items-start justify-between">
                       <div className="flex items-center gap-3">
-                        <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
-                          <Folder className="h-5 w-5 text-primary" />
+                        <div className="h-10 w-10 rounded-lg bg-muted/20 flex items-center justify-center">
+                          <Folder className="h-5 w-5 text-muted-foreground" />
                         </div>
                         <div>
                           <CardTitle className="text-lg">{project.name}</CardTitle>
@@ -105,7 +105,7 @@ export function ProjectsView() {
                           </p>
                         </div>
                       </div>
-                      <Button variant="ghost" size="icon" className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <Button variant="ghost" size="icon" aria-label={`Options for ${project.name}`} className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity">
                         <MoreHorizontal className="h-4 w-4" />
                       </Button>
                     </div>
@@ -114,11 +114,13 @@ export function ProjectsView() {
                     <p className="text-sm text-muted-foreground line-clamp-2">
                       {project.description?.trim() || "No description"}
                     </p>
-                    <div className="flex items-center justify-between mt-4 text-xs text-muted-foreground">
-                      <span>{project.encrypted ? "Encrypted" : "Standard"}</span>
-                      <span className="flex items-center gap-2 text-primary">
+                    <div className="mt-4 flex items-center justify-between text-xs text-muted-foreground">
+                      <span className="font-mono uppercase tracking-widest text-[10px]">
+                        {project.encrypted ? "Encrypted" : "Standard"}
+                      </span>
+                      <span className="transition-smooth flex items-center gap-2 text-muted-foreground group-hover:text-gold-text">
                         View recordings
-                        <ChevronRight className="h-3 w-3" />
+                        <ChevronRight className="transition-smooth h-3 w-3 group-hover:translate-x-0.5" />
                       </span>
                     </div>
                   </CardContent>

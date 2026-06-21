@@ -797,7 +797,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     switch (normalizedStatus.kind) {
       case "downloaded":
         return (
-          <Badge variant="default" className="bg-green-600">
+          <Badge variant="default" className="bg-gold">
             <Check className="h-3 w-3 mr-1" />
             Ready
           </Badge>
@@ -941,7 +941,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     const canRequestSpeechPermission = providerType === "macos_apple_speech";
     return (
       <div className="space-y-2">
-        <p className="text-xs text-amber-300">
+        <p className="text-xs text-rust">
           {label}:{" "}
           {provider.runtimeMessage ?? `${routeLabel} is not ready yet.`}{" "}
           {provider.runtimeDetails.setupAction ??
@@ -1215,7 +1215,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         <div className="rounded-xl border bg-muted/10 p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="text-sm font-semibold">{laneTitle}</p>
+              <p className="font-serif text-base font-semibold">{laneTitle}</p>
               <p className="mt-1 text-sm text-muted-foreground">
                 {laneDescription}
               </p>
@@ -1227,7 +1227,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             ) : null}
           </div>
           {recommendedRoute ? (
-            <div className="mt-4 rounded-lg border border-trusted/30 bg-background/80 p-4">
+            <div className="mt-4 rounded-lg border border-gold/30 bg-background/80 p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -1372,7 +1372,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
           </div>
 
           <div className="rounded-xl border bg-muted/10 p-4">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            <p className="rubric-muted">
               Route notes
             </p>
             <p className="mt-2 text-sm font-medium">
@@ -1503,7 +1503,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
           <div className="flex items-center gap-2">
             <Badge
               variant={overallReady ? "default" : "secondary"}
-              className={overallReady ? "bg-green-600" : ""}
+              className={overallReady ? "bg-gold" : ""}
             >
               {overallReady ? "Ready for transcription" : "Setup required"}
             </Badge>
@@ -1520,11 +1520,11 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         {appleNativeTranscriptionReady &&
         appleNativeUsedForDictation &&
         !appleNativeCursorInsertionReady ? (
-          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
-            <p className="text-sm font-medium text-amber-200">
+          <div className="rounded-md border border-rust/30 bg-rust/10 p-3">
+            <p className="text-sm font-medium text-rust">
               Apple Native transcription is ready.
             </p>
-            <p className="text-xs text-amber-100/90">
+            <p className="text-xs text-rust/90">
               Cursor insertion is not ready yet. Enable Plainsong in Privacy &
               Security &gt; Accessibility so it can insert text into the target
               app.
@@ -1537,11 +1537,11 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         appleNativeCursorInsertionReady &&
         !appleNativeAccessibilityTrusted &&
         preferredInsertStrategy === "simulated_typing" ? (
-          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
-            <p className="text-sm font-medium text-amber-200">
+          <div className="rounded-md border border-rust/30 bg-rust/10 p-3">
+            <p className="text-sm font-medium text-rust">
               Apple Native transcription is ready.
             </p>
-            <p className="text-xs text-amber-100/90">
+            <p className="text-xs text-rust/90">
               Native Cmd+V fallback is available. Direct Accessibility text
               insertion is not currently verified for this app copy.
             </p>
@@ -1549,23 +1549,23 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         ) : null}
 
         {lastCursorInsertFailure ? (
-          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
-            <p className="text-sm font-medium text-amber-200">
+          <div className="rounded-md border border-rust/30 bg-rust/10 p-3">
+            <p className="text-sm font-medium text-rust">
               Latest dictation fell back to clipboard-only.
             </p>
-            <p className="text-xs text-amber-100/90">
+            <p className="text-xs text-rust/90">
               {lastCursorInsertFailure}
             </p>
           </div>
         ) : null}
 
         {permissionDiagnostics?.runningFromDiskImage ? (
-          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 space-y-2">
-            <p className="text-sm font-medium text-amber-200">
+          <div className="rounded-md border border-rust/30 bg-rust/10 p-3 space-y-2">
+            <p className="text-sm font-medium text-rust">
               You are running Plainsong from the mounted DMG, not the installed
               app.
             </p>
-            <p className="text-xs text-amber-100/90">
+            <p className="text-xs text-rust/90">
               macOS permissions granted to the installed app do not apply to the
               disk image copy. Open the installed app in{" "}
               <code>/Applications</code>, then quit this DMG copy.
@@ -1590,10 +1590,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             >
               <div className="flex items-center justify-between gap-2">
                 <p className="text-sm font-medium">{row.label}</p>
-                <Badge
-                  variant={row.ready ? "default" : "secondary"}
-                  className={row.ready ? "bg-green-600" : ""}
-                >
+                <Badge variant="outline" className="border-border bg-muted/30 text-foreground">
+                  <span aria-hidden="true" className={row.ready ? "neume neume-lit mr-1" : "neume neume-hollow mr-1"} />
                   {permissionBadgeLabel(row.key, row.ready)}
                 </Badge>
               </div>
@@ -1669,7 +1667,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         {visibleAppleNativeNotes.length ? (
           <div className="space-y-1">
             {visibleAppleNativeNotes.map((note) => (
-              <p key={note} className="text-xs text-amber-300">
+              <p key={note} className="text-xs text-rust">
                 {note}
               </p>
             ))}
@@ -1698,7 +1696,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             <div className="flex items-center gap-2">
               <Badge
                 variant={insertReady ? "default" : "secondary"}
-                className={insertReady ? "bg-green-600" : ""}
+                className={insertReady ? "bg-gold" : ""}
               >
                 {insertReady
                   ? "Auto-insert ready"
@@ -1749,7 +1747,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             </Button>
           </div>
         </div>
-        <p className="text-xs text-amber-200">{insertDetail}</p>
+        <p className="text-xs text-muted-foreground">{insertDetail}</p>
       </div>
     );
   };
@@ -1771,18 +1769,18 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         className={cn(
           "transition-all",
           defaultProvider === provider.providerType &&
-            "border-trusted ring-1 ring-trusted",
+            "border-gold/40 ring-1 ring-gold",
         )}
       >
         <CardHeader className="pb-3">
           <div className="flex items-start justify-between">
             <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-lg bg-trusted/10 flex items-center justify-center text-trusted">
+              <div className="h-10 w-10 rounded-lg bg-muted/20 flex items-center justify-center text-muted-foreground">
                 {getProviderIcon(provider.providerType)}
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <CardTitle className="text-lg">
+                  <CardTitle className="font-serif text-lg font-semibold">
                     {providerUiName(provider)}
                   </CardTitle>
                   {defaultProvider === provider.providerType ? (
@@ -1811,28 +1809,28 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
           {provider.modelInfo && (
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
               <div className="p-2 bg-muted rounded-lg">
-                <div className="text-muted-foreground text-xs">Size</div>
-                <div className="font-medium">
+                <div className="rubric-muted">Size</div>
+                <div className="mt-0.5 font-medium tabular-nums">
                   {provider.modelInfo.sizeMb} MB
                 </div>
               </div>
               <div className="p-2 bg-muted rounded-lg">
-                <div className="text-muted-foreground text-xs">
+                <div className="rubric-muted">
                   Model / Parameters
                 </div>
-                <div className="font-medium">
+                <div className="mt-0.5 font-medium">
                   {provider.modelInfo.name || provider.modelInfo.parameters}
                 </div>
               </div>
               <div className="p-2 bg-muted rounded-lg">
-                <div className="text-muted-foreground text-xs">WER</div>
-                <div className="font-medium">
+                <div className="rubric-muted">WER</div>
+                <div className="mt-0.5 font-medium tabular-nums">
                   {provider.modelInfo.wordErrorRate?.toFixed(2) || "N/A"}%
                 </div>
               </div>
               <div className="p-2 bg-muted rounded-lg">
-                <div className="text-muted-foreground text-xs">Speed</div>
-                <div className="font-medium">
+                <div className="rubric-muted">Speed</div>
+                <div className="mt-0.5 font-medium tabular-nums">
                   {provider.modelInfo.realTimeFactor?.toFixed(0) || "N/A"}x RTF
                 </div>
               </div>
@@ -1945,7 +1943,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                   href={provider.modelInfo.sourceUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs text-trusted hover:underline"
+                  className="text-xs text-muted-foreground hover:underline"
                 >
                   Learn more
                 </a>
@@ -2020,30 +2018,40 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                   ) : null}
                 </>
               ) : selection.reason === "runtime_unavailable" ? (
-                <Button size="sm" variant="outline" disabled>
+                <span
+                  role="status"
+                  aria-label={`${providerUiName(provider)} is unavailable until its runtime is set up. Use the setup steps below.`}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-rust/30 bg-rust/10 px-2.5 py-1.5 text-xs font-medium text-rust"
+                >
+                  <span aria-hidden="true" className="neume neume-rust" />
                   Runtime setup required
-                </Button>
+                </span>
               ) : selection.reason === "not_enabled" ? (
-                <Button size="sm" variant="outline" disabled>
+                <span
+                  role="status"
+                  aria-label={`${providerUiName(provider)} is not enabled in this build and cannot be selected.`}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/30 px-2.5 py-1.5 text-xs font-medium text-muted-foreground"
+                >
+                  <span aria-hidden="true" className="neume neume-hollow" />
                   Not enabled
-                </Button>
+                </span>
               ) : null}
             </div>
           </div>
           {(runtimeIssue || providerError) && (
-            <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+            <div className="space-y-2 rounded-md border border-rust/30 bg-rust/10 px-3 py-2 text-xs text-rust">
               <p>{providerError ?? runtimeIssue}</p>
               {selection.reason === "runtime_unavailable" && (
                 <>
                   {provider.runtimeDetails?.missingFiles?.length ? (
-                    <p className="text-amber-100">
+                    <p className="text-rust/90">
                       Missing:{" "}
                       <span className="font-mono">
                         {provider.runtimeDetails.missingFiles.join(", ")}
                       </span>
                     </p>
                   ) : null}
-                  <p className="text-amber-100">
+                  <p className="text-rust/90">
                     How to enable:{" "}
                     <span className="font-mono">
                       {provider.runtimeDetails?.setupAction ??
@@ -2051,7 +2059,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                     </span>
                   </p>
                   {provider.runtimeDetails?.pythonPath ? (
-                    <p className="text-amber-100">
+                    <p className="text-rust/90">
                       Detected Python:{" "}
                       <span className="font-mono">
                         {provider.runtimeDetails.pythonPath}
@@ -2078,7 +2086,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         <TabsContent value="providers" className="space-y-4">
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">Model Routes</CardTitle>
+              <p className="rubric mb-1.5">SPEECH ENGINE</p>
+              <CardTitle className="font-serif text-lg font-semibold">Model Routes</CardTitle>
               <CardDescription>
                 Choose by workflow first. Downloads, runtime repair, and raw
                 provider details live below.
@@ -2197,7 +2206,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               <div className="rounded-xl border bg-muted/10 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <p className="text-sm font-medium">Current routing</p>
+                    <p className="font-serif text-base font-semibold">Current routing</p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       A quick summary of what Plainsong will use right now.
                     </p>
@@ -2208,7 +2217,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 </div>
                 <div className="mt-4 grid gap-3 xl:grid-cols-2">
                   <div className="rounded-lg border bg-background/70 p-3">
-                    <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    <p className="rubric-muted">
                       Dictation
                     </p>
                     <p className="mt-1 text-sm font-medium">
@@ -2243,7 +2252,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                     </p>
                   </div>
                   <div className="rounded-lg border bg-background/70 p-3">
-                    <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    <p className="rubric-muted">
                       Meetings
                     </p>
                     <p className="mt-1 text-sm font-medium">
@@ -2310,7 +2319,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
           </Card>
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-base">
+              <CardTitle className="font-serif text-lg font-semibold">
                 Downloads & Diagnostics
               </CardTitle>
               <CardDescription>
@@ -2331,7 +2340,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
           {showAdvancedTools && platformSettings ? (
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-base">
+                <CardTitle className="font-serif text-lg font-semibold">
                   Compatibility & Runtime Tuning
                 </CardTitle>
                 <CardDescription>
@@ -2597,7 +2606,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
           {showAdvancedTools ? (
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-base">
+                <CardTitle className="font-serif text-lg font-semibold">
                   Local Model Cache Repair
                 </CardTitle>
                 <CardDescription>
@@ -2652,7 +2661,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         <TabsContent value="benchmark" className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
+              <CardTitle className="flex items-center gap-2 font-serif font-semibold">
                 <BarChart3 className="h-5 w-5" />
                 Performance Benchmark
               </CardTitle>
@@ -2722,7 +2731,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                         </p>
                       </div>
                       <div className="text-right">
-                        <p className="font-mono font-medium">
+                        <p className="font-mono font-medium tabular-nums">
                           {(result.processingTimeMs / 1000).toFixed(2)}s
                         </p>
                         <p className="text-xs text-muted-foreground">
@@ -2736,7 +2745,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
 
               {benchmarkHistory.length > 0 && (
                 <div className="space-y-2 pt-2">
-                  <p className="text-xs font-medium text-muted-foreground">
+                  <p className="rubric-muted">
                     Recent benchmark history
                   </p>
                   {benchmarkHistory.map((entry) => (
@@ -2751,8 +2760,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                         </p>
                       </div>
                       <div className="text-right">
-                        <p>{(entry.processingTimeMs / 1000).toFixed(2)}s</p>
-                        <p className="text-muted-foreground">
+                        <p className="font-mono tabular-nums">{(entry.processingTimeMs / 1000).toFixed(2)}s</p>
+                        <p className="text-muted-foreground tabular-nums">
                           {(entry.confidence * 100).toFixed(1)}% ·{" "}
                           {entry.nonEmptyTranscript ? "non-empty" : "empty"}
                         </p>
@@ -2766,7 +2775,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
 
           <Card>
             <CardHeader>
-              <CardTitle>Provider Status</CardTitle>
+              <CardTitle className="font-serif font-semibold">Provider Status</CardTitle>
               <CardDescription>
                 Production availability for ASR providers in this build
               </CardDescription>

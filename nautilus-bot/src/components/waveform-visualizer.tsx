@@ -9,26 +9,57 @@ interface WaveformVisualizerProps {
   className?: string;
   barWidth?: number;
   barGap?: number;
+  /**
+   * When true, the live canvas fades out and resolves into a short row of gold
+   * neumes — the brand thesis (voice → notation → written record). Additive and
+   * back-compat: omitted means the canvas behaves exactly as before.
+   */
+  settled?: boolean;
+  /** Number of neumes in the settled row. */
+  settledNeumeCount?: number;
 }
 
-function resolveCanvasHsl(token: "active" | "trusted" | "muted-foreground", alpha?: number): string {
+/**
+ * The settled row — the waveform's resolution into notation. Gold neumes settle
+ * in (staggered) as the canvas fades, or sit static-seated under reduced motion.
+ */
+function SettledNeumeRow({ count = 6 }: { count?: number }) {
+  return (
+    <div
+      aria-hidden="true"
+      className="settle-stagger pointer-events-none flex items-center gap-1.5"
+    >
+      {Array.from({ length: count }, (_, i) => (
+        <span key={`neume-${i}`} className="neume neume-lit" />
+      ))}
+    </div>
+  );
+}
+
+// Canvas can't use CSS utility classes, so read the brand tokens at draw time.
+// active/live stroke -> --brand-warm (gold); secondary stroke -> --gold-ambient (bronze).
+// Falls back to the ink/foreground token so strokes still track light/dark + theme.
+function resolveCanvasColor(
+  token: "active" | "trusted" | "muted-foreground",
+  alpha?: number,
+): string {
+  const tokenVar =
+    token === "active" ? "--brand-warm" : token === "trusted" ? "--gold-ambient" : "--foreground";
+
   if (typeof window === "undefined") {
-    if (token === "active") return alpha === undefined ? "#f97316" : `rgba(249, 115, 22, ${alpha})`;
-    if (token === "trusted") return alpha === undefined ? "#3b82f6" : `rgba(59, 130, 246, ${alpha})`;
-    return alpha === undefined ? "#94a3b8" : `rgba(148, 163, 184, ${alpha})`;
+    // SSR fallback: neutral ink so we never emit a forbidden hue.
+    return alpha === undefined ? "#4a4336" : `rgba(74, 67, 54, ${alpha})`;
   }
 
-  const hslValue = getComputedStyle(document.documentElement)
-    .getPropertyValue(`--${token}`)
-    .trim();
+  const value = getComputedStyle(document.documentElement).getPropertyValue(tokenVar).trim();
 
-  if (!hslValue) {
-    if (token === "active") return alpha === undefined ? "#f97316" : `rgba(249, 115, 22, ${alpha})`;
-    if (token === "trusted") return alpha === undefined ? "#3b82f6" : `rgba(59, 130, 246, ${alpha})`;
-    return alpha === undefined ? "#94a3b8" : `rgba(148, 163, 184, ${alpha})`;
+  if (!value) {
+    return alpha === undefined ? "#4a4336" : `rgba(74, 67, 54, ${alpha})`;
   }
 
-  return alpha === undefined ? `hsl(${hslValue})` : `hsl(${hslValue} / ${alpha})`;
+  // Tokens may be raw color() values (oklch) or bare HSL channels.
+  const color = value.includes("(") ? value : `hsl(${value})`;
+  return alpha === undefined ? color : `color-mix(in oklab, ${color} ${alpha * 100}%, transparent)`;
 }
 
 export function WaveformVisualizer({
@@ -38,6 +69,8 @@ export function WaveformVisualizer({
   className,
   barWidth = 3,
   barGap = 1,
+  settled = false,
+  settledNeumeCount = 6,
 }: WaveformVisualizerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -58,6 +91,11 @@ export function WaveformVisualizer({
     const width = rect.width;
     const centerY = height / 2;
 
+    // Accessibility guards.
+    const forcedColors =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(forced-colors: active)").matches;
+
     // Clear canvas
     ctx.clearRect(0, 0, width, height);
 
@@ -66,7 +104,7 @@ export function WaveformVisualizer({
       ctx.beginPath();
       ctx.moveTo(0, centerY);
       ctx.lineTo(width, centerY);
-      ctx.strokeStyle = resolveCanvasHsl("muted-foreground");
+      ctx.strokeStyle = forcedColors ? "CanvasText" : resolveCanvasColor("muted-foreground");
       ctx.lineWidth = 1;
       ctx.stroke();
       return;
@@ -97,26 +135,46 @@ export function WaveformVisualizer({
       const x = i * totalBarWidth;
       const y = centerY - barHeight / 2;
       
-      // Create gradient
+      if (forcedColors) {
+        // High-contrast mode: solid system color, no gradient.
+        ctx.fillStyle = "CanvasText";
+        ctx.fillRect(x, y, barWidth, barHeight);
+        continue;
+      }
+
+      // Create gradient: gold for the live recording moment, bronze when idle.
       const gradient = ctx.createLinearGradient(0, y, 0, y + barHeight);
       if (isRecording) {
-        gradient.addColorStop(0, resolveCanvasHsl("active"));
-        gradient.addColorStop(1, resolveCanvasHsl("active", 0.5));
+        gradient.addColorStop(0, resolveCanvasColor("active"));
+        gradient.addColorStop(1, resolveCanvasColor("active", 0.5));
       } else {
-        gradient.addColorStop(0, resolveCanvasHsl("trusted"));
-        gradient.addColorStop(1, resolveCanvasHsl("trusted", 0.5));
+        gradient.addColorStop(0, resolveCanvasColor("trusted"));
+        gradient.addColorStop(1, resolveCanvasColor("trusted", 0.5));
       }
-      
+
       ctx.fillStyle = gradient;
       ctx.fillRect(x, y, barWidth, barHeight);
     }
 
-    // Add glow effect when recording
-    if (isRecording) {
-      ctx.shadowColor = resolveCanvasHsl("active");
+    // Add gold glow effect when recording (skip in forced-colors mode).
+    if (isRecording && !forcedColors) {
+      ctx.shadowColor = resolveCanvasColor("active");
       ctx.shadowBlur = 10;
     }
   }, [data, height, barWidth, barGap, isRecording]);
+
+  // Settled: the live canvas has fully resolved into notation — render only the
+  // gold neume row (the canvas is unmounted; nothing left to draw or fade).
+  if (settled) {
+    return (
+      <div
+        className={cn("inline-flex items-center", className)}
+        style={{ height }}
+      >
+        <SettledNeumeRow count={settledNeumeCount} />
+      </div>
+    );
+  }
 
   return (
     <canvas
@@ -170,9 +228,11 @@ export function RecordingWaveform({
         height={height}
       />
       {isRecording && (
-        <div className="absolute top-2 right-2 flex items-center gap-2">
-          <div className="h-2 w-2 rounded-full bg-active animate-pulse" />
-          <span className="text-xs text-active font-medium">LIVE</span>
+        <div className="settle-in absolute top-2 right-2 flex items-center gap-1.5">
+          <span className="neume neume-lit motion-safe:animate-pulse" aria-hidden="true" />
+          <span className="font-mono text-[0.6875rem] font-medium uppercase tracking-[0.18em] text-gold-text">
+            LIVE
+          </span>
         </div>
       )}
     </div>

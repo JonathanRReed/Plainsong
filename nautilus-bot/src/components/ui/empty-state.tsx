@@ -22,25 +22,28 @@ export function EmptyState({
   return (
     <div
       className={cn(
-        "mx-auto flex max-w-md flex-col items-center justify-center px-6 py-20 text-center",
+        "settle-stagger mx-auto flex max-w-md flex-col items-center justify-center px-6 py-20 text-center",
         className
       )}
     >
-      {icon && (
-        <div className="mb-5 flex size-14 items-center justify-center rounded-2xl border border-border/70 bg-muted/35 text-muted-foreground shadow-sm">
+      {icon ? (
+        <div className="mb-6 flex size-12 items-center justify-center text-muted-foreground/70">
           {icon}
         </div>
+      ) : (
+        <span className="neume neume-hollow mb-6" aria-hidden="true" />
       )}
-      <h3 className="text-lg font-semibold tracking-tight text-foreground">
+      <h3 className="font-serif text-xl font-medium tracking-tight text-foreground">
         {title}
       </h3>
       {description && (
-        <p className="mt-2 max-w-sm text-sm leading-6 text-muted-foreground">
+        <p className="mt-2.5 max-w-sm text-sm leading-6 text-muted-foreground">
           {description}
         </p>
       )}
       {action && (
         <Button
+          variant="outline"
           className="mt-6"
           onClick={action.onClick}
         >
