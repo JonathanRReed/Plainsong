@@ -1,11 +1,33 @@
 # Plainsong (app)
 
+**Free, open-source, local-first dictation and meeting capture for macOS.**
+
+- **Website:** https://plainsong.jonathanrreed.com
+- **Source & releases:** https://github.com/JonathanRReed/Plainsong
+  ([download a build](https://github.com/JonathanRReed/Plainsong/releases))
+
 This directory contains the Plainsong desktop app: the Electron main process,
 the React/TypeScript renderer, and the Rust transcription sidecar.
 
 For the product overview, privacy posture, and contribution guide, see the
 [repository root](../README.md), [PRIVACY.md](../PRIVACY.md), and
 [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+## What it is
+
+Press a hotkey, speak, and your words appear at the cursor in any app —
+transcribed on your own machine. Meetings are recorded, transcribed, and turned
+into searchable notes without sending a bot into the call.
+
+- **Local-first.** Speech recognition runs on-device by default via whisper.cpp
+  (`base.en`); no account and no audio leaves your machine unless you opt in.
+- **Bring your own keys.** Optional cloud transcription and AI cleanup use your
+  own provider keys, stored in the OS keychain and sent directly to the
+  provider — never through a Plainsong server.
+- **Honest about v1.** The dictation hotkey is **toggle-only** in v1 (press to
+  start, press again to stop); hold-to-talk / hands-free is a documented
+  fast-follow that needs a native key listener. macOS is **arm64-only** for v1.
+- **MIT licensed**, no trial, no tiers, no nags.
 
 ## Layout
 

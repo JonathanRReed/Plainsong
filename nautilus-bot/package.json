@@ -59,9 +59,13 @@
     "ai",
     "whisper"
   ],
-  "author": "Jonathan Reed",
+  "author": {
+    "name": "Jonathan Reed",
+    "url": "https://jonathanrreed.com"
+  },
   "license": "MIT",
   "homepage": "https://github.com/JonathanRReed/Plainsong",
+  "website": "https://plainsong.jonathanrreed.com",
   "overrides": {
     "esbuild": "^0.27.0"
   },

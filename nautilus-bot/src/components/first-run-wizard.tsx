@@ -1,15 +1,12 @@
-import { useCallback, useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
-  AlertCircle,
   Brain,
   CheckCircle2,
   ChevronRight,
   Download,
   KeyRound,
   Loader2,
-  MessageSquareWarning,
   Mic,
-  Monitor,
   Settings2,
   Shield,
   ShieldCheck,
@@ -79,6 +76,60 @@ const POWER_MODEL_OPTIONS = [
     desc: "Higher-accuracy local route when meeting quality matters more",
   },
 ];
+
+type PermissionGate = {
+  key: string;
+  label: string;
+  purpose: string;
+  section: "microphone" | "speech" | "accessibility" | "automation";
+  settingsLabel: string;
+  ready(perms: PermissionDiagnostics | null): boolean | undefined;
+};
+
+// Sequential, purpose-labeled gates: microphone first, then the speech and
+// cursor-control grants. Each row states *why* the grant is needed so the
+// request reads as a purpose, not a demand.
+const PERMISSION_GATES: PermissionGate[] = [
+  {
+    key: "microphone",
+    label: "Microphone",
+    purpose: "So Plainsong can hear what you say out loud.",
+    section: "microphone",
+    settingsLabel: "Microphone",
+    ready: (perms) => perms?.microphonePermissionReady ?? perms?.microphoneReady,
+  },
+  {
+    key: "speech",
+    label: "Speech recognition",
+    purpose: "So the native speech engine can turn your voice into text.",
+    section: "speech",
+    settingsLabel: "Speech Recognition",
+    ready: (perms) => perms?.speechRecognitionReady,
+  },
+  {
+    key: "accessibility",
+    label: "Accessibility",
+    purpose: "So Plainsong can insert your spoken words into other apps.",
+    section: "accessibility",
+    settingsLabel: "Accessibility",
+    ready: (perms) => perms?.accessibilityReady,
+  },
+  {
+    key: "automation",
+    label: "Keyboard fallback",
+    purpose: "So Plainsong can type words in when direct insertion is unavailable.",
+    section: "automation",
+    settingsLabel: "Automation",
+    ready: (perms) => perms?.automationReady,
+  },
+];
+
+const PERMISSION_GATE_ICONS: Record<string, ReactNode> = {
+  microphone: <Mic className="h-4 w-4" />,
+  speech: <Brain className="h-4 w-4" />,
+  accessibility: <ShieldCheck className="h-4 w-4" />,
+  automation: <Shield className="h-4 w-4" />,
+};
 
 const STEP_LABELS: Record<Step, string> = {
   welcome: "Choose your setup",
@@ -150,15 +201,19 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [permissionRequestBusy, setPermissionRequestBusy] = useState(false);
   const [permissionRequestError, setPermissionRequestError] = useState<string | null>(null);
   const [permissionRequestStatus, setPermissionRequestStatus] = useState<string | null>(null);
+  const [permissionRevocation, setPermissionRevocation] = useState<string | null>(null);
   const [autoRequestPermissions, setAutoRequestPermissions] = useState(true);
+  const permRowRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const [modelState, setModelState] = useState<"idle" | "downloading" | "done" | "error">("idle");
   const [modelError, setModelError] = useState<string | null>(null);
   const [selectedModelId, setSelectedModelId] = useState("base.en");
 
   const [shortcutValue, setShortcutValue] = useState(defaultDictationShortcut());
-  const [hotkeyMode, setHotkeyMode] =
-    useState<"hold_to_talk" | "toggle" | "hands_free">("toggle");
+  // v1 ships toggle-only: press to start, press again to stop. Hold-to-talk and
+  // hands-free need a native key listener that isn't wired yet, so the wizard
+  // shows a static behavior row and always persists toggle.
+  const hotkeyMode = "toggle" as const;
   const [hotkeyDemoActive, setHotkeyDemoActive] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -204,13 +259,6 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         }
         setAutoRequestPermissions(settings.transcription.dictationAutoRequestPermissions ?? true);
         setShortcutValue(settings.shortcuts.toggleDictation || defaultDictationShortcut());
-        setHotkeyMode(
-          settings.transcription.dictationHandsFreeEnabled
-            ? "hands_free"
-            : settings.transcription.dictationPushToTalk
-            ? "hold_to_talk"
-            : "toggle"
-        );
         setMeetingAudioStorageMode(
           settings.transcription.meetingAudioStorageMode === "transcript_only"
             ? "transcript_only"
@@ -267,6 +315,39 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       void refreshPerms();
     }
   }, [refreshPerms, step]);
+
+  const focusPermissionCard = useCallback((gateKey: string) => {
+    const card = permRowRefs.current[gateKey];
+    if (!card) {
+      return;
+    }
+    card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    card.focus();
+  }, []);
+
+  // Re-verify grants before advancing past the permission step. If a grant the
+  // user previously saw as green has since been revoked, surface the reason and
+  // jump focus to the affected card instead of silently moving on.
+  const reverifyPermissionsBeforeAdvance = useCallback(async () => {
+    const previous = perms;
+    const fresh = await refreshPerms();
+    if (!previous || !fresh) {
+      setPermissionRevocation(null);
+      return true;
+    }
+    const revoked = PERMISSION_GATES.find(
+      (gate) => gate.ready(previous) === true && gate.ready(fresh) !== true
+    );
+    if (!revoked) {
+      setPermissionRevocation(null);
+      return true;
+    }
+    const message = `${revoked.label} access was turned off again. ${revoked.purpose} Re-grant it to continue.`;
+    setPermissionRevocation(message);
+    setPermissionRequestStatus(null);
+    requestAnimationFrame(() => focusPermissionCard(revoked.key));
+    return false;
+  }, [focusPermissionCard, perms, refreshPerms]);
 
   const refreshMeetingSetup = useCallback(async () => {
     setMeetingSetupLoading(true);
@@ -390,8 +471,9 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       const settings = await getSettings();
       settings.shortcuts.toggleDictation = normalizeShortcut(shortcutValue);
       settings.shortcuts.toggleDictationAlternates = [];
-      settings.transcription.dictationPushToTalk = hotkeyMode === "hold_to_talk";
-      settings.transcription.dictationHandsFreeEnabled = hotkeyMode === "hands_free";
+      // v1 is toggle-only, so both push-to-talk and hands-free stay off.
+      settings.transcription.dictationPushToTalk = false;
+      settings.transcription.dictationHandsFreeEnabled = false;
       settings.transcription.dictationAutoRequestPermissions = autoRequestPermissions;
       await saveSettings(settings);
       return true;
@@ -401,7 +483,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     } finally {
       setSaveBusy(false);
     }
-  }, [autoRequestPermissions, hotkeyMode, shortcutValue]);
+  }, [autoRequestPermissions, shortcutValue]);
 
   const applyRecommendedMeetingRoute = useCallback(async () => {
     if (!meetingRecommendedRoute) {
@@ -472,6 +554,13 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   );
 
   const nextStep = async () => {
+    if (step === "permissions") {
+      const stillGranted = await reverifyPermissionsBeforeAdvance();
+      if (!stillGranted) {
+        return;
+      }
+    }
+
     if (step === "hotkey") {
       const saved = await persistDictationStep();
       if (!saved) {
@@ -529,9 +618,12 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
       <div className="relative flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col gap-6 overflow-y-auto rounded-2xl border border-border bg-card/95 p-8 text-card-foreground shadow-2xl">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-semibold text-card-foreground">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0 space-y-1">
+            <p className="rubric">
+              {mode === "meetings" ? "MEETINGS" : mode === "dictation" ? "DICTATION" : "ONBOARDING"}
+            </p>
+            <h2 className="font-serif text-xl font-semibold text-card-foreground">
               {mode === "meetings" ? "Set Up Meetings" : mode === "dictation" ? "Fix Dictation Setup" : "Getting Started"}
             </h2>
             <p className="text-sm text-muted-foreground">{subtitle}</p>
@@ -571,6 +663,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             requestBusy={permissionRequestBusy}
             requestError={permissionRequestError}
             requestStatus={permissionRequestStatus}
+            revocationNotice={permissionRevocation}
+            registerCardRef={(key, node) => {
+              permRowRefs.current[key] = node;
+            }}
           />
         ) : null}
 
@@ -591,7 +687,6 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             displayShortcut={displayShortcut}
             onShortcutChange={setShortcutValue}
             hotkeyMode={hotkeyMode}
-            onHotkeyModeChange={setHotkeyMode}
             includeMeetings={mode === "full" && includeMeetings}
             saveError={saveError}
           />
@@ -675,14 +770,15 @@ function WelcomeStep({ onChoose }: { onChoose(includeMeetings: boolean): void })
       </p>
       <div className="grid gap-3 md:grid-cols-2">
         <ChoiceCard
-          icon={<Zap className="h-6 w-6 text-primary" />}
+          icon={<Zap className="h-6 w-6 text-gold" />}
           title="Get dictation ready"
           description="Best first-run path. Fix permissions, set the hotkey, and start dictating quickly."
           actionLabel="Start with dictation"
+          recommended
           onClick={() => onChoose(false)}
         />
         <ChoiceCard
-          icon={<Settings2 className="h-6 w-6 text-primary" />}
+          icon={<Settings2 className="h-6 w-6 text-muted-foreground" />}
           title="Full setup"
           description="Do dictation first, then continue into meeting capture and system-audio setup."
           actionLabel="Set up both"
@@ -701,28 +797,39 @@ function ChoiceCard({
   title,
   description,
   actionLabel,
+  recommended = false,
   onClick,
 }: {
   icon: ReactNode;
   title: string;
   description: string;
   actionLabel: string;
+  recommended?: boolean;
   onClick(): void;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="flex flex-col items-start gap-3 rounded-xl border-2 border-border p-5 text-left transition-all hover:border-primary/60 hover:bg-primary/5"
+      className="transition-smooth flex flex-col items-start gap-3 rounded-xl border border-border p-5 text-left hover:border-primary/60 hover:bg-primary/5"
     >
-      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+      <div
+        className={
+          recommended
+            ? "flex h-12 w-12 items-center justify-center rounded-full bg-muted/20"
+            : "flex h-12 w-12 items-center justify-center rounded-full bg-muted/40"
+        }
+      >
         {icon}
       </div>
       <div>
-        <p className="font-semibold">{title}</p>
+        <p className="font-serif font-semibold">{title}</p>
         <p className="mt-1 text-sm text-muted-foreground">{description}</p>
       </div>
-      <span className="text-xs font-medium text-primary">{actionLabel}</span>
+      <span className={recommended ? "inline-flex items-center gap-1.5 text-xs font-medium text-foreground" : "text-xs font-medium text-muted-foreground"}>
+        {recommended ? <span className="neume neume-lit" aria-hidden="true" /> : null}
+        {actionLabel}
+      </span>
     </button>
   );
 }
@@ -739,6 +846,8 @@ function PermissionsStep({
   requestBusy,
   requestError,
   requestStatus,
+  revocationNotice,
+  registerCardRef,
 }: {
   perms: PermissionDiagnostics | null;
   loading: boolean;
@@ -754,19 +863,31 @@ function PermissionsStep({
   requestBusy: boolean;
   requestError: string | null;
   requestStatus: string | null;
+  revocationNotice: string | null;
+  registerCardRef(key: string, node: HTMLDivElement | null): void;
 }) {
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Plainsong needs microphone access and cursor-control permissions before dictation feels correct.
+        Grant these in order. Microphone first so Plainsong can hear you, then the
+        cursor-control grant so it can insert your spoken words into other apps.
       </p>
 
+      {revocationNotice ? (
+        <div
+          role="alert"
+          className="rounded-lg border border-rust/30 bg-rust/10 p-3 text-sm text-rust"
+        >
+          {revocationNotice}
+        </div>
+      ) : null}
+
       {perms?.runningFromDiskImage ? (
-        <div className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 space-y-2">
-          <p className="text-sm font-medium text-amber-900 dark:text-amber-100">
+        <div className="rounded-lg border border-rust/30 bg-rust/10 p-3 space-y-2">
+          <p className="text-sm font-medium text-rust">
             You are running the DMG copy
           </p>
-          <p className="text-xs text-amber-800 dark:text-amber-100/90">
+          <p className="text-xs text-rust">
             macOS permissions granted to the installed app do not apply to the disk image copy. Move Plainsong into
             /Applications and reopen that installed app.
           </p>
@@ -781,36 +902,22 @@ function PermissionsStep({
         </div>
       ) : null}
 
-      <div className="space-y-3">
-        <PermRow
-          label="Microphone"
-          icon={<Mic className="h-4 w-4" />}
-          ready={perms?.microphonePermissionReady ?? perms?.microphoneReady}
-          loading={loading}
-          onFix={() => onOpenPermissionSettings("microphone", "Microphone")}
-        />
-        <PermRow
-          label="Speech recognition"
-          icon={<Brain className="h-4 w-4" />}
-          ready={perms?.speechRecognitionReady}
-          loading={loading || requestBusy}
-          onFix={() => onOpenPermissionSettings("speech", "Speech Recognition")}
-        />
-        <PermRow
-          label="Accessibility"
-          icon={<ShieldCheck className="h-4 w-4" />}
-          ready={perms?.accessibilityReady}
-          loading={loading || requestBusy}
-          onFix={() => onOpenPermissionSettings("accessibility", "Accessibility")}
-        />
-        <PermRow
-          label="Keyboard fallback"
-          icon={<Shield className="h-4 w-4" />}
-          ready={perms?.automationReady}
-          loading={loading || requestBusy}
-          onFix={() => onOpenPermissionSettings("automation", "Automation")}
-        />
-      </div>
+      <ol className="space-y-3">
+        {PERMISSION_GATES.map((gate, index) => (
+          <li key={gate.key}>
+            <PermRow
+              order={index + 1}
+              label={gate.label}
+              purpose={gate.purpose}
+              icon={PERMISSION_GATE_ICONS[gate.key]}
+              ready={gate.ready(perms)}
+              loading={gate.key === "microphone" ? loading : loading || requestBusy}
+              onFix={() => onOpenPermissionSettings(gate.section, gate.settingsLabel)}
+              registerRef={(node) => registerCardRef(gate.key, node)}
+            />
+          </li>
+        ))}
+      </ol>
 
       <div className="rounded-lg border border-border p-3 space-y-3">
         <label className="flex items-center justify-between gap-3">
@@ -857,32 +964,48 @@ function PermissionsStep({
 }
 
 function PermRow({
+  order,
   label,
+  purpose,
   icon,
   ready,
   loading,
   onFix,
+  registerRef,
 }: {
+  order: number;
   label: string;
+  purpose: string;
   icon: ReactNode;
   ready: boolean | undefined;
   loading: boolean;
   onFix(): void;
+  registerRef(node: HTMLDivElement | null): void;
 }) {
   return (
-    <div className="flex items-center justify-between rounded-lg border border-border p-3">
-      <div className="flex items-center gap-2">
-        <span className="text-muted-foreground">{icon}</span>
-        <span className="text-sm font-medium">{label}</span>
+    <div
+      ref={registerRef}
+      tabIndex={-1}
+      className="flex items-start justify-between gap-3 rounded-lg border border-border p-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <div className="flex min-w-0 items-start gap-2.5">
+        <span className="rubric-muted mt-0.5 shrink-0 text-[0.65rem]" aria-hidden="true">
+          {order}
+        </span>
+        <span className="mt-0.5 shrink-0 text-muted-foreground">{icon}</span>
+        <div className="min-w-0">
+          <span className="text-sm font-medium">{label}</span>
+          <p className="text-xs text-muted-foreground">{purpose}</p>
+        </div>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2.5">
         {loading ? (
           <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
         ) : ready ? (
-          <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+          <span className="neume neume-lit" aria-hidden="true" />
         ) : (
           <>
-            <XCircle className="h-4 w-4 text-amber-500" />
+            <span className="neume neume-rust" aria-hidden="true" />
             <Button
               variant="outline"
               size="sm"
@@ -958,7 +1081,7 @@ function DictationModelStep({
       ) : null}
 
       {state === "done" ? (
-        <div className="flex items-center gap-2 text-sm text-emerald-600">
+        <div className="flex items-center gap-2 text-sm text-gold-text">
           <CheckCircle2 className="h-4 w-4" />
           Local dictation route downloaded and selected.
         </div>
@@ -989,7 +1112,6 @@ function HotkeyStep({
   displayShortcut,
   onShortcutChange,
   hotkeyMode,
-  onHotkeyModeChange,
   includeMeetings,
   saveError,
 }: {
@@ -998,7 +1120,6 @@ function HotkeyStep({
   displayShortcut: string;
   onShortcutChange(value: string): void;
   hotkeyMode: "hold_to_talk" | "toggle" | "hands_free";
-  onHotkeyModeChange(value: "hold_to_talk" | "toggle" | "hands_free"): void;
   includeMeetings: boolean;
   saveError: string | null;
 }) {
@@ -1037,23 +1158,13 @@ function HotkeyStep({
       </div>
 
       <div className="space-y-2 rounded-lg border border-border p-3">
-        <label
-          htmlFor="first-run-hotkey-behavior"
-          className="text-xs font-medium text-muted-foreground"
-        >
-          Hotkey behavior
-        </label>
-        <select
-          id="first-run-hotkey-behavior"
-          aria-label="Hotkey behavior"
-          className="w-full rounded-md border border-border bg-background p-2 text-sm"
-          value={hotkeyMode}
-          onChange={(event) =>
-            onHotkeyModeChange(event.target.value as "hold_to_talk" | "toggle" | "hands_free")
-          }
-        >
-          <option value="toggle">Toggle (press to start, press again to stop)</option>
-        </select>
+        <p className="rubric-muted text-[0.65rem]">Hotkey behavior</p>
+        <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-foreground">
+          Toggle{" "}
+          <span className="text-muted-foreground">
+            — press to start, press again to stop
+          </span>
+        </p>
       </div>
 
       <button
@@ -1161,12 +1272,12 @@ function MeetingSetupStep({
             {loading ? (
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
             ) : routeReady ? (
-              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+              <span className="neume neume-lit" aria-hidden="true" />
             ) : (
-              <MessageSquareWarning className="h-4 w-4 text-amber-500" />
+              <span className="neume neume-rust" aria-hidden="true" />
             )}
           </div>
-          {routeError ? <p className="mt-2 text-xs text-amber-600">{routeError}</p> : null}
+          {routeError ? <p className="mt-2 text-xs text-rust">{routeError}</p> : null}
           {verificationDetails.length > 0 ? (
             <div className="mt-2 space-y-1">
               {verificationDetails.map((detail) => (
@@ -1193,21 +1304,23 @@ function MeetingSetupStep({
               {systemAudioAvailable === null ? (
                 <p className="text-xs text-muted-foreground">Checking availability…</p>
               ) : systemAudioAvailable ? (
-                <p className="text-xs text-emerald-600">
+                <p className="text-xs text-gold-text">
                   Ready{loopbackDevice ? ` via ${loopbackDevice}` : ""}.
                 </p>
               ) : (
-                <p className="text-xs text-amber-600">
+                <p className="text-xs text-rust">
                   Not ready yet. Mic-only meetings work now, but capturing other speakers/system audio still needs setup.
                 </p>
               )}
             </div>
             {loading ? (
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            ) : systemAudioAvailable === null ? (
+              <span className="neume neume-hollow" aria-hidden="true" />
             ) : systemAudioAvailable ? (
-              <Monitor className="h-4 w-4 text-emerald-500" />
+              <span className="neume neume-lit" aria-hidden="true" />
             ) : (
-              <AlertCircle className="h-4 w-4 text-amber-500" />
+              <span className="neume neume-rust" aria-hidden="true" />
             )}
           </div>
           {!systemAudioAvailable ? (

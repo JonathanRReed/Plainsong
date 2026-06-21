@@ -15,7 +15,8 @@ interface ThemeContextType {
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>("system");
+  // Dark (the candle-lit folio) is Plainsong's default.
+  const [theme, setThemeState] = useState<Theme>("dark");
   const [isDark, setIsDark] = useState(false);
   const [colorScheme, setColorSchemeState] = useState<string>("default");
 
@@ -33,7 +34,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const loadTheme = async () => {
       try {
         const settings = await invoke<Record<string, unknown>>("get_settings");
-        const savedTheme = (settings.theme as Theme) || "system";
+        const savedTheme = (settings.theme as Theme) || "dark";
         const ui = (settings.ui as Record<string, unknown> | undefined) ?? {};
         const rawColorScheme = typeof ui.colorScheme === "string" ? ui.colorScheme : "default";
         const savedColorScheme = normalizeThemeScheme(rawColorScheme);
@@ -51,8 +52,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
           });
         }
       } catch {
-        // If settings not available, default to system
-        setThemeState("system");
+        // If settings not available, default to the candle-lit folio.
+        setThemeState("dark");
         setColorSchemeState("default");
       }
     };

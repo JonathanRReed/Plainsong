@@ -3237,6 +3237,7 @@ export function DictationView() {
   return (
     <div className="h-full flex flex-col">
       <PageHeader
+        eyebrow="DICTATION"
         title="Dictation"
         subtitle="Fast voice capture that inserts text where you work"
         actions={
@@ -3244,7 +3245,7 @@ export function DictationView() {
             className={cn(
               "flex items-center gap-2 text-sm px-4 py-2 rounded-lg border transition-all",
               hotkeyPressed
-                ? "bg-active text-active-foreground border-active scale-105"
+                ? "bg-gold/10 text-gold-text border-gold/40 scale-105"
                 : "bg-muted",
             )}
           >
@@ -3280,10 +3281,10 @@ export function DictationView() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-3">
+              <div className="space-y-3">
                 <div className="flex items-center gap-2">
-                  <Brain className="h-4 w-4 text-primary" />
-                  <p className="text-sm font-medium">Solo lanes</p>
+                  <Brain className="h-4 w-4 text-muted-foreground" />
+                  <p className="rubric">SOLO LANES</p>
                 </div>
                 <p className="text-xs text-muted-foreground">
                   Pick the lane that matches what you are doing right now.
@@ -3316,14 +3317,19 @@ export function DictationView() {
                         className={cn(
                           "rounded-xl border p-4 text-left transition-colors",
                           isActive
-                            ? "border-active bg-active/10 shadow-sm"
-                            : "border-border bg-background hover:border-active/40 hover:bg-muted/40",
+                            ? "border-rust/40 bg-rust/8 shadow-sm"
+                            : "border-border bg-background hover:border-rust/40 hover:bg-muted/40",
                         )}
                       >
                         <div className="flex items-center justify-between gap-3">
-                          <Icon className="h-4 w-4 text-primary" />
+                          <Icon
+                            className={cn(
+                              "h-4 w-4",
+                              isActive ? "text-gold" : "text-muted-foreground",
+                            )}
+                          />
                           {isActive ? (
-                            <span className="rounded-full bg-active px-2 py-0.5 text-[11px] font-semibold text-active-foreground">
+                            <span className="rounded-full bg-rust px-2 py-0.5 text-[11px] font-semibold text-destructive-foreground">
                               Active
                             </span>
                           ) : null}
@@ -3332,7 +3338,14 @@ export function DictationView() {
                         <p className="mt-2 text-sm text-muted-foreground">
                           {lane.description}
                         </p>
-                        <p className="mt-3 text-[11px] font-medium text-primary">
+                        <p
+                          className={cn(
+                            "mt-3 text-[11px] font-medium",
+                            isActive
+                              ? "text-gold-text"
+                              : "text-muted-foreground",
+                          )}
+                        >
                           {lane.emphasis}
                         </p>
                       </button>
@@ -3352,14 +3365,14 @@ export function DictationView() {
                       className={cn(
                         "rounded-xl border p-4 text-left transition-colors",
                         isActive
-                          ? "border-active bg-active/10 shadow-sm"
-                          : "border-border hover:border-active/50 hover:bg-muted/40",
+                          ? "border-rust/40 bg-rust/8 shadow-sm"
+                          : "border-border hover:border-rust/50 hover:bg-muted/40",
                       )}
                     >
                       <div className="flex items-center justify-between gap-3">
                         <p className="font-medium">{mode.label}</p>
                         {isActive && (
-                          <span className="rounded-full bg-active px-2 py-0.5 text-[11px] font-semibold text-active-foreground">
+                          <span className="rounded-full bg-rust px-2 py-0.5 text-[11px] font-semibold text-destructive-foreground">
                             Active
                           </span>
                         )}
@@ -3453,7 +3466,7 @@ export function DictationView() {
                           className={cn(
                             "rounded-xl border p-4",
                             isActive
-                              ? "border-active bg-active/10 shadow-sm"
+                              ? "border-rust/40 bg-rust/8 shadow-sm"
                               : "border-border bg-muted/20",
                           )}
                         >
@@ -3480,7 +3493,7 @@ export function DictationView() {
                               </p>
                             </div>
                             {isActive && (
-                              <span className="rounded-full bg-active px-2 py-0.5 text-[11px] font-semibold text-active-foreground">
+                              <span className="rounded-full bg-rust px-2 py-0.5 text-[11px] font-semibold text-destructive-foreground">
                                 Active
                               </span>
                             )}
@@ -3592,7 +3605,7 @@ export function DictationView() {
                     currentDictationProvider &&
                     currentMeetingProvider &&
                     currentDictationProvider !== currentMeetingProvider ? (
-                      <p className="text-xs text-amber-500">
+                      <p className="text-xs text-rust">
                         Dictation uses {currentDictationProvider} while meetings
                         use {currentMeetingProvider}.
                       </p>
@@ -3955,7 +3968,7 @@ export function DictationView() {
           <Card
             className={cn(
               "border transition-colors duration-200 shadow-sm",
-              isDictationBusy ? "border-active" : "border-muted",
+              isDictationBusy ? "border-gold/40" : "border-muted",
             )}
           >
             <CardHeader>
@@ -3984,7 +3997,7 @@ export function DictationView() {
                       {activeLane.description}
                     </p>
                     {dictationResolvedModeLabel ? (
-                      <p className="mt-2 text-[11px] font-medium text-primary">
+                      <p className="mt-2 font-mono text-[11px] text-muted-foreground">
                         Runtime mode: {dictationResolvedModeLabel}
                       </p>
                     ) : null}
@@ -4010,9 +4023,9 @@ export function DictationView() {
                   className={cn(
                     "rounded-xl border p-4",
                     dictationPhaseSummary.tone === "active"
-                      ? "border-active/30 bg-active/5"
+                      ? "border-gold/30 bg-gold/5"
                       : dictationPhaseSummary.tone === "success"
-                        ? "border-emerald-500/20 bg-emerald-500/5"
+                        ? "border-gold/20 bg-gold/5"
                         : dictationPhaseSummary.tone === "error"
                           ? "border-destructive/20 bg-destructive/5"
                           : "border-border bg-background",
@@ -4034,9 +4047,9 @@ export function DictationView() {
                       className={cn(
                         "rounded-full border px-2.5 py-1 text-[11px] font-semibold",
                         dictationPhaseSummary.tone === "active"
-                          ? "border-active/30 bg-active/5 text-active"
+                          ? "border-gold/30 bg-gold/5 text-gold-text"
                           : dictationPhaseSummary.tone === "success"
-                            ? "border-emerald-500/20 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300"
+                            ? "border-gold/20 bg-gold/5 text-gold-text"
                             : dictationPhaseSummary.tone === "error"
                               ? "border-destructive/20 bg-destructive/5 text-destructive"
                               : "border-border bg-background text-muted-foreground",
@@ -4083,18 +4096,22 @@ export function DictationView() {
                   <div className="flex flex-col items-center gap-6">
                     {isDictationCaptureLive ? (
                       <div className="flex flex-col items-center gap-4">
-                        <div className="relative flex h-24 w-24 items-center justify-center rounded-full border border-active/20 bg-active/5">
-                          <span className="absolute inset-0 rounded-full border border-active/20 animate-ping opacity-40" />
-                          <span className="absolute inset-[10px] rounded-full border border-active/20 opacity-60" />
-                          <Mic className="relative h-10 w-10 text-active" />
+                        <div className="gilt-halo relative flex h-24 w-24 items-center justify-center rounded-full border border-gold/20 bg-gold/5">
+                          <span className="absolute inset-0 rounded-full border border-gold/20 animate-ping opacity-40" />
+                          <span className="absolute inset-[10px] rounded-full border border-gold/20 opacity-60" />
+                          <Mic className="relative h-10 w-10 text-gold" />
                         </div>
                         <div className="text-center">
                           <p className="text-lg font-medium">
+                            <span
+                              aria-hidden="true"
+                              className="neume neume-lit neume-live mr-2 align-middle"
+                            />
                             {dictationPhase === "primed"
                               ? "Ready"
                               : "Listening"}
                           </p>
-                          <p className="mt-2 text-3xl font-mono font-semibold text-foreground">
+                          <p className="time-spec mt-2 text-3xl font-mono font-semibold text-foreground">
                             {dictationPhase === "recording"
                               ? formattedDuration
                               : "--:--"}
@@ -4117,6 +4134,10 @@ export function DictationView() {
                         </div>
                         <div className="text-center">
                           <p className="text-lg font-medium">
+                            <span
+                              aria-hidden="true"
+                              className="neume neume-lit neume-live mr-2 align-middle"
+                            />
                             {dictationPhaseSummary.title}
                           </p>
                           <p className="mt-1 text-muted-foreground">
@@ -4137,11 +4158,17 @@ export function DictationView() {
                       </div>
                     ) : dictationPhase === "done" ? (
                       <div className="flex flex-col items-center gap-4">
-                        <div className="flex h-24 w-24 items-center justify-center rounded-full border border-emerald-500/20 bg-emerald-500/5">
-                          <CheckCircle2 className="h-10 w-10 text-emerald-600 dark:text-emerald-300" />
+                        <div className="flex h-24 w-24 items-center justify-center rounded-full border border-gold/20 bg-gold/5">
+                          <CheckCircle2 className="h-10 w-10 text-gold-text" />
                         </div>
                         <div className="text-center">
-                          <p className="text-lg font-medium">Result ready</p>
+                          <p className="font-serif manuscript text-lg font-medium">
+                            <span
+                              aria-hidden="true"
+                              className="neume neume-lit mr-2 align-middle"
+                            />
+                            Result ready
+                          </p>
                           <p className="text-muted-foreground mt-1">
                             {dictationPhaseSummary.detail}
                           </p>
@@ -4163,6 +4190,10 @@ export function DictationView() {
                         </div>
                         <div className="text-center">
                           <p className="text-lg font-medium">
+                            <span
+                              aria-hidden="true"
+                              className="neume neume-rust mr-2 align-middle"
+                            />
                             Capture needs attention
                           </p>
                           <p className="text-muted-foreground mt-1">
@@ -4185,7 +4216,7 @@ export function DictationView() {
                           className={cn(
                             "relative flex h-24 w-24 items-center justify-center rounded-full border transition-transform duration-150",
                             hotkeyPressed
-                              ? "scale-[1.03] border-active/30 bg-active/5"
+                              ? "scale-[1.03] border-gold/30 bg-gold/5"
                               : "border-border bg-muted/20",
                           )}
                         >
@@ -4194,7 +4225,7 @@ export function DictationView() {
                             className={cn(
                               "absolute inset-0 rounded-full border transition-all duration-150",
                               hotkeyPressed
-                                ? "border-active/30 opacity-100"
+                                ? "border-gold/30 opacity-100"
                                 : "border-border/60 opacity-70",
                             )}
                           />
@@ -4203,7 +4234,7 @@ export function DictationView() {
                             className={cn(
                               "absolute inset-[10px] rounded-full border transition-all duration-150",
                               hotkeyPressed
-                                ? "border-active/25 opacity-100"
+                                ? "border-gold/25 opacity-100"
                                 : "border-border/50 opacity-70",
                             )}
                           />
@@ -4211,13 +4242,17 @@ export function DictationView() {
                             className={cn(
                               "relative h-10 w-10 transition-colors",
                               hotkeyPressed
-                                ? "text-active"
+                                ? "text-gold"
                                 : "text-muted-foreground",
                             )}
                           />
                         </div>
                         <div className="text-center">
                           <p className="text-lg font-medium">
+                            <span
+                              aria-hidden="true"
+                              className="neume neume-hollow mr-2 align-middle"
+                            />
                             {dictationPhaseSummary.title}
                           </p>
                           <p className="text-muted-foreground mt-1">
@@ -4263,7 +4298,7 @@ export function DictationView() {
           <section className="surface-panel-subtle rounded-2xl p-4">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
               <div className="max-w-xl">
-                <p className="quiet-label">Daily dictation guardrails</p>
+                <p className="rubric-muted">Daily dictation guardrails</p>
                 <p className="mt-1 text-base font-medium text-card-foreground">
                   The main path stays simple: trigger, speak, insert, then repair only when the target app needs it.
                 </p>
@@ -4752,8 +4787,8 @@ export function DictationView() {
                   <div
                     className={`mt-3 rounded-md border px-3 py-3 text-xs ${
                       recoveryState.tone === "warning"
-                        ? "border-amber-400/50 bg-amber-500/10 text-amber-700 dark:text-amber-300"
-                        : "border-orange-400/50 bg-orange-500/10 text-orange-700 dark:text-orange-300"
+                        ? "border-rust/40 bg-rust/10 text-rust"
+                        : "border-rust/50 bg-rust/10 text-rust"
                     }`}
                   >
                     <p className="font-medium">{recoveryState.title}</p>
@@ -4775,11 +4810,11 @@ export function DictationView() {
                     className={cn(
                       "mt-3 rounded-lg border p-3 text-xs",
                       deliveryDoctor.tone === "ready" &&
-                        "border-emerald-400/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200",
+                        "border-gold/40 bg-gold/10 text-gold-text",
                       deliveryDoctor.tone === "warning" &&
-                        "border-amber-400/50 bg-amber-500/10 text-amber-800 dark:text-amber-200",
+                        "border-rust/40 bg-rust/10 text-rust",
                       deliveryDoctor.tone === "attention" &&
-                        "border-orange-400/50 bg-orange-500/10 text-orange-800 dark:text-orange-200",
+                        "border-rust/50 bg-rust/10 text-rust",
                     )}
                   >
                     <div className="flex items-start gap-3">
@@ -4986,7 +5021,7 @@ export function DictationView() {
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
-                        <p className="text-sm text-muted-foreground">
+                        <p className="time-spec text-sm text-muted-foreground">
                           {formatRecordingDuration(recording.duration)}
                         </p>
                         <Button
@@ -5782,7 +5817,7 @@ export function DictationView() {
                 )}
                 <div className="rounded-md border bg-background/60 p-3 space-y-2">
                   <div className="flex items-center gap-2">
-                    <BookOpen className="h-4 w-4 text-primary" />
+                    <BookOpen className="h-4 w-4 text-muted-foreground" />
                     <p className="text-sm font-medium">
                       Teach Plainsong your words
                     </p>
@@ -6707,9 +6742,11 @@ export function DictationView() {
               </div>
               <div className="rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
                 Duration:{" "}
-                {selectedRecording
-                  ? formatRecordingDuration(selectedRecording.duration)
-                  : "N/A"}{" "}
+                <span className="time-spec">
+                  {selectedRecording
+                    ? formatRecordingDuration(selectedRecording.duration)
+                    : "N/A"}
+                </span>{" "}
                 · Created:{" "}
                 {selectedRecording
                   ? new Date(selectedRecording.createdAt).toLocaleString()
@@ -6770,7 +6807,7 @@ export function DictationView() {
               </div>
             )}
             {dictionaryCsvImportResult?.errors.length ? (
-              <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700">
+              <div className="rounded-md border border-rust/30 bg-rust/10 px-3 py-2 text-xs text-rust">
                 {dictionaryCsvImportResult.errors.map((error) => (
                   <p key={error}>{error}</p>
                 ))}

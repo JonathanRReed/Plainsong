@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LogicalSize, invoke, getCurrentWindow } from "@/lib/electron";
 import {
   AppWindow,
@@ -48,6 +48,7 @@ import { playDictationEarcon } from "@/lib/dictation-earcons";
 import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
 import { cn } from "@/lib/utils";
 import { AudioWaveform } from "@/components/ui/audio-waveform";
+import { WaveformVisualizer } from "@/components/waveform-visualizer";
 import type { DictationCustomMode } from "@/types/settings";
 
 type DisplayMode = "full" | "compact" | "minimal";
@@ -58,32 +59,32 @@ const MODE_META: Record<
   voice: {
     label: "General",
     icon: Mic,
-    accent: "text-cyan-200 bg-cyan-400/10 border-cyan-400/30",
+    accent: "text-rust border-rust/30 bg-rust/5",
   },
   messages: {
     label: "Slack & Chat",
     icon: TextCursorInput,
-    accent: "text-emerald-200 bg-emerald-400/10 border-emerald-400/30",
+    accent: "text-rust border-rust/30 bg-rust/5",
   },
   email: {
     label: "Writing",
     icon: Mail,
-    accent: "text-amber-200 bg-amber-400/10 border-amber-400/30",
+    accent: "text-rust border-rust/30 bg-rust/5",
   },
   notes: {
     label: "Notes",
     icon: StickyNote,
-    accent: "text-violet-200 bg-violet-400/10 border-violet-400/30",
+    accent: "text-rust border-rust/30 bg-rust/5",
   },
   meeting_follow_up: {
     label: "Meeting Follow-up",
     icon: Wand2,
-    accent: "text-fuchsia-200 bg-fuchsia-400/10 border-fuchsia-400/30",
+    accent: "text-rust border-rust/30 bg-rust/5",
   },
   custom: {
     label: "Custom",
     icon: Wand2,
-    accent: "text-slate-200 bg-slate-400/10 border-slate-400/30",
+    accent: "text-rust border-rust/30 bg-rust/5",
   },
 };
 
@@ -355,8 +356,8 @@ function PopupActionButton({
       className={cn(
         "group flex items-start gap-3 rounded-xl border px-3 py-3 text-left transition-colors",
         tone === "primary"
-          ? "border-white/12 bg-white/8 hover:bg-white/12"
-          : "border-white/10 bg-white/4.5 hover:bg-white/7.5",
+          ? "border-foreground/15 bg-foreground/8 hover:bg-foreground/12"
+          : "border-foreground/10 bg-foreground/4.5 hover:bg-foreground/7.5",
       )}
       onClick={onClick}
     >
@@ -364,15 +365,15 @@ function PopupActionButton({
         className={cn(
           "mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
           tone === "primary"
-            ? "bg-white/10 text-white"
-            : "bg-white/8 text-slate-100",
+            ? "bg-foreground/10 text-foreground"
+            : "bg-foreground/8 text-foreground",
         )}
       >
         <Icon className="h-4 w-4" />
       </div>
       <div className="min-w-0">
-        <p className="text-sm font-medium text-white">{label}</p>
-        <p className="mt-1 text-xs leading-relaxed text-slate-300">{detail}</p>
+        <p className="text-sm font-medium text-foreground">{label}</p>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{detail}</p>
       </div>
     </button>
   );
@@ -842,13 +843,26 @@ export function DictationPopup() {
     }
   };
 
-  const hidePopup = async () => {
+  const hidePopup = useCallback(async () => {
     try {
       await invoke("dismiss_dictation_overlay");
     } catch (error) {
       console.error("Failed to hide dictation popup:", error);
     }
-  };
+  }, []);
+
+  // The HUD persists until explicit dismissal (it never vanishes on click-away);
+  // Escape is the canonical dismissal for a floating panel (Apple HIG).
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        void hidePopup();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [hidePopup]);
 
   const handleStartAgain = async () => {
     try {
@@ -923,8 +937,11 @@ export function DictationPopup() {
         onDoubleClick={() => void cycleDisplayMode()}
         title="Double-click to expand"
       >
-        <div className="flex items-center gap-2 rounded-full border border-white/10 bg-slate-950/92 px-3 py-2 shadow-[0_10px_30px_rgba(2,6,23,0.4)] backdrop-blur-xl">
-          <div className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/6 text-slate-100">
+        <div className="flex items-center gap-2 rounded-full border border-foreground/10 bg-popover/95 px-3 py-2 shadow-[0_10px_30px_hsl(34_26%_4%/0.4)] backdrop-blur-xl">
+          <div className={cn(
+            "inline-flex h-6 w-6 items-center justify-center rounded-full transition-smooth",
+            phase === "recording" ? "bg-gold/12 text-gold-text" : "bg-foreground/6 text-foreground"
+          )}>
             <Mic className="h-3 w-3" />
           </div>
           <AudioWaveform
@@ -932,14 +949,14 @@ export function DictationPopup() {
             active={phase === "recording"}
             size="sm"
             barCount={11}
-            barColor="white"
+            barColor={phase === "recording" ? "var(--brand-warm)" : "var(--muted-foreground)"}
           />
-          <span className="text-[11px] font-medium tracking-[0.08em] text-slate-200">
+          <span className="text-[11px] font-medium tracking-[0.08em] text-foreground">
             {statusLabel}
           </span>
           <button
             type="button"
-            className="inline-flex h-6 w-6 items-center justify-center rounded-full text-slate-400 hover:bg-white/8 hover:text-white"
+            className="inline-flex h-6 w-6 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/8 hover:text-foreground"
             onMouseDown={(event) => event.stopPropagation()}
             onClick={() => void hidePopup()}
             aria-label="Hide popup"
@@ -996,18 +1013,24 @@ export function DictationPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="overflow-hidden rounded-[20px] border border-white/8 bg-black/80 px-4 py-3.5 backdrop-blur-xl shadow-[0_20px_60px_rgba(0,0,0,0.5)]">
+      <div className="overflow-hidden rounded-[20px] border border-foreground/10 bg-popover/95 px-4 py-3.5 backdrop-blur-xl shadow-[0_20px_60px_hsl(34_26%_4%/0.5)]">
         {/* Header - Minimal */}
         <div className="mb-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-medium text-slate-400">{phaseLabel}</span>
-            <span className="text-slate-600">·</span>
-            <span className="text-xs text-slate-300">{selectedModeLabel}</span>
+            {isCapturePhase && (
+              <span
+                aria-hidden="true"
+                className="neume neume-lit neume-live shrink-0"
+              />
+            )}
+            <span className="text-xs font-medium text-muted-foreground">{phaseLabel}</span>
+            <span className="text-muted-foreground">·</span>
+            <span className="text-xs text-muted-foreground">{selectedModeLabel}</span>
           </div>
           <div className="flex items-center gap-0.5">
             <button
               type="button"
-              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-white/5 hover:text-slate-200 transition-colors"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-foreground/5 hover:text-foreground transition-colors"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void cycleDisplayMode()}
               aria-label={compact ? "Expand" : "Compact"}
@@ -1016,7 +1039,7 @@ export function DictationPopup() {
             </button>
             <button
               type="button"
-              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-white/5 hover:text-slate-200 transition-colors"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-foreground/5 hover:text-foreground transition-colors"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void hidePopup()}
               aria-label="Hide"
@@ -1027,40 +1050,40 @@ export function DictationPopup() {
         </div>
 
         {isCapturePhase && (
-          <div className="space-y-3">
+          <div className="settle-in space-y-3">
             {/* Main Recording Bar - Super Minimal */}
-            <div className="flex items-center gap-3 rounded-2xl bg-white/3 px-3 py-2.5">
-              {/* Mic Icon */}
+            <div className="flex items-center gap-3 rounded-2xl bg-foreground/3 px-3 py-2.5">
+              {/* Mic Icon — the earned gold "set down" moment */}
               <div className={cn(
-                "flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-all",
-                phase === "recording" ? "bg-emerald-500/15" : "bg-white/5"
+                "flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-smooth",
+                phase === "recording" ? "gilt-edge gilt-halo bg-gold/12" : "bg-foreground/5"
               )}>
-                <Mic className={cn("h-4 w-4", phase === "recording" ? "text-emerald-400" : "text-slate-400")} />
+                <Mic className={cn("h-4 w-4", phase === "recording" ? "text-gold-text" : "text-muted-foreground")} />
               </div>
-              
-              {/* Waveform */}
+
+              {/* Waveform — the chant staff resolving into gold while recording */}
               <div className="flex-1">
                 <AudioWaveform
                   levels={displayAudioLevel}
                   active={phase === "recording"}
                   size="sm"
                   barCount={20}
-                  barColor="white"
+                  barColor={phase === "recording" ? "var(--brand-warm)" : "var(--muted-foreground)"}
                 />
               </div>
               
               {/* Timer */}
               <span className={cn(
                 "shrink-0 font-mono text-sm tabular-nums",
-                phase === "recording" ? "text-emerald-400" : "text-slate-500"
+                phase === "recording" ? "text-gold-text" : "text-muted-foreground"
               )}>
                 {elapsedText}
               </span>
-              
+
               {/* Stop Button */}
               <button
                 type="button"
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/15 transition-colors"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-foreground/10 text-foreground hover:bg-foreground/15 transition-colors"
                 onClick={() => void handleStopFromPopup()}
                 aria-label="Stop"
               >
@@ -1069,7 +1092,7 @@ export function DictationPopup() {
             </div>
             
             {/* Subtle Status Line */}
-            <p className="text-[11px] text-slate-500 text-center">
+            <p className="text-[11px] text-muted-foreground text-center">
               {formatHandsFreeRuntimeHint(
                 _handsFreeEnabled,
                 handsFreeSilenceTimeoutSeconds,
@@ -1078,11 +1101,14 @@ export function DictationPopup() {
               )}
             </p>
             {!compact && preview && (
-              <div className="rounded-[20px] border border-white/10 bg-white/3 px-4 py-3">
-                <p className="text-[11px] font-medium tracking-[0.16em] text-slate-500">
+              <div className="settle-in rounded-[20px] border border-foreground/10 bg-foreground/3 px-4 py-3">
+                <p className="font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
                   Live text
                 </p>
-                <p className="mt-2 text-sm leading-6 text-slate-200 line-clamp-4">
+                <p
+                  key={preview}
+                  className="ink-in mt-2 text-sm leading-6 text-foreground line-clamp-4"
+                >
                   {preview}
                 </p>
               </div>
@@ -1091,11 +1117,11 @@ export function DictationPopup() {
         )}
 
         {phase === "stopping" && (
-          <div className="flex items-center gap-3 text-white">
-            <Loader2 className="h-5 w-5 animate-spin text-slate-200" />
+          <div className="flex items-center gap-3 text-foreground">
+            <Loader2 className="h-5 w-5 animate-spin text-foreground" />
             <div>
               <p className="text-sm font-semibold">Stopping</p>
-              <p className="text-xs text-slate-300">
+              <p className="text-xs text-muted-foreground">
                 Finalizing audio and preserving context…
               </p>
             </div>
@@ -1103,25 +1129,36 @@ export function DictationPopup() {
         )}
 
         {phase === "transcribing" && (
-          <div className="flex items-center gap-3 text-white">
-            <Loader2 className="h-5 w-5 animate-spin text-slate-200" />
-            <div>
+          <div className="flex items-center gap-3 text-foreground">
+            <Loader2 className="h-5 w-5 animate-spin text-foreground" />
+            <div className="min-w-0 flex-1">
+              <div className="mb-1.5">
+                <WaveformVisualizer
+                  data={[]}
+                  settled
+                  settledNeumeCount={6}
+                  height={16}
+                />
+              </div>
               <p className="text-sm font-semibold">Transcribing</p>
-              <p className="text-xs text-slate-300">
+              <p className="text-xs text-muted-foreground">
                 {message ??
                   `${selectedModeLabel} is shaping the result for ${insertionMeta.label.toLowerCase()}${targetDetail}.`}
               </p>
               {autoActivationDetail && (
-                <p className="mt-1 text-xs text-slate-400">
+                <p className="mt-1 text-xs text-muted-foreground">
                   {autoActivationDetail}
                 </p>
               )}
               {!compact && preview && (
-                <div className="mt-2 max-w-[330px] rounded-xl border border-white/10 bg-white/4.5 px-3 py-2">
-                  <p className="text-[11px] uppercase tracking-wide text-slate-400">
+                <div className="mt-2 max-w-[330px] rounded-xl border border-foreground/10 bg-foreground/4.5 px-3 py-2">
+                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                     Live preview
                   </p>
-                  <p className="mt-1 text-xs leading-relaxed text-slate-200 line-clamp-4">
+                  <p
+                    key={preview}
+                    className="ink-in mt-1 text-xs leading-relaxed text-foreground line-clamp-4"
+                  >
                     {preview}
                   </p>
                 </div>
@@ -1131,20 +1168,20 @@ export function DictationPopup() {
         )}
 
         {phase === "delivering" && (
-          <div className="flex items-center gap-3 text-white">
-            <Loader2 className="h-5 w-5 animate-spin text-slate-200" />
+          <div className="flex items-center gap-3 text-foreground">
+            <Loader2 className="h-5 w-5 animate-spin text-foreground" />
             <div>
               <p className="text-sm font-semibold">Inserting</p>
-              <p className="text-xs text-slate-300">
+              <p className="text-xs text-muted-foreground">
                 {message ??
                   `Finishing ${insertionMeta.label.toLowerCase()}${targetDetail} with ${routeLabel}.`}
               </p>
               {!compact && preview && (
-                <div className="mt-2 max-w-[330px] rounded-xl border border-white/10 bg-white/4.5 px-3 py-2">
-                  <p className="text-[11px] uppercase tracking-wide text-slate-400">
+                <div className="commit-shine mt-2 max-w-[330px] rounded-xl border border-foreground/10 bg-foreground/4.5 px-3 py-2">
+                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                     Latest text
                   </p>
-                  <p className="mt-1 text-xs leading-relaxed text-slate-200 line-clamp-4">
+                  <p className="mt-1 text-xs leading-relaxed text-foreground line-clamp-4">
                     {preview}
                   </p>
                 </div>
@@ -1154,45 +1191,45 @@ export function DictationPopup() {
         )}
 
         {phase === "done" && (
-          <div className="flex items-center gap-3 text-white">
-            <CheckCircle2 className="h-5 w-5 text-slate-100" />
+          <div className="flex items-center gap-3 text-foreground">
+            <CheckCircle2 className="h-5 w-5 text-foreground" />
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold">{doneTitle}</p>
+              <p className="manuscript text-base font-serif text-foreground">{doneTitle}</p>
               {!compact && (
-                <p className="max-w-[330px] text-xs leading-relaxed text-slate-300">
+                <p className="max-w-[330px] text-xs leading-relaxed text-muted-foreground">
                   {doneMessage}
                 </p>
               )}
               {!compact && (
-                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-200">
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-foreground">
                   {commandLabel && (
-                    <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+                    <span className="rounded-full border border-foreground/10 bg-foreground/5 px-2.5 py-1">
                       {commandLabel}
                     </span>
                   )}
                   {finalSnippetAppliedCount > 0 && (
-                    <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+                    <span className="rounded-full border border-foreground/10 bg-foreground/5 px-2.5 py-1">
                       {finalSnippetAppliedCount === 1
                         ? "1 snippet"
                         : `${finalSnippetAppliedCount} snippets`}
                     </span>
                   )}
                   {runtimeAppTarget && (
-                    <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+                    <span className="rounded-full border border-foreground/10 bg-foreground/5 px-2.5 py-1">
                       Target {runtimeAppTarget}
                     </span>
                   )}
                   {transcriptionLatencyMs !== null && (
-                    <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+                    <span className="rounded-full border border-foreground/10 bg-foreground/5 px-2.5 py-1">
                       {formatLatencyMetric(transcriptionLatencyMs)} transcribe
                     </span>
                   )}
                   {insertLatencyMs !== null && (
-                    <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+                    <span className="rounded-full border border-foreground/10 bg-foreground/5 px-2.5 py-1">
                       {formatLatencyMetric(insertLatencyMs)} insert
                     </span>
                   )}
-                  <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1">
+                  <span className="rounded-full border border-foreground/10 bg-foreground/5 px-2.5 py-1">
                     {outcome === "copied"
                       ? "Clipboard ready"
                       : "Edit commands available"}
@@ -1200,25 +1237,25 @@ export function DictationPopup() {
                 </div>
               )}
               {!compact && (finalText || preview) && (
-                <div className="mt-3 max-w-[330px] rounded-xl border border-white/10 bg-white/4.5 px-3 py-2">
-                  <p className="text-[11px] uppercase tracking-wide text-slate-400">
+                <div className="mt-3 max-w-[330px] rounded-xl border border-foreground/10 bg-foreground/4.5 px-3 py-2">
+                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                     Latest result
                   </p>
-                  <p className="mt-1 text-xs leading-relaxed text-slate-200 line-clamp-4">
+                  <p className="mt-1 text-xs leading-relaxed text-foreground line-clamp-4">
                     {finalText ?? preview}
                   </p>
                 </div>
               )}
               {!compact && (
-                <div className="mt-3 rounded-xl border border-white/10 bg-white/4.5 px-3 py-2">
-                  <p className="text-[11px] uppercase tracking-wide text-slate-400">
+                <div className="mt-3 rounded-xl border border-foreground/10 bg-foreground/4.5 px-3 py-2">
+                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                     Voice edits
                   </p>
-                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-200">
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-foreground">
                     {spokenEditHints.map((hint) => (
                       <span
                         key={hint}
-                        className="rounded-full border border-white/10 bg-slate-950/90 px-2.5 py-1"
+                        className="rounded-full border border-foreground/10 bg-popover/95 px-2.5 py-1"
                       >
                         {hint}
                       </span>
@@ -1227,7 +1264,7 @@ export function DictationPopup() {
                 </div>
               )}
               {!compact && (
-                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-300">
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                   <div className="grid w-full gap-2 sm:grid-cols-2">
                     {finalText?.trim() && (
                       <PopupActionButton
@@ -1268,47 +1305,47 @@ export function DictationPopup() {
                 </div>
               )}
               {!compact && actionFeedback && (
-                <p className="mt-2 text-xs text-slate-300">{actionFeedback}</p>
+                <p className="mt-2 text-xs text-muted-foreground">{actionFeedback}</p>
               )}
             </div>
           </div>
         )}
 
         {phase === "error" && (
-          <div className="flex items-center gap-3 text-white">
-            <TriangleAlert className="h-5 w-5 text-slate-100" />
+          <div className="flex items-center gap-3 text-foreground">
+            <TriangleAlert className="h-5 w-5 text-foreground" />
             <div>
               <p className="text-sm font-semibold">Problem</p>
               {!compact && message && (
-                <p className="max-w-[330px] text-xs leading-relaxed text-slate-300">
+                <p className="max-w-[330px] text-xs leading-relaxed text-muted-foreground">
                   {message}
                 </p>
               )}
               {!compact && (
-                <p className="text-xs text-slate-400">
+                <p className="text-xs text-muted-foreground">
                   Check microphone access, {routeLabel.toLowerCase()}, and
                   shortcut permissions.
                 </p>
               )}
               {!compact && (
-                <div className="mt-2 flex items-center gap-2 text-xs text-slate-300">
+                <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
                   <button
                     type="button"
-                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/8"
+                    className="rounded-lg border border-foreground/10 bg-foreground/5 px-2.5 py-1.5 hover:bg-foreground/8"
                     onClick={() => void handleStartAgain()}
                   >
                     Start again
                   </button>
                   <button
                     type="button"
-                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
+                    className="rounded-lg border border-foreground/10 bg-foreground/5 px-2.5 py-1.5 hover:bg-foreground/10"
                     onClick={() => void openMainApp("dictation")}
                   >
                     Open dictation
                   </button>
                   <button
                     type="button"
-                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
+                    className="rounded-lg border border-foreground/10 bg-foreground/5 px-2.5 py-1.5 hover:bg-foreground/10"
                     onClick={() => void openMainApp("settings")}
                   >
                     <Settings2 className="mr-1 inline h-3.5 w-3.5" />

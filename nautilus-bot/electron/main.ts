@@ -4,8 +4,12 @@ import {
   dialog,
   globalShortcut,
   ipcMain,
+  Menu,
+  nativeImage,
   net,
+  screen,
   shell,
+  Tray,
   type IpcMainInvokeEvent,
 } from "electron";
 import { existsSync } from "fs";
@@ -33,6 +37,9 @@ let dictationPhase = "idle";
 let updaterConfigured = false;
 let updateReadyToInstall = false;
 let bootstrapComplete = false;
+let tray: Tray | null = null;
+let minimizeToTrayEnabled = false;
+let isQuitting = false;
 
 function qaLog(message: string, payload?: unknown): void {
   if (process.env.PLAINSONG_QA_PACKAGED_HOTKEY === "1") {
@@ -72,6 +79,9 @@ type AppSettings = {
     dictationPushToTalk?: boolean;
     dictationHandsFreeEnabled?: boolean;
   };
+  ui?: {
+    minimizeToTray?: boolean;
+  };
 };
 
 function getWindowLabel(win: BrowserWindow | null): string | null {
@@ -101,6 +111,46 @@ function showAndFocusMainWindow(): void {
   }
   mainWindow.show();
   mainWindow.focus();
+}
+
+// Menu-bar tray: a black-on-transparent template "P" the system recolors.
+const TRAY_ICON_1X =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABYAAAAWCAQAAABuvaSwAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAACYktHRAAAqo0jMgAAAAd0SU1FB+oGFRMGN2ML3+kAAAAldEVYdGRhdGU6Y3JlYXRlADIwMjYtMDYtMjFUMTk6MDY6NTUrMDA6MDCUuYwtAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDI2LTA2LTIxVDE5OjA2OjU1KzAwOjAw5eQ0kQAAACh0RVh0ZGF0ZTp0aW1lc3RhbXAAMjAyNi0wNi0yMVQxOTowNjo1NSswMDowMLLxFU4AAAE5SURBVCjPldIxb1JhFMbx310uXLiABUKcbEKIgyRdTHRzde/Qiaazt0vgN9AP4DZz7AXTp2K4dTBycNAx2qGnCUGMoYuECLlTgcqHps5y8yf8973me83IPBdMaqokQCEVCY4k/esbzcG5aNxxoeqom8MWF2ENlbcc+G6ZfCNXUfTDRt6uoquFQ209vlbKH2jfQs/P//MaN3/ZmHef112jOByd+qHqlmgWPTRbOv3Tw2IMseDmrCMPbTNbDdXV81V0N32Zb8lrDpSP9xZznQ2zYUrJpW8s3752mlzJT5IWKWNGVd858n21xGU588lFkLEllkwFPDCWSLL9ZBgMrtD66lHKpq8G6zotwQWgivmuMQF7FM7GC58ryWf2jaa041PJSomtT0xPnrlc5jzySm/66QGikY3Af80v6B9NCQwaOnOZ/AAAAAElFTkSuQmCC";
+const TRAY_ICON_2X =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAsCAQAAAC0jZKKAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAACYktHRAAAqo0jMgAAAAd0SU1FB+oGFRMGN2ML3+kAAAAldEVYdGRhdGU6Y3JlYXRlADIwMjYtMDYtMjFUMTk6MDY6NTUrMDA6MDCUuYwtAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDI2LTA2LTIxVDE5OjA2OjU1KzAwOjAw5eQ0kQAAACh0RVh0ZGF0ZTp0aW1lc3RhbXAAMjAyNi0wNi0yMVQxOTowNjo1NSswMDowMLLxFU4AAAH0SURBVEjH7ZbPSxRhGMc/Mzs7s64/IK0upmjpJRCCokOX6JCIt+gSKCh4EU+BIJ0DEfwbvEh1LsiLCBERHQqy9BD+II1SsQ6rjq2u67peXl5HZ3bnfXdH8LDf9/Llfd/nM8/zzjMvAxWdtwzfzAuSVOFg4+DgECeOTQzIc0QGl7+s8oNvzLFZGGz5ZtJkyXOVDmw594E35IAEV2ijg/uY7LDMFC9Z0qnDpI5hMuTFGD2VyjX6+CJWFukPSK6o6pmV4DHfajOvxdp/numhLRkaBIbrzEt0b1DRhXTIdtEH/2RCuCQjtKqDYS+kphnZFTd5pAPOhoD/sCJcjIc64KMQcJoN6dt1wPkQcI5d6Wt0wOE6ic5ECbZpkH49SnC9p8k+Rwm+S4twW0xFB65mAEf4aT5GBTYYokv4Fcb9H5Pa9XG28S4zyAhxAH7zlK/+EDVwAzcwMbCpo5FbdHIHgAzvec6noBA18BO6AAMLhwQm+6yyxjzTvGMnOEQNPMOkeBs5DkjjkiKFWyxEDbzAW6V9Hql1RQm9U95dUQFfWLChTNEEm0q7SgBbAS4ScEI6JxykDo5RK32t/nkXBidplL7Jk33ZeowrfwpTdOuG+0t8gMUlbtPjyRh+8YpZtjngO1ulZeqS5lDm6h1Z9vjHvegOpaLydAxNI4W4NraiLwAAAABJRU5ErkJggg==";
+
+function buildTrayMenu(): Menu {
+  return Menu.buildFromTemplate([
+    {
+      label: "Open Plainsong",
+      click: () => {
+        if (bootstrapComplete) {
+          showAndFocusMainWindow();
+        }
+      },
+    },
+    { type: "separator" },
+    {
+      label: "Quit Plainsong",
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]);
+}
+
+function createTray(): void {
+  if (tray) {
+    return;
+  }
+  const icon = nativeImage.createFromDataURL(TRAY_ICON_1X);
+  icon.addRepresentation({ scaleFactor: 2, dataURL: TRAY_ICON_2X });
+  icon.setTemplateImage(true);
+  tray = new Tray(icon);
+  tray.setToolTip("Plainsong");
+  // A menu (not a popover) on click, per Apple HIG for menu-bar extras.
+  tray.setContextMenu(buildTrayMenu());
 }
 
 function broadcastRendererEvent(eventName: string, payload: unknown): void {
@@ -290,7 +340,28 @@ async function installUpdateInElectron(): Promise<void> {
   autoUpdater.quitAndInstall();
 }
 
+// Anchor the overlay on the display the user is actually working on (the one
+// under the cursor), inside that display's work area — which already excludes
+// the menu bar and the notch safe-area on notched Macs. Without this the HUD
+// always opens on the primary display even when work is on an external monitor.
+function positionOverlayOnActiveDisplay(win: BrowserWindow): void {
+  try {
+    const point = screen.getCursorScreenPoint();
+    const { workArea } = screen.getDisplayNearestPoint(point);
+    const [winWidth, winHeight] = win.getSize();
+    const isRecording = getWindowLabel(win) === "recording-overlay";
+    const x = isRecording
+      ? workArea.x + workArea.width - winWidth - 20
+      : workArea.x + Math.round(workArea.width / 2 - winWidth / 2);
+    const y = workArea.y + workArea.height - winHeight - (isRecording ? 20 : 40);
+    win.setPosition(Math.round(x), Math.round(y));
+  } catch (error) {
+    console.error("[main] Failed to position overlay on active display:", error);
+  }
+}
+
 function showOverlayWindow(win: BrowserWindow): void {
+  positionOverlayOnActiveDisplay(win);
   if (process.platform === "darwin") {
     win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   }
@@ -363,6 +434,11 @@ async function handleLocalCommand(
     case "__window_start_drag__":
       // Dragging is handled through CSS app-region on Electron.
       return { handled: true, result: null };
+    case "app:set_minimize_to_tray": {
+      const payload = (args ?? {}) as { enabled?: unknown };
+      minimizeToTrayEnabled = payload.enabled === true;
+      return { handled: true, result: null };
+    }
     case "check_for_updates":
       return { handled: true, result: await checkForUpdatesInElectron() };
     case "install_update":
@@ -631,6 +707,14 @@ function createMainWindow(): BrowserWindow {
     mainWindow = null;
   });
 
+  // Keep Plainsong alive in the menu-bar tray when the user opts in.
+  win.on("close", (event) => {
+    if (minimizeToTrayEnabled && !isQuitting) {
+      event.preventDefault();
+      win.hide();
+    }
+  });
+
   if (isDev) {
     win.webContents.on("did-start-loading", () => {
       console.log("[renderer] did-start-loading", win.webContents.getURL());
@@ -693,8 +777,11 @@ process.on("unhandledRejection", (reason) => {
 });
 
 app.on("before-quit", () => {
+  isQuitting = true;
   globalShortcut.unregisterAll();
   ipcBridge?.shutdown();
+  tray?.destroy();
+  tray = null;
 });
 
 app.on("window-all-closed", () => {
@@ -836,7 +923,15 @@ async function bootstrap() {
   ipcBridge.start();
   await applyElectronGlobalShortcuts("startup");
 
+  try {
+    const settings = (await ipcBridge.invoke("get_settings")) as AppSettings;
+    minimizeToTrayEnabled = settings?.ui?.minimizeToTray === true;
+  } catch (error) {
+    console.error("[main] Failed to read minimize-to-tray setting:", error);
+  }
+
   mainWindow = createMainWindow();
+  createTray();
   bootstrapComplete = true;
 }
 

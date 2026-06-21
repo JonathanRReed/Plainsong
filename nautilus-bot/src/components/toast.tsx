@@ -94,21 +94,21 @@ function ToastContainer({
 const VARIANT_STYLES: Record<ToastVariant, { icon: typeof CheckCircle2; iconClass: string; accent: string; bar: string }> = {
     success: {
         icon: CheckCircle2,
-        iconClass: "text-emerald-500",
-        accent: "border-l-emerald-500",
-        bar: "bg-emerald-500",
+        iconClass: "text-gold-text",
+        accent: "border-l-gold",
+        bar: "bg-gold",
     },
     error: {
         icon: AlertCircle,
-        iconClass: "text-destructive",
-        accent: "border-l-destructive",
-        bar: "bg-destructive",
+        iconClass: "text-rust",
+        accent: "border-l-rust",
+        bar: "bg-rust",
     },
     info: {
         icon: Info,
-        iconClass: "text-primary",
-        accent: "border-l-primary",
-        bar: "bg-primary",
+        iconClass: "text-muted-foreground",
+        accent: "border-l-muted",
+        bar: "bg-muted",
     },
 };
 
@@ -130,6 +130,9 @@ function ToastItem({
         const remaining = Math.max(0, TOAST_DURATION_MS - elapsed);
         bar.style.transition = "none";
         bar.style.width = `${(remaining / TOAST_DURATION_MS) * 100}%`;
+        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+            return;
+        }
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
                 bar.style.transition = `width ${remaining}ms linear`;
@@ -142,14 +145,14 @@ function ToastItem({
         <div
             role="status"
             className={cn(
-                "group relative overflow-hidden rounded-lg border border-l-4 bg-card shadow-lg",
-                "animate-in slide-in-from-right-4 fade-in duration-200",
+                "group relative overflow-hidden rounded-md border border-l-[3px] bg-card shadow-[0_14px_38px_hsl(34_26%_4%/0.18)]",
+                "animate-in slide-in-from-right-4 fade-in duration-300 ease-out",
                 style.accent,
             )}
         >
             <div className="flex items-center gap-3 px-4 py-3">
                 <Icon className={cn("h-4 w-4 shrink-0", style.iconClass)} />
-                <span className="text-sm">{t.message}</span>
+                <span className="text-sm leading-5">{t.message}</span>
                 <button
                     type="button"
                     onClick={() => onDismiss(t.id)}

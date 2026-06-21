@@ -7,12 +7,23 @@ import { Input } from "@/components/ui/input";
 import { Edit2, Check, Trash2, User } from "lucide-react";
 import type { TranscriptSegment } from "@/types";
 
+/**
+ * Where this transcript was set down. Local-first by default; cloud must be
+ * named explicitly by the caller (honesty contract — never claim local when a
+ * named provider did the work). Absent the prop, we assume on-device.
+ */
+type TranscriptProvenance =
+  | { source: "local" }
+  | { source: "cloud"; provider: string };
+
 interface TranscriptViewerProps {
   segments: TranscriptSegment[];
   className?: string;
   onSegmentClick?: (segment: TranscriptSegment) => void;
   currentTime?: number;
   speakerNames?: Record<string, string>;
+  /** Provenance of the transcript; defaults to on-device when omitted. */
+  provenance?: TranscriptProvenance;
   onRenameSpeaker?: (speakerId: string, newName: string) => Promise<void> | void;
   onEditSegment?: (segmentId: string, newText: string) => Promise<void> | void;
   onDeleteSegments?: (segmentIds: string[]) => Promise<void> | void;
@@ -22,6 +33,8 @@ interface SpeakerBadgeProps {
   speakerId: string;
   speakerName?: string;
   isEditing?: boolean;
+  isActive?: boolean;
+  isFirstMention?: boolean;
   onRename?: (newName: string) => void;
 }
 
@@ -36,7 +49,7 @@ function defaultSpeakerLabel(speakerId: string) {
   return speakerId;
 }
 
-const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEditing, onRename }: SpeakerBadgeProps) {
+const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEditing, isActive, isFirstMention, onRename }: SpeakerBadgeProps) {
   const [isEditMode, setIsEditMode] = useState(false);
   const [editValue, setEditValue] = useState(speakerName || defaultSpeakerLabel(speakerId));
 
@@ -68,6 +81,7 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
           variant="ghost"
           size="icon"
           className="h-6 w-6"
+          aria-label="Save speaker name"
           onClick={handleSave}
         >
           <Check className="h-3 w-3" />
@@ -78,8 +92,17 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
 
   return (
     <div className="flex items-center gap-1 group">
-      <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-trusted/10 text-trusted text-xs font-medium">
-        <User className="h-3 w-3" />
+      <div
+        className={cn(
+          "rubric-muted flex items-center gap-1.5 rounded-md px-2 py-1 transition-smooth",
+          isActive
+            ? "bg-gold/10 text-gold-text"
+            : isFirstMention
+              ? "bg-gold/10 text-gold-text"
+              : "bg-muted/40 text-muted-foreground"
+        )}
+      >
+        <User className="h-3 w-3" aria-hidden="true" />
         <span>{speakerName || defaultSpeakerLabel(speakerId)}</span>
       </div>
       {isEditing && (
@@ -87,6 +110,7 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
           variant="ghost"
           size="icon"
           className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+          aria-label="Edit speaker name"
           onClick={() => setIsEditMode(true)}
         >
           <Edit2 className="h-3 w-3" />
@@ -102,6 +126,7 @@ export function TranscriptViewer({
   onSegmentClick,
   currentTime,
   speakerNames: externalSpeakerNames,
+  provenance,
   onRenameSpeaker,
   onEditSegment,
   onDeleteSegments,
@@ -110,6 +135,31 @@ export function TranscriptViewer({
   const [isEditingSpeakers, setIsEditingSpeakers] = useState(false);
   const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
+  // Session-scoped ribbon: the last segment the reader played/opened, by id.
+  // State only — no persistence backend (honest about what we keep).
+  const [lastReadSegmentId, setLastReadSegmentId] = useState<string | null>(null);
+
+  // Provenance defaults to on-device. Cloud is only ever shown when the caller
+  // names a provider — we never fabricate a "Local" claim.
+  const isLocal = provenance?.source !== "cloud";
+  const cloudProvider = provenance?.source === "cloud" ? provenance.provider : null;
+
+  // Info-strip figures, all defensible from the actual transcript data.
+  const stats = useMemo(() => {
+    const wordCount = segments.reduce(
+      (total, segment) => total + segment.text.trim().split(/\s+/).filter(Boolean).length,
+      0
+    );
+    const lastEnd = segments.length > 0 ? segments[segments.length - 1].endTime : 0;
+    const firstStart = segments.length > 0 ? segments[0].startTime : 0;
+    const spanSeconds = Math.max(0, lastEnd - firstStart);
+    const minutes = Math.max(spanSeconds > 0 ? 1 : 0, Math.round(spanSeconds / 60));
+    const avgConfidence =
+      segments.length > 0
+        ? segments.reduce((sum, segment) => sum + segment.confidence, 0) / segments.length
+        : 0;
+    return { wordCount, minutes, avgConfidence };
+  }, [segments]);
 
   useEffect(() => {
     if (externalSpeakerNames) {
@@ -146,37 +196,102 @@ export function TranscriptViewer({
     }, [] as TranscriptSegment[][]);
   }, [segments]);
 
+  // Track which group indices are the FIRST appearance of each speaker, so the
+  // first badge of a voice may be gilded once and later mentions stay neutral.
+  const firstSpeakerGroupIndices = useMemo(() => {
+    const seen = new Set<string>();
+    const firsts = new Set<number>();
+    groupedSegments.forEach((group, index) => {
+      const key = group[0].speakerId ?? `speaker-${index}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        firsts.add(index);
+      }
+    });
+    return firsts;
+  }, [groupedSegments]);
+
   return (
     <div className={cn("flex h-full min-h-0 flex-col overflow-hidden", className)}>
       {/* Toolbar */}
-      <div className="shrink-0 border-b bg-muted/50 p-3">
+      <div className="shrink-0 border-b border-border bg-muted/30 px-4 py-3">
         <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium">
-              {segments.length} segments
-            </span>
-            {segments.length > 0 && (
-              <span className="text-xs text-muted-foreground">
-                ({formatTimeWithMs(segments[segments.length - 1]?.endTime || 0)} total)
-              </span>
-            )}
+          <div className="flex flex-col gap-0.5">
+            <p className="rubric">TRANSCRIPT</p>
+            <div className="flex items-baseline gap-2 font-mono text-xs text-muted-foreground tabular-nums">
+              <span className="text-foreground">{segments.length} segments</span>
+              {segments.length > 0 && (
+                <span>
+                  ({formatTimeWithMs(segments[segments.length - 1]?.endTime || 0)} total)
+                </span>
+              )}
+            </div>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setIsEditingSpeakers(!isEditingSpeakers)}
-          >
-            {isEditingSpeakers ? "Done" : "Rename Speakers"}
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* Trust badge — provenance, honestly named */}
+            <span
+              className={cn(
+                "rubric-muted inline-flex items-center gap-1.5 rounded-md border px-2 py-1",
+                isLocal ? "border-gold/30 text-gold-text" : "border-border text-muted-foreground"
+              )}
+              title={
+                isLocal
+                  ? "Transcribed on this device."
+                  : `Transcribed by ${cloudProvider}, a named cloud provider.`
+              }
+            >
+              <span
+                className={cn("neume", isLocal ? "neume-lit" : "neume-hollow")}
+                aria-hidden="true"
+              />
+              {isLocal ? "Local transcript" : `Cloud (${cloudProvider})`}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setIsEditingSpeakers(!isEditingSpeakers)}
+            >
+              {isEditingSpeakers ? "Done" : "Rename Speakers"}
+            </Button>
+          </div>
         </div>
+
+        {/* Info strip — defensible figures, mono rubric, tabular */}
+        {segments.length > 0 && (
+          <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 rubric-muted">
+            <span className="inline-flex items-baseline gap-1">
+              <span className="time-spec text-foreground">{stats.wordCount}</span>
+              words
+            </span>
+            <span className="inline-flex items-baseline gap-1">
+              <span className="time-spec text-foreground">~{stats.minutes}</span>
+              min
+            </span>
+            <span className="inline-flex items-baseline gap-1">
+              avg conf
+              <span className="time-spec text-foreground">{Math.round(stats.avgConfidence * 100)}%</span>
+            </span>
+            <span className="inline-flex items-baseline gap-1">
+              <span
+                className={cn("neume", isLocal ? "neume-lit" : "neume-hollow")}
+                aria-hidden="true"
+              />
+              {isLocal ? "Local" : `Cloud (${cloudProvider})`}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Transcript */}
       <ScrollArea className="h-full min-h-0 flex-1">
         <div className="p-4 space-y-4">
           {groupedSegments.length === 0 ? (
-            <div className="text-center py-12 text-muted-foreground">
-              No transcript available. Transcription will appear here once processing is complete.
+            <div className="flex flex-col items-center gap-3 py-16 text-center">
+              <span className="neume neume-hollow" aria-hidden="true" />
+              <p className="font-serif text-base text-foreground">No transcript available</p>
+              <p className="max-w-xs text-sm text-muted-foreground">
+                Transcription will appear here once processing is complete.
+              </p>
             </div>
           ) : (
             groupedSegments.map((group, groupIndex) => {
@@ -186,31 +301,58 @@ export function TranscriptViewer({
               const speakerId = rawSpeakerId || `speaker-${groupIndex}`;
               const speakerName = speakerNames[speakerId];
               const canRenameSpeaker = true; // Always allow renaming
-              
+              const isFirstSpeakerMention = firstSpeakerGroupIndices.has(groupIndex);
+
               // Check if this group is currently playing
-              const isActive = currentTime !== undefined && 
-                currentTime >= firstSegment.startTime && 
+              const isActive = currentTime !== undefined &&
+                currentTime >= firstSegment.startTime &&
                 currentTime <= group[group.length - 1].endTime;
+
+              // The very first group opens the leaf with a gilded versal.
+              const isLeafOpening = groupIndex === 0;
+              // Session ribbon: a thin gold left-edge on the last-read group.
+              const isLastRead = lastReadSegmentId === firstSegment.id;
 
               return (
                 <div
                   key={groupIndex}
                   className={cn(
-                    "group flex gap-3 p-3 rounded-lg transition-colors",
-                    isActive ? "bg-trusted/10 border border-trusted/20" : "hover:bg-muted/50",
+                    "group relative flex gap-3 rounded-lg p-3 transition-colors",
+                    // Faint gold-ambient hairline separating speaker turns.
+                    groupIndex > 0 && "border-t border-gold-ambient/15",
+                    isActive ? "bg-gold/5" : "hover:bg-muted/50",
                     onSegmentClick && "cursor-pointer"
                   )}
-                  onClick={() => onSegmentClick?.(firstSegment)}
+                  onClick={() => {
+                    setLastReadSegmentId(firstSegment.id);
+                    onSegmentClick?.(firstSegment);
+                  }}
                 >
+                  {/* Playhead neume — the moment being spoken, settling in */}
+                  {isActive && (
+                    <span
+                      className="neume neume-lit settle-in absolute left-0 top-1/2 -translate-y-1/2"
+                      aria-hidden="true"
+                    />
+                  )}
+                  {/* Session ribbon bookmark — last-read position */}
+                  {isLastRead && !isActive && (
+                    <span
+                      className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full bg-gold-ambient"
+                      aria-hidden="true"
+                    />
+                  )}
                   {/* Timestamp & Speaker */}
                   <div className="flex flex-col gap-1 min-w-[100px]">
-                    <span className="text-xs text-muted-foreground font-mono">
+                    <span className="rubric-muted time-spec">
                       {formatTimeWithMs(firstSegment.startTime)}
                     </span>
                     <SpeakerBadge
                       speakerId={speakerId}
                       speakerName={speakerName}
                       isEditing={isEditingSpeakers && canRenameSpeaker}
+                      isActive={isActive}
+                      isFirstMention={isFirstSpeakerMention}
                       onRename={canRenameSpeaker ? (name) => handleRenameSpeaker(speakerId, name) : undefined}
                     />
                   </div>
@@ -224,7 +366,7 @@ export function TranscriptViewer({
                           value={editingText}
                           onChange={(e) => setEditingText(e.target.value)}
                           rows={3}
-                          className="w-full text-sm bg-background border border-active rounded-md px-2 py-1 resize-none focus:outline-none focus:ring-1 focus:ring-active"
+                          className="w-full text-sm bg-background border border-gold rounded-md px-2 py-1 resize-none focus:outline-none focus:ring-1 focus:ring-gold"
                           onKeyDown={(e) => {
                             if (e.key === "Escape") { setEditingSegmentId(null); }
                             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
@@ -241,23 +383,46 @@ export function TranscriptViewer({
                     ) : (
                       <div className="group/text relative">
                         <p
-                          className="text-sm leading-relaxed"
+                          className="manuscript max-w-prose text-[0.95rem] leading-[1.85]"
                           onClick={(e) => { if (onEditSegment) { e.stopPropagation(); setEditingSegmentId(firstSegment.id); setEditingText(group.map(s => s.text).join(" ")); } }}
                         >
-                          {group.map((segment, i) => (
-                            <span
-                              key={segment.id}
-                              className={cn(
-                                "transition-colors",
-                                currentTime !== undefined &&
-                                currentTime >= segment.startTime &&
-                                currentTime <= segment.endTime &&
-                                "bg-yellow-200/50 dark:bg-yellow-900/30 rounded px-0.5"
-                              )}
-                            >
-                              {segment.text}{i < group.length - 1 ? " " : ""}
-                            </span>
-                          ))}
+                          {group.map((segment, i) => {
+                            const isPlaying =
+                              currentTime !== undefined &&
+                              currentTime >= segment.startTime &&
+                              currentTime <= segment.endTime;
+                            const underline = isPlaying
+                              ? "underline decoration-dotted decoration-gold underline-offset-2"
+                              : "";
+                            // Open the whole leaf with a gilded versal. The entire
+                            // first word stays a single text node — the real letter
+                            // is never pulled out of the DOM (screen readers read
+                            // the word whole) — and the gilded drop-cap is rendered
+                            // by gilding the first letter via ::first-letter.
+                            if (isLeafOpening && i === 0) {
+                              return (
+                                <span
+                                  key={segment.id}
+                                  className={cn(
+                                    "transition-colors",
+                                    // Gilded versal drop-cap on the rendered first
+                                    // letter; the letter itself stays in the text
+                                    // node so the word reads whole to AT.
+                                    "[&::first-letter]:float-left [&::first-letter]:pr-[0.07em] [&::first-letter]:font-serif [&::first-letter]:text-[2.6em] [&::first-letter]:font-medium [&::first-letter]:leading-[0.82]",
+                                    "[&::first-letter]:[background:var(--gold-leaf)] [&::first-letter]:[-webkit-background-clip:text] [&::first-letter]:[background-clip:text] [&::first-letter]:[-webkit-text-fill-color:transparent] [&::first-letter]:[text-shadow:0_1px_0_color-mix(in_oklab,var(--bole)_70%,transparent)]",
+                                    underline
+                                  )}
+                                >
+                                  {segment.text}{i < group.length - 1 ? " " : ""}
+                                </span>
+                              );
+                            }
+                            return (
+                              <span key={segment.id} className={cn("transition-colors", underline)}>
+                                {segment.text}{i < group.length - 1 ? " " : ""}
+                              </span>
+                            );
+                          })}
                         </p>
                         {onEditSegment && (
                           <div className="absolute top-0 right-0 flex items-center gap-1 opacity-0 group-hover/text:opacity-100 transition-opacity">
@@ -287,8 +452,9 @@ export function TranscriptViewer({
                           </div>
                         )}
                         {firstSegment.confidence < 0.8 && (
-                          <p className="text-xs text-muted-foreground mt-1">
-                            Confidence: {Math.round(firstSegment.confidence * 100)}%
+                          <p className="rubric-muted mt-1 inline-flex items-center gap-1.5">
+                            <span className="neume neume-hollow" aria-hidden="true" />
+                            Low confidence
                           </p>
                         )}
                       </div>
