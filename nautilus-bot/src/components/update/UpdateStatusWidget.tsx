@@ -48,7 +48,7 @@ export function UpdateStatusWidget() {
       case "checking":
         return <Badge variant="outline">Checking...</Badge>;
       case "updateAvailable":
-        return <Badge className="bg-blue-100 text-blue-800 hover:bg-blue-100">Update Available</Badge>;
+        return <Badge className="bg-gold/10 text-gold-text hover:bg-gold/10">Update Available</Badge>;
       case "upToDate":
         return <Badge variant="secondary">Up to Date</Badge>;
       case "downloading":
@@ -89,7 +89,7 @@ export function UpdateStatusWidget() {
         )}
 
         {status?.status === "error" && (
-          <div className="rounded-md bg-red-50 p-3 text-sm text-red-800">
+          <div className="rounded-md bg-rust/10 p-3 text-sm text-rust">
             {status.error || "An error occurred while checking for updates"}
           </div>
         )}

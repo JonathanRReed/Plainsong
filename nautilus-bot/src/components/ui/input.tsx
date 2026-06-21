@@ -35,8 +35,8 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
               inputSize === "lg" && "h-12 px-4 py-3 text-base",
               leftIcon && (inputSize === "default" ? "pl-10" : inputSize === "sm" ? "pl-8" : "pl-12"),
               rightIcon && (inputSize === "default" ? "pr-10" : inputSize === "sm" ? "pr-8" : "pr-12"),
-              error && "border-destructive focus-visible:ring-destructive",
-              success && "border-success focus-visible:ring-success",
+              error && "border-rust focus-visible:ring-rust",
+              success && "border-gold focus-visible:ring-gold",
               !error && !success && "focus-visible:border-primary/50",
               className
             )}
@@ -61,8 +61,8 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
               inputSize === "default" && "text-xs",
               inputSize === "sm" && "text-[10px]",
               inputSize === "lg" && "text-sm",
-              error && "text-destructive",
-              success && "text-success",
+              error && "text-rust",
+              success && "text-gold-text",
               !error && !success && "text-muted-foreground"
             )}
           >

@@ -468,6 +468,31 @@ function formatMeetingReviewState(status: Recording["status"] | undefined): stri
   }
 }
 
+// A 1.5px left band that encodes meeting state by gold/rust/neutral — never a
+// stoplight hue. Gold = ready/done, rust = needs-attention, bronze ambient =
+// processing, muted hairline = draft/unknown. The earned burnished gold is held
+// for the live row, so a completed row carries the quieter ambient bronze band.
+function recordingStatusBand(
+  status: Recording["status"] | undefined,
+  isLive: boolean
+): { band: string; word: string } {
+  if (isLive) {
+    return { band: "border-l-gold", word: "Live" };
+  }
+  switch (status) {
+    case "completed":
+      return { band: "border-l-gold-ambient", word: "Ready" };
+    case "error":
+      return { band: "border-l-rust", word: "Attention" };
+    case "processing":
+      return { band: "border-l-gold-ambient/60", word: "Processing" };
+    case "recording":
+      return { band: "border-l-gold", word: "Capturing" };
+    default:
+      return { band: "border-l-border", word: "Draft" };
+  }
+}
+
 function describeMeetingAssetRetention(recording: Recording | null): {
   audioLabel: string;
   detail: string;
@@ -495,9 +520,9 @@ function describeMeetingAssetRetention(recording: Recording | null): {
 function qualityToneClasses(tone: "good" | "warn" | "muted"): string {
   switch (tone) {
     case "good":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-200";
+      return "border-gold/30 bg-gold/10 text-gold-text";
     case "warn":
-      return "border-amber-500/30 bg-amber-500/10 text-amber-100";
+      return "border-rust/30 bg-rust/10 text-rust";
     default:
       return "border-border bg-muted/40 text-muted-foreground";
   }
@@ -2302,8 +2327,9 @@ export function RecordingsView() {
     <div className="h-full flex flex-col">
       <div className="p-6 border-b flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold">Meetings</h1>
-          <p className="text-muted-foreground">
+          <p className="rubric mb-1.5">MEETINGS</p>
+          <h1 className="font-serif text-2xl font-semibold tracking-tight">Meetings</h1>
+          <p className="mt-1 text-muted-foreground">
             Capture meetings, review transcripts, and keep follow-up moving.
           </p>
         </div>
@@ -2325,11 +2351,11 @@ export function RecordingsView() {
       <ScrollArea className="flex-1">
         <div className="p-6">
           {autoNameIssue && (
-            <Card className="mb-4 border-amber-500/40 bg-amber-500/5">
+            <Card className="mb-4 border-rust/40 bg-rust/5">
               <CardContent className="p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <p className="text-sm font-medium text-amber-700 dark:text-amber-300">
+                    <p className="text-sm font-medium text-rust">
                       Meeting title generation failed
                     </p>
                     <p className="text-xs text-muted-foreground">{autoNameIssue.message}</p>
@@ -2365,8 +2391,8 @@ export function RecordingsView() {
           <section className="surface-panel-subtle mb-4 rounded-2xl p-4">
             <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-center">
               <div>
-                <p className="quiet-label">Meeting workspace</p>
-                <p className="mt-1 text-base font-medium text-card-foreground">
+                <p className="rubric-muted">Meeting workspace</p>
+                <p className="mt-1.5 font-serif text-base font-medium text-card-foreground">
                   Bot-free capture, transcript-first review, and practical follow-through.
                 </p>
               </div>
@@ -2381,8 +2407,8 @@ export function RecordingsView() {
                     key={label}
                     className="min-w-24 rounded-xl border border-border/70 bg-background/55 px-3 py-2"
                   >
-                    <p className="text-xs text-muted-foreground">{label}</p>
-                    <p className="mt-1 text-xl font-semibold tracking-tight">{value}</p>
+                    <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
+                    <p className="mt-1 font-serif text-xl font-semibold tabular-nums tracking-tight">{value}</p>
                   </div>
                 ))}
               </div>
@@ -2461,18 +2487,19 @@ export function RecordingsView() {
           </section>
 
           {isRecording && recordingId && (
-            <Card className="mb-4 border-active/40 bg-active/5">
+            <Card className="mb-4 border-gold/40 bg-gold/5">
               <CardContent className="p-4">
                 <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div className="space-y-2">
                     <div>
-                      <p className="text-sm font-medium text-active">Recording in progress</p>
+                      <p className="text-sm font-medium text-gold-text">Recording in progress</p>
                       <p className="text-xs text-muted-foreground">
                         Keep notes current while Plainsong captures the meeting.
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge variant="outline" className="border-active/30 bg-background/70 text-active">
+                      <Badge variant="outline" className="border-border bg-muted/30 text-foreground">
+                        <span className="neume neume-lit mr-1" />
                         Live meeting
                       </Badge>
                       <Badge variant="outline" className="bg-background/70">
@@ -2483,7 +2510,7 @@ export function RecordingsView() {
                         Playbook: {liveMeetingTemplateOption.label}
                       </Badge>
                       {liveMeetingConsentShown ? (
-                        <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
+                        <Badge variant="outline" className="border-gold/30 bg-gold/10 text-gold-text">
                           <CheckCircle2 className="mr-1 h-3 w-3" />
                           Consent confirmed
                         </Badge>
@@ -2531,7 +2558,7 @@ export function RecordingsView() {
                   height={56}
                 />
                 <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(280px,1fr)]">
-                  <div className="rounded-lg border border-active/20 bg-background/80 p-3">
+                  <div className="rounded-lg border border-gold/20 bg-background/80 p-3">
                     <div className="mb-2 flex items-center justify-between gap-3">
                       <p className="text-xs font-medium text-muted-foreground">
                         Meeting Notes <span className="opacity-50">(grounds summary, actions, and Ask)</span>
@@ -2545,12 +2572,12 @@ export function RecordingsView() {
                       onChange={(e) => setLiveMeetingNotes(e.target.value)}
                       placeholder="Capture decisions, names, risks, and next steps as the conversation moves."
                       rows={8}
-                      className="w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-active"
+                      className="w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-gold"
                     />
                   </div>
-                  <div className="rounded-lg border border-active/20 bg-background/70 p-3">
+                  <div className="rounded-lg border border-gold/20 bg-background/70 p-3">
                     <div className="mb-2 flex items-center justify-between gap-2">
-                      <p className="text-xs font-medium text-active">Live Transcript</p>
+                      <p className="text-xs font-medium text-gold-text">Live Transcript</p>
                       <p className="text-[11px] text-muted-foreground">
                         Transcript stays secondary to notes here
                       </p>
@@ -2569,14 +2596,14 @@ export function RecordingsView() {
                               key={i}
                               className={chunk.isPartial ? "opacity-50 italic" : "opacity-100"}
                             >
-                              <span className="mr-1.5 font-mono text-xs text-active/60">{ts}</span>
+                              <span className="mr-1.5 font-mono text-xs text-gold-text/60">{ts}</span>
                               {chunk.text}
                             </p>
                           );
                         })}
                       </div>
                     ) : (
-                      <div className="flex h-full min-h-[140px] items-center justify-center rounded-md border border-dashed border-active/20 bg-muted/20 px-4 text-center text-sm text-muted-foreground">
+                      <div className="flex h-full min-h-[140px] items-center justify-center rounded-md border border-dashed border-gold/20 bg-muted/20 px-4 text-center text-sm text-muted-foreground">
                         Live transcript lines will appear here while the meeting is being captured.
                       </div>
                     )}
@@ -2613,11 +2640,12 @@ export function RecordingsView() {
           )}
 
           {filteredMeetings.length === 0 ? (
-            <div className="surface-panel-subtle rounded-2xl px-6 py-12 text-center">
-              <div className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl border border-border/70 bg-muted/35 text-muted-foreground">
-                <FileAudio className="h-6 w-6" />
-              </div>
-              <h3 className="text-lg font-medium tracking-tight">
+            <div className="surface-panel-subtle rounded-2xl px-6 py-14 text-center">
+              <span
+                className="neume neume-hollow mx-auto mb-5 !block size-2.5"
+                aria-hidden="true"
+              />
+              <h3 className="font-serif text-lg font-medium tracking-tight">
                 {meetings.length === 0 ? "No meetings yet" : "No meetings match your filters"}
               </h3>
               <p className="mx-auto mt-2 max-w-sm text-sm leading-6 text-muted-foreground">
@@ -2634,41 +2662,62 @@ export function RecordingsView() {
             </div>
           ) : (
             <div className="grid gap-2">
-              {filteredMeetings.map((recording) => (
+              {filteredMeetings.map((recording) => {
+                const isLiveRow = recording.id === recordingId && isRecording;
+                const statusBand = recordingStatusBand(recording.status, isLiveRow);
+                return (
                 <Card
                   key={recording.id}
-                  className="cursor-pointer border-border/70 bg-card/78 transition-colors hover:bg-muted/25"
+                  className={`cursor-pointer overflow-hidden transition-smooth hover:bg-muted/25 ${
+                    isLiveRow
+                      ? "border-gold/40 bg-gold/10"
+                      : "border-border/70 bg-card/78"
+                  }`}
                   onClick={() => handleRecordingClick(recording)}
                 >
-                  <CardContent className="p-4">
+                  {/* Left status band: gold = ready/live, rust = needs attention,
+                      bronze ambient = processing, muted = draft. Border on the
+                      unrounded CardContent so the band reads flush. */}
+                  <CardContent className={`rounded-none border-l-2 p-4 ${statusBand.band}`}>
                     <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                       <div className="flex min-w-0 items-center gap-4">
-                        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-trusted/10">
-                          <FileAudio className="h-5 w-5 text-trusted" />
+                        <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted/20">
+                          {isLiveRow ? (
+                            <span className="neume neume-lit" aria-hidden="true" />
+                          ) : (
+                            <FileAudio className="h-5 w-5 text-muted-foreground" />
+                          )}
                         </div>
                         <div className="min-w-0">
                           <h3 className="truncate font-medium">{recording.title}</h3>
-                          <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                            <span>{new Date(recording.createdAt).toLocaleString()}</span>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 font-mono text-xs text-muted-foreground">
+                            <span className="time-spec">{new Date(recording.createdAt).toLocaleString()}</span>
+                            <span aria-hidden="true" className="text-muted-foreground/40">·</span>
                             {recording.status === "processing" ? (
                               <span className="inline-flex items-center gap-1">
-                                <Loader2 className="h-3 w-3 animate-spin" />
-                                Processing
+                                <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                                <span className={`rubric-muted ${isLiveRow ? "text-gold-text" : ""}`}>
+                                  {statusBand.word}
+                                </span>
                               </span>
                             ) : (
-                              <span className="capitalize">{recording.status}</span>
+                              <span className={`rubric-muted ${isLiveRow ? "text-gold-text" : ""}`}>
+                                {statusBand.word}
+                              </span>
                             )}
+                            <span aria-hidden="true" className="text-muted-foreground/40">·</span>
                             <span>Meeting</span>
                           </div>
                         </div>
                       </div>
 
                       <div className="flex items-center justify-end gap-2">
-                        <span className="text-sm text-muted-foreground">{formatDuration(recording.duration)}</span>
+                        <span className="time-spec text-sm text-muted-foreground">{formatDuration(recording.duration)}</span>
                         <Button
                           variant="ghost"
                           size="icon"
                           className="h-8 w-8"
+                          aria-label="Play audio recording"
                           disabled={!recording.audioPath}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -2683,6 +2732,7 @@ export function RecordingsView() {
                               variant="ghost"
                               size="icon"
                               className="h-8 w-8"
+                              aria-label="Recording options"
                               onClick={(e) => e.stopPropagation()}
                             >
                               <MoreHorizontal className="h-4 w-4" />
@@ -2735,7 +2785,8 @@ export function RecordingsView() {
                     </div>
                   </CardContent>
                 </Card>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -2826,7 +2877,8 @@ export function RecordingsView() {
                             {formatMeetingReviewState(selectedRecording?.status)}
                           </Badge>
                           {selectedRecording?.id === recordingId && isRecording ? (
-                            <Badge variant="outline" className="border-active/30 bg-active/10 text-active">
+                            <Badge variant="outline" className="border-border bg-muted/30 text-foreground">
+                              <span className="neume neume-lit mr-1" />
                               Live meeting
                             </Badge>
                           ) : null}
@@ -2869,10 +2921,10 @@ export function RecordingsView() {
                         </p>
                       </div>
                     </div>
-                    <div className="mt-4 rounded-lg border border-active/20 bg-active/5 p-4">
+                    <div className="mt-4 rounded-lg border border-rust/20 bg-rust/5 p-4">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
-                          <p className="text-[11px] font-semibold uppercase tracking-wide text-active">
+                          <p className="rubric">
                             Solo Meeting Cockpit
                           </p>
                           <p className="mt-1 text-xs text-muted-foreground">
@@ -3040,11 +3092,15 @@ export function RecordingsView() {
                       </div>
                     </div>
                     <div className="mt-4 grid gap-3 xl:grid-cols-2">
-                      <div className="rounded-lg border border-active/30 bg-active/5 p-4 space-y-3">
+                      <div className="rounded-lg border-l-2 border-rust/40 border-y border-r border-y-rust/20 border-r-rust/20 bg-rust/5 p-4 space-y-3">
                         <div className="flex items-center justify-between gap-3">
                           <div>
-                            <p className="text-xs font-semibold uppercase tracking-wide text-active">
+                            <p className="rubric flex items-center gap-1.5">
+                              <span className="neume neume-rust" aria-hidden="true" />
                               Summary
+                            </p>
+                            <p className="rubric-muted mt-1 normal-case tracking-normal text-[10px]">
+                              AI-generated from transcript + notes
                             </p>
                             <p className="text-xs text-muted-foreground">
                               Keep the meeting recap editable. Regenerate when your notes change.
@@ -3085,15 +3141,19 @@ export function RecordingsView() {
                           aria-label="Meeting summary"
                           placeholder="Summary will appear here after transcription and analysis finish."
                           rows={8}
-                          className="w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-active"
+                          className="w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-rust"
                         />
                       </div>
 
-                      <div className="rounded-lg border p-4 space-y-3">
+                      <div className="rounded-lg border-l-2 border-rust/40 border-y border-r border-y-border border-r-border p-4 space-y-3">
                         <div className="flex items-center justify-between gap-3">
                           <div>
-                            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                            <p className="rubric flex items-center gap-1.5">
+                              <span className="neume neume-rust" aria-hidden="true" />
                               Action Items
+                            </p>
+                            <p className="rubric-muted mt-1 normal-case tracking-normal text-[10px]">
+                              AI-extracted from transcript + notes
                             </p>
                             <p className="text-xs text-muted-foreground">
                               One line per follow-up. Owners and dates can stay inline.
@@ -3137,7 +3197,7 @@ export function RecordingsView() {
                           aria-label="Meeting action items"
                           placeholder="Action items will appear here after transcription and analysis finish."
                           rows={8}
-                          className="w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-active"
+                          className="w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-rust"
                         />
                       </div>
                     </div>
@@ -3274,18 +3334,18 @@ export function RecordingsView() {
                       ))}
                     </div>
 
-                    <div className="rounded-lg border border-active/30 bg-active/5 p-4 space-y-3">
+                    <div className="rounded-lg border border-rust/30 bg-rust/5 p-4 space-y-3">
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <div className="flex items-center gap-2">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-active">
+                            <p className="rubric">
                               Enhanced Notes
                             </p>
                             <Badge variant="outline" className="bg-background/80">
                               Transcript + raw notes
                             </Badge>
                             {enhancedMeetingNotesIsStale ? (
-                              <Badge variant="outline" className="bg-amber-500/10 text-amber-100">
+                              <Badge variant="outline" className="bg-rust/10 text-rust">
                                 Raw notes changed
                               </Badge>
                             ) : null}
@@ -3924,7 +3984,7 @@ export function RecordingsView() {
               ) : selectedTranscript ? (
                 <div className="flex min-h-0 flex-1 flex-col">
                   {detailError && (
-                    <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+                    <div className="mb-3 flex items-center gap-2 rounded-lg border border-rust/30 bg-rust/10 p-3 text-xs text-rust">
                       <AlertCircle className="h-4 w-4 shrink-0" />
                       {detailError}
                     </div>
@@ -3954,7 +4014,7 @@ export function RecordingsView() {
                         </Button>
                       </div>
                       {diarizationMessage && (
-                        <p className="text-xs text-green-700 mt-2">{diarizationMessage}</p>
+                        <p className="text-xs text-gold-text mt-2">{diarizationMessage}</p>
                       )}
                       {diarizationError && (
                         <p className="text-xs text-destructive mt-2">{diarizationError}</p>
@@ -4074,7 +4134,7 @@ export function RecordingsView() {
                           Consent: {selectedMeetingConsent.label}
                         </span>
                         {selectedMeetingConsent.needsManualNotice ? (
-                          <span className="text-xs text-amber-700 dark:text-amber-300">
+                          <span className="text-xs text-rust">
                             Share the notice before distributing this capture.
                           </span>
                         ) : null}

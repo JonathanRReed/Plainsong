@@ -41,7 +41,7 @@ export function BetaChannelToggle({ disabled }: BetaChannelToggleProps) {
           Get early access to new features and improvements
         </p>
         {channel === "beta" && (
-          <div className="flex items-center gap-1.5 text-xs text-amber-600 mt-1">
+          <div className="flex items-center gap-1.5 text-xs text-rust mt-1">
             <AlertTriangle className="h-3 w-3" />
             <span>Beta versions may be less stable than stable releases</span>
           </div>

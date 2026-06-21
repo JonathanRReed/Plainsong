@@ -1,7 +1,5 @@
 import { useMemo, useState } from "react";
 import {
-  AlertCircle,
-  CheckCircle2,
   Download,
   Loader2,
   Mic,
@@ -45,18 +43,19 @@ import type { AsrProviderInfo } from "@/types";
 
 function statusTone(ready: boolean) {
   return ready
-    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-950 dark:text-emerald-100"
-    : "border-amber-500/30 bg-amber-500/10 text-amber-950 dark:text-amber-100";
+    ? "border-gold/30 bg-gold/10 text-gold-text"
+    : "border-rust/30 bg-rust/10 text-rust";
 }
 
 const readinessDetailClass = "rounded-lg border border-border/60 bg-background/60 px-3 py-2";
+const readinessLabelClass = "rubric-muted text-current opacity-70";
 
 function providerBadge(provider: AsrProviderInfo) {
   if (provider.runtimeStatus === "ready") {
     return (
       <Badge
         variant="outline"
-        className="border-emerald-500/30 text-emerald-700 dark:text-emerald-300"
+        className="border-gold/30 text-gold-text"
       >
         Ready
       </Badge>
@@ -67,7 +66,7 @@ function providerBadge(provider: AsrProviderInfo) {
     return (
       <Badge
         variant="outline"
-        className="border-amber-500/30 text-amber-700 dark:text-amber-300"
+        className="border-rust/30 text-rust"
       >
         Missing model
       </Badge>
@@ -78,7 +77,7 @@ function providerBadge(provider: AsrProviderInfo) {
     return (
       <Badge
         variant="outline"
-        className="border-amber-500/30 text-amber-700 dark:text-amber-300"
+        className="border-rust/30 text-rust"
       >
         Runtime setup
       </Badge>
@@ -86,7 +85,7 @@ function providerBadge(provider: AsrProviderInfo) {
   }
 
   return (
-    <Badge variant="outline" className="border-rose-500/30 text-rose-700 dark:text-rose-300">
+    <Badge variant="outline" className="border-rust/30 text-rust">
       Error
     </Badge>
   );
@@ -188,19 +187,17 @@ export function SetupView() {
 
   return (
     <div className="h-full flex flex-col">
-      <div className="border-b px-6 py-5">
+      <div className="border-b border-border/70 px-6 py-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="space-y-2">
-            <div className="inline-flex items-center gap-2 rounded-full border border-cyan-500/20 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-800 dark:text-cyan-200">
-              <Sparkles className="h-3.5 w-3.5" />
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <p className="rubric inline-flex items-center gap-1.5">
+              <Sparkles className="h-3 w-3" aria-hidden="true" />
               Guided setup and repairs
-            </div>
-            <div>
-              <h1 className="text-2xl font-semibold tracking-tight">Setup</h1>
-              <p className="text-sm text-muted-foreground">
-                Check dictation and meetings, rerun guided setup, and verify every route from one place.
-              </p>
-            </div>
+            </p>
+            <h1 className="font-serif text-2xl font-semibold tracking-tight">Setup</h1>
+            <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
+              Check dictation and meetings, rerun guided setup, and verify every route from one place.
+            </p>
           </div>
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => requestOnboarding("full")}>
@@ -219,7 +216,7 @@ export function SetupView() {
       <div className="flex-1 overflow-y-auto px-6 py-6">
         <div className="space-y-6">
           {error ? (
-            <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-900 dark:text-rose-100">
+            <div className="rounded-lg border border-rust/30 bg-rust/10 px-4 py-3 text-sm text-rust">
               {error}
             </div>
           ) : null}
@@ -227,7 +224,7 @@ export function SetupView() {
             <div
               role="status"
               aria-live="polite"
-              className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-900 dark:text-amber-100"
+              className="rounded-lg border border-rust/30 bg-rust/10 px-4 py-3 text-sm text-rust"
             >
               {statusMessage}
             </div>
@@ -236,8 +233,8 @@ export function SetupView() {
           <div className="grid gap-4 lg:grid-cols-2">
             <Card className={statusTone(dictationReady)}>
               <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Mic className="h-4 w-4" />
+                <CardTitle className="flex items-center gap-2 font-serif text-base">
+                  <Mic className="h-4 w-4" aria-hidden="true" />
                   Dictation readiness
                 </CardTitle>
                 <CardDescription className="text-current opacity-80">
@@ -257,31 +254,31 @@ export function SetupView() {
                 </div>
                 <div className="grid gap-2 sm:grid-cols-3">
                   <div className={readinessDetailClass}>
-                    <div className="text-xs text-current opacity-70">Microphone</div>
+                    <div className={readinessLabelClass}>Microphone</div>
                     <div className="mt-1 font-medium">
                       {permissions?.microphoneReady ? "Ready" : "Needs access"}
                     </div>
                   </div>
                   <div className={readinessDetailClass}>
-                    <div className="text-xs text-current opacity-70">Speech</div>
+                    <div className={readinessLabelClass}>Speech</div>
                     <div className="mt-1 font-medium">
                       {permissions?.speechRecognitionReady ?? true ? "Ready" : "Needs access"}
                     </div>
                   </div>
                   <div className={readinessDetailClass}>
-                    <div className="text-xs text-current opacity-70">Cursor insert</div>
+                    <div className={readinessLabelClass}>Cursor insert</div>
                     <div className="mt-1 font-medium">{cursorInsertLabel}</div>
                   </div>
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <div className={readinessDetailClass}>
-                    <div className="text-xs text-current opacity-70">Local dictation</div>
+                    <div className={readinessLabelClass}>Local dictation</div>
                     <div className="mt-1 font-medium">
                       {dictationLocalReady ? "Ready" : "No ready route"}
                     </div>
                   </div>
                   <div className={readinessDetailClass}>
-                    <div className="text-xs text-current opacity-70">Cloud dictation</div>
+                    <div className={readinessLabelClass}>Cloud dictation</div>
                     <div className="mt-1 font-medium">
                       {dictationCloudReady ? "Ready" : "No ready route"}
                     </div>
@@ -295,7 +292,7 @@ export function SetupView() {
                   </p>
                 )}
                 {dictationBlockers.length > 0 ? (
-                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-current opacity-90">
+                  <div className="rounded-lg border border-rust/20 bg-rust/5 px-3 py-2 text-xs text-current opacity-90">
                     <p className="mb-1 font-medium">Current blockers</p>
                     <ul className="space-y-1">
                       {dictationBlockers.map((blocker) => (
@@ -395,8 +392,8 @@ export function SetupView() {
 
             <Card className={statusTone(meetingReady)}>
               <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <MonitorUp className="h-4 w-4" />
+                <CardTitle className="flex items-center gap-2 font-serif text-base">
+                  <MonitorUp className="h-4 w-4" aria-hidden="true" />
                   Meeting readiness
                 </CardTitle>
                 <CardDescription className="text-current opacity-80">
@@ -416,7 +413,7 @@ export function SetupView() {
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <div className={readinessDetailClass}>
-                    <div className="text-xs text-current opacity-70">System audio</div>
+                    <div className={readinessLabelClass}>System audio</div>
                     <div className="mt-1 font-medium">
                       {systemAudioAvailable === null
                         ? "Checking"
@@ -426,12 +423,12 @@ export function SetupView() {
                     </div>
                   </div>
                   <div className={readinessDetailClass}>
-                    <div className="text-xs text-current opacity-70">Loopback device</div>
+                    <div className={readinessLabelClass}>Loopback device</div>
                     <div className="mt-1 font-medium">{loopbackDevice ?? "Not found"}</div>
                   </div>
                 </div>
                 <div className={readinessDetailClass}>
-                  <div className="text-xs text-current opacity-70">Meeting capture mode</div>
+                  <div className={readinessLabelClass}>Meeting capture mode</div>
                   <div className="mt-1 font-medium">
                     {meetingCaptureMode === "me_and_them"
                       ? "Me + Them"
@@ -459,7 +456,7 @@ export function SetupView() {
                   </p>
                 )}
                 {meetingBlockers.length > 0 ? (
-                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-current opacity-90">
+                  <div className="rounded-lg border border-rust/20 bg-rust/5 px-3 py-2 text-xs text-current opacity-90">
                     <p className="mb-1 font-medium">Current blockers</p>
                     <ul className="space-y-1">
                       {meetingBlockers.map((blocker) => (
@@ -527,8 +524,8 @@ export function SetupView() {
           <Card>
             <CardHeader className="flex flex-row items-start justify-between gap-4">
               <div>
-                <CardTitle className="flex items-center gap-2">
-                  <Settings2 className="h-4 w-4" />
+                <CardTitle className="flex items-center gap-2 font-serif">
+                  <Settings2 className="h-4 w-4" aria-hidden="true" />
                   Providers and models
                 </CardTitle>
                 <CardDescription>
@@ -676,7 +673,7 @@ export function SetupView() {
                           </p>
                         ) : null}
                         {provider.runtimeDetails.missingFiles?.length ? (
-                          <p className="text-xs text-amber-700 dark:text-amber-300">
+                          <p className="text-xs text-rust">
                             Missing:{" "}
                             <span className="font-mono">
                               {provider.runtimeDetails.missingFiles.join(", ")}
@@ -698,8 +695,8 @@ export function SetupView() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <ShieldCheck className="h-4 w-4" />
+              <CardTitle className="flex items-center gap-2 font-serif">
+                <ShieldCheck className="h-4 w-4" aria-hidden="true" />
                 Quick recovery
               </CardTitle>
                 <CardDescription>
@@ -708,14 +705,11 @@ export function SetupView() {
             </CardHeader>
             <CardContent className="grid gap-3 md:grid-cols-3">
               <div className="rounded-xl border border-border/70 p-4">
-                <div className="mb-2 flex items-center gap-2">
-                  <div className={dictationReady ? "flex h-6 w-6 items-center justify-center rounded-md bg-emerald-500/10" : "flex h-6 w-6 items-center justify-center rounded-md bg-amber-500/10"}>
-                    {dictationReady ? (
-                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-                    ) : (
-                      <AlertCircle className="h-3.5 w-3.5 text-amber-400" />
-                    )}
-                  </div>
+                <div className="mb-2 flex items-center gap-2.5">
+                  <span
+                    className={dictationReady ? "neume neume-lit" : "neume neume-rust"}
+                    aria-hidden="true"
+                  />
                   <p className="font-medium">{dictationReady ? "Dictation ready" : "Dictation not ready"}</p>
                 </div>
                 <p className="text-sm text-muted-foreground">
@@ -726,14 +720,11 @@ export function SetupView() {
                 </Button>
               </div>
               <div className="rounded-xl border border-border/70 p-4">
-                <div className="mb-2 flex items-center gap-2">
-                  <div className={meetingReady ? "flex h-6 w-6 items-center justify-center rounded-md bg-emerald-500/10" : "flex h-6 w-6 items-center justify-center rounded-md bg-amber-500/10"}>
-                    {meetingReady ? (
-                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-                    ) : (
-                      <AlertCircle className="h-3.5 w-3.5 text-amber-400" />
-                    )}
-                  </div>
+                <div className="mb-2 flex items-center gap-2.5">
+                  <span
+                    className={meetingReady ? "neume neume-lit" : "neume neume-rust"}
+                    aria-hidden="true"
+                  />
                   <p className="font-medium">{meetingReady ? "Meetings ready" : "Meetings not ready"}</p>
                 </div>
                 <p className="text-sm text-muted-foreground">
@@ -744,8 +735,8 @@ export function SetupView() {
                 </Button>
               </div>
               <div className="rounded-xl border border-border/70 p-4">
-                <div className="mb-2 flex items-center gap-2">
-                  <Settings2 className="h-4 w-4 text-cyan-300" />
+                <div className="mb-2 flex items-center gap-2.5">
+                  <Settings2 className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
                   <p className="font-medium">Power-user controls</p>
                 </div>
                 <p className="text-sm text-muted-foreground">

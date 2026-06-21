@@ -21,6 +21,12 @@ interface AudioWaveformProps {
   glowColor?: string;
   /** Enable the ambient glow behind active bars */
   glow?: boolean;
+  /**
+   * When true, the live bars fade out (opacity) so a caller can crossfade the
+   * waveform into a settled neume row. Additive/back-compat: omitted leaves the
+   * waveform fully visible exactly as before.
+   */
+  settled?: boolean;
   className?: string;
 }
 
@@ -54,6 +60,7 @@ export function AudioWaveform({
   barColor,
   glowColor,
   glow = false,
+  settled = false,
   className,
 }: AudioWaveformProps) {
   const frameRef = useRef(0);
@@ -65,6 +72,22 @@ export function AudioWaveform({
   const totalBars = Array.isArray(levels) ? levels.length : barCount;
   const weights = generateSymmetricWeights(totalBars);
   const canvasWidth = totalBars * (config.barWidth + config.gap) - config.gap;
+
+  // Canvas can't read CSS custom properties, so resolve var(--token) refs (and
+  // fall back to warm brand colors) to concrete strings at draw time — keeps
+  // strokes warm and theme-aware instead of raw white / cool defaults.
+  const resolveColor = (input?: string, fallback = "rgba(200,149,67,0.5)") => {
+    if (typeof window === "undefined") return fallback;
+    const value = input?.trim() ?? "";
+    const varMatch = value.match(/^var\((--[\w-]+)\)$/);
+    if (varMatch) {
+      const resolved = getComputedStyle(document.documentElement)
+        .getPropertyValue(varMatch[1])
+        .trim();
+      return resolved || fallback;
+    }
+    return value || fallback;
+  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -81,6 +104,16 @@ export function AudioWaveform({
     if (smoothedRef.current.length !== totalBars) {
       smoothedRef.current = new Array(totalBars).fill(0.15);
     }
+
+    const reducedMotion =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const forcedColors =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(forced-colors: active)").matches;
+    const inkFallback = resolveColor("var(--foreground)", "rgba(241,237,228,0.9)");
+    const barFill = resolveColor(barColor, inkFallback);
+    const goldGlow = resolveColor(glowColor, barFill);
 
     const draw = () => {
       frameRef.current += 1;
@@ -109,17 +142,17 @@ export function AudioWaveform({
         const smoothing = active ? 0.18 : 0.06;
         smoothedRef.current[i] = current + (target - current) * smoothing;
 
-        const intensity = smoothedRef.current[i];
+        const intensity = reducedMotion ? target : smoothedRef.current[i];
         const minBarH = variant === "pulse" ? 2 : config.barWidth;
         const barH = minBarH + intensity * (config.height - minBarH) * weight;
         const x = i * (config.barWidth + config.gap);
         const y = (config.height - barH) / 2;
         const radius = config.barWidth / 2;
 
-        // Glow effect
-        if (glow && active && intensity > 0.3) {
+        // Glow effect (skip under forced-colors so the system palette wins).
+        if (glow && active && intensity > 0.3 && !forcedColors) {
           const glowAlpha = (intensity - 0.3) * 0.6;
-          ctx.shadowColor = glowColor || barColor || "rgba(255,255,255,0.5)";
+          ctx.shadowColor = goldGlow;
           ctx.shadowBlur = 6;
           ctx.globalAlpha = glowAlpha;
           ctx.beginPath();
@@ -131,7 +164,7 @@ export function AudioWaveform({
 
         // Main bar
         const alpha = active ? 0.35 + intensity * 0.65 : 0.2 + intensity * 0.15;
-        ctx.fillStyle = barColor || "currentColor";
+        ctx.fillStyle = forcedColors ? "CanvasText" : barFill;
         ctx.globalAlpha = alpha;
         ctx.beginPath();
         ctx.roundRect(x, y, config.barWidth, barH, radius);
@@ -139,17 +172,28 @@ export function AudioWaveform({
         ctx.globalAlpha = 1;
       }
 
-      animationRef.current = requestAnimationFrame(draw);
+      // Honor reduced motion: paint one static frame, no animation loop.
+      if (!reducedMotion) {
+        animationRef.current = requestAnimationFrame(draw);
+      }
     };
 
-    animationRef.current = requestAnimationFrame(draw);
+    if (reducedMotion) {
+      draw();
+    } else {
+      animationRef.current = requestAnimationFrame(draw);
+    }
     return () => cancelAnimationFrame(animationRef.current);
   }, [levels, active, variant, totalBars, barColor, glowColor, glow, config, weights, canvasWidth]);
 
   return (
     <canvas
       ref={canvasRef}
-      className={cn("pointer-events-none", className)}
+      className={cn(
+        "pointer-events-none transition-opacity duration-500 ease-[var(--ease-settle)]",
+        settled && "opacity-0",
+        className,
+      )}
       style={{ width: canvasWidth, height: config.height }}
       aria-hidden="true"
     />

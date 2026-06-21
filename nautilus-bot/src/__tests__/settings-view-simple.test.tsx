@@ -365,7 +365,10 @@ describe("SettingsView performance behavior", () => {
     });
   });
 
-  it("offers every color scheme to all users", async () => {
+  it("ships only the Plainsong palette — no alternate color-scheme picker", async () => {
+    // Plainsong's brand is one vellum/ink palette with a single gold accent and
+    // rust rubric; the old multi-theme picker (Rose Pine, Catppuccin, …) was
+    // removed deliberately. Light vs dark stays available via the theme toggle.
     render(
       <ToastProvider>
         <SettingsView />
@@ -373,39 +376,9 @@ describe("SettingsView performance behavior", () => {
     );
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
-    const select = screen.getByLabelText("Color scheme");
-    expect(select).toHaveValue("default");
-    expect(screen.getByRole("option", { name: "Rose Pine Night" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Catppuccin Mocha" })).toBeInTheDocument();
-    expect(screen.queryByText(/\(Pro\)/)).not.toBeInTheDocument();
-  });
-
-  it("persists the selected color scheme", async () => {
-    const backend = await import("@/lib/backend");
-
-    render(
-      <ToastProvider>
-        <SettingsView />
-      </ToastProvider>
-    );
-
-    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
-    vi.useFakeTimers();
-
-    const select = screen.getByLabelText("Color scheme");
-    fireEvent.change(select, { target: { value: "rose-pine" } });
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(400);
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    expect(backend.saveSettings).toHaveBeenCalled();
-    const calls = vi.mocked(backend.saveSettings).mock.calls;
-    const lastCall = calls[calls.length - 1];
-    expect(lastCall?.[0]?.ui?.colorScheme).toBe("rose-pine");
+    expect(screen.queryByLabelText("Color scheme")).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Rose Pine Night" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Catppuccin Mocha" })).not.toBeInTheDocument();
   });
 
   it("persists the always-on-top toggle from desktop settings", async () => {

@@ -8,14 +8,14 @@ const Card = React.forwardRef<
   <div
     ref={ref}
     className={cn(
-      "rounded-lg bg-card text-card-foreground transition-all duration-200",
+      "rounded-md bg-card text-card-foreground transition-smooth",
       variant === "default" &&
-        "border border-border/70 shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset] hover:border-primary/25 hover:shadow-[0_18px_45px_hsl(225_22%_3%/0.12)]",
+        "border border-border/60 shadow-[0_1px_0_hsl(var(--foreground)/0.03)_inset] hover:border-border",
       variant === "glass" &&
-        "glass border border-border/70 shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset] hover:shadow-[0_18px_45px_hsl(225_22%_3%/0.12)]",
+        "glass border border-border/60 shadow-[0_1px_0_hsl(var(--foreground)/0.03)_inset] hover:shadow-[0_14px_38px_hsl(34_26%_4%/0.1)]",
       variant === "interactive" &&
-        "border border-border/70 cursor-pointer shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset] hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-[0_18px_45px_hsl(225_22%_3%/0.14)] active:translate-y-0",
-      variant === "elevated" && "border-0 shadow-[0_24px_70px_hsl(225_22%_3%/0.18)] hover:shadow-[0_28px_80px_hsl(225_22%_3%/0.22)]",
+        "border border-border/60 cursor-pointer shadow-[0_1px_0_hsl(var(--foreground)/0.03)_inset] hover:-translate-y-0.5 hover:border-border hover:shadow-[0_14px_38px_hsl(34_26%_4%/0.12)] active:translate-y-0",
+      variant === "elevated" && "border-0 shadow-[0_20px_60px_hsl(34_26%_4%/0.16)] hover:shadow-[0_24px_70px_hsl(34_26%_4%/0.2)]",
       variant === "borderless" && "border-0 shadow-none hover:shadow-sm",
       className
     )}
@@ -43,7 +43,7 @@ const CardTitle = React.forwardRef<
   <h3
     ref={ref}
     className={cn(
-      "text-2xl font-semibold leading-none tracking-tight",
+      "font-serif text-2xl font-semibold leading-none tracking-tight",
       className
     )}
     {...props}

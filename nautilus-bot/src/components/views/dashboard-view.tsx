@@ -28,7 +28,6 @@ import { cn } from "@/lib/utils";
 import {
   Folder,
   FileAudio,
-  Clock,
   Brain,
   Loader2,
   Mic,
@@ -241,6 +240,7 @@ export function DashboardView() {
   return (
     <div className="h-full flex flex-col">
       <PageHeader
+        eyebrow="WORKSPACE"
         title="Home"
         subtitle="Dictation, meetings, and follow-through in one place"
         actions={
@@ -258,7 +258,7 @@ export function DashboardView() {
               <CardContent className="grid gap-6 p-5 sm:p-6 lg:grid-cols-[minmax(0,1fr)_260px]">
                 <div className="min-w-0">
                   <div className="mb-5 flex flex-wrap items-center gap-2">
-                    <Badge variant={dictationReady && meetingReady ? "success" : "warning"}>
+                    <Badge variant={dictationReady && meetingReady ? "default" : "destructive"}>
                       {setupLoading ? "Checking setup" : dictationReady && meetingReady ? "Ready" : "Needs attention"}
                     </Badge>
                     <Badge variant="outline">Local memory</Badge>
@@ -270,7 +270,7 @@ export function DashboardView() {
                     Capture voice, review the result, and move the next action forward without leaving the workspace.
                   </p>
                   <div className="mt-6 flex flex-wrap gap-2">
-                    <Button onClick={() => requestMainView("dictation")}>
+                    <Button variant="outline" onClick={() => requestMainView("dictation")}>
                       <Mic data-icon="inline-start" />
                       Open dictation
                     </Button>
@@ -303,7 +303,7 @@ export function DashboardView() {
                         </span>
                       </span>
                       {item.ready ? (
-                        <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-gold-text" />
                       ) : (
                         <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground" />
                       )}
@@ -317,30 +317,30 @@ export function DashboardView() {
               <CardContent className="flex h-full flex-col gap-4 p-5">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <p className="quiet-label">Today</p>
-                    <p className="mt-1 text-lg font-semibold tracking-tight">Capture overview</p>
+                    <p className="rubric-muted">Today</p>
+                    <p className="mt-1 font-serif text-lg font-semibold tracking-tight">Capture overview</p>
                   </div>
-                  <div className="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
+                  <div className="flex size-10 items-center justify-center rounded-xl bg-muted/30 text-muted-foreground">
                     <Brain className="h-4 w-4" />
                   </div>
                 </div>
                 <div className="grid grid-cols-3 gap-2">
                   <div className="rounded-xl border border-border/60 bg-background/55 p-3">
-                    <p className="text-xl font-semibold">{recordings.length}</p>
+                    <p className="text-xl font-semibold tabular-nums">{recordings.length}</p>
                     <p className="mt-1 text-xs text-muted-foreground">Meetings</p>
                   </div>
                   <div className="rounded-xl border border-border/60 bg-background/55 p-3">
-                    <p className="text-xl font-semibold">{projects.length}</p>
+                    <p className="text-xl font-semibold tabular-nums">{projects.length}</p>
                     <p className="mt-1 text-xs text-muted-foreground">Projects</p>
                   </div>
                   <div className="rounded-xl border border-border/60 bg-background/55 p-3">
-                    <p className="text-xl font-semibold">{Math.floor(totalDuration / 3600)}h</p>
+                    <p className="text-xl font-semibold tabular-nums">{Math.floor(totalDuration / 3600)}h</p>
                     <p className="mt-1 text-xs text-muted-foreground">Audio</p>
                   </div>
                 </div>
                 <Separator />
                 <div className="flex items-start gap-3 rounded-xl bg-muted/35 p-3">
-                  <Zap className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+                  <Zap className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                   <p className="text-sm leading-6 text-muted-foreground">
                     Dictation stays first. Meetings add memory, action items, and follow-through.
                   </p>
@@ -350,12 +350,13 @@ export function DashboardView() {
           </section>
 
           {/* Second Brain - Memory */}
-          <Card className="border-primary/20 hover-lift">
+          <Card className="hover-lift">
             <CardHeader>
+              <p className="rubric mb-1.5">MEMORY</p>
               <div className="flex items-center justify-between">
-                <CardTitle className="flex items-center gap-2">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-                    <Brain className="h-4 w-4 text-primary" />
+                <CardTitle className="flex items-center gap-2 font-serif">
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/30">
+                    <Brain className="h-4 w-4 text-muted-foreground" />
                   </div>
                   Second Brain
                 </CardTitle>
@@ -405,14 +406,14 @@ export function DashboardView() {
                       key={message.id}
                       className={cn(
                         "p-3 rounded-lg",
-                        message.role === "user" ? "bg-primary/10 ml-8" : "bg-muted/30 mr-8"
+                        message.role === "user" ? "bg-muted/40 ml-8" : "bg-muted/20 mr-8"
                       )}
                     >
                       <p className="text-sm">{message.content}</p>
                       {message.citations && message.citations.length > 0 && (
                         <div className="mt-2 space-y-1">
                           {message.citations.map((citation, idx) => (
-                            <div key={idx} className="text-xs text-muted-foreground border-l-2 border-primary/30 pl-2">
+                            <div key={idx} className="text-xs text-muted-foreground border-l-2 border-gold/30 pl-2">
                               {citation.text}
                             </div>
                           ))}
@@ -427,9 +428,10 @@ export function DashboardView() {
 
           <Card className="hover-lift">
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-                  <Users className="h-4 w-4 text-primary" />
+              <p className="rubric mb-1.5">PEOPLE & COMPANIES</p>
+              <CardTitle className="flex items-center gap-2 font-serif">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/30">
+                  <Users className="h-4 w-4 text-muted-foreground" />
                 </div>
                 Relationship Memory
               </CardTitle>
@@ -547,9 +549,10 @@ export function DashboardView() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-blue-500/10">
-                  <Search className="h-4 w-4 text-blue-500" />
+              <p className="rubric mb-1.5">SEARCH</p>
+              <CardTitle className="flex items-center gap-2 font-serif">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/20">
+                  <Search className="h-4 w-4 text-muted-foreground" />
                 </div>
                 Ask Across Meetings
               </CardTitle>
@@ -632,7 +635,7 @@ export function DashboardView() {
               )}
 
               {multiAnalysisResult && (
-                <div className="space-y-2 rounded-lg border-l-2 border-l-blue-500/40 bg-muted/20 p-4 text-sm">
+                <div className="space-y-2 rounded-lg border-l-2 border-l-gold/40 bg-muted/20 p-4 text-sm">
                   <p className="whitespace-pre-wrap leading-relaxed">{multiAnalysisResult}</p>
                   {multiAnalysisCitations.length > 0 && (
                     <div className="mt-3 space-y-1 border-t border-border/50 pt-3">
@@ -657,12 +660,10 @@ export function DashboardView() {
 
             <TabsContent value="recent" className="space-y-4">
               {recentRecordings.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-16 text-center">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-muted/50 mb-3">
-                    <FileAudio className="h-6 w-6 text-muted-foreground" />
-                  </div>
-                  <p className="font-medium">No meetings yet</p>
-                  <p className="mt-1 text-sm text-muted-foreground">Start recording to see them here.</p>
+                <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
+                  <span className="neume neume-hollow" />
+                  <p className="font-serif text-base font-medium">No meetings yet</p>
+                  <p className="text-sm text-muted-foreground">Start recording to see them here.</p>
                 </div>
               ) : (
                 <div className="space-y-1.5">
@@ -694,12 +695,10 @@ export function DashboardView() {
 
             <TabsContent value="projects" className="space-y-4">
               {projects.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-16 text-center">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-muted/50 mb-3">
-                    <Folder className="h-6 w-6 text-muted-foreground" />
-                  </div>
-                  <p className="font-medium">No projects yet</p>
-                  <p className="mt-1 text-sm text-muted-foreground">Create your first project to organize meetings.</p>
+                <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
+                  <span className="neume neume-hollow" />
+                  <p className="font-serif text-base font-medium">No projects yet</p>
+                  <p className="text-sm text-muted-foreground">Create your first project to organize meetings.</p>
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -711,8 +710,8 @@ export function DashboardView() {
                     >
                       <CardHeader className="pb-2">
                         <div className="flex items-center gap-2">
-                          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-500/10">
-                            <Folder className="h-3.5 w-3.5 text-blue-500" />
+                          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-muted/20">
+                            <Folder className="h-3.5 w-3.5 text-muted-foreground" />
                           </div>
                           <CardTitle className="text-base truncate">{project.name}</CardTitle>
                         </div>
@@ -733,12 +732,10 @@ export function DashboardView() {
 
             <TabsContent value="timeline">
               {Object.keys(timelineGroups).length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-16 text-center">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-muted/50 mb-3">
-                    <Clock className="h-6 w-6 text-muted-foreground" />
-                  </div>
-                  <p className="font-medium">No timeline yet</p>
-                  <p className="mt-1 text-sm text-muted-foreground">Sessions will appear here as they are captured.</p>
+                <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
+                  <span className="neume neume-hollow" />
+                  <p className="font-serif text-base font-medium">No timeline yet</p>
+                  <p className="text-sm text-muted-foreground">Sessions will appear here as they are captured.</p>
                 </div>
               ) : (
                 <div className="space-y-4">

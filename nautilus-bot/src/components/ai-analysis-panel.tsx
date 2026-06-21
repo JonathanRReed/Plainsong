@@ -436,7 +436,7 @@ export function AiAnalysisPanel({
       {threadMessages.length > 0 && (
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium">Conversation</CardTitle>
+            <CardTitle className="font-serif text-base font-semibold">Conversation</CardTitle>
           </CardHeader>
           <CardContent>
             <ScrollArea className="max-h-72 pr-3">
@@ -450,10 +450,10 @@ export function AiAnalysisPanel({
                     )}
                   >
                     <div className="flex items-center justify-between gap-3">
-                      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                      <p className="rubric-muted">
                         {message.role === "assistant" ? "Assistant" : "You"}
                       </p>
-                      <p className="text-[11px] text-muted-foreground">
+                      <p className="font-mono text-[11px] text-muted-foreground tabular-nums">
                         {new Date(message.createdAt).toLocaleTimeString()}
                       </p>
                     </div>
@@ -504,9 +504,9 @@ export function AiAnalysisPanel({
 
       {/* Results */}
       {isAnalyzing && !lastResult && !actionItems && (
-        <div className="flex items-center justify-center py-8 text-muted-foreground">
-          <Loader2 className="h-5 w-5 mr-2 animate-spin" />
-          {emptyStateLabel}
+        <div className="flex flex-col items-center justify-center gap-3 py-10 text-center">
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          <p className="font-serif text-sm text-muted-foreground">{emptyStateLabel}</p>
         </div>
       )}
 
@@ -514,15 +514,15 @@ export function AiAnalysisPanel({
         <Card>
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
-              <CardTitle className="text-sm font-medium flex items-center gap-2">
-                <Sparkles className="h-4 w-4 text-trusted" />
+              <CardTitle className="flex items-center gap-2 font-serif text-base font-semibold">
+                <Sparkles className="h-4 w-4 text-gold-text" />
                 {title}
               </CardTitle>
               <div className="flex items-center gap-2">
-                <Badge variant="secondary" className="text-xs">
+                <Badge variant="secondary" className="font-mono text-xs">
                   {lastResult.model}
                 </Badge>
-                <span className="text-xs text-muted-foreground">
+                <span className="font-mono text-xs text-muted-foreground tabular-nums">
                   {(lastResult.processingTimeMs / 1000).toFixed(1)}s
                 </span>
               </div>
@@ -536,14 +536,14 @@ export function AiAnalysisPanel({
             </ScrollArea>
             
             {showUncertaintyBanner && (
-              <div className="mt-4 p-2 rounded-md bg-amber-500/10 text-amber-700 text-xs">
+              <div className="mt-4 p-2 rounded-md bg-rust/10 text-rust text-xs">
                 Uncertainty: citation coverage is below threshold (coverage {(((citationCoverage?.ratio ?? 0) * 100)).toFixed(0)}%, confidence {((citationCoverage?.avgCertainty ?? 0) * 100).toFixed(0)}%).
               </div>
             )}
 
             {lastResult.citations.length > 0 && (
               <div className="mt-4 pt-4 border-t">
-                <p className="text-xs text-muted-foreground mb-2">Citations:</p>
+                <p className="rubric mb-2">CITATIONS</p>
                 <div className="space-y-1">
                   {lastResult.citations.map((citation: { text: string; startTime?: number; endTime?: number; recordingId?: string; certainty?: number }, idx: number) => (
                     <p key={idx} className="text-xs text-muted-foreground italic">
@@ -605,8 +605,8 @@ export function AiAnalysisPanel({
       {actionItems && actionItems.length > 0 && (
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium flex items-center gap-2">
-              <CheckSquare className="h-4 w-4 text-trusted" />
+            <CardTitle className="flex items-center gap-2 font-serif text-base font-semibold">
+              <CheckSquare className="h-4 w-4 text-gold-text" />
               Action Items
             </CardTitle>
           </CardHeader>
@@ -672,9 +672,9 @@ export function AiAnalysisPanel({
       )}
 
       {actionItems && actionItems.length === 0 && (
-        <div className="text-center py-8 text-muted-foreground">
-          <CheckSquare className="h-8 w-8 mx-auto mb-2 opacity-50" />
-          <p className="text-sm">No action items found in this transcript</p>
+        <div className="flex flex-col items-center gap-3 py-10 text-center">
+          <span className="neume neume-hollow" aria-hidden="true" />
+          <p className="font-serif text-sm text-muted-foreground">No action items found in this transcript</p>
         </div>
       )}
     </div>

@@ -8,6 +8,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
+import { invoke } from "@/lib/electron";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -83,10 +84,7 @@ import type {
 import type { PermissionDiagnostics, SecurityStatus } from "@/lib/backend/settings";
 import type { DiarizationModelOption } from "@/lib/backend/asr";
 import type { Settings } from "@/types/settings";
-import {
-  normalizeThemeScheme,
-  THEME_SCHEMES,
-} from "@/lib/theme-schemes";
+import { normalizeThemeScheme } from "@/lib/theme-schemes";
 import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
 import { ONBOARDING_STORAGE_KEY, requestOnboarding } from "@/lib/onboarding";
 import { requestMainView } from "@/lib/navigation";
@@ -1204,24 +1202,6 @@ export function SettingsView() {
     );
   }, [activeTab, getCachedModelsForProvider, settings, updateSettings]);
 
-  const updateDictationShortcutBehavior = useCallback(
-    (mode: DictationHotkeyBehavior) => {
-      if (!settings) {
-        return;
-      }
-
-      void updateSettings({
-        ...settings,
-        transcription: {
-          ...settings.transcription,
-          dictationPushToTalk: mode === "hold_to_talk",
-          dictationHandsFreeEnabled: mode === "hands_free",
-        },
-      });
-    },
-    [settings, updateSettings],
-  );
-
   const applyColorScheme = useCallback((scheme: string) => {
     const root = document.documentElement;
     if (scheme === "default") {
@@ -1310,8 +1290,8 @@ export function SettingsView() {
     state === "neutral"
       ? "border-border bg-muted/30 text-muted-foreground"
       : state
-      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
-      : "border-amber-400/30 bg-amber-400/10 text-amber-100";
+      ? "border-gold/30 bg-gold/10 text-gold-text"
+      : "border-rust/30 bg-rust/10 text-rust";
 
   const handleSettingsTextBlur = useCallback(() => {
     void flushPendingSettingsSave();
@@ -1546,18 +1526,12 @@ export function SettingsView() {
             <p className="text-sm text-muted-foreground">
               {dictationShortcutBehaviorHint}
             </p>
-            <select
-              aria-label="Hotkey behavior"
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-              value={dictationShortcutBehavior}
-              onChange={(event) =>
-                updateDictationShortcutBehavior(
-                  event.target.value as DictationHotkeyBehavior,
-                )
-              }
-            >
-              <option value="toggle">Toggle (press to start, press again to stop)</option>
-            </select>
+            <p className="w-full rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-foreground">
+              Toggle{" "}
+              <span className="text-muted-foreground">
+                — press to start, press again to stop
+              </span>
+            </p>
           </div>
         )}
 
@@ -1923,7 +1897,7 @@ export function SettingsView() {
                         Math.round(
                           settings.audio.silenceTimeoutSeconds / 60,
                         ) === preset
-                          ? "border-trusted bg-trusted text-white"
+                          ? "border-rust/40 bg-rust/8 text-rust"
                           : "border-border bg-muted hover:bg-muted/80"
                       }`}
                       onClick={() =>
@@ -2041,10 +2015,10 @@ export function SettingsView() {
                       <div
                         className={`h-full rounded-full transition-none ${
                           micTestLevel > 80
-                            ? "bg-red-500"
+                            ? "bg-rust"
                             : micTestLevel > 50
-                              ? "bg-yellow-500"
-                              : "bg-emerald-500"
+                              ? "bg-rust/70"
+                              : "bg-gold"
                         }`}
                         style={{ width: `${micTestLevel}%` }}
                       />
@@ -2188,10 +2162,18 @@ export function SettingsView() {
                     >
                       <p className="font-medium">{item.label}</p>
                       <p
-                        className={
-                          item.ready ? "text-green-500" : "text-amber-500"
-                        }
+                        className={`flex items-center gap-1.5 ${
+                          item.ready ? "text-gold-text" : "text-rust"
+                        }`}
                       >
+                        <span
+                          aria-hidden="true"
+                          className={
+                            item.ready
+                              ? "neume neume-lit"
+                              : "neume neume-rust"
+                          }
+                        />
                         {item.ready ? "Ready" : item.offLabel}
                       </p>
                       <Button
@@ -2293,13 +2275,13 @@ export function SettingsView() {
                 </Button>
               </div>
               {!settings.privacy.remoteProcessingEnabled ? (
-                <p className="text-xs text-amber-600">
+                <p className="text-xs text-rust">
                   Remote processing is disabled. Stored cloud keys stay inactive
                   until policy is enabled.
                 </p>
               ) : null}
               {settings.privacy.remoteProcessingEnabled && !hasApiKey ? (
-                <p className="text-xs text-amber-600">
+                <p className="text-xs text-rust">
                   Selected analysis provider has no stored key. Analysis
                   requests will fail with a credential error.
                 </p>
@@ -2470,7 +2452,7 @@ export function SettingsView() {
           <div className="space-y-4 rounded-2xl border border-border/60 bg-background/75 p-4">
             <div className="space-y-1">
               <Label className="flex items-center gap-2">
-                <Database className="h-4 w-4 text-violet-600" />
+                <Database className="h-4 w-4 text-muted-foreground" />
                 Memory Search
               </Label>
               <p className="text-sm text-muted-foreground">
@@ -2628,7 +2610,8 @@ export function SettingsView() {
         <div className="mx-auto flex max-w-[1680px] flex-col gap-4 px-4 py-5 sm:px-6">
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+              <p className="rubric mb-1.5">SETTINGS</p>
+              <h1 className="font-serif text-2xl font-semibold tracking-tight sm:text-3xl">
                 Settings
               </h1>
               <p className="mt-1 text-sm text-muted-foreground sm:text-base">
@@ -2668,7 +2651,7 @@ export function SettingsView() {
             {useDesktopSettingsRail && (
               <aside className="h-fit self-start overflow-hidden rounded-[24px] border border-border bg-card text-card-foreground shadow-sm xl:sticky xl:top-6">
                 <div className="border-b border-border px-5 py-5">
-                  <h2 className="text-xl font-semibold tracking-tight">
+                  <h2 className="font-serif text-xl font-semibold tracking-tight">
                     Overview
                   </h2>
                   <p className="mt-2 text-sm leading-6 text-muted-foreground">
@@ -2756,10 +2739,10 @@ export function SettingsView() {
                   <div className="rounded-[20px] border border-border bg-card px-4 py-4 shadow-sm sm:px-5">
                     <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                       <div className="min-w-0 max-w-3xl">
-                        <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                        <p className="rubric-muted mb-1.5">
                           {activeTabConfig.eyebrow}
                         </p>
-                        <h2 className="mt-2 text-xl font-semibold tracking-tight text-foreground">
+                        <h2 className="font-serif text-xl font-semibold tracking-tight text-foreground">
                           {activeTabConfig.title}
                         </h2>
                         <p className="mt-2 text-sm leading-6 text-muted-foreground">
@@ -2844,10 +2827,10 @@ export function SettingsView() {
                   <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
                     {!useDesktopSettingsRail && (
                       <div className="max-w-3xl">
-                        <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                        <p className="rubric mb-1.5">
                           {activeTabConfig.eyebrow}
                         </p>
-                        <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
+                        <h2 className="font-serif text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
                           {activeTabConfig.title}
                         </h2>
                         <p className="mt-3 text-sm leading-6 text-muted-foreground sm:text-base">
@@ -2857,10 +2840,10 @@ export function SettingsView() {
                     )}
                     {useDesktopSettingsRail && (
                       <div className="max-w-3xl">
-                        <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                        <p className="rubric mb-1.5">
                           {activeTabConfig.eyebrow}
                         </p>
-                        <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
+                        <h2 className="font-serif text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
                           {activeTabConfig.title}
                         </h2>
                         <p className="mt-3 text-sm leading-6 text-muted-foreground sm:text-base">
@@ -2898,7 +2881,7 @@ export function SettingsView() {
                   {activeTab === "asr" && (
                     <div className="space-y-5">
                       <div className="border-b border-border/60 pb-4">
-                        <h3 className="text-lg font-semibold text-foreground">
+                        <h3 className="font-serif text-lg font-semibold text-foreground">
                           Transcription
                         </h3>
                         <p className="max-w-3xl text-sm leading-6 text-muted-foreground">
@@ -2915,10 +2898,10 @@ export function SettingsView() {
                         <div className="rounded-[24px] border border-border bg-muted/20 p-5 text-foreground">
                           <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                             <div>
-                              <p className="text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+                              <p className="rubric mb-1.5">
                                 Capture routing
                               </p>
-                              <h3 className="mt-2 text-xl font-semibold text-foreground">
+                              <h3 className="font-serif text-xl font-semibold text-foreground">
                                 Microphone routing
                               </h3>
                               <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
@@ -2940,7 +2923,7 @@ export function SettingsView() {
                           <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                             <div className="space-y-3 rounded-2xl border border-border bg-background p-4">
                               <div>
-                                <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                                <p className="rubric-muted">
                                   App-wide default
                                 </p>
                                 <p className="mt-1 text-sm text-muted-foreground">
@@ -2982,7 +2965,7 @@ export function SettingsView() {
                             <div className="space-y-3 rounded-2xl border border-border bg-background p-4">
                               <div className="flex items-start justify-between gap-3">
                                 <div>
-                                  <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                                  <p className="rubric-muted">
                                     Dictation override
                                   </p>
                                   <p className="mt-1 text-sm text-muted-foreground">
@@ -3054,7 +3037,7 @@ export function SettingsView() {
                             <div className="space-y-3 rounded-2xl border border-border bg-background p-4 md:col-span-2 xl:col-span-1">
                               <div className="flex items-start justify-between gap-3">
                                 <div>
-                                  <p className="text-xs uppercase tracking-[0.18em] text-muted-foreground">
+                                  <p className="rubric-muted">
                                     Meeting override
                                   </p>
                                   <p className="mt-1 text-sm text-muted-foreground">
@@ -3128,14 +3111,14 @@ export function SettingsView() {
                             {currentAudioDevices.map((device) => (
                               <div
                                 key={`card-${device.deviceId}`}
-                                className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"
+                                className="rounded-2xl border border-border/60 bg-foreground/[0.03] p-4"
                               >
                                 <div className="flex items-start justify-between gap-3">
                                   <div>
-                                    <p className="text-sm font-medium text-white">
+                                    <p className="text-sm font-medium text-foreground">
                                       {device.deviceName}
                                     </p>
-                                    <p className="mt-1 text-xs text-slate-400">
+                                    <p className="mt-1 text-xs text-muted-foreground">
                                       {deviceTransportLabel(device)}
                                       {device.channelCount
                                         ? ` - ${device.channelCount} ch`
@@ -3146,19 +3129,19 @@ export function SettingsView() {
                                     </p>
                                   </div>
                                   {device.isDefault ? (
-                                    <span className="rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em] text-emerald-200">
+                                    <span className="rounded-full border border-gold/30 bg-gold/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em] text-gold-text">
                                       Default
                                     </span>
                                   ) : null}
                                 </div>
                                 {device.isBluetoothLike ? (
-                                  <p className="mt-3 text-xs leading-5 text-amber-200">
+                                  <p className="mt-3 text-xs leading-5 text-rust">
                                     Bluetooth headset mics can lower playback
                                     quality while dictating. Built-in or USB
                                     mics usually sound cleaner.
                                   </p>
                                 ) : (
-                                  <p className="mt-3 text-xs leading-5 text-slate-400">
+                                  <p className="mt-3 text-xs leading-5 text-muted-foreground">
                                     Stable local input for dictation, meetings,
                                     and mic tests.
                                   </p>
@@ -3240,7 +3223,7 @@ export function SettingsView() {
                                 {diarizationModels.map((model) => (
                                   <div
                                     key={model.id}
-                                    className={`rounded-md border p-3 cursor-pointer transition-colors ${selectedDiarizationModel === model.id ? "border-trusted bg-trusted/5" : "border-border bg-muted/20 hover:bg-muted/40"}`}
+                                    className={`rounded-md border p-3 cursor-pointer transition-colors ${selectedDiarizationModel === model.id ? "border-rust/40 bg-rust/8" : "border-border bg-muted/20 hover:bg-muted/40"}`}
                                     onClick={() =>
                                       setSelectedDiarizationModel(model.id)
                                     }
@@ -3260,7 +3243,7 @@ export function SettingsView() {
                                               model.id,
                                             )
                                           }
-                                          className="accent-trusted"
+                                          className="accent-rust"
                                         />
                                         <div>
                                           <p className="text-sm font-medium">
@@ -3272,7 +3255,7 @@ export function SettingsView() {
                                         </div>
                                       </div>
                                       {model.installed ? (
-                                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400 shrink-0">
+                                        <span className="inline-flex items-center gap-1 rounded-full bg-gold/10 px-2 py-0.5 text-[10px] font-medium text-gold-text shrink-0">
                                           <CheckCircle2 className="h-3 w-3" />{" "}
                                           Installed
                                         </span>
@@ -3333,7 +3316,7 @@ export function SettingsView() {
                                       Wespeaker ECAPA-TDNN (speaker embedding)
                                     </p>
                                   </div>
-                                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400">
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-gold/10 px-2 py-0.5 text-[10px] font-medium text-gold-text">
                                     <CheckCircle2 className="h-3 w-3" />{" "}
                                     Installed
                                   </span>
@@ -3503,9 +3486,9 @@ export function SettingsView() {
                         </div>
 
                         <div className="space-y-5 border-t pt-4">
-                          <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                          <p className="rubric">
                             Power user
-                          </h3>
+                          </p>
                           {renderSharedDictationControls({
                             includeMeetingAutoName: true,
                             includeAudioTuning: true,
@@ -3562,44 +3545,6 @@ export function SettingsView() {
                           </div>
                         </div>
 
-                        {(() => {
-                          const currentScheme = normalizeThemeScheme(
-                            settings.ui.colorScheme,
-                          );
-                          return (
-                            <div className="space-y-2">
-                              <Label>Color scheme</Label>
-                              <select
-                                aria-label="Color scheme"
-                                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                                value={currentScheme}
-                                onChange={(e: ChangeEvent<HTMLSelectElement>) => {
-                                  const normalized = normalizeThemeScheme(
-                                    e.target.value,
-                                  );
-                                  applyColorScheme(normalized);
-                                  void updateSettings({
-                                    ...settings,
-                                    ui: {
-                                      ...settings.ui,
-                                      colorScheme: normalized,
-                                    },
-                                  });
-                                }}
-                              >
-                                {THEME_SCHEMES.map((option) => (
-                                  <option
-                                    key={option.value}
-                                    value={option.value}
-                                  >
-                                    {option.label}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                          );
-                        })()}
-
                         <div className="flex items-center justify-between">
                           <div className="space-y-0.5">
                             <Label>Keep running after close</Label>
@@ -3610,12 +3555,15 @@ export function SettingsView() {
                           </div>
                           <Switch
                             checked={settings.ui.minimizeToTray}
-                            onCheckedChange={(checked) =>
+                            onCheckedChange={(checked) => {
                               void updateSettings({
                                 ...settings,
                                 ui: { ...settings.ui, minimizeToTray: checked },
-                              })
-                            }
+                              });
+                              void invoke("app:set_minimize_to_tray", {
+                                enabled: checked,
+                              }).catch(() => {});
+                            }}
                           />
                         </div>
 
@@ -3692,9 +3640,9 @@ export function SettingsView() {
                         </div>
 
                         <div className="pt-4 border-t space-y-5">
-                          <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                          <p className="rubric">
                             Power user
-                          </h3>
+                          </p>
                           <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
                             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                               <div>
@@ -3781,9 +3729,9 @@ export function SettingsView() {
                         </div>
 
                         <div className="pt-4 border-t space-y-5">
-                          <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                          <p className="rubric">
                             Power user
-                          </h3>
+                          </p>
                             {renderSharedDictationControls({
                               includeCoreControls: false,
                               includePermissions: true,
@@ -4385,9 +4333,9 @@ export function SettingsView() {
 
                         {backupConfig && (
                           <div className="pt-4 border-t space-y-5">
-                            <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                            <p className="rubric">
                               Power user
-                            </h3>
+                            </p>
                             <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
                               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                                 <div>
@@ -4867,7 +4815,7 @@ export function SettingsView() {
                               </p>
                             )}
                             {hasUnsavedChanges ? (
-                              <p className="text-xs text-amber-600">
+                              <p className="text-xs text-rust">
                                 Save or discard local settings edits before
                                 restoring a profile snapshot.
                               </p>
@@ -4881,8 +4829,8 @@ export function SettingsView() {
                                   <span
                                     className={`text-xs font-medium ${
                                       backupSetupReport.ready
-                                        ? "text-emerald-600"
-                                        : "text-amber-600"
+                                        ? "text-gold-text"
+                                        : "text-rust"
                                     }`}
                                   >
                                     {backupSetupReport.ready
@@ -4899,9 +4847,9 @@ export function SettingsView() {
                                       <div className="flex items-center justify-between gap-2">
                                         <div className="flex items-center gap-2">
                                           {check.status === "pass" ? (
-                                            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                                            <CheckCircle2 className="h-4 w-4 text-gold-text" />
                                           ) : (
-                                            <XCircle className="h-4 w-4 text-amber-600" />
+                                            <XCircle className="h-4 w-4 text-rust" />
                                           )}
                                           <p className="text-sm font-medium">
                                             {check.label}
@@ -4962,7 +4910,7 @@ export function SettingsView() {
                           </p>
                           {!settings.privacy.remoteProcessingEnabled &&
                           settings.privacy.llmProvider !== "ollama" ? (
-                            <p className="text-xs text-amber-600">
+                            <p className="text-xs text-rust">
                               Remote provider selected but remote processing is
                               disabled.
                             </p>
@@ -5038,8 +4986,8 @@ export function SettingsView() {
                                   ))}
                               </select>
                             ) : (
-                              <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                                <p className="text-amber-700 dark:text-amber-400">
+                              <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
+                                <p className="text-rust">
                                   Enter your OpenAI API key in advanced settings
                                   to fetch models.
                                 </p>
@@ -5066,8 +5014,8 @@ export function SettingsView() {
                                 ))}
                               </select>
                             ) : (
-                              <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                                <p className="text-amber-700 dark:text-amber-400">
+                              <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
+                                <p className="text-rust">
                                   Enter your Anthropic API key in advanced
                                   settings to fetch models.
                                 </p>
@@ -5096,8 +5044,8 @@ export function SettingsView() {
                                   ))}
                               </select>
                             ) : (
-                              <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                                <p className="text-amber-700 dark:text-amber-400">
+                              <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
+                                <p className="text-rust">
                                   Enter your Google AI API key in advanced
                                   settings to fetch models.
                                 </p>
@@ -5124,8 +5072,8 @@ export function SettingsView() {
                                 ))}
                               </select>
                             ) : (
-                              <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                                <p className="text-amber-700 dark:text-amber-400">
+                              <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
+                                <p className="text-rust">
                                   Enter your DeepSeek API key in advanced
                                   settings to fetch models.
                                 </p>
@@ -5153,8 +5101,8 @@ export function SettingsView() {
                                 ))}
                               </select>
                             ) : (
-                              <div className="p-3 rounded border bg-amber-50 dark:bg-amber-950/20 text-sm">
-                                <p className="text-amber-700 dark:text-amber-400">
+                              <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
+                                <p className="text-rust">
                                   Enter your Ollama Cloud API key in advanced
                                   settings to fetch models.
                                 </p>
@@ -5229,9 +5177,9 @@ export function SettingsView() {
                         )}
 
                         <div className="pt-4 border-t space-y-5">
-                          <h3 className="text-sm font-medium text-amber-600 dark:text-amber-500">
+                          <p className="rubric">
                             Power user
-                          </h3>
+                          </p>
                             <div className="rounded-2xl border border-border/60 bg-background/70 p-4">
                               <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                                 <div>
@@ -5269,7 +5217,7 @@ export function SettingsView() {
                     <Card>
                       <CardHeader>
                         <CardTitle className="flex items-center gap-2">
-                          <RefreshCw className="h-5 w-5 text-blue-600" />
+                          <RefreshCw className="h-5 w-5 text-muted-foreground" />
                           Updates
                         </CardTitle>
                         <CardDescription>

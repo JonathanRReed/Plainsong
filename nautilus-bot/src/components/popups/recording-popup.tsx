@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { LogicalSize, invoke, listen, getCurrentWindow } from "@/lib/electron";
 import {
   Mic,
@@ -13,7 +13,6 @@ import {
   Loader2,
   Copy,
 } from "lucide-react";
-import { AnimatedGradientText } from "@/components/ui/animated-gradient-text";
 import {
   getRecording,
   getWaveformData,
@@ -76,6 +75,7 @@ export function RecordingPopup() {
     null,
   );
   const [copiedNotice, setCopiedNotice] = useState(false);
+  const [transcriptCommitted, setTranscriptCommitted] = useState(false);
   const recordingIdRef = useRef<string | null>(null);
   const lastSavedMeetingNotesRef = useRef("");
 
@@ -137,6 +137,7 @@ export function RecordingPopup() {
             setMessage(payload.message ?? null);
             if (payload.phase === "recording") {
               setTranscriptionPreview("");
+              setTranscriptCommitted(false);
             }
             setStopping(false);
             return;
@@ -151,6 +152,7 @@ export function RecordingPopup() {
           setPhase("recording");
           setMessage(null);
           setTranscriptionPreview("");
+          setTranscriptCommitted(false);
           setStopping(false);
         },
       );
@@ -170,6 +172,7 @@ export function RecordingPopup() {
           }
           if (event.payload.isFinal) {
             setMessage("Transcript preview is ready in Meetings.");
+            setTranscriptCommitted(true);
           }
         },
       );
@@ -326,6 +329,16 @@ export function RecordingPopup() {
     return () => globalThis.clearTimeout(id);
   }, [copiedNotice]);
 
+  // The commit shine is a single gold set-down sweep — retire it after one pass
+  // so the transcript block doesn't keep glinting once it's been laid down.
+  useEffect(() => {
+    if (!transcriptCommitted) {
+      return;
+    }
+    const id = globalThis.setTimeout(() => setTranscriptCommitted(false), 800);
+    return () => globalThis.clearTimeout(id);
+  }, [transcriptCommitted]);
+
   const elapsedText = useMemo(() => {
     const mins = Math.floor(elapsed / 60);
     const secs = elapsed % 60;
@@ -355,14 +368,27 @@ export function RecordingPopup() {
     }
   };
 
-  const hidePopup = async () => {
+  const hidePopup = useCallback(async () => {
     try {
       await invoke("dismiss_recording_overlay");
-      await window.hide();
+      await getCurrentWindow().hide();
     } catch (error) {
       console.error("Failed to hide recording popup:", error);
     }
-  };
+  }, []);
+
+  // The HUD persists until explicit dismissal (it never vanishes on click-away);
+  // Escape is the canonical dismissal for a floating panel (Apple HIG).
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        void hidePopup();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [hidePopup]);
 
   const openMainApp = async (
     view?: "recordings" | "settings",
@@ -419,7 +445,7 @@ export function RecordingPopup() {
         data-drag-region
         className="flex h-screen w-screen items-center justify-center bg-transparent"
       >
-        <div className="flex items-center gap-2 rounded-full border border-border/80 bg-background/95 px-3 py-2 text-foreground shadow-[0_20px_60px_rgba(2,6,23,0.45)] backdrop-blur-md">
+        <div className="flex items-center gap-2 rounded-full border border-border/80 bg-background/95 px-3 py-2 text-foreground shadow-[0_20px_60px_hsl(34_26%_4%/0.45)] backdrop-blur-md">
           <div className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-muted/80 text-foreground">
             {isTranscribing ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -432,12 +458,11 @@ export function RecordingPopup() {
             active={!isTranscribing}
             size="sm"
             barCount={9}
-            barColor="white"
           />
-          <span className="text-xs font-medium uppercase tracking-[0.18em]">
+          <span className="font-mono text-xs font-medium uppercase tracking-[0.18em]">
             {isTranscribing ? "Processing" : captureModeLabel}
           </span>
-          <span className="font-mono text-sm text-muted-foreground">
+          <span className="time-spec font-mono text-sm text-muted-foreground">
             {isTranscribing ? "…" : elapsedText}
           </span>
           <button
@@ -474,7 +499,7 @@ export function RecordingPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="max-h-[calc(100vh-24px)] overflow-y-auto rounded-[24px] border border-border/80 bg-background/95 px-4 py-3 text-foreground shadow-[0_24px_80px_rgba(2,6,23,0.5)] backdrop-blur-xl">
+      <div className="max-h-[calc(100vh-24px)] overflow-y-auto rounded-[24px] border border-border/80 bg-background/95 px-4 py-3 text-foreground shadow-[0_24px_80px_hsl(34_26%_4%/0.5)] backdrop-blur-xl">
         <div
           data-drag-region
           className="mb-3 flex cursor-grab select-none items-center justify-between text-muted-foreground active:cursor-grabbing"
@@ -520,19 +545,24 @@ export function RecordingPopup() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-2 rounded-full border border-success/25 bg-success/10 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-success">
-            {isTranscribing ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Mic className="h-3.5 w-3.5" />
-            )}
-            {statusLabel}
-          </span>
+          {isTranscribing ? (
+            <span className="inline-flex items-center gap-2 rounded-full border border-rust/30 bg-rust/10 px-2.5 py-1 font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-rust">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+              {statusLabel}
+            </span>
+          ) : (
+            <span className="gilt-halo inline-flex items-center gap-2 rounded-full border border-gold/40 bg-gold/10 px-2.5 py-1 font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-gold-text">
+              <span
+                className="neume neume-lit neume-live"
+                aria-hidden="true"
+              />
+              {statusLabel}
+            </span>
+          )}
           {!isTranscribing && (
             <span className="inline-flex items-center gap-2 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
-              <AnimatedGradientText colorFrom="#34d399" colorTo="#10b981" className="font-semibold">
-                Instant notes
-              </AnimatedGradientText>
+              <span className="neume neume-hollow" />
+              Instant notes
             </span>
           )}
           <span className="inline-flex items-center gap-2 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
@@ -567,19 +597,18 @@ export function RecordingPopup() {
         >
           <div className="flex items-center gap-3">
             {displayMode === "full" && (
-              <div className="flex h-14 items-center rounded-2xl border border-border/80 bg-muted/40 px-3 shadow-lg shadow-black/20">
+              <div className="flex h-14 items-center rounded-2xl border border-border/80 bg-muted/40 px-3 shadow-lg shadow-foreground/20">
                 <AudioWaveform
                   levels={waveformBars}
                   active={!isTranscribing}
                   size="lg"
-                  barColor="white"
                   glow
-                  glowColor={isTranscribing ? "rgba(52,211,153,0.4)" : "rgba(147,197,253,0.4)"}
+                  glowColor="rgba(200,149,67,0.45)"
                 />
               </div>
             )}
             <div>
-              <p className="text-base font-semibold tracking-tight">
+              <p className="manuscript text-lg font-medium leading-snug tracking-tight">
                 {isTranscribing ? "Finishing your meeting" : recordingTitle}
               </p>
               <p className="text-sm text-muted-foreground">
@@ -594,11 +623,11 @@ export function RecordingPopup() {
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="rounded-2xl border border-border/80 bg-muted/40 px-3 py-2 text-right shadow-lg shadow-black/10">
-              <p className="text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+            <div className="rounded-2xl border border-border/80 bg-muted/40 px-3 py-2 text-right shadow-lg shadow-foreground/10">
+              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
                 {isTranscribing ? "Status" : "Elapsed"}
               </p>
-              <p className="font-mono text-base font-medium text-foreground">
+              <p className="time-spec font-mono text-base font-medium text-foreground">
                 {isTranscribing ? "Saving" : elapsedText}
               </p>
             </div>
@@ -657,7 +686,7 @@ export function RecordingPopup() {
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1.05fr)_minmax(220px,0.95fr)]">
               <div className="rounded-2xl border border-border/80 bg-muted/30 p-3">
                 <div className="mb-2 flex items-center justify-between">
-                  <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                  <p className="font-mono text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
                     Live notes
                   </p>
                   <p className="text-[11px] text-muted-foreground">
@@ -672,9 +701,13 @@ export function RecordingPopup() {
                   className="min-h-[176px] w-full resize-none rounded-xl border border-border/80 bg-background/80 px-3 py-3 text-sm leading-6 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring/40"
                 />
               </div>
-              <div className="rounded-2xl border border-border/80 bg-muted/30 p-3">
+              <div
+                className={`rounded-2xl border border-border/80 bg-muted/30 p-3${
+                  transcriptCommitted ? " commit-shine" : ""
+                }`}
+              >
                 <div className="mb-2 flex items-center justify-between">
-                  <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                  <p className="font-mono text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
                     Transcript preview
                   </p>
                   <p className="text-[11px] text-muted-foreground">
@@ -683,7 +716,7 @@ export function RecordingPopup() {
                       : "Live support for your notes"}
                   </p>
                 </div>
-                <p className="max-h-[176px] overflow-y-auto text-sm leading-6 text-foreground">
+                <p className="manuscript max-h-[176px] overflow-y-auto text-sm leading-6 text-foreground">
                   {previewText}
                 </p>
               </div>
@@ -693,12 +726,12 @@ export function RecordingPopup() {
 
         {displayMode === "compact" && (
           <div className="mt-4 space-y-3">
-            <div className="flex items-center justify-between gap-3 text-xs text-slate-300">
+            <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
               <div className="min-w-0">
-                <p className="truncate font-medium text-slate-100">
+                <p className="manuscript truncate font-medium text-foreground">
                   {recordingTitle}
                 </p>
-                <p className="truncate text-slate-400">
+                <p className="truncate text-muted-foreground">
                   {meetingTemplateLabel} · {consentStatus.label}
                 </p>
               </div>
@@ -706,7 +739,7 @@ export function RecordingPopup() {
                 {consentStatus.needsManualNotice ? (
                   <button
                     type="button"
-                    className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
+                    className="rounded-lg border border-foreground/10 bg-foreground/5 px-2.5 py-1.5 hover:bg-foreground/10"
                     onClick={async () => {
                       try {
                         await navigator.clipboard.writeText(
@@ -723,32 +756,32 @@ export function RecordingPopup() {
                 ) : null}
                 <button
                   type="button"
-                  className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 hover:bg-white/10"
+                  className="rounded-lg border border-foreground/10 bg-foreground/5 px-2.5 py-1.5 hover:bg-foreground/10"
                   onClick={() => void openMainApp("recordings", recordingId)}
                 >
                   Open Workspace
                 </button>
               </div>
             </div>
-            <div className="rounded-2xl border border-white/10 bg-white/4 p-3">
+            <div className="rounded-2xl border border-foreground/10 bg-foreground/4 p-3">
               <div className="mb-2 flex items-center justify-between">
-                <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
+                <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
                   Notes snapshot
                 </p>
-                <p className="text-[11px] text-slate-400">{captureModeLabel}</p>
+                <p className="text-[11px] text-muted-foreground">{captureModeLabel}</p>
               </div>
-              <p className="line-clamp-3 text-sm leading-6 text-slate-100">
+              <p className="line-clamp-3 text-sm leading-6 text-foreground">
                 {notesSummary}
               </p>
             </div>
-            <div className="rounded-2xl border border-white/10 bg-white/4 p-3">
+            <div className="rounded-2xl border border-foreground/10 bg-foreground/4 p-3">
               <div className="mb-2 flex items-center justify-between">
-                <p className="text-xs font-medium uppercase tracking-[0.18em] text-slate-300">
+                <p className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
                   Transcript preview
                 </p>
-                <p className="text-[11px] text-slate-400">{statusLabel}</p>
+                <p className="text-[11px] text-muted-foreground">{statusLabel}</p>
               </div>
-              <p className="line-clamp-3 text-sm leading-6 text-slate-100">
+              <p className="line-clamp-3 text-sm leading-6 text-foreground">
                 {previewText}
               </p>
             </div>
