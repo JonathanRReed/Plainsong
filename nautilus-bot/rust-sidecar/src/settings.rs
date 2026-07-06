@@ -950,18 +950,19 @@ fn dictation_app_category_override_matches(app_matcher: &str, app_target: Option
 /// overrides first (first enabled match wins, in list order), then falls
 /// through to the built-in bundle-id/name classifier.
 ///
-/// When `dictation_category_formatting_enabled` is `false`, this always
-/// returns `Other` (no category fragment injected), preserving pre-feature
-/// behavior exactly.
+/// This always resolves the real category, regardless of
+/// `dictation_category_formatting_enabled` — that toggle only controls
+/// whether the LLM dictation-formatting prompt injects a category-specific
+/// fragment (see `run_dictation_formatting_with_selected_provider` in
+/// `lib.rs`, which applies that gating itself). Other consumers, like
+/// dictionary/snippet `category_scope` matching in `dictation_parity.rs`,
+/// need the real resolved category unconditionally, since that's an
+/// unrelated setting from AI-category-formatting.
 pub fn resolve_dictation_app_category_with_overrides(
     transcription: &TranscriptionSettings,
     app_target: Option<&str>,
     app_bundle_id: Option<&str>,
 ) -> DictationAppCategory {
-    if !transcription.dictation_category_formatting_enabled {
-        return DictationAppCategory::Other;
-    }
-
     for override_entry in &transcription.dictation_app_category_overrides {
         if !override_entry.enabled {
             continue;
@@ -1205,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_with_overrides_master_toggle_short_circuits_to_other() {
+    fn resolve_with_overrides_ignores_ai_formatting_toggle() {
         let transcription = TranscriptionSettings {
             dictation_category_formatting_enabled: false,
             dictation_app_category_overrides: vec![DictationAppCategoryOverride {
@@ -1217,12 +1218,34 @@ mod tests {
             ..TranscriptionSettings::default()
         };
 
-        // Even though Slack would normally resolve to Messaging (via override
-        // or the built-in classifier), the master toggle being off must force
-        // Other, i.e. behave exactly as before this feature existed.
+        // The AI-category-formatting toggle is a distinct setting from "what
+        // category does this app resolve to" — the resolver must always
+        // return the real resolved category (here, via the matching
+        // override) regardless of whether that toggle is on or off. Gating
+        // the LLM prompt fragment on this toggle happens at the
+        // lib.rs call site, not inside the resolver itself.
         let category =
             resolve_dictation_app_category_with_overrides(&transcription, Some("Slack"), None);
-        assert_eq!(category, DictationAppCategory::Other);
+        assert_eq!(category, DictationAppCategory::Messaging);
+    }
+
+    #[test]
+    fn resolve_with_overrides_falls_through_to_builtin_classifier_when_ai_formatting_toggle_is_off()
+    {
+        let transcription = TranscriptionSettings {
+            dictation_category_formatting_enabled: false,
+            ..TranscriptionSettings::default()
+        };
+
+        // No overrides configured, and the toggle is off, but the resolver
+        // should still fall through to the built-in bundle-id/name
+        // classifier and return the real category (Slack -> Messaging), not
+        // `Other`. This is the regression this decoupling fixes: dictionary/
+        // snippet category-scope matching must work independently of the
+        // AI-formatting toggle.
+        let category =
+            resolve_dictation_app_category_with_overrides(&transcription, Some("Slack"), None);
+        assert_eq!(category, DictationAppCategory::Messaging);
     }
 
     #[test]

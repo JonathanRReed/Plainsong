@@ -2671,12 +2671,23 @@ fn local_dictation_command_transform(command_key: &str, input: &str) -> Result<S
 /// target app's name/bundle id. Returned as an optional hint so callers can
 /// append it as a supplement to the transform prompt without it ever being
 /// required.
+///
+/// Like `run_dictation_formatting_with_selected_provider`, this is a
+/// prompt-fragment consumer, so it respects
+/// `dictation_category_formatting_enabled` itself (returning `Other` when
+/// disabled) rather than relying on the resolver to gate it — the resolver
+/// always returns the real category so non-prompt consumers (e.g.
+/// dictionary/snippet `category_scope` matching) are unaffected by this
+/// toggle.
 async fn resolve_selected_text_transform_app_category(
     state: &AppState,
     target_app: Option<&str>,
     target_app_bundle_id: Option<&str>,
 ) -> text::format::DictationAppCategory {
     let settings = state.settings_manager.lock().await.settings().clone();
+    if !settings.transcription.dictation_category_formatting_enabled {
+        return text::format::DictationAppCategory::Other;
+    }
     settings::resolve_dictation_app_category_with_overrides(
         &settings.transcription,
         target_app,
@@ -4583,11 +4594,20 @@ async fn run_dictation_formatting_with_selected_provider(
 
     let settings = state.settings_manager.lock().await.settings().clone();
 
-    let app_category = settings::resolve_dictation_app_category_with_overrides(
+    let resolved_app_category = settings::resolve_dictation_app_category_with_overrides(
         &settings.transcription,
         active_app.as_deref(),
         dictation_options.context_app_bundle_id.as_deref(),
     );
+    // The AI-category-formatting toggle only controls whether the LLM
+    // prompt gets a category-specific fragment; it must not affect other
+    // consumers of the resolver (e.g. dictionary/snippet category-scope
+    // matching), so the gating lives here rather than inside the resolver.
+    let app_category = if settings.transcription.dictation_category_formatting_enabled {
+        resolved_app_category
+    } else {
+        text::format::DictationAppCategory::Other
+    };
     let category_fragment = text::format::dictation_category_prompt_fragment(app_category);
 
     let system_prompt = if let Some(custom_prompt) = active_dictation_custom_mode(&settings)

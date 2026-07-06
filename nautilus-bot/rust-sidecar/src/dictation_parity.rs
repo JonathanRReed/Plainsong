@@ -1271,6 +1271,99 @@ mod tests {
     }
 
     #[test]
+    fn category_scoped_dictionary_entry_applies_via_resolver_even_when_ai_formatting_toggle_is_off()
+    {
+        // Regression test: a user with a category-scoped dictionary entry
+        // (e.g. a medical term that should only expand in an EHR/notes app)
+        // expects that scoping to work regardless of whether they've
+        // separately disabled AI-category-formatting. That toggle only
+        // governs the LLM dictation-formatting prompt fragment; it must not
+        // affect dictionary/snippet category-scope matching, which depends
+        // on `resolve_dictation_app_category_with_overrides` always
+        // returning the real resolved category.
+        let transcription = crate::settings::TranscriptionSettings {
+            dictation_category_formatting_enabled: false,
+            dictation_app_category_overrides: vec![crate::settings::DictationAppCategoryOverride {
+                id: "1".to_string(),
+                app_matcher: "epic".to_string(),
+                category: "notes".to_string(),
+                enabled: true,
+            }],
+            ..crate::settings::TranscriptionSettings::default()
+        };
+
+        let destination_category = crate::settings::resolve_dictation_app_category_with_overrides(
+            &transcription,
+            Some("Epic EHR"),
+            None,
+        );
+        assert_eq!(destination_category, DictationAppCategory::Notes);
+
+        let rules = vec![DictionaryRule {
+            spoken_form: "htn".to_string(),
+            replacement: "hypertension".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("notes".to_string()),
+        }];
+
+        let (output, applied) = apply_dictation_dictionary_for_category(
+            "patient has htn",
+            &rules,
+            Some("Epic EHR"),
+            destination_category,
+        );
+        assert_eq!(output, "patient has hypertension");
+        assert_eq!(
+            applied, 1,
+            "category-scoped dictionary entry must apply even when \
+             dictation_category_formatting_enabled is false"
+        );
+    }
+
+    #[test]
+    fn category_scoped_snippet_entry_applies_via_resolver_even_when_ai_formatting_toggle_is_off() {
+        // Same regression as above, for snippets rather than dictionary
+        // entries.
+        let transcription = crate::settings::TranscriptionSettings {
+            dictation_category_formatting_enabled: false,
+            ..crate::settings::TranscriptionSettings::default()
+        };
+
+        // No override configured; relies on the built-in bundle-id/name
+        // classifier falling through correctly even with the toggle off.
+        let destination_category = crate::settings::resolve_dictation_app_category_with_overrides(
+            &transcription,
+            Some("Slack"),
+            None,
+        );
+        assert_eq!(destination_category, DictationAppCategory::Messaging);
+
+        let snippets = vec![SnippetRule {
+            trigger: "omw".to_string(),
+            expansion: "on my way".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("messaging".to_string()),
+        }];
+
+        let (output, applied) = apply_dictation_snippets_for_category(
+            "omw now",
+            &snippets,
+            Some("Slack"),
+            destination_category,
+        );
+        assert_eq!(output, "on my way now");
+        assert_eq!(
+            applied, 1,
+            "category-scoped snippet must apply even when \
+             dictation_category_formatting_enabled is false"
+        );
+    }
+
+    #[test]
     fn parse_dictation_command_supports_undo_synonyms() {
         let (command, action) =
             parse_dictation_command("command scratch that", DEFAULT_COMMAND_PREFIX)
