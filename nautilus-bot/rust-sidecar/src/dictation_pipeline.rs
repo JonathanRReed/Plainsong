@@ -1,5 +1,6 @@
 use crate::dictation_parity::{apply_contextual_phrase_replacement, DictionaryRule, SnippetRule};
 use crate::models::{DictationDictionaryEntry, DictationSnippet};
+use crate::text::format::DictationAppCategory;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictationPipelineResult {
@@ -22,6 +23,14 @@ pub struct DictationPipelineInput<'a> {
     pub formatting_hint: Option<&'a str>,
     pub smart_formatting_enabled: bool,
     pub recent_inserted_text: Option<&'a str>,
+    /// Resolved destination-app category (via `resolve_dictation_app_category`
+    /// or the settings-aware `resolve_dictation_app_category_with_overrides`),
+    /// used to scope dictionary/snippet entries whose `category_scope` is
+    /// set. Defaults to `DictationAppCategory::Other` when not provided,
+    /// which never matches a set `category_scope`, so category-scoped
+    /// entries simply won't apply unless the caller resolves and passes the
+    /// real category here.
+    pub destination_category: DictationAppCategory,
 }
 
 pub fn apply_dictation_pipeline(input: DictationPipelineInput<'_>) -> DictationPipelineResult {
@@ -47,8 +56,12 @@ pub fn apply_dictation_pipeline(input: DictationPipelineInput<'_>) -> DictationP
         };
     }
 
-    let (normalized_text, dictionary_applied) =
-        apply_dictionary_entries(text.as_str(), input.dictionary_entries, input.app_target);
+    let (normalized_text, dictionary_applied) = apply_dictionary_entries(
+        text.as_str(),
+        input.dictionary_entries,
+        input.app_target,
+        input.destination_category,
+    );
     if dictionary_applied > 0 {
         dictionary_applied_count = dictionary_applied;
         pipeline_stage_keys.push("dictionary".to_string());
@@ -66,8 +79,12 @@ pub fn apply_dictation_pipeline(input: DictationPipelineInput<'_>) -> DictationP
     }
 
     if command_applied.is_none() && !text.trim().is_empty() {
-        let (expanded_text, applied) =
-            apply_snippets(text.as_str(), input.snippets, input.app_target);
+        let (expanded_text, applied) = apply_snippets(
+            text.as_str(),
+            input.snippets,
+            input.app_target,
+            input.destination_category,
+        );
         text = expanded_text;
         snippet_applied_count = applied;
         if applied > 0 {
@@ -223,6 +240,7 @@ fn apply_dictionary_entries(
     input: &str,
     entries: &[DictationDictionaryEntry],
     app_target: Option<&str>,
+    destination_category: DictationAppCategory,
 ) -> (String, usize) {
     let rules = entries
         .iter()
@@ -232,15 +250,22 @@ fn apply_dictionary_entries(
             app_scope: entry.app_scope.clone(),
             case_sensitive: entry.case_sensitive,
             enabled: entry.enabled,
+            category_scope: entry.category_scope.clone(),
         })
         .collect::<Vec<_>>();
-    crate::dictation_parity::apply_dictation_dictionary(input, &rules, app_target)
+    crate::dictation_parity::apply_dictation_dictionary_for_category(
+        input,
+        &rules,
+        app_target,
+        destination_category,
+    )
 }
 
 fn apply_snippets(
     input: &str,
     snippets: &[DictationSnippet],
     app_target: Option<&str>,
+    destination_category: DictationAppCategory,
 ) -> (String, usize) {
     let rules = snippets
         .iter()
@@ -250,9 +275,15 @@ fn apply_snippets(
             app_scope: snippet.app_scope.clone(),
             case_sensitive: snippet.case_sensitive,
             enabled: snippet.enabled,
+            category_scope: snippet.category_scope.clone(),
         })
         .collect::<Vec<_>>();
-    crate::dictation_parity::apply_dictation_snippets(input, &rules, app_target)
+    crate::dictation_parity::apply_dictation_snippets_for_category(
+        input,
+        &rules,
+        app_target,
+        destination_category,
+    )
 }
 
 fn matches_undo_phrase(value: &str) -> bool {
@@ -302,6 +333,7 @@ mod tests {
             app_scope: None,
             case_sensitive: false,
             enabled: true,
+            category_scope: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -315,6 +347,7 @@ mod tests {
             app_scope: None,
             case_sensitive: false,
             enabled: true,
+            category_scope: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -331,6 +364,7 @@ mod tests {
             formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: None,
+            destination_category: DictationAppCategory::Other,
         });
 
         assert_eq!(result.text, "OpenAI be right back");
@@ -353,6 +387,7 @@ mod tests {
             formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("ship it today"),
+            destination_category: DictationAppCategory::Other,
         });
 
         assert_eq!(result.text, "ship it tomorrow");
@@ -376,6 +411,7 @@ mod tests {
             formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("ship it Friday"),
+            destination_category: DictationAppCategory::Other,
         });
 
         assert_eq!(result.text, "ship it Monday");
@@ -399,6 +435,7 @@ mod tests {
             formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("ship it tomorrow"),
+            destination_category: DictationAppCategory::Other,
         });
 
         assert_eq!(result.text, "ship it next week");
@@ -422,6 +459,7 @@ mod tests {
             formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: None,
+            destination_category: DictationAppCategory::Other,
         });
 
         assert!(result.text.is_empty());
@@ -445,6 +483,7 @@ mod tests {
             formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("ship it today"),
+            destination_category: DictationAppCategory::Other,
         });
 
         assert_eq!(result.text, "ship it tomorrow");
@@ -467,6 +506,7 @@ mod tests {
             formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("sam is ready"),
+            destination_category: DictationAppCategory::Other,
         });
 
         assert_eq!(result.text, "John is ready");
@@ -488,6 +528,7 @@ mod tests {
             formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("ship it tomorrow morning"),
+            destination_category: DictationAppCategory::Other,
         });
 
         assert_eq!(result.text, "ship it Monday morning");
@@ -511,6 +552,7 @@ mod tests {
             formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("ship it tomorrow morning"),
+            destination_category: DictationAppCategory::Other,
         });
 
         assert_eq!(result.text, "ship it Monday morning");

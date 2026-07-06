@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::text::format::DictationAppCategory;
+
 pub const DEFAULT_COMMAND_PREFIX: &str = "command";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +35,14 @@ pub struct DictionaryRule {
     pub case_sensitive: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Optional dictation-destination-app category key (one of the
+    /// `dictation_app_category_to_key`/`from_key` strings in `settings.rs`:
+    /// other/messaging/email/notes/worklog/ai_chat/code_editor). When set,
+    /// this rule only applies if the current destination app resolves to the
+    /// same category. When `None` (the default), the rule applies regardless
+    /// of category, exactly as before this field existed.
+    #[serde(default)]
+    pub category_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +55,9 @@ pub struct SnippetRule {
     pub case_sensitive: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// See `DictionaryRule::category_scope`.
+    #[serde(default)]
+    pub category_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +215,24 @@ fn snippet_app_scope_matches(snippet_scope: Option<&str>, app_target: Option<&st
     app_name.to_lowercase().contains(&scope.to_lowercase())
 }
 
+/// Mirrors `snippet_app_scope_matches`'s blank-matches-everything convention:
+/// a missing/blank `category_scope` always matches (i.e. the rule is not
+/// category-scoped and applies regardless of destination-app category). When
+/// a category is set, it must match the resolved `destination_category`
+/// (via `dictation_app_category_to_key`) exactly.
+fn category_scope_matches(
+    category_scope: Option<&str>,
+    destination_category: DictationAppCategory,
+) -> bool {
+    let Some(scope) = category_scope
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+    crate::settings::dictation_app_category_from_key(scope) == destination_category
+}
+
 fn replace_dictionary_case_sensitive_all(
     haystack: &str,
     needle: &str,
@@ -270,6 +301,21 @@ pub fn apply_dictation_dictionary(
     rules: &[DictionaryRule],
     app_target: Option<&str>,
 ) -> (String, usize) {
+    apply_dictation_dictionary_for_category(input, rules, app_target, DictationAppCategory::Other)
+}
+
+/// Same as `apply_dictation_dictionary`, but additionally scopes rules whose
+/// `category_scope` is set to only apply when `destination_category` matches.
+/// Rules with `category_scope: None` are unaffected by `destination_category`
+/// and always apply (subject to the existing `app_scope`/`enabled` checks) —
+/// this preserves `apply_dictation_dictionary`'s exact prior behavior for
+/// every existing entry.
+pub fn apply_dictation_dictionary_for_category(
+    input: &str,
+    rules: &[DictionaryRule],
+    app_target: Option<&str>,
+    destination_category: DictationAppCategory,
+) -> (String, usize) {
     if input.trim().is_empty() || rules.is_empty() {
         return (input.to_string(), 0);
     }
@@ -284,6 +330,9 @@ pub fn apply_dictation_dictionary(
             continue;
         }
         if !snippet_app_scope_matches(rule.app_scope.as_deref(), app_target) {
+            continue;
+        }
+        if !category_scope_matches(rule.category_scope.as_deref(), destination_category) {
             continue;
         }
         if rule.spoken_form.trim().is_empty() {
@@ -317,6 +366,21 @@ pub fn apply_dictation_snippets(
     snippets: &[SnippetRule],
     app_target: Option<&str>,
 ) -> (String, usize) {
+    apply_dictation_snippets_for_category(input, snippets, app_target, DictationAppCategory::Other)
+}
+
+/// Same as `apply_dictation_snippets`, but additionally scopes snippets whose
+/// `category_scope` is set to only apply when `destination_category` matches.
+/// Snippets with `category_scope: None` are unaffected by
+/// `destination_category` and always apply (subject to the existing
+/// `app_scope`/`enabled` checks) — this preserves `apply_dictation_snippets`'s
+/// exact prior behavior for every existing entry.
+pub fn apply_dictation_snippets_for_category(
+    input: &str,
+    snippets: &[SnippetRule],
+    app_target: Option<&str>,
+    destination_category: DictationAppCategory,
+) -> (String, usize) {
     if input.trim().is_empty() || snippets.is_empty() {
         return (input.to_string(), 0);
     }
@@ -331,6 +395,9 @@ pub fn apply_dictation_snippets(
             continue;
         }
         if !snippet_app_scope_matches(snippet.app_scope.as_deref(), app_target) {
+            continue;
+        }
+        if !category_scope_matches(snippet.category_scope.as_deref(), destination_category) {
             continue;
         }
         if snippet.trigger.trim().is_empty() {
@@ -863,6 +930,7 @@ mod tests {
                 app_scope: None,
                 case_sensitive: false,
                 enabled: true,
+                category_scope: None,
             },
             DictionaryRule {
                 spoken_form: "open ai".to_string(),
@@ -870,6 +938,7 @@ mod tests {
                 app_scope: None,
                 case_sensitive: false,
                 enabled: true,
+                category_scope: None,
             },
         ];
 
@@ -890,6 +959,7 @@ mod tests {
             app_scope: Some("gmail".to_string()),
             case_sensitive: false,
             enabled: true,
+            category_scope: None,
         }];
 
         let (non_matching, non_matching_count) =
@@ -901,6 +971,171 @@ mod tests {
             apply_dictation_dictionary("follow up tomorrow", &rules, Some("Gmail"));
         assert_eq!(matching, "follow-up tomorrow");
         assert_eq!(matching_count, 1);
+    }
+
+    #[test]
+    fn dictionary_category_scoped_entry_applies_only_when_category_matches() {
+        let rules = vec![DictionaryRule {
+            spoken_form: "brb".to_string(),
+            replacement: "be right back".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("messaging".to_string()),
+        }];
+
+        let (matching, matching_count) = apply_dictation_dictionary_for_category(
+            "brb everyone",
+            &rules,
+            Some("Slack"),
+            DictationAppCategory::Messaging,
+        );
+        assert_eq!(matching, "be right back everyone");
+        assert_eq!(matching_count, 1);
+    }
+
+    #[test]
+    fn dictionary_category_scoped_entry_is_skipped_for_non_matching_category() {
+        let rules = vec![DictionaryRule {
+            spoken_form: "brb".to_string(),
+            replacement: "be right back".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("messaging".to_string()),
+        }];
+
+        let (output, applied) = apply_dictation_dictionary_for_category(
+            "brb everyone",
+            &rules,
+            Some("Gmail"),
+            DictationAppCategory::Email,
+        );
+        assert_eq!(output, "brb everyone");
+        assert_eq!(applied, 0);
+    }
+
+    #[test]
+    fn dictionary_entry_without_category_scope_applies_regardless_of_category() {
+        // Regression-safety: entries with no category_scope must apply exactly
+        // as before this feature existed, no matter what destination category
+        // is passed in.
+        let rules = vec![DictionaryRule {
+            spoken_form: "open ai".to_string(),
+            replacement: "OpenAI".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+        }];
+
+        for category in [
+            DictationAppCategory::Other,
+            DictationAppCategory::Messaging,
+            DictationAppCategory::Email,
+            DictationAppCategory::Notes,
+            DictationAppCategory::Worklog,
+            DictationAppCategory::AiChat,
+            DictationAppCategory::CodeEditor,
+        ] {
+            let (output, applied) = apply_dictation_dictionary_for_category(
+                "please email open ai today",
+                &rules,
+                None,
+                category,
+            );
+            assert_eq!(output, "please email OpenAI today");
+            assert_eq!(
+                applied, 1,
+                "expected match regardless of category {category:?}"
+            );
+        }
+
+        // The plain (non-category-aware) entry point must also behave
+        // identically, since it defaults to Other internally.
+        let (output, applied) =
+            apply_dictation_dictionary("please email open ai today", &rules, None);
+        assert_eq!(output, "please email OpenAI today");
+        assert_eq!(applied, 1);
+    }
+
+    #[test]
+    fn snippet_category_scoped_entry_applies_only_when_category_matches() {
+        let snippets = vec![SnippetRule {
+            trigger: "omw".to_string(),
+            expansion: "on my way".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("messaging".to_string()),
+        }];
+
+        let (matching, matching_count) = apply_dictation_snippets_for_category(
+            "omw now",
+            &snippets,
+            Some("Slack"),
+            DictationAppCategory::Messaging,
+        );
+        assert_eq!(matching, "on my way now");
+        assert_eq!(matching_count, 1);
+    }
+
+    #[test]
+    fn snippet_category_scoped_entry_is_skipped_for_non_matching_category() {
+        let snippets = vec![SnippetRule {
+            trigger: "omw".to_string(),
+            expansion: "on my way".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("messaging".to_string()),
+        }];
+
+        let (output, applied) = apply_dictation_snippets_for_category(
+            "omw now",
+            &snippets,
+            Some("Notion"),
+            DictationAppCategory::Notes,
+        );
+        assert_eq!(output, "omw now");
+        assert_eq!(applied, 0);
+    }
+
+    #[test]
+    fn snippet_without_category_scope_applies_regardless_of_category() {
+        // Regression-safety: snippets with no category_scope must apply
+        // exactly as before this feature existed, no matter what destination
+        // category is passed in.
+        let snippets = vec![SnippetRule {
+            trigger: "brb".to_string(),
+            expansion: "be right back".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+        }];
+
+        for category in [
+            DictationAppCategory::Other,
+            DictationAppCategory::Messaging,
+            DictationAppCategory::Email,
+            DictationAppCategory::Notes,
+            DictationAppCategory::Worklog,
+            DictationAppCategory::AiChat,
+            DictationAppCategory::CodeEditor,
+        ] {
+            let (output, applied) =
+                apply_dictation_snippets_for_category("brb team", &snippets, None, category);
+            assert_eq!(output, "be right back team");
+            assert_eq!(
+                applied, 1,
+                "expected match regardless of category {category:?}"
+            );
+        }
+
+        let (output, applied) = apply_dictation_snippets("brb team", &snippets, None);
+        assert_eq!(output, "be right back team");
+        assert_eq!(applied, 1);
     }
 
     #[test]

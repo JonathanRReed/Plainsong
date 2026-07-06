@@ -261,6 +261,24 @@ function formatInsertionModeLabel(value: string | null): string | null {
   return INSERTION_MODE_LABELS[normalized] ?? value.replace(/_/g, " ");
 }
 
+// Mirrors the case-only-match check inside `infer_learned_correction` in
+// rust-sidecar/src/dictation_parity.rs: two phrases are a "case-only" edit
+// when they're identical ignoring case but differ in actual casing (i.e. not
+// a no-op, and not a change to the underlying letters/words/whitespace).
+function isCaseOnlyDifference(original: string, corrected: string): boolean {
+  const normalizedOriginal = original.trim().split(/\s+/).join(" ");
+  const normalizedCorrected = corrected.trim().split(/\s+/).join(" ");
+  if (!normalizedOriginal || !normalizedCorrected) {
+    return false;
+  }
+  if (normalizedOriginal === normalizedCorrected) {
+    return false;
+  }
+  return (
+    normalizedOriginal.toLowerCase() === normalizedCorrected.toLowerCase()
+  );
+}
+
 type DictationModeSummaryItem = {
   label: string;
   value: string;
@@ -1206,6 +1224,8 @@ export function DictationView() {
   const [newDictionaryAppScope, setNewDictionaryAppScope] = useState("");
   const [newDictionaryCaseSensitive, setNewDictionaryCaseSensitive] =
     useState(false);
+  const [newDictionaryCategoryScope, setNewDictionaryCategoryScope] =
+    useState<DictationAppCategoryKey | "any">("any");
   const [dictionaryCsvDialogOpen, setDictionaryCsvDialogOpen] = useState(false);
   const [dictionaryCsvMode, setDictionaryCsvMode] = useState<
     "import" | "export"
@@ -1221,6 +1241,9 @@ export function DictationView() {
   const [newSnippetExpansion, setNewSnippetExpansion] = useState("");
   const [newSnippetAppScope, setNewSnippetAppScope] = useState("");
   const [newSnippetCaseSensitive, setNewSnippetCaseSensitive] = useState(false);
+  const [newSnippetCategoryScope, setNewSnippetCategoryScope] = useState<
+    DictationAppCategoryKey | "any"
+  >("any");
   const [dictationRetentionPreset, setDictationRetentionPreset] = useState<
     "immediate" | "24h" | "72h" | "never" | "custom"
   >("never");
@@ -1557,6 +1580,19 @@ export function DictationView() {
         new Date(left.updatedAt).getTime(),
     );
   }, [dictationCorrectionSuggestions]);
+
+  // Sourced entirely from the existing listDictationDictionaryEntries data
+  // (DictationDictionaryEntry already carries createdAt/updatedAt from the
+  // backend) — no new endpoint needed, just a client-side sort + slice.
+  const recentlyLearnedDictionaryEntries = useMemo(() => {
+    return [...dictationDictionaryEntries]
+      .sort(
+        (left, right) =>
+          new Date(right.updatedAt).getTime() -
+          new Date(left.updatedAt).getTime(),
+      )
+      .slice(0, 8);
+  }, [dictationDictionaryEntries]);
 
   const inferModePreset = (values: {
     profile: "normal_speed" | "power_rewrite";
@@ -2767,12 +2803,16 @@ export function DictationView() {
         appScope: newSnippetAppScope.trim() || null,
         caseSensitive: newSnippetCaseSensitive,
         enabled: true,
+        ...(newSnippetCategoryScope !== "any"
+          ? { categoryScope: newSnippetCategoryScope }
+          : {}),
       });
       setDictationSnippets((prev) => [...prev, created]);
       setNewSnippetTrigger("");
       setNewSnippetExpansion("");
       setNewSnippetAppScope("");
       setNewSnippetCaseSensitive(false);
+      setNewSnippetCategoryScope("any");
     } catch (error) {
       console.warn("Failed to create dictation snippet:", error);
     }
@@ -2791,12 +2831,16 @@ export function DictationView() {
         appScope: newDictionaryAppScope.trim() || null,
         caseSensitive: newDictionaryCaseSensitive,
         enabled: true,
+        ...(newDictionaryCategoryScope !== "any"
+          ? { categoryScope: newDictionaryCategoryScope }
+          : {}),
       });
       setDictationDictionaryEntries((prev) => [...prev, created]);
       setNewDictionarySpokenForm("");
       setNewDictionaryReplacement("");
       setNewDictionaryAppScope("");
       setNewDictionaryCaseSensitive(false);
+      setNewDictionaryCategoryScope("any");
     } catch (error) {
       console.warn("Failed to create dictation dictionary entry:", error);
     }
@@ -3025,6 +3069,7 @@ export function DictationView() {
       appScope: string | null;
       caseSensitive: boolean;
       enabled: boolean;
+      categoryScope: string | null;
     }>,
   ) => {
     setDictationSnippets((prev) =>
@@ -3055,6 +3100,7 @@ export function DictationView() {
       appScope: string | null;
       caseSensitive: boolean;
       enabled: boolean;
+      categoryScope: string | null;
     }>,
   ) => {
     setDictationDictionaryEntries((prev) =>
@@ -4898,6 +4944,32 @@ export function DictationView() {
                     >
                       Learn correction
                     </Button>
+                    {isCaseOnlyDifference(
+                      latestCorrectionBaseline,
+                      transcribedText,
+                    ) && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() =>
+                          void learnCorrection(
+                            latestCorrectionBaseline,
+                            transcribedText,
+                            {
+                              force: true,
+                              appTarget,
+                              setStatus: setLatestLearnStatus,
+                              onSuccess: () =>
+                                setLatestCorrectionBaseline(
+                                  transcribedText.trim(),
+                                ),
+                            },
+                          )
+                        }
+                      >
+                        Fix capitalization
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
                       size="sm"
@@ -5790,6 +5862,38 @@ export function DictationView() {
                   </div>
                 </div>
 
+                {recentlyLearnedDictionaryEntries.length > 0 && (
+                  <div
+                    className="rounded-md border bg-muted/20 p-3 space-y-2"
+                    data-testid="recently-learned-dictionary"
+                  >
+                    <p className="text-sm font-medium">Recently learned</p>
+                    <ul className="space-y-1">
+                      {recentlyLearnedDictionaryEntries.map((entry) => (
+                        <li
+                          key={entry.id}
+                          className="flex items-center justify-between gap-3 text-xs"
+                        >
+                          <span className="truncate">
+                            <span className="font-mono text-muted-foreground">
+                              {entry.spokenForm}
+                            </span>
+                            <span className="mx-1 text-muted-foreground">
+                              {"->"}
+                            </span>
+                            <span className="font-medium">
+                              {entry.replacement}
+                            </span>
+                          </span>
+                          <span className="shrink-0 text-muted-foreground">
+                            {new Date(entry.updatedAt).toLocaleString()}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_1fr_auto] gap-2">
                   <input
                     type="text"
@@ -5824,6 +5928,30 @@ export function DictationView() {
                   >
                     Add
                   </Button>
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,240px)]">
+                  <Select
+                    value={newDictionaryCategoryScope}
+                    onValueChange={(value) =>
+                      setNewDictionaryCategoryScope(
+                        value as DictationAppCategoryKey | "any",
+                      )
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="any">
+                        Any destination category
+                      </SelectItem>
+                      {DICTATION_APP_CATEGORY_SELECT_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
                   <input
@@ -5911,6 +6039,35 @@ export function DictationView() {
                               })
                             }
                           />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,220px)]">
+                          <Select
+                            value={entry.categoryScope ?? "any"}
+                            onValueChange={(value) =>
+                              void patchDictionaryEntry(entry.id, {
+                                categoryScope: value === "any" ? null : value,
+                              })
+                            }
+                          >
+                            <SelectTrigger className="text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="any">
+                                Any destination category
+                              </SelectItem>
+                              {DICTATION_APP_CATEGORY_SELECT_OPTIONS.map(
+                                (option) => (
+                                  <SelectItem
+                                    key={option.value}
+                                    value={option.value}
+                                  >
+                                    {option.label}
+                                  </SelectItem>
+                                ),
+                              )}
+                            </SelectContent>
+                          </Select>
                         </div>
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-4 text-xs text-muted-foreground">
@@ -6187,6 +6344,30 @@ export function DictationView() {
                     Add
                   </Button>
                 </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,240px)]">
+                  <Select
+                    value={newSnippetCategoryScope}
+                    onValueChange={(value) =>
+                      setNewSnippetCategoryScope(
+                        value as DictationAppCategoryKey | "any",
+                      )
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="any">
+                        Any destination category
+                      </SelectItem>
+                      {DICTATION_APP_CATEGORY_SELECT_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
                 <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
                   <input
                     type="checkbox"
@@ -6273,6 +6454,35 @@ export function DictationView() {
                               })
                             }
                           />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,220px)]">
+                          <Select
+                            value={snippet.categoryScope ?? "any"}
+                            onValueChange={(value) =>
+                              void patchSnippet(snippet.id, {
+                                categoryScope: value === "any" ? null : value,
+                              })
+                            }
+                          >
+                            <SelectTrigger className="text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="any">
+                                Any destination category
+                              </SelectItem>
+                              {DICTATION_APP_CATEGORY_SELECT_OPTIONS.map(
+                                (option) => (
+                                  <SelectItem
+                                    key={option.value}
+                                    value={option.value}
+                                  >
+                                    {option.label}
+                                  </SelectItem>
+                                ),
+                              )}
+                            </SelectContent>
+                          </Select>
                         </div>
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-4 text-xs text-muted-foreground">
@@ -7009,6 +7219,36 @@ export function DictationView() {
                       >
                         Learn correction
                       </Button>
+                      {isCaseOnlyDifference(
+                        historyCorrectionBaseline,
+                        historyCorrectionText,
+                      ) && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            void learnCorrection(
+                              historyCorrectionBaseline,
+                              historyCorrectionText,
+                              {
+                                force: true,
+                                appTarget:
+                                  selectedHistoryDetails?.activationMatcher ??
+                                  selectedHistoryDetails?.appTarget ??
+                                  selectedHistoryDetails?.contextAppName ??
+                                  null,
+                                setStatus: setHistoryLearnStatus,
+                                onSuccess: () =>
+                                  setHistoryCorrectionBaseline(
+                                    historyCorrectionText.trim(),
+                                  ),
+                              },
+                            )
+                          }
+                        >
+                          Fix capitalization
+                        </Button>
+                      )}
                     </div>
                   </div>
                   <div className="rounded-lg bg-muted p-4 min-h-[180px]">

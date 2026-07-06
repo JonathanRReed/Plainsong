@@ -3787,6 +3787,7 @@ fn apply_dictation_snippets(
             app_scope: snippet.app_scope.clone(),
             case_sensitive: snippet.case_sensitive,
             enabled: snippet.enabled,
+            category_scope: snippet.category_scope.clone(),
         })
         .collect::<Vec<_>>();
     crate::dictation_parity::apply_dictation_snippets(input, &rules, app_target)
@@ -3888,6 +3889,7 @@ fn apply_learned_correction_candidate(
                     app_scope: Some(None),
                     case_sensitive: Some(false),
                     enabled: Some(true),
+                    category_scope: Some(None),
                 },
             )
             .map_err(|e| e.to_string())?;
@@ -3900,6 +3902,7 @@ fn apply_learned_correction_candidate(
                 app_scope: None,
                 case_sensitive: false,
                 enabled: true,
+                category_scope: None,
             })
             .map_err(|e| e.to_string())?;
         ("created".to_string(), created)
@@ -5277,6 +5280,7 @@ mod tests {
             app_scope: app_scope.map(str::to_string),
             case_sensitive,
             enabled: true,
+            category_scope: None,
             created_at: now,
             updated_at: now,
         }
@@ -13746,6 +13750,11 @@ async fn stop_dictation_for_sidecar(
     }
 
     if command_applied.is_none() {
+        let destination_category = settings::resolve_dictation_app_category_with_overrides(
+            &settings_snapshot.transcription,
+            app_target.as_deref(),
+            app_bundle_id.as_deref(),
+        );
         let pipeline_result = crate::dictation_pipeline::apply_dictation_pipeline(
             crate::dictation_pipeline::DictationPipelineInput {
                 text: raw_transcribed_text.as_str(),
@@ -13756,6 +13765,7 @@ async fn stop_dictation_for_sidecar(
                 formatting_hint: formatting_hint.as_deref(),
                 smart_formatting_enabled: true,
                 recent_inserted_text,
+                destination_category,
             },
         );
         final_text = pipeline_result.text.trim().to_string();
@@ -16514,6 +16524,7 @@ pub async fn dispatch_command(
                     if existing.replacement == request.replacement.trim()
                         && existing.case_sensitive == request.case_sensitive
                         && existing.enabled == request.enabled
+                        && existing.category_scope == request.category_scope
                     {
                         skipped_count += 1;
                         continue;
@@ -16526,6 +16537,7 @@ pub async fn dispatch_command(
                             app_scope: Some(request.app_scope.clone()),
                             case_sensitive: Some(request.case_sensitive),
                             enabled: Some(request.enabled),
+                            category_scope: Some(request.category_scope.clone()),
                         },
                     ) {
                         Ok(_) => updated_count += 1,
