@@ -23,5 +23,9 @@
   "ignoreDependencies": [
     "tailwindcss",
     "tw-animate-css"
-  ]
+  ],
+  "ignoreExportsUsedInFile": {
+    "interface": true,
+    "type": true
+  }
 }
