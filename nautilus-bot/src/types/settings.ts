@@ -17,6 +17,22 @@ export interface Settings {
   theme: "light" | "dark" | "system";
 }
 
+export type DictationAppCategoryKey =
+  | "other"
+  | "messaging"
+  | "email"
+  | "notes"
+  | "worklog"
+  | "ai_chat"
+  | "code_editor";
+
+export interface DictationAppCategoryOverride {
+  id: string;
+  appMatcher: string;
+  category: DictationAppCategoryKey;
+  enabled: boolean;
+}
+
 export interface DictationCustomMode {
   id: string;
   name: string;
@@ -131,6 +147,8 @@ export interface TranscriptionSettings {
   embeddingModel: string;
   enableAutoAnalysis: boolean;
   platformOptimization?: PlatformOptimizationSettings;
+  dictationCategoryFormattingEnabled?: boolean;
+  dictationAppCategoryOverrides?: DictationAppCategoryOverride[];
 }
 
 export interface PlatformOptimizationSettings {

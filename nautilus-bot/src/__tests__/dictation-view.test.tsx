@@ -730,6 +730,68 @@ describe("DictationView modes", () => {
     expect(await screen.findByDisplayValue("be right back")).toBeInTheDocument();
   });
 
+  it("toggles category-aware dictation formatting", async () => {
+    render(<DictationView />);
+
+    const toggle = await screen.findByText("Format for destination app");
+    const card = toggle.closest(".rounded-2xl");
+    expect(card).toBeTruthy();
+    const switchControl = within(card as HTMLElement).getByRole("switch");
+    expect(switchControl).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.click(switchControl);
+
+    await waitFor(() => {
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
+    });
+
+    const saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+    const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
+    expect(latestSettings.transcription.dictationCategoryFormattingEnabled).toBe(false);
+  });
+
+  it("adds and removes a per-app category override", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("App overrides");
+    const appMatcherInput = screen.getByPlaceholderText("App matcher (e.g. slack)");
+    fireEvent.change(appMatcherInput, {
+      target: { value: "notion" },
+    });
+    const overridesSection = appMatcherInput.closest(".border-t");
+    expect(overridesSection).toBeTruthy();
+    fireEvent.click(
+      within(overridesSection as HTMLElement).getByRole("button", { name: "Add" }),
+    );
+
+    await waitFor(() => {
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
+    });
+
+    let saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+    let latestSettings = saveCalls[saveCalls.length - 1]?.[0];
+    expect(latestSettings.transcription.dictationAppCategoryOverrides).toHaveLength(1);
+    expect(latestSettings.transcription.dictationAppCategoryOverrides[0]).toMatchObject({
+      appMatcher: "notion",
+      category: "messaging",
+      enabled: true,
+    });
+
+    const overrideRow = (await screen.findByDisplayValue("notion")).closest(
+      ".space-y-2",
+    );
+    expect(overrideRow).toBeTruthy();
+    fireEvent.click(
+      within(overrideRow as HTMLElement).getByRole("button", { name: "Remove" }),
+    );
+
+    await waitFor(() => {
+      saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+      latestSettings = saveCalls[saveCalls.length - 1]?.[0];
+      expect(latestSettings.transcription.dictationAppCategoryOverrides).toHaveLength(0);
+    });
+  });
+
   it("persists command preset prompt edits", async () => {
     const backend = await import("@/lib/backend/dictation");
 
