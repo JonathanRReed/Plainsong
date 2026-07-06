@@ -57,10 +57,12 @@ explicitly so nothing is assumed.
   secrets are present and otherwise publishes an unsigned build. macOS is
   **arm64-only for v1** (the Rust sidecar is host-arch; Intel needs per-arch
   cross-compiles — tracked).
-- **Packaged build verified as of 2026-06-13** (STALE — see known gap below):
-  `electron:build:mac` produced `Plainsong.app` with bundle id
-  `com.plainsong.app`, both TCC usage strings in the Info.plist, and the
-  arm64 `plainsong-sidecar` bundled in `Resources/sidecar/` at that time.
+- **Packaged build re-verified 2026-07-06**: `electron:pack` produces
+  `Plainsong.app` (342MB, under the 450MB size-gate cap) with bundle id
+  `com.plainsong.app`, both TCC usage strings in the Info.plist, and both
+  native binaries bundled — `plainsong-sidecar` in `Resources/sidecar/` and
+  the new hold-to-talk `plainsong-native-shortcut-helper` in
+  `Resources/shortcut-helper/`.
 - **Honest hotkey UI**: onboarding still defaults to **toggle**; hold-to-talk
   is now a real, selectable option in Settings, gated on a runtime check that
   the native helper is actually running (never offered as a dead choice), and
@@ -136,25 +138,16 @@ Expect this pass to surface a couple of small fixes; that's normal.
 - **Shortcut-conflict detection utility** (`partitionUniqueShortcutRegistrations`,
   ported alongside the hold-to-talk work) is tested but not yet wired into an
   actual conflict-detection UX — currently dormant, safe to activate later.
-- **Packaged-build step currently broken, discovered 2026-07-06** (pre-existing,
-  NOT caused by this push — confirmed via `git diff` that no `package.json`
-  dependency changed across any of the 7 commits, only the `scripts` block
-  gained `shortcut-helper:build` wiring): `bun run electron:pack` fails at the
-  `electron-builder` native-packaging step with `production dependency not
-  found: @radix-ui/react-dialog`, even though that package is genuinely
-  present in `node_modules` and declared in `package.json`. Root cause is
-  electron-builder's Bun-compatibility shim ("bun does not support any CLI for
-  dependency tree extraction, utilizing file traversal collector instead") —
-  its manual `node_modules` traversal fails to resolve this dependency, likely
-  from an electron-builder or Radix version bump since the last verified
-  packaged build (2026-06-13) that this repo's CI never re-checks (CI's
-  "production build" step only runs `bun run build:renderer`, never the full
-  `electron-builder` packaging path — so this regression had no gate to catch
-  it). All of this session's actual code changes are independently verified
-  via typecheck/vitest/cargo-test/clippy/knip/ipc-contract, which do NOT
-  exercise this packaging step — the feature work itself is not implicated.
-  Needs investigation (electron-builder version pin, or its Bun-collector
-  config) separately from this push.
+- **Packaged-build environment drift, found + fixed 2026-07-06**: `bun run
+  electron:pack` briefly failed with "production dependency not found:
+  @radix-ui/react-dialog" — the on-disk `node_modules/@radix-ui/react-dialog`
+  was stale at `1.1.15` while `package.json`/`bun.lock` require `^1.1.16`
+  (and electron-builder itself was stale at `26.8.1` vs. the lockfile's
+  `26.15.3`). A local dev-environment issue, not a repo bug: `bun.lock` was
+  already correct, so a plain `bun install` reconciled `node_modules` with
+  zero lockfile changes to commit. Confirmed CI's "production build" step
+  only runs `bun run build:renderer`, never the full `electron-builder`
+  packaging path, so this kind of drift has no gate — worth adding one.
 
 ## Done since the first checklist
 
