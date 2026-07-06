@@ -29,6 +29,7 @@ const electronLocalCommands = new Set([
   "__window_show__",
   "__window_start_drag__",
   "check_for_updates",
+  "get_dictation_shortcut_capability_status",
   "get_update_status",
   "install_update",
 ]);

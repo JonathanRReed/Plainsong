@@ -32,6 +32,7 @@ import {
 import { useTheme } from "@/components/theme-provider";
 import {
   clearProviderSecret,
+  getDictationShortcutCapabilityStatus,
   getPermissionDiagnostics,
   getSecurityStatus,
   getSettings,
@@ -81,7 +82,11 @@ import type {
   BackupInfo,
   CloudSetupReport,
 } from "@/lib/backend/storage";
-import type { PermissionDiagnostics, SecurityStatus } from "@/lib/backend/settings";
+import type {
+  DictationShortcutCapabilityStatus,
+  PermissionDiagnostics,
+  SecurityStatus,
+} from "@/lib/backend/settings";
 import type { DiarizationModelOption } from "@/lib/backend/asr";
 import type { Settings } from "@/types/settings";
 import { normalizeThemeScheme } from "@/lib/theme-schemes";
@@ -439,6 +444,8 @@ export function SettingsView() {
     useState<CloudSetupReport | null>(null);
   const [permissionDiagnostics, setPermissionDiagnostics] =
     useState<PermissionDiagnostics | null>(null);
+  const [nativeShortcutAvailable, setNativeShortcutAvailable] =
+    useState(false);
   const [securityStatus, setSecurityStatus] = useState<SecurityStatus | null>(
     null,
   );
@@ -510,10 +517,12 @@ export function SettingsView() {
     [settings, permissionDiagnostics],
   );
   const dictationShortcutBehavior = resolveDictationHotkeyBehavior(settings);
+  const dictationHoldToTalkActive =
+    nativeShortcutAvailable && settings?.transcription.dictationPushToTalk;
   const dictationShortcutBehaviorHint = settings?.transcription
     .dictationHandsFreeEnabled
     ? "Press shortcut once to start hands-free dictation, then pause speaking or press again to stop"
-    : settings?.transcription.dictationPushToTalk
+    : dictationHoldToTalkActive
       ? "Hold shortcut to record, release to stop"
       : "Press shortcut once to start, then press again to stop";
 
@@ -830,6 +839,24 @@ export function SettingsView() {
       mounted = false;
     };
   }, [permissionDiagnostics]);
+
+  useEffect(() => {
+    let mounted = true;
+    getDictationShortcutCapabilityStatus()
+      .then((status: DictationShortcutCapabilityStatus) => {
+        if (mounted) {
+          setNativeShortcutAvailable(status.nativeShortcutAvailable);
+        }
+      })
+      .catch((err) => {
+        // A native-helper probe failure should not block settings; hold-to-talk
+        // simply stays hidden and the honest toggle-only copy remains in place.
+        console.warn("getDictationShortcutCapabilityStatus check failed:", err);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (activeTab !== "security" || hasLoadedSecurityTab) {
@@ -1526,12 +1553,37 @@ export function SettingsView() {
             <p className="text-sm text-muted-foreground">
               {dictationShortcutBehaviorHint}
             </p>
-            <p className="w-full rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-foreground">
-              Toggle{" "}
-              <span className="text-muted-foreground">
-                — press to start, press again to stop
-              </span>
-            </p>
+            {nativeShortcutAvailable ? (
+              <select
+                aria-label="Hotkey behavior"
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                value={settings?.transcription.dictationPushToTalk ? "hold_to_talk" : "toggle"}
+                onChange={(event) => {
+                  if (!settings) {
+                    return;
+                  }
+                  const pushToTalk = event.target.value === "hold_to_talk";
+                  updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      dictationPushToTalk: pushToTalk,
+                      dictationHandsFreeEnabled: false,
+                    },
+                  });
+                }}
+              >
+                <option value="toggle">Toggle (press to start, press again to stop)</option>
+                <option value="hold_to_talk">Hold-to-talk (hold to record, release to stop)</option>
+              </select>
+            ) : (
+              <p className="w-full rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-foreground">
+                Toggle{" "}
+                <span className="text-muted-foreground">
+                  — press to start, press again to stop
+                </span>
+              </p>
+            )}
           </div>
         )}
 

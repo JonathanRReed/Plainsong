@@ -98,6 +98,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_dictation_history_details",
   "get_dictation_insights",
   "get_dictation_overlay_state",
+  "get_dictation_shortcut_capability_status",
   "get_embedding_status",
   "get_loopback_device_name",
   "get_meeting_chat_messages",

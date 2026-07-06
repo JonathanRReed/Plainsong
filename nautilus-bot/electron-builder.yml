@@ -44,6 +44,15 @@ mac:
   extendInfo:
     NSMicrophoneUsageDescription: "Plainsong transcribes your speech on your Mac for dictation and meeting capture. Audio stays on your device."
     NSSpeechRecognitionUsageDescription: "Plainsong can use Apple's on-device speech recognition to transcribe your dictation."
+  # macOS-only native helper (built by `shortcut-helper:build`) that observes
+  # the dictation hotkey via a listen-only CGEventTap so press-and-hold works.
+  # Packaged the same way as the Rust sidecar: it must be signed with the same
+  # identity/entitlements as the main app — see docs/CODE_SIGNING.md.
+  extraResources:
+    - from: dist-native/
+      to: shortcut-helper
+      filter:
+        - plainsong-native-shortcut-helper
 
 win:
   target:

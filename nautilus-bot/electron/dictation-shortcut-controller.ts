@@ -2,9 +2,11 @@ type DictationShortcutBehavior = "hold_to_talk" | "toggle" | "hands_free";
 type DictationShortcutSignal =
   | "pressed"
   | "released"
+  | "cancelled"
   | "emergency_stop"
   | "watchdog_timeout";
 type DictationShortcutCapability = "press_only" | "press_and_release";
+type DictationShortcutSource = "electron" | "native";
 type DictationShortcutPhase =
   | "idle"
   | "recording"
@@ -13,7 +15,7 @@ type DictationShortcutPhase =
   | "delivering"
   | "done"
   | "error";
-type DictationShortcutAction = "start" | "stop" | "ignore";
+type DictationShortcutAction = "start" | "stop" | "cancel" | "ignore";
 
 type DictationShortcutDecision = {
   action: DictationShortcutAction;
@@ -39,6 +41,23 @@ export function resolveDictationShortcutBehavior(settings: {
   return "toggle";
 }
 
+export function resolveDictationShortcutCapability(input: {
+  nativeShortcutAvailable: boolean;
+  behavior: DictationShortcutBehavior;
+}): DictationShortcutCapability {
+  if (input.nativeShortcutAvailable && input.behavior === "hold_to_talk") {
+    return "press_and_release";
+  }
+  return "press_only";
+}
+
+export function shouldHandleDictationShortcutSource(input: {
+  source: DictationShortcutSource;
+  nativeShortcutAvailable: boolean;
+}): boolean {
+  return input.source === "native" || !input.nativeShortcutAvailable;
+}
+
 export function resolveDictationShortcutDecision(input: {
   phase: DictationShortcutPhase;
   behavior: DictationShortcutBehavior;
@@ -54,6 +73,22 @@ export function resolveDictationShortcutDecision(input: {
       ? {
           action: "stop",
           stopReason: signal,
+          usesPressOnlyFallback,
+          effectiveBehavior: behavior,
+        }
+      : {
+          action: "ignore",
+          stopReason: null,
+          usesPressOnlyFallback,
+          effectiveBehavior: behavior,
+        };
+  }
+
+  if (signal === "cancelled") {
+    return phase === "recording"
+      ? {
+          action: "cancel",
+          stopReason: "cancelled",
           usesPressOnlyFallback,
           effectiveBehavior: behavior,
         }
