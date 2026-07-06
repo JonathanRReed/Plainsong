@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { useRecordings } from "@/hooks/use-recordings";
 import {
   exportRecordingV2,
   exportWithTemplate,
   listExportTemplates,
+  openExportPath,
   type ExportTemplate,
 } from "@/lib/backend/exports";
 import { Button } from "@/components/ui/button";
@@ -12,6 +13,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/ui/empty-state";
+import { requestMainView } from "@/lib/navigation";
 import {
   Select,
   SelectContent,
@@ -19,13 +22,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { AlertCircle, CheckCircle2, FileOutput, Loader2, Eye } from "lucide-react";
+import { AlertCircle, CheckCircle2, ExternalLink, FileAudio, FileOutput, Loader2, Eye, RefreshCw } from "lucide-react";
 
 type ExportFormat = "markdown" | "json" | "text";
 type RedactionLevel = "none" | "basic" | "strict";
 
 export function ExportsView() {
-  const { recordings } = useRecordings();
+  const { recordings, isLoading: recordingsLoading, error: recordingsError } = useRecordings();
   const [recordingId, setRecordingId] = useState<string>("");
   const [format, setFormat] = useState<ExportFormat>("markdown");
   const [redactionLevel, setRedactionLevel] = useState<RedactionLevel>("basic");
@@ -34,6 +37,8 @@ export function ExportsView() {
   const [lastExportPath, setLastExportPath] = useState<string | null>(null);
   const [isWorking, setIsWorking] = useState(false);
   const [templates, setTemplates] = useState<ExportTemplate[]>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(true);
+  const [templateLoadError, setTemplateLoadError] = useState<string | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [templatePreview, setTemplatePreview] = useState("");
   const [templateTargetPath, setTemplateTargetPath] = useState("");
@@ -51,18 +56,30 @@ export function ExportsView() {
     }
   };
 
-  useEffect(() => {
-    void listExportTemplates()
-      .then((loadedTemplates) => {
-        setTemplates(loadedTemplates);
-        if (loadedTemplates.length > 0) {
-          setSelectedTemplateId(loadedTemplates[0].id);
+  const loadTemplates = useCallback(async () => {
+    setTemplatesLoading(true);
+    setTemplateLoadError(null);
+    try {
+      const loadedTemplates = await listExportTemplates();
+      setTemplates(loadedTemplates);
+      setSelectedTemplateId((current) => {
+        if (loadedTemplates.some((template) => template.id === current)) {
+          return current;
         }
-      })
-      .catch((e) => {
-        console.warn("Failed to load export templates:", e);
+        return loadedTemplates[0]?.id ?? "";
       });
+    } catch (e) {
+      setTemplates([]);
+      setSelectedTemplateId("");
+      setTemplateLoadError(e instanceof Error ? e.message : "Export templates could not be loaded");
+    } finally {
+      setTemplatesLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void loadTemplates();
+  }, [loadTemplates]);
 
   const generatePreview = async () => {
     setError(null);
@@ -97,6 +114,15 @@ export function ExportsView() {
       setError(e instanceof Error ? e.message : "Export failed");
     } finally {
       setIsWorking(false);
+    }
+  };
+
+  const openLastExport = async (path: string) => {
+    setError(null);
+    try {
+      await openExportPath(path);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not open export");
     }
   };
 
@@ -158,6 +184,30 @@ export function ExportsView() {
 
       <ScrollArea className="flex-1">
         <div className="p-6 space-y-6 max-w-5xl">
+          {recordingsError ? (
+            <div className="flex items-center gap-3 rounded-lg border border-rust/30 bg-rust/10 px-4 py-3 text-sm text-rust">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>{recordingsError}</span>
+            </div>
+          ) : null}
+
+          {!recordingsLoading && !recordingsError && recordings.length === 0 ? (
+            <Card>
+              <CardContent>
+                <EmptyState
+                  icon={<FileAudio className="h-8 w-8" />}
+                  title="No recordings to export"
+                  description="Record a meeting first, then return here to preview, redact, and export the transcript or notes."
+                  action={{
+                    label: "Open meetings",
+                    onClick: () => requestMainView("recordings"),
+                  }}
+                  className="py-14"
+                />
+              </CardContent>
+            </Card>
+          ) : null}
+
           <Card>
             <CardHeader>
               <CardTitle>Export Setup</CardTitle>
@@ -229,6 +279,11 @@ export function ExportsView() {
                   Export
                 </Button>
               </div>
+              {!recordingId ? (
+                <p className="text-xs text-muted-foreground">
+                  Select a recording before previewing or exporting.
+                </p>
+              ) : null}
             </CardContent>
           </Card>
 
@@ -242,7 +297,17 @@ export function ExportsView() {
                 <Label>Template</Label>
                 <Select value={selectedTemplateId} onValueChange={setSelectedTemplateId}>
                   <SelectTrigger>
-                    <SelectValue placeholder={templates.length === 0 ? "No templates available" : "Select template"} />
+                    <SelectValue
+                      placeholder={
+                        templatesLoading
+                          ? "Loading templates"
+                          : templateLoadError
+                            ? "Templates unavailable"
+                            : templates.length === 0
+                              ? "No templates available"
+                              : "Select template"
+                      }
+                    />
                   </SelectTrigger>
                   <SelectContent>
                     {templates.map((template) => (
@@ -253,10 +318,29 @@ export function ExportsView() {
                   </SelectContent>
                 </Select>
               </div>
+              {templateLoadError ? (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rust/30 bg-rust/10 px-3 py-2 text-sm text-rust">
+                  <span>{templateLoadError}</span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void loadTemplates()}
+                    disabled={templatesLoading}
+                  >
+                    {templatesLoading ? (
+                      <Loader2 data-icon="inline-start" className="animate-spin" />
+                    ) : (
+                      <RefreshCw data-icon="inline-start" />
+                    )}
+                    Retry
+                  </Button>
+                </div>
+              ) : null}
               <Button
                 variant="outline"
                 onClick={generateTemplatePreview}
-                disabled={isWorking || !recordingId || !selectedTemplateId}
+                disabled={isWorking || templatesLoading || !recordingId || !selectedTemplateId}
               >
                 {isWorking ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Eye className="mr-2 h-4 w-4" />}
                 Render Preview
@@ -271,15 +355,31 @@ export function ExportsView() {
               </div>
               <Button
                 onClick={exportTemplateNow}
-                disabled={isWorking || !recordingId || !selectedTemplateId}
+                disabled={isWorking || templatesLoading || !recordingId || !selectedTemplateId}
               >
                 {isWorking ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileOutput className="mr-2 h-4 w-4" />}
                 Export Template
               </Button>
-              {lastTemplateExportPath && (
+              {!recordingId || !selectedTemplateId ? (
                 <p className="text-xs text-muted-foreground">
-                  Template exported to <span className="font-mono break-all">{lastTemplateExportPath}</span>
+                  Select a recording and template before rendering structured exports.
                 </p>
+              ) : null}
+              {lastTemplateExportPath && (
+                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gold/30 bg-gold/10 px-3 py-2 text-xs">
+                  <span className="text-muted-foreground">
+                    Template exported to <span className="font-mono break-all">{lastTemplateExportPath}</span>
+                  </span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void openLastExport(lastTemplateExportPath)}
+                  >
+                    <ExternalLink data-icon="inline-start" />
+                    Open export
+                  </Button>
+                </div>
               )}
               <pre className="text-xs leading-relaxed whitespace-pre-wrap rounded-lg border bg-muted/20 p-4 font-mono min-h-[180px]">
                 {templatePreview || (
@@ -300,9 +400,18 @@ export function ExportsView() {
           )}
 
           {lastExportPath && (
-            <div className="flex items-center gap-3 rounded-lg border border-gold/30 bg-gold/10 px-4 py-3 text-sm">
+            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-gold/30 bg-gold/10 px-4 py-3 text-sm">
               <CheckCircle2 className="h-4 w-4 shrink-0 text-gold-text" />
               <span>Export written to: <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs break-all">{lastExportPath}</code></span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void openLastExport(lastExportPath)}
+              >
+                <ExternalLink data-icon="inline-start" />
+                Open export
+              </Button>
             </div>
           )}
 

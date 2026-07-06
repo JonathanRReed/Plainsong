@@ -1,5 +1,6 @@
 // @ts-nocheck - Vitest mock types don't align with TypeScript
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RecordingsView } from "@/components/views/recordings-view";
 import type { Recording } from "@/types";
@@ -82,7 +83,14 @@ vi.mock("@/components/toast", () => ({
 }));
 
 vi.mock("@/components/recording-overlay", () => ({
-  ConsentDialog: () => null,
+  ConsentDialog: (props: any) =>
+    props.open ? (
+      <div role="dialog" aria-label="Meeting consent">
+        <button type="button" onClick={() => props.onStart?.({ systemAudio: true })}>
+          Confirm meeting consent
+        </button>
+      </div>
+    ) : null,
 }));
 
 vi.mock("@/components/transcript-viewer", () => ({
@@ -959,5 +967,81 @@ describe("RecordingsView", () => {
     await screen.findByText("Meeting notes");
     expect(screen.getByText("Capture mode")).toBeInTheDocument();
     expect(screen.getAllByText("Me + Them").length).toBeGreaterThan(0);
+  });
+
+  it("starts meeting capture after consent and stops an active meeting", async () => {
+    startMeeting.mockResolvedValueOnce("r-live");
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByRole("button", { name: "New Meeting" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm meeting consent" }));
+
+    await waitFor(() => {
+      expect(startMeeting).toHaveBeenCalledWith(
+        expect.objectContaining({
+          systemAudio: true,
+          projectId: "default",
+          consentPromptShown: true,
+        }),
+      );
+    });
+
+    recordingState = {
+      isRecording: true,
+      recordingId: "r1",
+      formattedDuration: "02:04",
+    };
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByRole("button", { name: "Stop Meeting" }));
+
+    await waitFor(() => {
+      expect(stopMeeting).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("explains unavailable speaker identification and can run diarization when available", async () => {
+    const user = userEvent.setup();
+    backend.isDiarizationModelAvailable.mockResolvedValueOnce(false);
+    backend.getMeetingTranscriptDetails.mockResolvedValue({
+      segmentCount: 1,
+      model: "Distil Whisper",
+      modelId: "distil-large-v3",
+      requestedProvider: "distil_whisper",
+      actualProvider: "distil_whisper",
+      qualityScore: 0.92,
+      transcriptionLatencyMs: 880,
+      sourceMode: "me_them",
+      hasSourceAwareSpeakers: false,
+      hasSpeakerLabels: false,
+    });
+
+    render(<RecordingsView />);
+
+    await user.click(screen.getByText("Weekly sync"));
+    await user.click(await screen.findByRole("tab", { name: "Transcript" }));
+    await screen.findByText("No speaker labels detected");
+    await user.click(await screen.findByRole("button", { name: "Identify Speakers" }));
+
+    expect(
+      await screen.findByText(/Speaker diarization is not yet available as a local model/i)
+    ).toBeInTheDocument();
+
+    backend.isDiarizationModelAvailable.mockResolvedValueOnce(true);
+    backend.runDiarization.mockResolvedValueOnce({
+      speakers: [
+        { id: "speaker-1", name: "Speaker 1" },
+        { id: "speaker-2", name: "Speaker 2" },
+      ],
+      segmentsUpdated: 2,
+    });
+
+    await user.click(screen.getByRole("button", { name: "Identify Speakers" }));
+
+    await waitFor(() => {
+      expect(backend.runDiarization).toHaveBeenCalledWith("r1");
+    });
+    expect(await screen.findByText("Speaker identification complete (2 speakers found).")).toBeInTheDocument();
   });
 });

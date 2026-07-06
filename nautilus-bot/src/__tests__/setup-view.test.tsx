@@ -206,6 +206,7 @@ describe("SetupView", () => {
     expect(screen.getAllByRole("button", { name: "Fix dictation setup" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: "Set up meetings" }).length).toBeGreaterThan(0);
     expect(screen.getByText(/every route's runtime state/i)).toBeInTheDocument();
+    expect(screen.getByText(/Permission and insert tests may open macOS settings/i)).toBeInTheDocument();
   });
 
   it("downloads a missing provider model and refreshes runtime probes", async () => {
@@ -312,5 +313,15 @@ describe("SetupView", () => {
     render(<SetupView />);
 
     expect(screen.getByText("Keyboard fallback")).toBeInTheDocument();
+  });
+
+  it("does not mark speech permission ready before diagnostics load", () => {
+    setupStatusMock.loading = true;
+    setupStatusMock.permissions = null as never;
+
+    render(<SetupView />);
+
+    expect(screen.getByText("Speech")).toBeInTheDocument();
+    expect(screen.getAllByText("Checking").length).toBeGreaterThan(0);
   });
 });
