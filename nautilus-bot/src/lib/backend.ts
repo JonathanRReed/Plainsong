@@ -180,6 +180,56 @@ export async function captureSelectedTextForPlayback(): Promise<string | null> {
   return await invoke("capture_selected_text_for_playback");
 }
 
+// Keep in sync with the command keys the Rust sidecar actually resolves via
+// `dictation_command_selected_text_label` in rust-sidecar/src/dictation_parity.rs.
+// That function currently only recognizes a subset of these
+// (rewrite_shorter, rewrite_professional, bulletize_selection, and the four
+// case-transform commands); the rest are declared here for the full
+// renderer metadata layer (src/lib/selected-text-actions.ts) and will 400
+// from the backend until the Rust side adds support for them.
+export type SelectedTextTransformCommand =
+  | "proofread_text"
+  | "rewrite_shorter"
+  | "expand_text"
+  | "continue_writing"
+  | "simplify_language"
+  | "rewrite_professional"
+  | "rewrite_friendly"
+  | "rewrite_casual"
+  | "summarize_text"
+  | "translate_english"
+  | "explain_text"
+  | "find_bugs"
+  | "bulletize_selection"
+  | "numbered_list_selection"
+  | "polish_text"
+  | "prompt_engineer"
+  | "uppercase_selection"
+  | "lowercase_selection"
+  | "title_case_selection"
+  | "sentence_case_selection";
+
+export interface SelectedTextTransformResult {
+  commandKey: string;
+  inputText: string;
+  outputText: string;
+  targetScope?: "selection" | "focused_field" | null;
+  targetApp?: string | null;
+  targetBundleId?: string | null;
+  pasted: boolean;
+  copied: boolean;
+  error?: string | null;
+  usedAi: boolean;
+  provider?: string | null;
+  modelId?: string | null;
+}
+
+export async function transformSelectedText(
+  commandKey: SelectedTextTransformCommand
+): Promise<SelectedTextTransformResult> {
+  return await invoke("transform_selected_text", { commandKey });
+}
+
 export async function getDictationAudioLevel(): Promise<number> {
   return await invoke("get_dictation_audio_level");
 }

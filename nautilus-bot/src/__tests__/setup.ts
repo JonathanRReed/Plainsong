@@ -13,6 +13,21 @@ Element.prototype.hasPointerCapture = () => false;
 Element.prototype.setPointerCapture = () => {};
 Element.prototype.releasePointerCapture = () => {};
 
+// jsdom does not implement matchMedia; components like the toast progress
+// bar (src/components/toast.tsx) query prefers-reduced-motion.
+if (!window.matchMedia) {
+  window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  })) as unknown as typeof window.matchMedia;
+}
+
 const canvas2DContextStub = {
   beginPath: vi.fn(),
   clearRect: vi.fn(),

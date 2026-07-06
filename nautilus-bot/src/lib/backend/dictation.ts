@@ -37,5 +37,6 @@ export type {
   DictationStartOptions,
   LearnDictationCorrectionResult,
   QueueDictationCorrectionSuggestionResult,
+  SelectedTextTransformCommand,
   DictationCorrectionSuggestion,
 } from "../backend";
