@@ -799,6 +799,15 @@ export async function repairCursorInsertPermissions(): Promise<PermissionDiagnos
   return await invoke("repair_cursor_insert_permissions");
 }
 
+export interface DictationShortcutCapabilityStatus {
+  nativeShortcutAvailable: boolean;
+}
+
+/** Check whether the native hold-to-talk helper is available on this machine. */
+export async function getDictationShortcutCapabilityStatus(): Promise<DictationShortcutCapabilityStatus> {
+  return await invoke("get_dictation_shortcut_capability_status");
+}
+
 // Diarization types
 interface Speaker {
   id: string;

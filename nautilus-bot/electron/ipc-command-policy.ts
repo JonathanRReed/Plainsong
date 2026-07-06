@@ -12,6 +12,7 @@ const FAST_COMMANDS = new Set<string>([
   "get_default_asr_provider",
   "get_dictation_audio_level",
   "get_dictation_overlay_state",
+  "get_dictation_shortcut_capability_status",
   "get_loopback_device_name",
   "get_permission_diagnostics",
   "get_recording_overlay_state",

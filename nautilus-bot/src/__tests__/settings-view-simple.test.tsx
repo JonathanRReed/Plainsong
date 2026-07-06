@@ -142,6 +142,9 @@ vi.mock("@/lib/backend", () => ({
     notes: [],
   })),
   getBackupSetupReport: vi.fn(),
+  getDictationShortcutCapabilityStatus: vi.fn(async () => ({
+    nativeShortcutAvailable: false,
+  })),
   getOllamaStatus: vi.fn(async () => true),
   getSecurityStatus: vi.fn(async () => ({
     vaultInitialized: false,
@@ -340,6 +343,64 @@ describe("SettingsView performance behavior", () => {
     await waitFor(() => {
       expect(backend.saveSettings).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("offers a real hold-to-talk option once the native shortcut helper is available", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: true,
+    });
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await waitFor(() => {
+      expect(backend.getDictationShortcutCapabilityStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findAllByText("Capture and transcription");
+
+    const hotkeySelect = await screen.findByLabelText("Hotkey behavior");
+    expect(hotkeySelect.tagName).toBe("SELECT");
+    expect(
+      within(hotkeySelect as HTMLSelectElement).getByText(
+        "Hold-to-talk (hold to record, release to stop)",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.change(hotkeySelect, { target: { value: "hold_to_talk" } });
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
+    const lastSave = saveCalls[saveCalls.length - 1]?.[0] as
+      | { transcription?: { dictationPushToTalk?: boolean } }
+      | undefined;
+    expect(lastSave?.transcription?.dictationPushToTalk).toBe(true);
+  });
+
+  it("keeps the honest toggle-only copy when the native shortcut helper is unavailable", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: false,
+    });
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await waitFor(() => {
+      expect(backend.getDictationShortcutCapabilityStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findAllByText("Capture and transcription");
+
+    expect(screen.queryByLabelText("Hotkey behavior")).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText(/press to start, press again to stop/).length,
+    ).toBeGreaterThan(0);
   });
 
   it("shows personal profile sync actions and can restore the latest profile snapshot", async () => {

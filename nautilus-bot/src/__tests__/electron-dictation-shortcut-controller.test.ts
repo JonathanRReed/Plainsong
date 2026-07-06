@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   resolveDictationShortcutBehavior,
+  resolveDictationShortcutCapability,
   resolveDictationShortcutDecision,
+  shouldHandleDictationShortcutSource,
 } from "../../electron/dictation-shortcut-controller";
 
 describe("resolveDictationShortcutBehavior", () => {
@@ -103,5 +105,103 @@ describe("resolveDictationShortcutDecision", () => {
       action: "stop",
       stopReason: "hands_free_toggle",
     });
+  });
+
+  it("cancels (discards) a recording session on a cancelled signal", () => {
+    expect(
+      resolveDictationShortcutDecision({
+        phase: "recording",
+        behavior: "hold_to_talk",
+        capability: "press_and_release",
+        signal: "cancelled",
+      }),
+    ).toMatchObject({
+      action: "cancel",
+      stopReason: "cancelled",
+    });
+  });
+
+  it("ignores a cancelled signal outside of an active recording", () => {
+    expect(
+      resolveDictationShortcutDecision({
+        phase: "idle",
+        behavior: "hold_to_talk",
+        capability: "press_and_release",
+        signal: "cancelled",
+      }),
+    ).toMatchObject({
+      action: "ignore",
+      stopReason: null,
+    });
+  });
+});
+
+describe("resolveDictationShortcutCapability", () => {
+  it("reports press-and-release only when hold-to-talk is selected and the native helper is available", () => {
+    expect(
+      resolveDictationShortcutCapability({
+        nativeShortcutAvailable: true,
+        behavior: "hold_to_talk",
+      }),
+    ).toBe("press_and_release");
+  });
+
+  it("falls back to press-only when the native helper is unavailable", () => {
+    expect(
+      resolveDictationShortcutCapability({
+        nativeShortcutAvailable: false,
+        behavior: "hold_to_talk",
+      }),
+    ).toBe("press_only");
+  });
+
+  it("stays press-only for toggle and hands-free behaviors even when the native helper is available", () => {
+    expect(
+      resolveDictationShortcutCapability({
+        nativeShortcutAvailable: true,
+        behavior: "toggle",
+      }),
+    ).toBe("press_only");
+    expect(
+      resolveDictationShortcutCapability({
+        nativeShortcutAvailable: true,
+        behavior: "hands_free",
+      }),
+    ).toBe("press_only");
+  });
+});
+
+describe("shouldHandleDictationShortcutSource", () => {
+  it("always handles native-sourced events", () => {
+    expect(
+      shouldHandleDictationShortcutSource({
+        source: "native",
+        nativeShortcutAvailable: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldHandleDictationShortcutSource({
+        source: "native",
+        nativeShortcutAvailable: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("ignores electron-sourced events once the native helper takes over", () => {
+    expect(
+      shouldHandleDictationShortcutSource({
+        source: "electron",
+        nativeShortcutAvailable: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("falls back to handling electron-sourced events when the native helper is unavailable", () => {
+    expect(
+      shouldHandleDictationShortcutSource({
+        source: "electron",
+        nativeShortcutAvailable: false,
+      }),
+    ).toBe(true);
   });
 });

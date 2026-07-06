@@ -1,5 +1,6 @@
 export {
   clearProviderSecret,
+  getDictationShortcutCapabilityStatus,
   getPermissionDiagnostics,
   getSecurityStatus,
   getSettings,
@@ -19,6 +20,7 @@ export {
   verifySystemAudioSetup,
 } from "../backend";
 export type {
+  DictationShortcutCapabilityStatus,
   PermissionDiagnostics,
   SecurityStatus,
   SetupVerificationResult,
