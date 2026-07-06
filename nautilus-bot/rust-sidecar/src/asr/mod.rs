@@ -1,4 +1,3 @@
-pub mod canary;
 pub mod cohere;
 pub mod distil_whisper;
 pub mod elevenlabs_scribe;
@@ -13,6 +12,7 @@ pub mod platform;
 pub mod python_runtime;
 pub mod voxtral;
 pub mod whisper;
+pub mod whisper_candle;
 pub mod windows_sdk_dictation_provider;
 
 use anyhow::Result;
@@ -335,9 +335,9 @@ impl AsrProviderFactory {
             AsrProviderType::Parakeet => {
                 Box::new(parakeet::ParakeetProvider::new(selected_model_id))
             }
-            AsrProviderType::WhisperCandle => {
-                Box::new(canary::CanaryProvider::new(selected_model_id))
-            }
+            AsrProviderType::WhisperCandle => Box::new(whisper_candle::WhisperCandleProvider::new(
+                selected_model_id,
+            )),
             AsrProviderType::DistilWhisper => Box::new(distil_whisper::DistilWhisperProvider::new(
                 selected_model_id,
             )),

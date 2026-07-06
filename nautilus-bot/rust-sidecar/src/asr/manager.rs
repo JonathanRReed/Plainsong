@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 const PARAKEET_ONNX_NAMES: [&str; 1] = ["encoder.onnx"];
 const PARAKEET_VOCAB_NAMES: [&str; 1] = ["tokens.txt"];
 // Whisper Candle: Whisper Large V3 Turbo via Candle (no Python)
-const CANARY_REQUIRED_FILES: [&str; 4] = [
+const WHISPER_CANDLE_REQUIRED_FILES: [&str; 4] = [
     "model.safetensors",
     "config.json",
     "tokenizer.json",
@@ -335,7 +335,7 @@ impl AsrManager {
         match effective.provider_type {
             AsrProviderType::Whisper => super::whisper::clear_cached_model(&normalized),
             AsrProviderType::WhisperCandle => {
-                super::canary::clear_cached_runtime(&self.models_dir.join("canary"));
+                super::whisper_candle::clear_cached_runtime(&self.models_dir.join("canary"));
             }
             AsrProviderType::DistilWhisper => {
                 super::distil_whisper::clear_cached_runtime();
@@ -1345,7 +1345,7 @@ fn runtime_diagnostics_for_provider(
         }
         AsrProviderType::WhisperCandle => {
             let model_dir = models_root.join("canary");
-            let model_ready = CANARY_REQUIRED_FILES
+            let model_ready = WHISPER_CANDLE_REQUIRED_FILES
                 .iter()
                 .all(|f| model_dir.join(f).exists());
             runtime_native_model(
@@ -1354,7 +1354,7 @@ fn runtime_diagnostics_for_provider(
                 model_ready,
                 &missing_required_files(
                     models_root.join("canary").as_path(),
-                    &CANARY_REQUIRED_FILES,
+                    &WHISPER_CANDLE_REQUIRED_FILES,
                 ),
                 MissingModelCopy {
                     message:
