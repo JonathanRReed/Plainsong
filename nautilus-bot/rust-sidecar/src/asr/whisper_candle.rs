@@ -10,10 +10,10 @@ use std::{cell::RefCell, thread_local};
 // ---------------------------------------------------------------------------
 // Model: openai/whisper-large-v3-turbo via Candle (experimental local path)
 // ---------------------------------------------------------------------------
-const CANARY_MODEL_ID: &str = "whisper-large-v3-turbo";
-const CANARY_HF_REPO: &str = "openai/whisper-large-v3-turbo";
+const WHISPER_CANDLE_MODEL_ID: &str = "whisper-large-v3-turbo";
+const WHISPER_CANDLE_HF_REPO: &str = "openai/whisper-large-v3-turbo";
 
-const CANARY_REQUIRED_FILES: [&str; 4] = [
+const WHISPER_CANDLE_REQUIRED_FILES: [&str; 4] = [
     "model.safetensors",
     "config.json",
     "tokenizer.json",
@@ -21,7 +21,7 @@ const CANARY_REQUIRED_FILES: [&str; 4] = [
 ];
 
 #[cfg(feature = "asr-canary")]
-struct CanaryRuntime {
+struct WhisperCandleRuntime {
     model_dir_key: String,
     n_mels: usize,
     device: candle_core::Device,
@@ -30,7 +30,7 @@ struct CanaryRuntime {
 }
 
 #[cfg(feature = "asr-canary")]
-fn load_runtime(model_dir: &Path) -> Result<CanaryRuntime> {
+fn load_runtime(model_dir: &Path) -> Result<WhisperCandleRuntime> {
     use candle_core::{DType, Device};
     use candle_nn::VarBuilder;
     use candle_transformers::models::whisper::{model::Whisper, Config};
@@ -38,22 +38,22 @@ fn load_runtime(model_dir: &Path) -> Result<CanaryRuntime> {
 
     let device = Device::Cpu;
     let cfg_text = std::fs::read_to_string(model_dir.join("config.json"))
-        .context("Failed to read Canary config.json")?;
+        .context("Failed to read Whisper Candle config.json")?;
     let config: Config =
-        serde_json::from_str(&cfg_text).context("Failed to parse Canary config.json")?;
+        serde_json::from_str(&cfg_text).context("Failed to parse Whisper Candle config.json")?;
     let n_mels = config.num_mel_bins;
 
     let weights_path = model_dir.join("model.safetensors");
     let vb = unsafe {
         VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)
-            .context("Failed to load Canary weights")?
+            .context("Failed to load Whisper Candle weights")?
     };
-    let model = Whisper::load(&vb, config).context("Failed to initialise Canary Whisper model")?;
+    let model = Whisper::load(&vb, config).context("Failed to initialise Whisper Candle model")?;
 
     let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
-        .map_err(|e| anyhow::anyhow!("Failed to load Canary tokenizer: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to load Whisper Candle tokenizer: {}", e))?;
 
-    Ok(CanaryRuntime {
+    Ok(WhisperCandleRuntime {
         model_dir_key: model_dir.to_string_lossy().to_string(),
         n_mels,
         device,
@@ -64,7 +64,7 @@ fn load_runtime(model_dir: &Path) -> Result<CanaryRuntime> {
 
 #[cfg(feature = "asr-canary")]
 thread_local! {
-    static RUNTIME_CACHE: RefCell<Option<CanaryRuntime>> = const { RefCell::new(None) };
+    static RUNTIME_CACHE: RefCell<Option<WhisperCandleRuntime>> = const { RefCell::new(None) };
 }
 
 #[cfg(feature = "asr-canary")]
@@ -89,11 +89,11 @@ pub(crate) fn clear_cached_runtime(model_dir: &Path) {
 #[cfg(not(feature = "asr-canary"))]
 pub(crate) fn clear_cached_runtime(_model_dir: &Path) {}
 
-pub struct CanaryProvider {
+pub struct WhisperCandleProvider {
     model_dir: PathBuf,
 }
 
-impl CanaryProvider {
+impl WhisperCandleProvider {
     pub fn new(_selected_model_id: Option<&str>) -> Self {
         let model_dir = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -104,7 +104,7 @@ impl CanaryProvider {
     }
 
     fn has_required_files(&self) -> bool {
-        CANARY_REQUIRED_FILES
+        WHISPER_CANDLE_REQUIRED_FILES
             .iter()
             .all(|f| self.model_dir.join(f).exists())
     }
@@ -124,7 +124,7 @@ impl CanaryProvider {
     }
 }
 
-impl Default for CanaryProvider {
+impl Default for WhisperCandleProvider {
     fn default() -> Self {
         Self::new(None)
     }
@@ -134,9 +134,9 @@ impl Default for CanaryProvider {
 // Native Candle inference (feature-gated)
 // ---------------------------------------------------------------------------
 /// Public entry point for running Whisper-Large-V3-Turbo inference on raw f32 samples.
-/// Called by canary.rs and voxtral.rs (which reuses the same encoder architecture).
+/// Called by whisper_candle.rs and voxtral.rs (which reuses the same encoder architecture).
 #[cfg(feature = "asr-canary")]
-pub(super) fn run_canary_inference_on_samples(
+pub(super) fn run_whisper_candle_inference_on_samples(
     samples: Vec<f32>,
     model_dir: &Path,
 ) -> Result<String> {
@@ -157,7 +157,7 @@ pub(super) fn run_canary_inference_on_samples(
 
         let runtime = cache
             .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Canary runtime cache unavailable"))?;
+            .ok_or_else(|| anyhow::anyhow!("Whisper Candle runtime cache unavailable"))?;
 
         let n_frames = w::N_FRAMES;
         let mel_extractor = MelSpectrogram::new(512, 160, 400, runtime.n_mels, 16000);
@@ -177,7 +177,7 @@ pub(super) fn run_canary_inference_on_samples(
             .model
             .encoder
             .forward(&mel_tensor, true)
-            .context("Canary encoder failed")?;
+            .context("Whisper Candle encoder failed")?;
 
         let sot = runtime.tokenizer.token_to_id(w::SOT_TOKEN).unwrap_or(50258);
         let eot = runtime.tokenizer.token_to_id(w::EOT_TOKEN).unwrap_or(50257);
@@ -204,7 +204,7 @@ pub(super) fn run_canary_inference_on_samples(
                 .model
                 .decoder
                 .forward(&token_tensor, &audio_features, tokens.len() == 4)
-                .context("Canary decoder step failed")?;
+                .context("Whisper Candle decoder step failed")?;
 
             let logits = runtime
                 .model
@@ -245,16 +245,16 @@ fn max_new_tokens_for_audio(sample_count: usize) -> usize {
 }
 
 #[cfg(feature = "asr-canary")]
-fn run_canary_candle(model_dir: &Path, audio_path: &Path) -> Result<String> {
+fn run_whisper_candle_inference_from_file(model_dir: &Path, audio_path: &Path) -> Result<String> {
     let samples = crate::audio::utils::load_audio_file(audio_path)
-        .context("Failed to load audio for Canary")?;
-    run_canary_inference_on_samples(samples, model_dir)
+        .context("Failed to load audio for Whisper Candle")?;
+    run_whisper_candle_inference_on_samples(samples, model_dir)
 }
 
 #[cfg(not(feature = "asr-canary"))]
-fn run_canary_candle(_model_dir: &Path, _audio_path: &Path) -> Result<String> {
+fn run_whisper_candle_inference_from_file(_model_dir: &Path, _audio_path: &Path) -> Result<String> {
     Err(anyhow::anyhow!(
-        "Canary Candle support is not compiled in. Rebuild with the `asr-canary` feature."
+        "Whisper Candle support is not compiled in. Rebuild with the `asr-canary` feature."
     ))
 }
 
@@ -262,7 +262,7 @@ fn run_canary_candle(_model_dir: &Path, _audio_path: &Path) -> Result<String> {
 // AsrProvider implementation
 // ---------------------------------------------------------------------------
 #[async_trait]
-impl AsrProvider for CanaryProvider {
+impl AsrProvider for WhisperCandleProvider {
     fn name(&self) -> &str {
         "Whisper Candle"
     }
@@ -291,7 +291,7 @@ impl AsrProvider for CanaryProvider {
             word_error_rate: Some(4.2),
             real_time_factor: Some(0.9),
             license: "MIT".to_string(),
-            source_url: format!("https://huggingface.co/{}", CANARY_HF_REPO),
+            source_url: format!("https://huggingface.co/{}", WHISPER_CANDLE_HF_REPO),
         }
     }
 
@@ -331,8 +331,10 @@ impl AsrProvider for CanaryProvider {
 
         let text = if let Some(samples) = use_trimmed {
             // Write trimmed audio to temp file
-            let temp_path =
-                std::env::temp_dir().join(format!("canary_trimmed_{}.wav", uuid::Uuid::new_v4()));
+            let temp_path = std::env::temp_dir().join(format!(
+                "whisper_candle_trimmed_{}.wav",
+                uuid::Uuid::new_v4()
+            ));
             {
                 let spec = hound::WavSpec {
                     channels: 1,
@@ -351,17 +353,20 @@ impl AsrProvider for CanaryProvider {
                 writer.finalize().context("Failed to finalize temp WAV")?;
             }
             let temp_path_for_cleanup = temp_path.clone();
-            let result =
-                tokio::task::spawn_blocking(move || run_canary_candle(&model_dir, &temp_path))
-                    .await
-                    .context("Whisper Candle inference task panicked");
+            let result = tokio::task::spawn_blocking(move || {
+                run_whisper_candle_inference_from_file(&model_dir, &temp_path)
+            })
+            .await
+            .context("Whisper Candle inference task panicked");
             let _ = std::fs::remove_file(&temp_path_for_cleanup);
             result??
         } else {
             let audio_path_owned = audio_path.to_path_buf();
-            tokio::task::spawn_blocking(move || run_canary_candle(&model_dir, &audio_path_owned))
-                .await
-                .context("Whisper Candle inference task panicked")??
+            tokio::task::spawn_blocking(move || {
+                run_whisper_candle_inference_from_file(&model_dir, &audio_path_owned)
+            })
+            .await
+            .context("Whisper Candle inference task panicked")??
         };
 
         let duration = Self::wav_duration_seconds(&audio_path_for_dur);
@@ -379,7 +384,7 @@ impl AsrProvider for CanaryProvider {
             confidence: 0.92,
             processing_time_ms: start.elapsed().as_millis() as u64,
             model_name: "whisper-large-v3-turbo".to_string(),
-            model_id: CANARY_MODEL_ID.to_string(),
+            model_id: WHISPER_CANDLE_MODEL_ID.to_string(),
             requested_provider: AsrProviderType::WhisperCandle,
             actual_provider: AsrProviderType::WhisperCandle,
             requested_engine: Some("provider_default".to_string()),
@@ -390,7 +395,8 @@ impl AsrProvider for CanaryProvider {
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        let temp_path = std::env::temp_dir().join(format!("canary_{}.wav", uuid::Uuid::new_v4()));
+        let temp_path =
+            std::env::temp_dir().join(format!("whisper_candle_{}.wav", uuid::Uuid::new_v4()));
         std::fs::write(&temp_path, audio_data)
             .context("failed to write temp wav for Whisper Candle")?;
         let result = self.transcribe(&temp_path).await;
@@ -415,17 +421,17 @@ impl AsrProvider for CanaryProvider {
         let manager = DownloadManager::new()?;
         let progress_cb = std::sync::Arc::new(progress_cb);
 
-        for (i, file_name) in CANARY_REQUIRED_FILES.iter().enumerate() {
+        for (i, file_name) in WHISPER_CANDLE_REQUIRED_FILES.iter().enumerate() {
             let destination = self.model_dir.join(file_name);
             if destination.exists() {
                 continue;
             }
             let url = format!(
                 "https://huggingface.co/{}/resolve/main/{}",
-                CANARY_HF_REPO, file_name
+                WHISPER_CANDLE_HF_REPO, file_name
             );
             let cb = progress_cb.clone();
-            let n_files = CANARY_REQUIRED_FILES.len() as f32;
+            let n_files = WHISPER_CANDLE_REQUIRED_FILES.len() as f32;
             manager
                 .download_file_unverified(&url, &destination, move |p| {
                     cb((i as f32 / n_files + p.percentage as f32 / 100.0 / n_files) * 100.0);

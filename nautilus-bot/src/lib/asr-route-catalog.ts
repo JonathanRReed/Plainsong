@@ -250,7 +250,7 @@ function routeSummary(
     return "Built into Windows and convenient for direct dictation, but not a meeting route.";
   }
   if (providerType === "whisper_candle") {
-    return "Experimental native Candle runtime for power users who want Whisper locally.";
+    return "Whisper Large v3 Turbo run via Candle instead of whisper.cpp — a fallback engine, not a different model from the whisper.cpp large-v3-turbo route.";
   }
   if (providerType === "whisper") {
     return "Flexible Whisper family for local power users who want finer model control.";
