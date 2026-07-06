@@ -28,7 +28,11 @@ import {
   type NativeShortcutRawEvent,
 } from "./native-macos-shortcut";
 import { startNativeMacosShortcutController } from "./native-macos-shortcut-runtime";
-import { convertShortcutToAccelerator } from "./shortcut-registration";
+import {
+  convertShortcutToAccelerator,
+  findConflictingShortcuts,
+  type ShortcutConflictInfo,
+} from "./shortcut-registration";
 import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
 
 const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
@@ -51,6 +55,7 @@ let minimizeToTrayEnabled = false;
 let isQuitting = false;
 let nativeShortcutController: NativeShortcutController | null = null;
 let nativeShortcutAvailable = false;
+let shortcutConflicts: ShortcutConflictInfo[] = [];
 
 function qaLog(message: string, payload?: unknown): void {
   if (process.env.PLAINSONG_QA_PACKAGED_HOTKEY === "1") {
@@ -83,8 +88,11 @@ let updateStatus: UpdateStatusPayload = { status: "unknown" };
 
 type AppSettings = {
   shortcuts?: {
+    toggleRecording?: string;
     toggleDictation?: string;
     openWindow?: string;
+    quickExport?: string;
+    focusSearch?: string;
   };
   transcription?: {
     dictationPushToTalk?: boolean;
@@ -462,6 +470,11 @@ async function handleLocalCommand(
         handled: true,
         result: { nativeShortcutAvailable },
       };
+    case "get_shortcut_conflicts":
+      return {
+        handled: true,
+        result: { conflicts: shortcutConflicts },
+      };
     default:
       return { handled: false };
   }
@@ -647,8 +660,27 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
 
   startNativeShortcutControllerIfNeeded(settings);
 
-  const dictationShortcut = convertShortcutToAccelerator(settings.shortcuts?.toggleDictation);
-  const openWindowShortcut = convertShortcutToAccelerator(settings.shortcuts?.openWindow);
+  const conflicts = findConflictingShortcuts(settings.shortcuts ?? {});
+  shortcutConflicts = conflicts;
+  if (conflicts.length > 0) {
+    for (const conflict of conflicts) {
+      console.warn("[shortcuts] conflict detected, skipping registration", {
+        reason,
+        skipped: conflict.label,
+        shortcut: conflict.shortcut,
+        keptOwner: conflict.conflictsWith,
+      });
+    }
+  }
+  broadcastRendererEvent("shortcut-conflicts-changed", { conflicts });
+  const skippedFields = new Set(conflicts.map((conflict) => conflict.field));
+
+  const dictationShortcut = skippedFields.has("toggleDictation")
+    ? null
+    : convertShortcutToAccelerator(settings.shortcuts?.toggleDictation);
+  const openWindowShortcut = skippedFields.has("openWindow")
+    ? null
+    : convertShortcutToAccelerator(settings.shortcuts?.openWindow);
   const behavior = resolveDictationShortcutBehavior(settings.transcription ?? {});
   const usesPressOnlyElectronFallback = behavior === "hold_to_talk";
 

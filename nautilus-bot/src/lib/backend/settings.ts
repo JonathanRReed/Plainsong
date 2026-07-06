@@ -4,6 +4,7 @@ export {
   getPermissionDiagnostics,
   getSecurityStatus,
   getSettings,
+  getShortcutConflicts,
   hasProviderSecret,
   lockVault,
   migrateToEncryptedStorage,
@@ -24,4 +25,7 @@ export type {
   PermissionDiagnostics,
   SecurityStatus,
   SetupVerificationResult,
+  ShortcutConflict,
+  ShortcutConflictStatus,
+  ShortcutFieldKey,
 } from "../backend";

@@ -3,10 +3,12 @@ type ShortcutRegistrationDefinition = {
   shortcut: string | null | undefined;
 };
 
-type ShortcutRegistrationConflict = {
+type ShortcutRegistrationConflict<T extends ShortcutRegistrationDefinition> = {
   label: string;
   shortcut: string;
   conflictsWith: string;
+  definition: T;
+  conflictsWithDefinition: ReadyShortcutRegistration<T>;
 };
 
 type ReadyShortcutRegistration<T extends ShortcutRegistrationDefinition> = Omit<
@@ -118,17 +120,79 @@ function normalizeAcceleratorToken(
   }
 }
 
+// Fields the app can bind to a keyboard shortcut. Order here has no
+// semantic meaning on its own; precedence is expressed separately via
+// SHORTCUT_FIELD_PRECEDENCE below.
+export type ShortcutFieldKey =
+  | "toggleDictation"
+  | "toggleRecording"
+  | "openWindow"
+  | "quickExport"
+  | "focusSearch";
+
+export type ShortcutFieldSettings = Partial<Record<ShortcutFieldKey, string | undefined>>;
+
+export type ShortcutConflictInfo = {
+  field: ShortcutFieldKey;
+  label: string;
+  shortcut: string;
+  conflictsWith: string;
+  conflictsWithField: ShortcutFieldKey;
+};
+
+// Precedence when two configured shortcuts normalize to the same accelerator:
+// whichever field is listed first here "wins" and keeps the OS-level
+// registration; later fields are skipped. Dictation is the app's primary
+// interaction (per the OSS "Cursor Tab of voice" positioning) so it always
+// wins. Open window is the other field that is actually registered with
+// Electron's globalShortcut today, so it comes next. toggleRecording is a
+// pre-existing settings field that is not wired to any registration path
+// (neither globalShortcut.register nor the native shortcut controller, which
+// only wires toggleDictation) — it is ranked below the shortcuts that really
+// register something so a collision never disables a working shortcut in
+// favor of one that was never going to fire. quickExport/focusSearch are
+// renderer-local shortcuts (not yet wired to globalShortcut) but are still
+// included so users get a warning if they configure a clash before those are
+// wired up.
+export const SHORTCUT_FIELD_PRECEDENCE: Array<{ key: ShortcutFieldKey; label: string }> = [
+  { key: "toggleDictation", label: "Dictation" },
+  { key: "openWindow", label: "Open window" },
+  { key: "toggleRecording", label: "Recording" },
+  { key: "quickExport", label: "Quick export" },
+  { key: "focusSearch", label: "Search" },
+];
+
+export function findConflictingShortcuts(
+  shortcuts: ShortcutFieldSettings,
+): ShortcutConflictInfo[] {
+  const definitions = SHORTCUT_FIELD_PRECEDENCE.map(({ key, label }) => ({
+    field: key,
+    label,
+    shortcut: shortcuts[key],
+  }));
+
+  const { conflicts } = partitionUniqueShortcutRegistrations(definitions);
+
+  return conflicts.map((conflict) => ({
+    field: conflict.definition.field,
+    label: conflict.label,
+    shortcut: conflict.shortcut,
+    conflictsWith: conflict.conflictsWith,
+    conflictsWithField: conflict.conflictsWithDefinition.field,
+  }));
+}
+
 export function partitionUniqueShortcutRegistrations<
   T extends ShortcutRegistrationDefinition,
 >(
   definitions: T[],
 ): {
   unique: Array<ReadyShortcutRegistration<T>>;
-  conflicts: ShortcutRegistrationConflict[];
+  conflicts: Array<ShortcutRegistrationConflict<T>>;
 } {
   const ownersByShortcut = new Map<string, ReadyShortcutRegistration<T>>();
   const unique: Array<ReadyShortcutRegistration<T>> = [];
-  const conflicts: ShortcutRegistrationConflict[] = [];
+  const conflicts: Array<ShortcutRegistrationConflict<T>> = [];
 
   for (const definition of definitions) {
     if (!definition.shortcut) {
@@ -148,6 +212,8 @@ export function partitionUniqueShortcutRegistrations<
         label: definition.label,
         shortcut: definition.shortcut,
         conflictsWith: existing.label,
+        definition,
+        conflictsWithDefinition: existing,
       });
       continue;
     }

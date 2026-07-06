@@ -114,6 +114,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_relationship_memory",
   "get_security_status",
   "get_settings",
+  "get_shortcut_conflicts",
   "get_speakers",
   "get_transcript",
   "get_update_channel",

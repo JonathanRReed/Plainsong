@@ -145,6 +145,9 @@ vi.mock("@/lib/backend", () => ({
   getDictationShortcutCapabilityStatus: vi.fn(async () => ({
     nativeShortcutAvailable: false,
   })),
+  getShortcutConflicts: vi.fn(async () => ({
+    conflicts: [],
+  })),
   getOllamaStatus: vi.fn(async () => true),
   getSecurityStatus: vi.fn(async () => ({
     vaultInitialized: false,
@@ -654,5 +657,56 @@ describe("SettingsView performance behavior", () => {
     const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
     const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
     expect(latestSettings?.transcription.dictationActiveLanguages).toEqual(["fr"]);
+  });
+
+  it("warns inline when two shortcuts are bound to the same key combination", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+        openWindow: "Ctrl+Shift+Space",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("Global keyboard shortcuts");
+
+    expect(
+      await screen.findByText(/This conflicts with Dictation — only one will work\./),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no shortcut conflict warning when every binding is distinct", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        toggleRecording: "Ctrl+Shift+R",
+        toggleDictation: "Ctrl+Shift+Space",
+        toggleDictationAlternates: [],
+        openWindow: "Ctrl+Shift+N",
+        quickExport: "Ctrl+Shift+E",
+        focusSearch: "Ctrl+Shift+F",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("Global keyboard shortcuts");
+
+    expect(screen.queryByText(/This conflicts with/)).not.toBeInTheDocument();
   });
 });
