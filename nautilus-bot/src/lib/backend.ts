@@ -868,6 +868,30 @@ export async function getDictationShortcutCapabilityStatus(): Promise<DictationS
   return await invoke("get_dictation_shortcut_capability_status");
 }
 
+export type ShortcutFieldKey =
+  | "toggleDictation"
+  | "toggleRecording"
+  | "openWindow"
+  | "quickExport"
+  | "focusSearch";
+
+export interface ShortcutConflict {
+  field: ShortcutFieldKey;
+  label: string;
+  shortcut: string;
+  conflictsWith: string;
+  conflictsWithField: ShortcutFieldKey;
+}
+
+export interface ShortcutConflictStatus {
+  conflicts: ShortcutConflict[];
+}
+
+/** Ask whether any configured global shortcuts currently collide on the same key combination. */
+export async function getShortcutConflicts(): Promise<ShortcutConflictStatus> {
+  return await invoke("get_shortcut_conflicts");
+}
+
 // Diarization types
 interface Speaker {
   id: string;

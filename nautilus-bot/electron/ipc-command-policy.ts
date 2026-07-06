@@ -18,6 +18,7 @@ const FAST_COMMANDS = new Set<string>([
   "get_recording_overlay_state",
   "get_security_status",
   "get_settings",
+  "get_shortcut_conflicts",
   "get_update_channel",
   "get_update_status",
   "has_provider_secret",
