@@ -254,6 +254,7 @@ vi.mock("@/lib/backend/dictation", () => ({
       appScope: null,
       caseSensitive: false,
       enabled: true,
+      categoryScope: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
@@ -271,6 +272,7 @@ vi.mock("@/lib/backend/dictation", () => ({
       appScope: null,
       caseSensitive: false,
       enabled: true,
+      categoryScope: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
@@ -626,6 +628,7 @@ describe("DictationView modes", () => {
       appScope: "Slack",
       caseSensitive: false,
       enabled: true,
+      categoryScope: null,
       createdAt: new Date("2026-03-14T10:00:00Z").toISOString(),
       updatedAt: new Date("2026-03-14T10:00:00Z").toISOString(),
     });
@@ -696,6 +699,7 @@ describe("DictationView modes", () => {
       appScope: "Slack",
       caseSensitive: false,
       enabled: true,
+      categoryScope: null,
       createdAt: new Date("2026-03-14T10:00:00Z").toISOString(),
       updatedAt: new Date("2026-03-14T10:00:00Z").toISOString(),
     });
@@ -815,6 +819,151 @@ describe("DictationView modes", () => {
           enabled: true,
         },
       );
+    });
+  });
+
+  it("shows a recently learned list sourced from existing dictionary entries", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    vi.mocked(backend.listDictationDictionaryEntries).mockResolvedValueOnce([
+      {
+        id: "dict-older",
+        spokenForm: "jon",
+        replacement: "John",
+        appScope: null,
+        caseSensitive: false,
+        enabled: true,
+        categoryScope: null,
+        createdAt: new Date("2026-01-01T10:00:00Z").toISOString(),
+        updatedAt: new Date("2026-01-01T10:00:00Z").toISOString(),
+      },
+      {
+        id: "dict-newer",
+        spokenForm: "open ai",
+        replacement: "OpenAI",
+        appScope: null,
+        caseSensitive: false,
+        enabled: true,
+        categoryScope: null,
+        createdAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+        updatedAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+      },
+    ]);
+
+    render(<DictationView />);
+
+    const recentlyLearned = await screen.findByTestId(
+      "recently-learned-dictionary",
+    );
+    expect(
+      within(recentlyLearned).getByText("Recently learned"),
+    ).toBeInTheDocument();
+
+    const items = within(recentlyLearned).getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    // Newer updatedAt entry (open ai -> OpenAI) should be listed first.
+    expect(items[0]).toHaveTextContent("open ai");
+    expect(items[0]).toHaveTextContent("OpenAI");
+    expect(items[1]).toHaveTextContent("jon");
+    expect(items[1]).toHaveTextContent("John");
+  });
+
+  it("shows Fix capitalization only for a case-only diff of the latest result", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("Flow Profiles");
+    const handler = backendMocks.eventListeners.get("dictation-text-ready");
+    expect(handler).toBeTruthy();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          text: "hello world",
+          actualProvider: "distil_whisper",
+        },
+      });
+    });
+
+    const learnButton = await screen.findByRole("button", {
+      name: "Learn correction",
+    });
+    const textarea = learnButton
+      .closest(".space-y-3")
+      ?.querySelector("textarea");
+    expect(textarea).toBeTruthy();
+
+    // Unedited text: no pending correction of any kind yet.
+    expect(
+      screen.queryByRole("button", { name: "Fix capitalization" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.change(textarea as HTMLTextAreaElement, {
+      target: { value: "Hello World" },
+    });
+
+    expect(
+      await screen.findByRole("button", { name: "Fix capitalization" }),
+    ).toBeInTheDocument();
+
+    fireEvent.change(textarea as HTMLTextAreaElement, {
+      target: { value: "Hello there world" },
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: "Fix capitalization" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("sets a category scope on a new dictionary entry", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    vi.mocked(backend.createDictationDictionaryEntry).mockResolvedValueOnce({
+      id: "dict-scoped",
+      spokenForm: "standup",
+      replacement: "stand-up",
+      appScope: null,
+      caseSensitive: false,
+      enabled: true,
+      categoryScope: "worklog",
+      createdAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+      updatedAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+    });
+
+    render(<DictationView />);
+
+    await screen.findByText("Dictionary");
+    fireEvent.change(screen.getByPlaceholderText("Say (e.g. open ai)"), {
+      target: { value: "standup" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Insert (e.g. OpenAI)"), {
+      target: { value: "stand-up" },
+    });
+
+    const dictionarySection = screen
+      .getByPlaceholderText("Say (e.g. open ai)")
+      .closest(".mt-5");
+    expect(dictionarySection).toBeTruthy();
+    const categoryTrigger = within(
+      dictionarySection as HTMLElement,
+    ).getByRole("combobox");
+    fireEvent.click(categoryTrigger);
+    fireEvent.click(await screen.findByRole("option", { name: "Worklog" }));
+
+    fireEvent.click(
+      within(dictionarySection as HTMLElement).getAllByRole("button", {
+        name: "Add",
+      })[0],
+    );
+
+    await waitFor(() => {
+      expect(backend.createDictationDictionaryEntry).toHaveBeenCalledWith({
+        spokenForm: "standup",
+        replacement: "stand-up",
+        appScope: null,
+        caseSensitive: false,
+        enabled: true,
+        categoryScope: "worklog",
+      });
     });
   });
 });

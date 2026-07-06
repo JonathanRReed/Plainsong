@@ -415,6 +415,10 @@ export interface DictationDictionaryEntry {
   appScope: string | null;
   caseSensitive: boolean;
   enabled: boolean;
+  /** Optional dictation-destination-app category key (see DictationAppCategoryOverride's
+   * `category` values: other/messaging/email/notes/worklog/ai_chat/code_editor).
+   * `null`/absent means the entry applies regardless of destination-app category. */
+  categoryScope: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -425,6 +429,7 @@ interface CreateDictationDictionaryEntryRequest {
   appScope?: string | null;
   caseSensitive?: boolean;
   enabled?: boolean;
+  categoryScope?: string | null;
 }
 
 interface UpdateDictationDictionaryEntryRequest {
@@ -433,6 +438,7 @@ interface UpdateDictationDictionaryEntryRequest {
   appScope?: string | null;
   caseSensitive?: boolean;
   enabled?: boolean;
+  categoryScope?: string | null;
 }
 
 interface LearnDictationCorrectionRequest {
@@ -485,6 +491,8 @@ export interface DictationSnippet {
   appScope: string | null;
   caseSensitive: boolean;
   enabled: boolean;
+  /** See DictationDictionaryEntry.categoryScope. */
+  categoryScope: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -495,6 +503,7 @@ interface CreateDictationSnippetRequest {
   appScope?: string | null;
   caseSensitive?: boolean;
   enabled?: boolean;
+  categoryScope?: string | null;
 }
 
 interface UpdateDictationSnippetRequest {
@@ -503,6 +512,7 @@ interface UpdateDictationSnippetRequest {
   appScope?: string | null;
   caseSensitive?: boolean;
   enabled?: boolean;
+  categoryScope?: string | null;
 }
 
 export interface DictationCommandPreset {
