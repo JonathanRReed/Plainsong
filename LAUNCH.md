@@ -8,8 +8,8 @@ explicitly so nothing is assumed.
 
 - **Free & open-source**: all commercial licensing/trial/nag/entitlement code
   removed; MIT LICENSE present.
-- **Compiles & passes CI gates**: `cargo clippy -D warnings` clean, 292 Rust
-  unit tests, 265 vitest, typecheck (both tsconfigs), IPC contract, knip,
+- **Compiles & passes CI gates**: `cargo clippy -D warnings` clean, 295 Rust
+  unit tests, 273 vitest, typecheck (both tsconfigs), IPC contract, knip,
   rustfmt — all green. CI runs the shipped default feature set + a production
   build.
 - **Competitive-parity push (2026-07-06)**: a research-driven pass closing the
@@ -38,6 +38,15 @@ explicitly so nothing is assumed.
     invoke a Cmd+K command (shorten/expand/proofread/tone-rewrite/translate/
     bulletize/case-transforms/etc.), have it replaced in place — mined from
     an abandoned branch, adapted and hardened rather than merged wholesale.
+  - **Shortcut-conflict detection wired end-to-end**: colliding shortcuts
+    (e.g. dictation toggle vs. open-window) are now detected before
+    registration, with a clear precedence rule and an inline warning in
+    Settings — the utility for this existed but was dormant until now.
+  - **Category-scope/AI-formatting coupling fixed**: category-scoped
+    dictionary/snippet entries now apply correctly regardless of the
+    separate "AI formatting" toggle (a real bug, not just a sharp edge —
+    found a second, previously-unnoticed call site with the same coupling
+    while fixing the first).
   - See `[[project-nautilusbot-oss-relaunch]]` memory for the full research
     citations and per-phase engineering notes.
 - **Fast default route**: whisper.cpp (Metal/CoreML) `base.en`; measured
@@ -132,12 +141,6 @@ Expect this pass to surface a couple of small fixes; that's normal.
   no native `AsrProviderType` counterpart the existing MLX-route-mapping
   pattern requires, so doing it properly is a separate, larger provider
   addition, not a quick win.
-- **Dictionary category-scope coupling**: category-scoped dictionary/snippet
-  entries only take effect when the (differently-scoped) "AI formatting"
-  toggle is on — a minor UX sharp edge worth decoupling in a follow-up.
-- **Shortcut-conflict detection utility** (`partitionUniqueShortcutRegistrations`,
-  ported alongside the hold-to-talk work) is tested but not yet wired into an
-  actual conflict-detection UX — currently dormant, safe to activate later.
 - **Packaged-build environment drift, found + fixed 2026-07-06**: `bun run
   electron:pack` briefly failed with "production dependency not found:
   @radix-ui/react-dialog" — the on-disk `node_modules/@radix-ui/react-dialog`
