@@ -8,10 +8,38 @@ explicitly so nothing is assumed.
 
 - **Free & open-source**: all commercial licensing/trial/nag/entitlement code
   removed; MIT LICENSE present.
-- **Compiles & passes CI gates**: `cargo clippy -D warnings` clean, 235 Rust
-  unit tests, 172 vitest, typecheck (both tsconfigs), IPC contract, knip,
+- **Compiles & passes CI gates**: `cargo clippy -D warnings` clean, 292 Rust
+  unit tests, 265 vitest, typecheck (both tsconfigs), IPC contract, knip,
   rustfmt — all green. CI runs the shipped default feature set + a production
   build.
+- **Competitive-parity push (2026-07-06)**: a research-driven pass closing the
+  gaps found against Wispr Flow, Willow Voice, Aqua Voice, Superwhisper,
+  MacWhisper, Talon, Handy, and Anarlog/Hyprnote:
+  - **Destination-app-aware AI formatting**: dictation cleanup now adapts to
+    the app you're dictating into (email/messaging/AI-chat/code-editor/notes/
+    worklog), matching Wispr Flow's headline differentiator — bundle-id +
+    name based, with per-app overrides, fully local/BYOK, degrades to prior
+    behavior when disabled.
+  - **Real hold-to-talk**: a native `.listenOnly` CGEventTap Swift helper
+    (rides the existing Accessibility grant, no new permission prompt) gives
+    true press-and-hold, with Electron's toggle-only path kept as an automatic
+    fallback if the helper is unavailable or crashes.
+  - **Hands-free / VAD activation**: auto-stop dictation after sustained
+    silence (any activation mode) and auto-start on sustained speech when
+    hands-free is enabled — a streaming energy-threshold gate, no ONNX
+    inference in the hot path.
+  - **ASR provider naming/copy fixed**: the module that was internally named
+    as if it implemented NVIDIA's Canary model (it's actually a second
+    Whisper backend via Candle) was renamed; route-picker copy now states the
+    real tradeoff instead of vague "experimental" language.
+  - **Dictionary/snippets gained category scoping**, a "recently learned"
+    list, and a capitalization-only quick action.
+  - **Voice/palette editing of selected text**: select text in any app,
+    invoke a Cmd+K command (shorten/expand/proofread/tone-rewrite/translate/
+    bulletize/case-transforms/etc.), have it replaced in place — mined from
+    an abandoned branch, adapted and hardened rather than merged wholesale.
+  - See `[[project-nautilusbot-oss-relaunch]]` memory for the full research
+    citations and per-phase engineering notes.
 - **Fast default route**: whisper.cpp (Metal/CoreML) `base.en`; measured
   ~137 ms p50 / ~218× real-time on Apple Silicon via `bun run benchmark:latency`.
 - **Hot path unblocked**: concurrent JSON-RPC dispatch, model pre-warm on start,
@@ -29,12 +57,14 @@ explicitly so nothing is assumed.
   secrets are present and otherwise publishes an unsigned build. macOS is
   **arm64-only for v1** (the Rust sidecar is host-arch; Intel needs per-arch
   cross-compiles — tracked).
-- **Packaged build verified**: `electron:build:mac` produces `Plainsong.app`
-  with bundle id `com.plainsong.app`, both TCC usage strings in the Info.plist,
-  and the arm64 `plainsong-sidecar` bundled in `Resources/sidecar/`.
-- **Honest hotkey UI**: v1 exposes **toggle** mode only across all surfaces
-  (settings, dictation view, onboarding default); the broken hold-to-talk/
-  hands-free options are removed (they need a native key listener — fast-follow).
+- **Packaged build verified as of 2026-06-13** (STALE — see known gap below):
+  `electron:build:mac` produced `Plainsong.app` with bundle id
+  `com.plainsong.app`, both TCC usage strings in the Info.plist, and the
+  arm64 `plainsong-sidecar` bundled in `Resources/sidecar/` at that time.
+- **Honest hotkey UI**: onboarding still defaults to **toggle**; hold-to-talk
+  is now a real, selectable option in Settings, gated on a runtime check that
+  the native helper is actually running (never offered as a dead choice), and
+  hands-free is a real, independent option (no native-helper dependency).
 - **App icon**: a real designed Plainsong mark — a gilt-gradient versal “P” on a
   candle-lit ink folio (Baskerville), regenerated at every size into
   `build-resources/icon.icns` / `.ico` / `.png`, plus a black-on-transparent
@@ -74,15 +104,57 @@ Expect this pass to surface a couple of small fixes; that's normal.
 7. **HUD on an external monitor / notched Mac**: confirm the dictation and
    recording overlays appear on the *active* display, not the built-in one, and
    clear of the notch.
+8. **Native hold-to-talk feel**: the CGEventTap helper is built, typechecked,
+   and unit-tested via its dependency-injected TS facade — but real
+   press-and-hold timing/reliability (including the automatic fallback to
+   toggle if the helper crashes mid-session) needs a real keyboard.
+9. **Hands-free/VAD tuning**: the auto-stop silence threshold (default ~1.8s)
+   and auto-start energy threshold are reasonable defaults derived from the
+   existing batch VAD's config, but need validation against a real mic in a
+   real room (background noise, pause length while composing a sentence).
+10. **Destination-app formatting bundle-id list**: the built-in ChatGPT/
+    Claude/Cursor/VS Code/etc. bundle-id matches were written from public
+    knowledge, not spot-checked against real installed apps on this machine.
 
 ## Known gaps (not hard blockers)
 
-- **Hold-to-talk / hands-free**: real press-and-hold needs a native key listener
-  (Electron global shortcuts are press-only); v1 ships honest **toggle** mode
-  (shown as static text, no dead dropdown). Real hold-to-talk is the top
-  fast-follow (needs keyboard validation).
 - **`nautilus-bot/` directory name** retained (CI working-directory depends on
   it); repo-flatten is a separate cleanup.
+- **Windows/Linux support** deliberately out of scope for this push (macOS-only
+  focus); Willow Voice, Talon, and Handy already ship Windows — tracked as a
+  future multi-week platform investment, not attempted here.
+- **Silero VAD v2**: the current hands-free gate is a cheap energy-threshold
+  heuristic (accurate enough for a quiet room, weaker in noisy/multi-speaker
+  environments); a proper VAD model is a deliberate v2, not done now.
+- **SenseVoice as a first-class ASR route**: investigated, not done — it has
+  no native `AsrProviderType` counterpart the existing MLX-route-mapping
+  pattern requires, so doing it properly is a separate, larger provider
+  addition, not a quick win.
+- **Dictionary category-scope coupling**: category-scoped dictionary/snippet
+  entries only take effect when the (differently-scoped) "AI formatting"
+  toggle is on — a minor UX sharp edge worth decoupling in a follow-up.
+- **Shortcut-conflict detection utility** (`partitionUniqueShortcutRegistrations`,
+  ported alongside the hold-to-talk work) is tested but not yet wired into an
+  actual conflict-detection UX — currently dormant, safe to activate later.
+- **Packaged-build step currently broken, discovered 2026-07-06** (pre-existing,
+  NOT caused by this push — confirmed via `git diff` that no `package.json`
+  dependency changed across any of the 7 commits, only the `scripts` block
+  gained `shortcut-helper:build` wiring): `bun run electron:pack` fails at the
+  `electron-builder` native-packaging step with `production dependency not
+  found: @radix-ui/react-dialog`, even though that package is genuinely
+  present in `node_modules` and declared in `package.json`. Root cause is
+  electron-builder's Bun-compatibility shim ("bun does not support any CLI for
+  dependency tree extraction, utilizing file traversal collector instead") —
+  its manual `node_modules` traversal fails to resolve this dependency, likely
+  from an electron-builder or Radix version bump since the last verified
+  packaged build (2026-06-13) that this repo's CI never re-checks (CI's
+  "production build" step only runs `bun run build:renderer`, never the full
+  `electron-builder` packaging path — so this regression had no gate to catch
+  it). All of this session's actual code changes are independently verified
+  via typecheck/vitest/cargo-test/clippy/knip/ipc-contract, which do NOT
+  exercise this packaging step — the feature work itself is not implicated.
+  Needs investigation (electron-builder version pin, or its Bun-collector
+  config) separately from this push.
 
 ## Done since the first checklist
 
