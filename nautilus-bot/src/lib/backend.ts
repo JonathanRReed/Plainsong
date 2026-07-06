@@ -937,6 +937,15 @@ export async function downloadDiarizationModel(modelId?: string): Promise<void> 
   return await invoke("download_diarization_model", { modelId });
 }
 
+// Silero VAD APIs (opt-in, higher-accuracy hands-free/auto-stop backend)
+export async function isSileroVadModelDownloaded(): Promise<boolean> {
+  return await invoke("is_silero_vad_model_downloaded");
+}
+
+export async function downloadSileroVadModel(): Promise<void> {
+  await invoke("download_silero_vad_model");
+}
+
 export async function getSpeakers(recordingId: string): Promise<Speaker[]> {
   return await invoke("get_speakers", { recordingId });
 }

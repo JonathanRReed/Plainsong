@@ -143,6 +143,7 @@ export interface TranscriptionSettings {
   meetingRetentionCustomMonths?: number;
   meetingRetentionDeleteMode?: "audio_only" | "audio_and_transcript";
   dictationSilenceTimeoutSeconds: number;
+  dictationVadBackend?: "energy_threshold" | "silero";
   memorySearchMode: "fts" | "ollama_embeddings";
   embeddingModel: string;
   enableAutoAnalysis: boolean;

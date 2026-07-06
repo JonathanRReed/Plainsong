@@ -244,6 +244,13 @@ pub struct TranscriptionSettings {
     pub meeting_retention_delete_mode: String,
     /// Dictation: Silence timeout in seconds before auto-stop (0 = disabled)
     pub dictation_silence_timeout_seconds: f32,
+    /// Which speech/silence detector backs hands-free auto-start and
+    /// auto-stop-on-silence: "energy_threshold" (default, always available,
+    /// cheap O(1) heuristic) or "silero" (higher-accuracy ONNX model,
+    /// requires the Silero VAD model to be downloaded; automatically falls
+    /// back to "energy_threshold" if it isn't -- see
+    /// `crate::audio::silero_vad::build_vad_gate`).
+    pub dictation_vad_backend: String,
     /// Memory search mode: "fts" (default) or "ollama_embeddings"
     pub memory_search_mode: String,
     /// Ollama embedding model name (e.g. "nomic-embed-text")
@@ -361,6 +368,7 @@ impl Default for TranscriptionSettings {
             meeting_retention_custom_months: 1,
             meeting_retention_delete_mode: "audio_only".to_string(),
             dictation_silence_timeout_seconds: 0.0,
+            dictation_vad_backend: "energy_threshold".to_string(),
             memory_search_mode: "fts".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
             enable_auto_analysis: true,

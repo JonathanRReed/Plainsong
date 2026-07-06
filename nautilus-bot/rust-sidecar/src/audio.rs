@@ -1,15 +1,15 @@
 pub mod enhance;
 pub mod mel;
+pub mod silero_vad;
 pub mod system_capture;
 pub mod utils;
 pub mod vad;
 pub mod waveform;
 
 use crate::audio::enhance::AudioPreprocessor;
+use crate::audio::silero_vad::build_vad_gate;
 use crate::audio::system_capture::MixedAudioCapture;
-use crate::audio::vad::{
-    calculate_energy_db, StreamingVadGate, VadConfig, VadEdge, VoiceActivityDetector,
-};
+use crate::audio::vad::{VadBackendKind, VadConfig, VadEdge, VadGate, VoiceActivityDetector};
 use crate::models::RecordingOptions;
 use crate::settings;
 use crate::sidecar_handle::SidecarHandle;
@@ -39,12 +39,23 @@ const DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS: f32 = 0.5;
 
 /// Per-session configuration for "auto-stop dictation after sustained silence",
 /// resolved once from settings when a dictation session starts.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DictationAutoStopConfig {
     pub enabled: bool,
     /// Continuous silence duration (seconds) required to trigger auto-stop,
     /// following at least `DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS` of detected speech.
     pub silence_timeout_seconds: f32,
+    /// Which VAD implementation should drive this session's auto-stop gate
+    /// (and the hands-free monitor's auto-start gate). Resolved once from the
+    /// `dictation_vad_backend` setting by the caller (lib.rs); `build_vad_gate`
+    /// handles falling back to `EnergyThreshold` if `Silero` was requested but
+    /// isn't actually usable.
+    pub vad_backend: VadBackendKind,
+    /// Filesystem path to the downloaded Silero VAD ONNX model, if any. Only
+    /// consulted when `vad_backend == VadBackendKind::Silero`; `None` (e.g.
+    /// the model was never downloaded) is a normal, handled case that
+    /// triggers the energy-threshold fallback rather than an error.
+    pub silero_model_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,7 +119,13 @@ pub struct AudioCapture {
     /// Scoped to `dictation_vad_session_id` so a stale gate from a previous session
     /// can never fire into a new one (mirrors how `dictation_partial_buffer` is
     /// scoped to `active_session_id` at the lib.rs layer).
-    dictation_vad_gate: Arc<std::sync::Mutex<Option<StreamingVadGate>>>,
+    ///
+    /// Boxed as `dyn VadGate` so the capture callback can drive either the
+    /// energy-threshold heuristic or the Silero-backed detector through the
+    /// exact same call sites (see `crate::audio::vad::VadGate`); which
+    /// concrete backend is behind the box is decided once, when the gate is
+    /// installed in `start_dictation`, by `crate::audio::silero_vad::build_vad_gate`.
+    dictation_vad_gate: Arc<std::sync::Mutex<Option<Box<dyn VadGate + Send>>>>,
     /// Monotonic id of the dictation session the VAD gate above belongs to.
     /// Bumped every `start_dictation` call; the callback only acts on the gate
     /// when this still matches the session it captured at spawn time.
@@ -188,18 +205,19 @@ fn dictation_start_elapsed_ms(dictation_start: &std::sync::Mutex<Option<Instant>
 /// this guarantees a gate left running by a stale/just-stopped session can never
 /// signal into a session that has since started (the id will have moved on).
 ///
-/// Chunks `mono_samples` into `frame_size`-sample frames (mirroring the batch
-/// `VoiceActivityDetector`'s framing) so gate behavior doesn't depend on the
-/// OS/device-specific cpal callback cadence.
+/// `vad_gate` is a `Box<dyn VadGate>` so this same call site drives either the
+/// energy-threshold heuristic or the Silero-backed detector interchangeably --
+/// this function (and every other caller of the gate) has no branch on which
+/// backend is actually installed; each `VadGate` impl does its own internal
+/// framing/chunking of `mono_samples`.
 fn drive_dictation_auto_stop_gate(
     mono_samples: &[f32],
-    frame_size: usize,
     session_id: u64,
-    vad_gate: &std::sync::Mutex<Option<StreamingVadGate>>,
+    vad_gate: &std::sync::Mutex<Option<Box<dyn VadGate + Send>>>,
     vad_session_id: &AtomicU64,
     event_handle: Option<&SidecarHandle>,
 ) {
-    if frame_size == 0 {
+    if mono_samples.is_empty() {
         return;
     }
     let Ok(mut gate_slot) = vad_gate.lock() else {
@@ -214,13 +232,8 @@ fn drive_dictation_auto_stop_gate(
         return;
     };
 
-    let mut silence_after_speech = false;
-    for chunk in mono_samples.chunks(frame_size) {
-        let energy_db = calculate_energy_db(chunk);
-        if gate.push_frame(energy_db) == VadEdge::SilenceStarted {
-            silence_after_speech = true;
-        }
-    }
+    let edge = gate.push_samples(mono_samples);
+    let silence_after_speech = edge == VadEdge::SilenceStarted;
 
     // `SilenceStarted` only fires as an edge out of the speech state, so
     // `is_speaking()` being false here is guaranteed; asserted defensively so a
@@ -238,6 +251,7 @@ fn drive_dictation_auto_stop_gate(
                     "signal": "silence_stop",
                     "sessionId": session_id,
                     "framesPerSecond": frames_per_second,
+                    "vadBackend": gate.backend_name(),
                 }),
             );
         }
@@ -585,14 +599,19 @@ impl AudioCapture {
                 let frame_size = ((sample_rate as f32) * DICTATION_AUTO_STOP_FRAME_MS / 1000.0)
                     .round()
                     .max(1.0) as usize;
-                Some(StreamingVadGate::new(&VadConfig {
+                let vad_config = VadConfig {
                     frame_size,
                     sample_rate,
                     threshold_db: None,
                     min_speech_duration: DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS,
                     min_silence_duration: auto_stop.silence_timeout_seconds,
                     padding_seconds: 0.0,
-                }))
+                };
+                Some(build_vad_gate(
+                    auto_stop.vad_backend,
+                    &vad_config,
+                    auto_stop.silero_model_path.as_deref(),
+                ))
             } else {
                 None
             };
@@ -684,10 +703,6 @@ impl AudioCapture {
             let vad_event_handle_f32 = vad_event_handle.clone();
             let vad_event_handle_i16 = vad_event_handle.clone();
             let vad_event_handle_u8 = vad_event_handle;
-            let vad_frame_size = ((config.sample_rate() as f32) * DICTATION_AUTO_STOP_FRAME_MS
-                / 1000.0)
-                .round()
-                .max(1.0) as usize;
             const SPEECH_THRESHOLD: f32 = 0.02;
 
             let stream_result = match config.sample_format() {
@@ -756,7 +771,6 @@ impl AudioCapture {
                             if vad_active {
                                 drive_dictation_auto_stop_gate(
                                     &mono_scratch,
-                                    vad_frame_size,
                                     session_id,
                                     &vad_gate_f32,
                                     &vad_session_id_f32,
@@ -832,7 +846,6 @@ impl AudioCapture {
                             if vad_active {
                                 drive_dictation_auto_stop_gate(
                                     &mono_scratch,
-                                    vad_frame_size,
                                     session_id,
                                     &vad_gate_i16,
                                     &vad_session_id_i16,
@@ -908,7 +921,6 @@ impl AudioCapture {
                             if vad_active {
                                 drive_dictation_auto_stop_gate(
                                     &mono_scratch,
-                                    vad_frame_size,
                                     session_id,
                                     &vad_gate_u8,
                                     &vad_session_id_u8,
@@ -1633,7 +1645,7 @@ impl AudioCapture {
     /// so the user can start dictating without touching a hotkey at all.
     ///
     /// This is deliberately NOT the same machinery as `start_dictation`'s auto-stop
-    /// `StreamingVadGate` (see `drive_dictation_auto_stop_gate`): that gate only runs once a
+    /// gate (see `drive_dictation_auto_stop_gate`): that gate only runs once a
     /// dictation session's own capture stream is already open, whereas this monitor is the
     /// thing that runs *instead*, while idle, purely to decide when to call the existing
     /// start-dictation path. It never appends to `dictation_buffer`, never touches
@@ -1642,6 +1654,11 @@ impl AudioCapture {
     /// (electron/main.ts) to route through the exact same `start_dictation` command every
     /// other activation path (hotkey, native helper) already uses, so it passes through the
     /// same `DictationSessionState::Idle` guard and can't double-start a session.
+    ///
+    /// `vad_backend`/`silero_model_path` select which [`VadGate`] implementation drives
+    /// speech detection here, via `crate::audio::silero_vad::build_vad_gate` -- the same
+    /// backend-selection knob `start_dictation`'s auto-stop gate uses, so hands-free
+    /// auto-start and auto-stop-on-silence always agree on which detector is active.
     ///
     /// Callers MUST NOT invoke this unless `dictation_hands_free_enabled` is on; the whole
     /// point is that the mic is never opened for this purpose when the setting is off, so
@@ -1653,6 +1670,8 @@ impl AudioCapture {
         &mut self,
         preference: Option<&settings::AudioInputDevicePreference>,
         event_handle: SidecarHandle,
+        vad_backend: VadBackendKind,
+        silero_model_path: Option<PathBuf>,
     ) -> Result<()> {
         if self.hands_free_monitor_active.load(Ordering::SeqCst) {
             return Ok(());
@@ -1700,14 +1719,22 @@ impl AudioCapture {
             // accumulation, no allocation beyond the VAD gate itself. This must
             // stay cheap since (when hands-free is enabled) it can run indefinitely
             // while the app is idle.
-            let gate = std::sync::Mutex::new(StreamingVadGate::new(&VadConfig {
+            //
+            // Backend-agnostic: `build_vad_gate` returns either the energy-threshold
+            // heuristic or the Silero-backed detector (with automatic fallback to
+            // energy-threshold if Silero isn't available), and this code never
+            // branches on which one it got back.
+            let vad_config = VadConfig {
                 frame_size,
                 sample_rate,
                 threshold_db: None,
                 min_speech_duration: DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS,
                 min_silence_duration: 0.3,
                 padding_seconds: 0.0,
-            }));
+            };
+            let gate: std::sync::Mutex<Box<dyn VadGate + Send>> = std::sync::Mutex::new(
+                build_vad_gate(vad_backend, &vad_config, silero_model_path.as_deref()),
+            );
             let running = Arc::clone(&monitor_active);
             let running_f32 = Arc::clone(&running);
             let running_i16 = Arc::clone(&running);
@@ -1719,8 +1746,7 @@ impl AudioCapture {
 
             fn handle_frame(
                 mono: &[f32],
-                frame_size: usize,
-                gate: &std::sync::Mutex<StreamingVadGate>,
+                gate: &std::sync::Mutex<Box<dyn VadGate + Send>>,
                 running: &AtomicBool,
                 handle: &SidecarHandle,
             ) {
@@ -1730,14 +1756,11 @@ impl AudioCapture {
                 let Ok(mut gate) = gate.lock() else {
                     return;
                 };
-                for chunk in mono.chunks(frame_size) {
-                    let energy_db = calculate_energy_db(chunk);
-                    if gate.push_frame(energy_db) == VadEdge::SpeechStarted {
-                        handle.emit(
-                            "dictation-vad-signal",
-                            serde_json::json!({ "signal": "hands_free_start" }),
-                        );
-                    }
+                if gate.push_samples(mono) == VadEdge::SpeechStarted {
+                    handle.emit(
+                        "dictation-vad-signal",
+                        serde_json::json!({ "signal": "hands_free_start" }),
+                    );
                 }
             }
 
@@ -1755,7 +1778,7 @@ impl AudioCapture {
                                 .map(|chunk| chunk.iter().sum::<f32>() / num_channels as f32)
                                 .collect()
                         };
-                        handle_frame(&mono, frame_size, &gate, &running_f32, &handle_f32);
+                        handle_frame(&mono, &gate, &running_f32, &handle_f32);
                     },
                     err_fn,
                     None,
@@ -1779,7 +1802,7 @@ impl AudioCapture {
                                 })
                                 .collect()
                         };
-                        handle_frame(&mono, frame_size, &gate, &running_i16, &handle_i16);
+                        handle_frame(&mono, &gate, &running_i16, &handle_i16);
                     },
                     err_fn,
                     None,
@@ -1803,7 +1826,7 @@ impl AudioCapture {
                                 })
                                 .collect()
                         };
-                        handle_frame(&mono, frame_size, &gate, &running_u8, &handle_u8);
+                        handle_frame(&mono, &gate, &running_u8, &handle_u8);
                     },
                     err_fn,
                     None,
@@ -2011,22 +2034,22 @@ fn ensure_min_duration(samples: &mut Vec<f32>, sample_rate: u32, min_seconds: f3
 #[cfg(test)]
 mod dictation_auto_stop_gate_tests {
     use super::drive_dictation_auto_stop_gate;
-    use crate::audio::vad::{StreamingVadGate, VadConfig};
+    use crate::audio::vad::{EnergyThresholdVadGate, VadConfig, VadGate};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
     // Fixed threshold, small hysteresis windows expressed in whole "frames" (one
     // `frame_size`-sample chunk each), matching the convention used by
     // `audio::vad::tests::fixed_threshold_gate`.
-    fn test_gate() -> StreamingVadGate {
-        StreamingVadGate::new(&VadConfig {
+    fn test_gate() -> Box<dyn VadGate + Send> {
+        Box::new(EnergyThresholdVadGate::new(&VadConfig {
             frame_size: 160, // 10ms at 16kHz
             sample_rate: 16_000,
             threshold_db: Some(-40.0),
             min_speech_duration: 0.05,  // 5 frames
             min_silence_duration: 0.05, // 5 frames
             padding_seconds: 0.0,
-        })
+        }))
     }
 
     fn loud_samples(frames: usize) -> Vec<f32> {
@@ -2048,9 +2071,7 @@ mod dictation_auto_stop_gate_tests {
         {
             let mut slot = gate.lock().unwrap();
             let g = slot.as_mut().unwrap();
-            for _ in 0..6 {
-                let _ = g.push_frame(-10.0); // loud enough to confirm speech
-            }
+            let _ = g.push_samples(&loud_samples(6)); // loud enough to confirm speech
             assert!(g.is_speaking(), "should be in speech state after loud run");
         }
 
@@ -2058,7 +2079,6 @@ mod dictation_auto_stop_gate_tests {
         // doesn't panic and correctly advances gate state for the active session.
         drive_dictation_auto_stop_gate(
             &quiet_samples(6),
-            160,
             session_id.load(Ordering::SeqCst),
             &gate,
             &session_id,
@@ -2087,16 +2107,13 @@ mod dictation_auto_stop_gate_tests {
         {
             let mut slot = gate.lock().unwrap();
             let g = slot.as_mut().unwrap();
-            for _ in 0..6 {
-                let _ = g.push_frame(-10.0);
-            }
+            let _ = g.push_samples(&loud_samples(6));
             assert!(g.is_speaking());
         }
 
         // A stale callback (still holding session_id=1) tries to push silence in.
         drive_dictation_auto_stop_gate(
             &quiet_samples(6),
-            160,
             stale_callback_session_id,
             &gate,
             &current_session_id,
@@ -2114,27 +2131,27 @@ mod dictation_auto_stop_gate_tests {
     }
 
     #[test]
-    fn zero_frame_size_is_a_no_op() {
+    fn empty_samples_is_a_no_op() {
         let gate = Mutex::new(Some(test_gate()));
         let session_id = AtomicU64::new(1);
 
-        // Should not panic (chunks(0) would panic) and should not touch the gate.
-        drive_dictation_auto_stop_gate(&loud_samples(6), 0, 1, &gate, &session_id, None);
+        // Should not panic and should not touch the gate.
+        drive_dictation_auto_stop_gate(&[], 1, &gate, &session_id, None);
 
         let slot = gate.lock().unwrap();
         assert!(
             !slot.as_ref().unwrap().is_speaking(),
-            "gate should be untouched when frame_size is 0"
+            "gate should be untouched when no samples are provided"
         );
     }
 
     #[test]
     fn no_gate_installed_is_a_no_op() {
-        let gate: Mutex<Option<StreamingVadGate>> = Mutex::new(None);
+        let gate: Mutex<Option<Box<dyn VadGate + Send>>> = Mutex::new(None);
         let session_id = AtomicU64::new(1);
 
         // Auto-stop disabled for this session: gate slot is None. Must not panic.
-        drive_dictation_auto_stop_gate(&loud_samples(6), 160, 1, &gate, &session_id, None);
+        drive_dictation_auto_stop_gate(&loud_samples(6), 1, &gate, &session_id, None);
 
         assert!(gate.lock().unwrap().is_none());
     }
@@ -2167,7 +2184,12 @@ mod hands_free_monitor_tests {
         // reflects the real ordering.
         audio.is_dictating.store(true, Ordering::SeqCst);
 
-        let result = audio.start_hands_free_monitor(None, test_handle());
+        let result = audio.start_hands_free_monitor(
+            None,
+            test_handle(),
+            crate::audio::vad::VadBackendKind::EnergyThreshold,
+            None,
+        );
 
         assert!(
             result.is_ok(),
@@ -2191,7 +2213,12 @@ mod hands_free_monitor_tests {
             .hands_free_monitor_active
             .store(true, Ordering::SeqCst);
 
-        let result = audio.start_hands_free_monitor(None, test_handle());
+        let result = audio.start_hands_free_monitor(
+            None,
+            test_handle(),
+            crate::audio::vad::VadBackendKind::EnergyThreshold,
+            None,
+        );
 
         assert!(
             result.is_ok(),

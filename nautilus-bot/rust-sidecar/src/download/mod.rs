@@ -17,6 +17,19 @@ pub struct DownloadManager {
     models_dir: PathBuf,
 }
 
+/// Silero VAD (MIT-licensed) ONNX model, fetched directly from the upstream
+/// `snakers4/silero-vad` GitHub repo. Verified by direct binary download and
+/// inspection: this is a real ONNX protobuf file (not an HTML/LFS-pointer
+/// error page), current size ~2.2MB.
+/// See `crate::audio::silero_vad` for the model's input/output contract.
+const SILERO_VAD_ONNX_URL: &str =
+    "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx";
+const SILERO_VAD_ONNX_FILE: &str = "silero_vad.onnx";
+/// The real file is ~2.2MB; tolerate upstream size drift but reject tiny
+/// HTML/error-page payloads (same defensive pattern as
+/// `min_expected_model_bytes` for Whisper models).
+const SILERO_VAD_MIN_EXPECTED_BYTES: u64 = 512 * 1024;
+
 /// Download progress information
 #[derive(Debug, Clone)]
 #[expect(
@@ -401,6 +414,64 @@ impl DownloadManager {
             .exists()
     }
 
+    /// Path Silero VAD's ONNX model is stored at once downloaded.
+    pub fn silero_vad_model_path(&self) -> PathBuf {
+        self.models_dir.join("vad").join(SILERO_VAD_ONNX_FILE)
+    }
+
+    /// Whether the Silero VAD ONNX model has already been downloaded.
+    pub fn is_silero_vad_model_downloaded(&self) -> bool {
+        self.silero_vad_model_path().exists()
+    }
+
+    /// Download the Silero VAD ONNX model (MIT-licensed, ~2.2MB), the small
+    /// voice-activity-detection model from `snakers4/silero-vad` used as an
+    /// accuracy-focused v2 backend alongside `StreamingVadGate`'s energy
+    /// heuristic. Fetched directly from the upstream GitHub repo (a single,
+    /// unversioned raw file, no HF LFS/auth quirks to work around).
+    ///
+    /// Wired to the `download_silero_vad_model` sidecar IPC command (see
+    /// `lib.rs`), invoked from the Settings UI's VAD backend selector.
+    pub async fn download_silero_vad_model(
+        &self,
+        progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
+    ) -> Result<PathBuf> {
+        let destination = self.silero_vad_model_path();
+
+        if destination.exists() {
+            let metadata = tokio::fs::metadata(&destination).await?;
+            if metadata.len() >= SILERO_VAD_MIN_EXPECTED_BYTES {
+                tracing::info!("Silero VAD model already exists at {:?}", destination);
+                return Ok(destination);
+            }
+            tracing::warn!(
+                "Existing Silero VAD model at {:?} looks too small ({} bytes); re-downloading",
+                destination,
+                metadata.len()
+            );
+            tokio::fs::remove_file(&destination).await.ok();
+        }
+
+        tracing::info!("Downloading Silero VAD model from {}", SILERO_VAD_ONNX_URL);
+        self.download_file_unverified(SILERO_VAD_ONNX_URL, &destination, progress_callback)
+            .await?;
+
+        let metadata = tokio::fs::metadata(&destination).await?;
+        if metadata.len() < SILERO_VAD_MIN_EXPECTED_BYTES {
+            tokio::fs::remove_file(&destination).await.ok();
+            return Err(anyhow::anyhow!(
+                "Downloaded Silero VAD model is too small ({} bytes). Download failed.",
+                metadata.len()
+            ));
+        }
+
+        tracing::info!(
+            "Silero VAD model downloaded successfully to {:?}",
+            destination
+        );
+        Ok(destination)
+    }
+
     /// Get available space in models directory
     pub async fn get_available_space(&self) -> Result<u64> {
         // This is platform-specific
@@ -514,6 +585,25 @@ impl DownloadManager {
                     models.push(DownloadedModel {
                         name: format!("{} {}", label, name),
                         provider: "moonshine".to_string(),
+                        path: entry.path(),
+                        size_bytes: metadata.len(),
+                        downloaded_at: metadata.modified()?,
+                    });
+                }
+            }
+        }
+
+        // Check Silero VAD model
+        let vad_dir = self.models_dir.join("vad");
+        if vad_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&vad_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let metadata = entry.metadata().await?;
+                if metadata.is_file() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    models.push(DownloadedModel {
+                        name: format!("Silero VAD {}", name),
+                        provider: "silero_vad".to_string(),
                         path: entry.path(),
                         size_bytes: metadata.len(),
                         downloaded_at: metadata.modified()?,
