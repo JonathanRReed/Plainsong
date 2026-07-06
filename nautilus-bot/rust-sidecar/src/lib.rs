@@ -9855,6 +9855,10 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
         .unwrap_or(asr::AsrProviderType::DistilWhisper);
     transcription.dictation_route_preference =
         normalize_dictation_route_preference(&transcription.dictation_route_preference).to_string();
+    transcription.dictation_vad_backend =
+        audio::vad::VadBackendKind::from_settings_str(&transcription.dictation_vad_backend)
+            .as_settings_str()
+            .to_string();
     transcription.default_provider = asr_provider_to_settings_value(default_provider).to_string();
     transcription.selected_model_id =
         normalize_asr_model_id(default_provider, &transcription.selected_model_id);
@@ -13785,9 +13789,15 @@ async fn reconcile_hands_free_monitor(
     state: &AppState,
     handle: &crate::sidecar_handle::SidecarHandle,
 ) {
-    let hands_free_enabled = {
+    let (hands_free_enabled, vad_backend) = {
         let sm = state.settings_manager.lock().await;
-        sm.settings().transcription.dictation_hands_free_enabled
+        let settings = sm.settings();
+        (
+            settings.transcription.dictation_hands_free_enabled,
+            audio::vad::VadBackendKind::from_settings_str(
+                &settings.transcription.dictation_vad_backend,
+            ),
+        )
     };
 
     let session_state = {
@@ -13816,11 +13826,38 @@ async fn reconcile_hands_free_monitor(
         }
     };
 
-    if let Err(error) =
-        audio.start_hands_free_monitor(preferred_input_device.as_ref(), handle.clone())
-    {
+    let silero_model_path = resolve_silero_vad_model_path(vad_backend);
+
+    if let Err(error) = audio.start_hands_free_monitor(
+        preferred_input_device.as_ref(),
+        handle.clone(),
+        vad_backend,
+        silero_model_path,
+    ) {
         tracing::warn!("Failed to start hands-free idle monitor: {}", error);
     }
+}
+
+/// Resolve the on-disk path to the Silero VAD ONNX model, but only when
+/// `vad_backend` actually calls for it -- when the energy-threshold backend
+/// is selected, skip touching the filesystem/download-manager entirely and
+/// return `None`, since `build_vad_gate` never consults it in that case.
+///
+/// Returns `None` (rather than erroring) if the download manager can't be
+/// constructed or the model hasn't been downloaded yet; both are handled,
+/// expected cases that `crate::audio::silero_vad::build_vad_gate` already
+/// treats as "fall back to energy-threshold".
+fn resolve_silero_vad_model_path(
+    vad_backend: audio::vad::VadBackendKind,
+) -> Option<std::path::PathBuf> {
+    if vad_backend != audio::vad::VadBackendKind::Silero {
+        return None;
+    }
+    let manager = download::DownloadManager::new().ok()?;
+    if !manager.is_silero_vad_model_downloaded() {
+        return None;
+    }
+    Some(manager.silero_vad_model_path())
 }
 
 /// Sidecar-compatible start_dictation: simplified version that emits events via SidecarHandle.
@@ -14094,9 +14131,14 @@ async fn start_dictation_for_sidecar(
             .transcription
             .dictation_silence_timeout_seconds,
     );
+    let vad_backend = audio::vad::VadBackendKind::from_settings_str(
+        &settings_snapshot.transcription.dictation_vad_backend,
+    );
     let auto_stop_config = audio::DictationAutoStopConfig {
         enabled: effective_silence_timeout_seconds > 0.0,
         silence_timeout_seconds: effective_silence_timeout_seconds,
+        vad_backend,
+        silero_model_path: resolve_silero_vad_model_path(vad_backend),
     };
 
     // Handles captured under the audio lock when capture starts successfully, so
@@ -17083,6 +17125,29 @@ pub async fn dispatch_command(
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Null)
+        }
+        "is_silero_vad_model_downloaded" => {
+            let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
+            Ok(serde_json::json!(manager.is_silero_vad_model_downloaded()))
+        }
+        "download_silero_vad_model" => {
+            let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
+            let progress_handle = handle.clone();
+            let path = manager
+                .download_silero_vad_model(move |progress: download::DownloadProgress| {
+                    progress_handle.emit_event(
+                        "model-download-progress",
+                        serde_json::json!({
+                            "modelName": "silero_vad",
+                            "percentage": progress.percentage,
+                            "bytesDownloaded": progress.bytes_downloaded,
+                            "totalBytes": progress.total_bytes,
+                        }),
+                    );
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!(path.to_string_lossy()))
         }
 
         // ── Projects ───────────────────────────────────────────────────────

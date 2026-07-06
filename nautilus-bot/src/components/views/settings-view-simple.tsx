@@ -70,7 +70,9 @@ import {
 } from "@/lib/backend/ai";
 import {
   downloadDiarizationModel,
+  downloadSileroVadModel,
   isDiarizationModelAvailable,
+  isSileroVadModelDownloaded,
   listDiarizationModels,
 } from "@/lib/backend/asr";
 import {
@@ -468,6 +470,8 @@ export function SettingsView() {
   >([]);
   const [selectedDiarizationModel, setSelectedDiarizationModel] =
     useState("ecapa_tdnn_speaker");
+  const [sileroVadAvailable, setSileroVadAvailable] = useState(false);
+  const [sileroVadDownloading, setSileroVadDownloading] = useState(false);
   const [micTestActive, setMicTestActive] = useState(false);
   const [micTestLevel, setMicTestLevel] = useState(0);
   const [micTestRecording, setMicTestRecording] = useState(false);
@@ -1024,6 +1028,22 @@ export function SettingsView() {
       if (!mounted) return;
       setDiarizationAvailable(avail);
       setDiarizationModels(models);
+    };
+    load();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      const avail = await withSettingsSectionTimeout(
+        "Silero VAD availability",
+        isSileroVadModelDownloaded(),
+      ).catch(() => false);
+      if (!mounted) return;
+      setSileroVadAvailable(avail);
     };
     load();
     return () => {
@@ -2056,6 +2076,103 @@ export function SettingsView() {
                       {preset}m
                     </button>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {settings.audio.voiceActivityDetection && (
+              <div className="space-y-3 rounded-2xl border border-border/60 bg-background/75 p-4">
+                <div className="space-y-0.5">
+                  <Label>VAD accuracy</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Energy-threshold is the default: a lightweight heuristic
+                    that needs no download and works well in quiet rooms.
+                    Silero is a small ONNX speech-detection model that's more
+                    accurate in noisy environments, but requires a one-time
+                    ~2 MB model download before it can be enabled.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                      (settings.transcription.dictationVadBackend ??
+                        "energy_threshold") === "energy_threshold"
+                        ? "border-rust/40 bg-rust/8 text-rust"
+                        : "border-border bg-muted hover:bg-muted/80"
+                    }`}
+                    onClick={() =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          dictationVadBackend: "energy_threshold",
+                        },
+                      })
+                    }
+                  >
+                    Energy-threshold
+                  </button>
+                  {sileroVadAvailable ? (
+                    <button
+                      type="button"
+                      className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                        settings.transcription.dictationVadBackend ===
+                        "silero"
+                          ? "border-rust/40 bg-rust/8 text-rust"
+                          : "border-border bg-muted hover:bg-muted/80"
+                      }`}
+                      onClick={() =>
+                        void updateSettings({
+                          ...settings,
+                          transcription: {
+                            ...settings.transcription,
+                            dictationVadBackend: "silero",
+                          },
+                        })
+                      }
+                    >
+                      Silero (accurate)
+                    </button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={sileroVadDownloading}
+                      onClick={async () => {
+                        setSileroVadDownloading(true);
+                        try {
+                          await downloadSileroVadModel();
+                          setSileroVadAvailable(true);
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationVadBackend: "silero",
+                            },
+                          });
+                        } catch (e) {
+                          const msg =
+                            e instanceof Error ? e.message : String(e);
+                          setError(`Download failed: ${msg}`);
+                        } finally {
+                          setSileroVadDownloading(false);
+                        }
+                      }}
+                    >
+                      {sileroVadDownloading ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Downloading Model...
+                        </>
+                      ) : (
+                        <>
+                          <Download className="mr-2 h-4 w-4" />
+                          Download Silero (~2 MB)
+                        </>
+                      )}
+                    </Button>
+                  )}
                 </div>
               </div>
             )}

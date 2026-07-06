@@ -216,6 +216,141 @@ pub enum VadEdge {
     NoChange,
 }
 
+/// Which speech/silence-gate implementation a dictation session should use.
+///
+/// Mirrors the `AsrProviderType` pattern used to select swappable ASR
+/// backends (`crate::asr::AsrProviderType` + `AsrProviderFactory`): a small,
+/// serializable, `Copy` enum that a settings string maps onto, with a
+/// factory (`build_vad_gate`, in this module) that turns a `VadBackendKind`
+/// into a boxed trait object. Callers (the cpal capture callback in
+/// `audio.rs`) only ever hold a `Box<dyn VadGate>` and call `push_samples` /
+/// `is_speaking` / `frames_per_second` -- they do not know or care which
+/// concrete backend is underneath.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum VadBackendKind {
+    /// The original O(1)-per-frame energy/RMS-threshold heuristic
+    /// (`StreamingVadGate`). Always available; no model download required.
+    #[default]
+    EnergyThreshold,
+    /// The Silero ONNX speech-probability model (`SileroVadDetector`),
+    /// wrapped so it produces the same [`VadEdge`] stream as
+    /// `StreamingVadGate`. Falls back to `EnergyThreshold` automatically if
+    /// the model isn't downloaded, fails to load, or errors at runtime (see
+    /// `crate::audio::silero_vad::SileroBackedVadGate`).
+    Silero,
+}
+
+impl VadBackendKind {
+    /// Parse from the `dictation_vad_backend` settings string. Unknown/empty
+    /// values default to `EnergyThreshold` (the pre-existing, always-safe
+    /// behavior) rather than erroring, matching how other stringly-typed
+    /// settings in this codebase (e.g. `dictation_route_preference`) are
+    /// normalized leniently.
+    pub fn from_settings_str(value: &str) -> Self {
+        match value {
+            "silero" => VadBackendKind::Silero,
+            _ => VadBackendKind::EnergyThreshold,
+        }
+    }
+
+    pub fn as_settings_str(&self) -> &'static str {
+        match self {
+            VadBackendKind::EnergyThreshold => "energy_threshold",
+            VadBackendKind::Silero => "silero",
+        }
+    }
+}
+
+/// Uniform speech/silence gate interface implemented by both the
+/// energy-threshold heuristic ([`StreamingVadGate`], via
+/// [`EnergyThresholdVadGate`]) and the Silero ONNX-backed detector
+/// (`crate::audio::silero_vad::SileroBackedVadGate`).
+///
+/// This is the seam that lets `audio.rs`'s capture callback and the
+/// hands-free monitor drive either backend identically: both `start_dictation`
+/// and `start_hands_free_monitor` build a `Box<dyn VadGate + Send>` once (via
+/// `build_vad_gate`) and thereafter only call trait methods, so the auto-stop
+/// / auto-start call sites' contracts (feed samples in, get a `VadEdge` out)
+/// never change based on which backend is active.
+///
+/// Implementations consume raw mono `f32` PCM samples (not a single
+/// precomputed RMS-dB scalar) because Silero needs the raw waveform for its
+/// own internal chunking; `EnergyThresholdVadGate` derives the RMS-dB value
+/// itself from each frame internally, so both backends still fit one method.
+pub trait VadGate {
+    /// Feed a contiguous span of mono `f32` PCM samples (as produced by one
+    /// cpal callback tick) into the gate. Implementations frame/chunk
+    /// internally in whatever unit their algorithm needs, and return the
+    /// most significant edge observed while consuming `mono_samples` (i.e. if
+    /// multiple internal frames/chunks were processed, `SilenceStarted` or
+    /// `SpeechStarted` -- whichever fired -- takes priority over
+    /// `NoChange`; only one edge fires per unbroken state, same as
+    /// `StreamingVadGate::push_frame`'s per-frame contract).
+    fn push_samples(&mut self, mono_samples: &[f32]) -> VadEdge;
+
+    /// Whether the gate is currently latched into the "speech" state.
+    fn is_speaking(&self) -> bool;
+
+    /// Frames (or model chunks) per second this gate was configured with,
+    /// forwarded to callers/events exactly as `StreamingVadGate::frames_per_second`
+    /// already is.
+    fn frames_per_second(&self) -> f32;
+
+    /// Human-readable name of the backend actually driving this gate right
+    /// now (e.g. for logging/diagnostics). A gate that has fallen back
+    /// internally (see `SileroBackedVadGate`) should report the backend it
+    /// fell back *to*, not the one it was originally configured for.
+    fn backend_name(&self) -> &'static str;
+}
+
+/// Adapts [`StreamingVadGate`] (which consumes one pre-computed RMS-dB value
+/// per frame via `push_frame`) to the sample-based [`VadGate`] trait: it
+/// chunks incoming samples into `frame_size`-sample frames itself (mirroring
+/// `drive_dictation_auto_stop_gate`'s existing chunking loop in `audio.rs`)
+/// and computes each frame's energy via [`calculate_energy_db`].
+pub struct EnergyThresholdVadGate {
+    gate: StreamingVadGate,
+    frame_size: usize,
+}
+
+impl EnergyThresholdVadGate {
+    pub fn new(config: &VadConfig) -> Self {
+        Self {
+            gate: StreamingVadGate::new(config),
+            frame_size: config.frame_size.max(1),
+        }
+    }
+}
+
+impl VadGate for EnergyThresholdVadGate {
+    fn push_samples(&mut self, mono_samples: &[f32]) -> VadEdge {
+        let mut most_significant = VadEdge::NoChange;
+        for chunk in mono_samples.chunks(self.frame_size) {
+            let energy_db = calculate_energy_db(chunk);
+            let edge = self.gate.push_frame(energy_db);
+            if edge != VadEdge::NoChange {
+                most_significant = edge;
+            }
+        }
+        most_significant
+    }
+
+    fn is_speaking(&self) -> bool {
+        self.gate.is_speaking()
+    }
+
+    fn frames_per_second(&self) -> f32 {
+        self.gate.frames_per_second()
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "energy_threshold"
+    }
+}
+
 /// Cheap, streaming (per-frame) speech/silence gate.
 ///
 /// This is an *additive* sibling to [`VoiceActivityDetector`]: that type scans

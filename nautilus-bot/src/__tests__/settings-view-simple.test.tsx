@@ -189,6 +189,8 @@ vi.mock("@/lib/backend", () => ({
   listDiarizationModels: vi.fn(async () => [
     { id: "ecapa_tdnn_speaker", label: "ECAPA-TDNN 512", description: "Recommended", installed: true },
   ]),
+  isSileroVadModelDownloaded: vi.fn(async () => false),
+  downloadSileroVadModel: vi.fn(async () => {}),
   migrateToEncryptedStorage: vi.fn(),
   openPermissionSettings: vi.fn(),
   requestDictationPermissions: vi.fn(async () => ({
@@ -460,6 +462,61 @@ describe("SettingsView performance behavior", () => {
       | undefined;
     expect(lastSave?.transcription?.dictationHandsFreeEnabled).toBe(true);
     expect(lastSave?.transcription?.dictationPushToTalk).toBe(false);
+  });
+
+  it("keeps Silero VAD opt-in: offers a download button (not a silent switch) until the model is present, then lets the user select it", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.isSileroVadModelDownloaded).mockResolvedValue(false);
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findAllByText("Capture and transcription");
+
+    await waitFor(() => {
+      expect(backend.isSileroVadModelDownloaded).toHaveBeenCalled();
+    });
+
+    // Model not downloaded yet: Silero is not selectable, only a download
+    // affordance is shown (no silent/automatic download).
+    expect(backend.downloadSileroVadModel).not.toHaveBeenCalled();
+    const downloadButton = await screen.findByText(/Download Silero/);
+    expect(screen.queryByText("Silero (accurate)")).not.toBeInTheDocument();
+
+    fireEvent.click(downloadButton);
+
+    await waitFor(() => {
+      expect(backend.downloadSileroVadModel).toHaveBeenCalledTimes(1);
+    });
+
+    // Once downloaded, the Silero option becomes available and selecting it
+    // persists dictationVadBackend: "silero" via the normal save path.
+    await screen.findByText("Silero (accurate)");
+    fireEvent.click(screen.getByText("Silero (accurate)"));
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
+    const lastSave = saveCalls[saveCalls.length - 1]?.[0] as
+      | { transcription?: { dictationVadBackend?: string } }
+      | undefined;
+    expect(lastSave?.transcription?.dictationVadBackend).toBe("silero");
+  });
+
+  it("defaults VAD backend to energy-threshold when unset, requiring no download", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.isSileroVadModelDownloaded).mockResolvedValue(false);
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findAllByText("Capture and transcription");
+
+    const energyOption = await screen.findByText("Energy-threshold");
+    expect(energyOption.className).toContain("border-rust/40");
   });
 
   it("shows personal profile sync actions and can restore the latest profile snapshot", async () => {
