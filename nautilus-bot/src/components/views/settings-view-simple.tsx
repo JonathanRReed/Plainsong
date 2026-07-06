@@ -521,7 +521,7 @@ export function SettingsView() {
     nativeShortcutAvailable && settings?.transcription.dictationPushToTalk;
   const dictationShortcutBehaviorHint = settings?.transcription
     .dictationHandsFreeEnabled
-    ? "Press shortcut once to start hands-free dictation, then pause speaking or press again to stop"
+    ? "Dictation starts automatically when you speak, no shortcut press needed — pause speaking (or press the shortcut) to stop"
     : dictationHoldToTalkActive
       ? "Hold shortcut to record, release to stop"
       : "Press shortcut once to start, then press again to stop";
@@ -1553,37 +1553,35 @@ export function SettingsView() {
             <p className="text-sm text-muted-foreground">
               {dictationShortcutBehaviorHint}
             </p>
-            {nativeShortcutAvailable ? (
-              <select
-                aria-label="Hotkey behavior"
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                value={settings?.transcription.dictationPushToTalk ? "hold_to_talk" : "toggle"}
-                onChange={(event) => {
-                  if (!settings) {
-                    return;
-                  }
-                  const pushToTalk = event.target.value === "hold_to_talk";
-                  updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      dictationPushToTalk: pushToTalk,
-                      dictationHandsFreeEnabled: false,
-                    },
-                  });
-                }}
-              >
-                <option value="toggle">Toggle (press to start, press again to stop)</option>
-                <option value="hold_to_talk">Hold-to-talk (hold to record, release to stop)</option>
-              </select>
-            ) : (
-              <p className="w-full rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-foreground">
-                Toggle{" "}
-                <span className="text-muted-foreground">
-                  — press to start, press again to stop
-                </span>
-              </p>
-            )}
+            <select
+              aria-label="Hotkey behavior"
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              value={dictationShortcutBehavior}
+              onChange={(event) => {
+                if (!settings) {
+                  return;
+                }
+                const behavior = event.target.value as DictationHotkeyBehavior;
+                updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationPushToTalk: behavior === "hold_to_talk",
+                    dictationHandsFreeEnabled: behavior === "hands_free",
+                  },
+                });
+              }}
+            >
+              <option value="toggle">Toggle (press to start, press again to stop)</option>
+              {nativeShortcutAvailable && (
+                <option value="hold_to_talk">
+                  Hold-to-talk (hold to record, release to stop)
+                </option>
+              )}
+              <option value="hands_free">
+                Hands-free (starts automatically when you speak, no shortcut needed)
+              </option>
+            </select>
           </div>
         )}
 

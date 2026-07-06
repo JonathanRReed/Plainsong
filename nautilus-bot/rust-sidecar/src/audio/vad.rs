@@ -172,7 +172,7 @@ impl VoiceActivityDetector {
 }
 
 /// Calculate energy in dB for a frame
-fn calculate_energy_db(samples: &[f32]) -> f32 {
+pub(crate) fn calculate_energy_db(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return -100.0;
     }
@@ -198,6 +198,155 @@ fn percentile(data: &[f32], p: f32) -> f32 {
 
     let index = ((sorted.len() - 1) as f32 * p) as usize;
     sorted[index.min(sorted.len() - 1)]
+}
+
+/// Edge event emitted by [`StreamingVadGate::push_frame`].
+///
+/// The gate is a simple two-state (speech / silence) machine with hysteresis:
+/// it only reports an edge once the *new* state has been sustained for a
+/// minimum run of frames, so brief dips or spikes don't cause flapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VadEdge {
+    /// Sustained energy above the noise floor was just confirmed after a
+    /// period of silence (or at startup).
+    SpeechStarted,
+    /// Sustained quiet was just confirmed after a period of speech.
+    SilenceStarted,
+    /// No confirmed state transition on this frame.
+    NoChange,
+}
+
+/// Cheap, streaming (per-frame) speech/silence gate.
+///
+/// This is an *additive* sibling to [`VoiceActivityDetector`]: that type scans
+/// a full, already-captured buffer offline (used today for silence-trimming).
+/// `StreamingVadGate` instead consumes one frame's RMS-dB value at a time —
+/// e.g. from the live cpal input callback — and is O(1) per call with no
+/// heap allocation in `push_frame`, so it is safe to drive from a real-time
+/// audio thread or a hot polling loop.
+///
+/// The adaptive noise floor and hysteresis behavior are deliberately derived
+/// from the same [`VadConfig`] knobs the batch detector uses
+/// (`min_speech_duration`, `min_silence_duration`, the "+15dB above noise
+/// floor" adaptive threshold, and the `-40.0` dB default threshold), just
+/// re-expressed as running frame counts / an exponential moving average
+/// instead of a full-buffer scan + percentile, since a percentile can't be
+/// computed in O(1) without buffering.
+pub struct StreamingVadGate {
+    /// Frames per second, derived from `config.sample_rate / config.frame_size`.
+    frames_per_second: f32,
+    /// Fixed threshold in dB, if configured (mirrors `VadConfig::threshold_db`).
+    fixed_threshold_db: Option<f32>,
+    /// Running noise-floor estimate (EMA), seeded at the same -40dB default
+    /// the batch detector starts its adaptive threshold at.
+    noise_floor_db: f32,
+    /// How many frames of confirmed speech are required before emitting
+    /// `SpeechStarted` (derived from `min_speech_duration`).
+    min_speech_frames: u32,
+    /// How many frames of confirmed silence are required before emitting
+    /// `SilenceStarted` (derived from `min_silence_duration`).
+    min_silence_frames: u32,
+    /// Whether the gate is currently latched into the "speech" state.
+    in_speech: bool,
+    /// Consecutive frames above threshold seen while not yet in speech.
+    above_run: u32,
+    /// Consecutive frames at/below threshold seen while in speech.
+    below_run: u32,
+}
+
+/// How far above the noise floor a frame's energy must be to count as
+/// speech. Mirrors the `+ 15.0` adaptive-threshold offset used by
+/// [`VoiceActivityDetector::detect_speech`].
+const NOISE_FLOOR_MARGIN_DB: f32 = 15.0;
+
+/// Smoothing factor for the running noise-floor EMA. Only frames that look
+/// like silence (below the current threshold) are folded in, mirroring how
+/// the batch detector's percentile(0.1) is dominated by the quietest frames.
+/// Small alpha means the floor adapts over roughly a couple of seconds of
+/// audio rather than jumping around frame-to-frame.
+const NOISE_FLOOR_EMA_ALPHA: f32 = 0.05;
+
+impl StreamingVadGate {
+    /// Build a gate whose adaptive-threshold and hysteresis behavior are
+    /// derived from `config`, the same [`VadConfig`] used by the batch
+    /// [`VoiceActivityDetector`].
+    pub fn new(config: &VadConfig) -> Self {
+        let frames_per_second = config.sample_rate as f32 / config.frame_size as f32;
+        let min_speech_frames = (config.min_speech_duration * frames_per_second)
+            .ceil()
+            .max(1.0) as u32;
+        let min_silence_frames = (config.min_silence_duration * frames_per_second)
+            .ceil()
+            .max(1.0) as u32;
+
+        Self {
+            frames_per_second,
+            fixed_threshold_db: config.threshold_db,
+            noise_floor_db: -40.0, // Same default the batch detector seeds `adaptive_threshold` with.
+            min_speech_frames,
+            min_silence_frames,
+            in_speech: false,
+            above_run: 0,
+            below_run: 0,
+        }
+    }
+
+    /// Current effective threshold in dB: either the fixed configured
+    /// threshold, or `noise_floor + NOISE_FLOOR_MARGIN_DB` when adaptive.
+    fn threshold_db(&self) -> f32 {
+        self.fixed_threshold_db
+            .unwrap_or(self.noise_floor_db + NOISE_FLOOR_MARGIN_DB)
+    }
+
+    /// Feed one frame's RMS energy (in dB, e.g. from `calculate_energy_db`)
+    /// into the gate. O(1), no allocation.
+    pub fn push_frame(&mut self, rms_db: f32) -> VadEdge {
+        let threshold = self.threshold_db();
+        let is_above = rms_db > threshold;
+
+        // Only adapt the noise floor from frames that look quiet, so loud
+        // speech doesn't drag the floor (and therefore the threshold) upward.
+        if self.fixed_threshold_db.is_none() && !is_above {
+            self.noise_floor_db += (rms_db - self.noise_floor_db) * NOISE_FLOOR_EMA_ALPHA;
+        }
+
+        let mut edge = VadEdge::NoChange;
+
+        if is_above {
+            self.below_run = 0;
+            if !self.in_speech {
+                self.above_run += 1;
+                if self.above_run >= self.min_speech_frames {
+                    self.in_speech = true;
+                    self.above_run = 0;
+                    edge = VadEdge::SpeechStarted;
+                }
+            }
+        } else {
+            self.above_run = 0;
+            if self.in_speech {
+                self.below_run += 1;
+                if self.below_run >= self.min_silence_frames {
+                    self.in_speech = false;
+                    self.below_run = 0;
+                    edge = VadEdge::SilenceStarted;
+                }
+            }
+        }
+
+        edge
+    }
+
+    /// Whether the gate is currently latched into the "speech" state.
+    pub fn is_speaking(&self) -> bool {
+        self.in_speech
+    }
+
+    /// Frames per second this gate was configured with (useful for callers
+    /// converting frame counts back to durations).
+    pub fn frames_per_second(&self) -> f32 {
+        self.frames_per_second
+    }
 }
 
 /// Pre-process audio with VAD to trim silence
@@ -257,7 +406,7 @@ pub fn trim_silence(samples: &[f32], sample_rate: u32, threshold_db: f32) -> Vec
 
 #[cfg(test)]
 mod tests {
-    use super::trim_silence;
+    use super::{trim_silence, StreamingVadGate, VadConfig, VadEdge};
 
     fn repeated_sample(amplitude: f32, sample_rate: u32, seconds: usize) -> Vec<f32> {
         vec![amplitude; sample_rate as usize * seconds]
@@ -285,5 +434,186 @@ mod tests {
 
         assert!(trimmed.len() < samples.len());
         assert!(trimmed.len() > sample_rate as usize);
+    }
+
+    /// Test config: fixed threshold (no adaptive noise-floor drift to reason
+    /// about), 100ms min speech / 100ms min silence at 100 frames/sec
+    /// (10ms "frames" -- we're feeding synthetic dB values directly, one
+    /// `push_frame` call standing in for one frame), so both hysteresis
+    /// windows are exactly 10 frames.
+    fn fixed_threshold_gate() -> StreamingVadGate {
+        StreamingVadGate::new(&VadConfig {
+            frame_size: 160, // 10ms at 16kHz
+            sample_rate: 16_000,
+            threshold_db: Some(-40.0),
+            min_speech_duration: 0.1,
+            min_silence_duration: 0.1,
+            padding_seconds: 0.0,
+        })
+    }
+
+    const LOUD_DB: f32 = -10.0;
+    const QUIET_DB: f32 = -60.0;
+
+    #[test]
+    fn streaming_gate_detects_speech_start_after_sustained_energy() {
+        let mut gate = fixed_threshold_gate();
+
+        // Fewer than min_speech_frames (10) loud frames: no edge yet.
+        let mut edges = Vec::new();
+        for _ in 0..9 {
+            edges.push(gate.push_frame(LOUD_DB));
+        }
+        assert!(
+            edges.iter().all(|e| *e == VadEdge::NoChange),
+            "should not fire before sustained run is long enough: {edges:?}"
+        );
+        assert!(!gate.is_speaking());
+
+        // The 10th consecutive loud frame confirms speech.
+        let edge = gate.push_frame(LOUD_DB);
+        assert_eq!(edge, VadEdge::SpeechStarted);
+        assert!(gate.is_speaking());
+    }
+
+    #[test]
+    fn streaming_gate_detects_silence_start_after_sustained_quiet_following_speech() {
+        let mut gate = fixed_threshold_gate();
+
+        for _ in 0..10 {
+            gate.push_frame(LOUD_DB);
+        }
+        assert!(gate.is_speaking());
+
+        // Fewer than min_silence_frames (10) quiet frames: still speaking.
+        let mut edges = Vec::new();
+        for _ in 0..9 {
+            edges.push(gate.push_frame(QUIET_DB));
+        }
+        assert!(
+            edges.iter().all(|e| *e == VadEdge::NoChange),
+            "should not fire before sustained quiet run is long enough: {edges:?}"
+        );
+        assert!(gate.is_speaking());
+
+        let edge = gate.push_frame(QUIET_DB);
+        assert_eq!(edge, VadEdge::SilenceStarted);
+        assert!(!gate.is_speaking());
+    }
+
+    #[test]
+    fn streaming_gate_does_not_flap_on_brief_dips_or_spikes() {
+        let mut gate = fixed_threshold_gate();
+
+        for _ in 0..10 {
+            gate.push_frame(LOUD_DB);
+        }
+        assert!(gate.is_speaking());
+
+        // A brief 3-frame dip below threshold (shorter than the 10-frame
+        // min_silence run) should not flip state.
+        for _ in 0..3 {
+            let edge = gate.push_frame(QUIET_DB);
+            assert_eq!(edge, VadEdge::NoChange);
+        }
+        assert!(gate.is_speaking(), "brief dip should not end speech");
+
+        // Back to loud resets the below-run counter; speech continues.
+        let edge = gate.push_frame(LOUD_DB);
+        assert_eq!(edge, VadEdge::NoChange);
+        assert!(gate.is_speaking());
+
+        // Now confirm silence for real.
+        for _ in 0..9 {
+            let edge = gate.push_frame(QUIET_DB);
+            assert_eq!(edge, VadEdge::NoChange);
+        }
+        assert_eq!(gate.push_frame(QUIET_DB), VadEdge::SilenceStarted);
+        assert!(!gate.is_speaking());
+
+        // A brief 3-frame spike above threshold (shorter than the 10-frame
+        // min_speech run) should not flip state back on.
+        for _ in 0..3 {
+            let edge = gate.push_frame(LOUD_DB);
+            assert_eq!(edge, VadEdge::NoChange);
+        }
+        assert!(!gate.is_speaking(), "brief spike should not start speech");
+    }
+
+    #[test]
+    fn streaming_gate_produces_correct_edge_sequence_over_loud_quiet_loud() {
+        let mut gate = fixed_threshold_gate();
+        let mut observed_edges = Vec::new();
+
+        // 15 loud frames (speech confirmed on the 10th).
+        for _ in 0..15 {
+            let edge = gate.push_frame(LOUD_DB);
+            if edge != VadEdge::NoChange {
+                observed_edges.push(edge);
+            }
+        }
+
+        // 20 quiet frames (silence confirmed on the 10th quiet frame).
+        for _ in 0..20 {
+            let edge = gate.push_frame(QUIET_DB);
+            if edge != VadEdge::NoChange {
+                observed_edges.push(edge);
+            }
+        }
+
+        // 15 more loud frames (speech confirmed again on the 10th).
+        for _ in 0..15 {
+            let edge = gate.push_frame(LOUD_DB);
+            if edge != VadEdge::NoChange {
+                observed_edges.push(edge);
+            }
+        }
+
+        assert_eq!(
+            observed_edges,
+            vec![
+                VadEdge::SpeechStarted,
+                VadEdge::SilenceStarted,
+                VadEdge::SpeechStarted,
+            ]
+        );
+    }
+
+    #[test]
+    fn streaming_gate_adaptive_threshold_tracks_noise_floor_like_batch_detector() {
+        // No fixed threshold: adaptive mode, same -40dB seed and +15dB
+        // margin as `VoiceActivityDetector`.
+        let mut gate = StreamingVadGate::new(&VadConfig {
+            frame_size: 160,
+            sample_rate: 16_000,
+            threshold_db: None,
+            min_speech_duration: 0.1,
+            min_silence_duration: 0.1,
+            padding_seconds: 0.0,
+        });
+
+        // Quiet room tone well above the -40dB seed but still "silence":
+        // should adapt the floor upward over many frames, folding in only
+        // quiet (sub-threshold) frames.
+        for _ in 0..200 {
+            let edge = gate.push_frame(-55.0);
+            assert_eq!(edge, VadEdge::NoChange);
+        }
+        assert!(!gate.is_speaking());
+
+        // A frame at the old (-40 + 15 = -25dB) threshold is now well
+        // between the adapted floor and old threshold; sustained energy at
+        // -20dB should still register as clear speech.
+        let mut fired = false;
+        for _ in 0..15 {
+            if gate.push_frame(-20.0) == VadEdge::SpeechStarted {
+                fired = true;
+                break;
+            }
+        }
+        assert!(
+            fired,
+            "sustained clearly-above-floor energy should start speech"
+        );
     }
 }
