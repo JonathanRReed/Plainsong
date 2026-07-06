@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::text::format::{self, DictationAppCategory};
+
 pub(crate) fn nautilus_config_dir() -> Result<PathBuf> {
     let config_dir = dirs::config_dir()
         .context("Could not find config directory")?
@@ -250,6 +252,24 @@ pub struct TranscriptionSettings {
     pub enable_auto_analysis: bool,
     /// Platform-specific ASR optimization policy and engine preferences.
     pub platform_optimization: PlatformOptimizationSettings,
+    /// Master toggle for destination-app-aware dictation formatting (independent
+    /// of the general Smart Format toggle above).
+    pub dictation_category_formatting_enabled: bool,
+    /// User-defined per-app category overrides, checked before the built-in
+    /// bundle-id/name classifier. First match wins.
+    pub dictation_app_category_overrides: Vec<DictationAppCategoryOverride>,
+}
+
+/// A user-defined override that pins a destination app (matched by substring,
+/// same convention as `dictation_parity`'s snippet/dictionary `app_scope`
+/// matching) to a specific dictation formatting category.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DictationAppCategoryOverride {
+    pub id: String,
+    pub app_matcher: String,
+    pub category: String,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -345,6 +365,8 @@ impl Default for TranscriptionSettings {
             embedding_model: "nomic-embed-text".to_string(),
             enable_auto_analysis: true,
             platform_optimization: PlatformOptimizationSettings::default(),
+            dictation_category_formatting_enabled: true,
+            dictation_app_category_overrides: Vec::new(),
         }
     }
 }
@@ -880,6 +902,78 @@ impl Default for UpdateSettings {
     }
 }
 
+/// Stable string identifier for a `DictationAppCategory`, used for
+/// serializing user-facing override values (settings JSON + frontend Select).
+pub fn dictation_app_category_to_key(category: DictationAppCategory) -> &'static str {
+    match category {
+        DictationAppCategory::Other => "other",
+        DictationAppCategory::Messaging => "messaging",
+        DictationAppCategory::Email => "email",
+        DictationAppCategory::Notes => "notes",
+        DictationAppCategory::Worklog => "worklog",
+        DictationAppCategory::AiChat => "ai_chat",
+        DictationAppCategory::CodeEditor => "code_editor",
+    }
+}
+
+/// Parses a category key back into a `DictationAppCategory`. Unknown/blank
+/// values fall back to `Other` (i.e. behave as if no override matched).
+pub fn dictation_app_category_from_key(key: &str) -> DictationAppCategory {
+    match key.trim().to_ascii_lowercase().as_str() {
+        "messaging" => DictationAppCategory::Messaging,
+        "email" => DictationAppCategory::Email,
+        "notes" => DictationAppCategory::Notes,
+        "worklog" => DictationAppCategory::Worklog,
+        "ai_chat" => DictationAppCategory::AiChat,
+        "code_editor" => DictationAppCategory::CodeEditor,
+        _ => DictationAppCategory::Other,
+    }
+}
+
+/// Uses the same case-insensitive substring containment as
+/// `dictation_parity::snippet_app_scope_matches`, but with inverted blank-matcher
+/// semantics: there, a blank scope matches everything; here, an empty/blank
+/// matcher matches nothing (an override must specify an app to scope to). A
+/// missing app target never matches a non-empty matcher in either function.
+fn dictation_app_category_override_matches(app_matcher: &str, app_target: Option<&str>) -> bool {
+    let matcher = app_matcher.trim();
+    if matcher.is_empty() {
+        return false;
+    }
+    let Some(app_name) = app_target else {
+        return false;
+    };
+    app_name.to_lowercase().contains(&matcher.to_lowercase())
+}
+
+/// Settings-aware dictation destination-app category resolver. Checks user
+/// overrides first (first enabled match wins, in list order), then falls
+/// through to the built-in bundle-id/name classifier.
+///
+/// When `dictation_category_formatting_enabled` is `false`, this always
+/// returns `Other` (no category fragment injected), preserving pre-feature
+/// behavior exactly.
+pub fn resolve_dictation_app_category_with_overrides(
+    transcription: &TranscriptionSettings,
+    app_target: Option<&str>,
+    app_bundle_id: Option<&str>,
+) -> DictationAppCategory {
+    if !transcription.dictation_category_formatting_enabled {
+        return DictationAppCategory::Other;
+    }
+
+    for override_entry in &transcription.dictation_app_category_overrides {
+        if !override_entry.enabled {
+            continue;
+        }
+        if dictation_app_category_override_matches(&override_entry.app_matcher, app_target) {
+            return dictation_app_category_from_key(&override_entry.category);
+        }
+    }
+
+    format::resolve_dictation_app_category(app_target, app_bundle_id)
+}
+
 /// Settings manager
 pub struct SettingsManager {
     settings: Settings,
@@ -985,9 +1079,13 @@ impl Default for SettingsManager {
 #[cfg(test)]
 mod tests {
     use super::{
+        dictation_app_category_from_key, dictation_app_category_to_key,
         normalize_audio_input_device_preference, normalize_dictation_active_languages,
-        AudioInputDevicePreference, PlatformOptimizationSettings, Settings,
+        resolve_dictation_app_category_with_overrides, AudioInputDevicePreference,
+        DictationAppCategoryOverride, PlatformOptimizationSettings, Settings,
+        TranscriptionSettings,
     };
+    use crate::text::format::DictationAppCategory;
 
     #[test]
     fn platform_optimization_defaults_are_stable() {
@@ -1056,5 +1154,165 @@ mod tests {
             }))
             .expect("valid device preference");
         assert_eq!(normalized.transport_type.as_deref(), Some("builtin"));
+    }
+
+    #[test]
+    fn dictation_category_formatting_defaults_are_stable() {
+        let settings = Settings::default();
+        assert!(settings.transcription.dictation_category_formatting_enabled);
+        assert!(settings
+            .transcription
+            .dictation_app_category_overrides
+            .is_empty());
+    }
+
+    #[test]
+    fn dictation_app_category_override_deserializes_missing_fields() {
+        let parsed: DictationAppCategoryOverride =
+            serde_json::from_str("{}").expect("override should deserialize with defaults");
+        assert_eq!(parsed.id, "");
+        assert_eq!(parsed.app_matcher, "");
+        assert_eq!(parsed.category, "");
+        assert!(!parsed.enabled);
+    }
+
+    #[test]
+    fn dictation_app_category_key_round_trips() {
+        for category in [
+            DictationAppCategory::Other,
+            DictationAppCategory::Messaging,
+            DictationAppCategory::Email,
+            DictationAppCategory::Notes,
+            DictationAppCategory::Worklog,
+            DictationAppCategory::AiChat,
+            DictationAppCategory::CodeEditor,
+        ] {
+            let key = dictation_app_category_to_key(category);
+            assert_eq!(dictation_app_category_from_key(key), category);
+        }
+    }
+
+    #[test]
+    fn dictation_app_category_from_key_falls_back_to_other() {
+        assert_eq!(
+            dictation_app_category_from_key("not-a-real-category"),
+            DictationAppCategory::Other
+        );
+        assert_eq!(
+            dictation_app_category_from_key(""),
+            DictationAppCategory::Other
+        );
+    }
+
+    #[test]
+    fn resolve_with_overrides_master_toggle_short_circuits_to_other() {
+        let transcription = TranscriptionSettings {
+            dictation_category_formatting_enabled: false,
+            dictation_app_category_overrides: vec![DictationAppCategoryOverride {
+                id: "1".to_string(),
+                app_matcher: "slack".to_string(),
+                category: "messaging".to_string(),
+                enabled: true,
+            }],
+            ..TranscriptionSettings::default()
+        };
+
+        // Even though Slack would normally resolve to Messaging (via override
+        // or the built-in classifier), the master toggle being off must force
+        // Other, i.e. behave exactly as before this feature existed.
+        let category =
+            resolve_dictation_app_category_with_overrides(&transcription, Some("Slack"), None);
+        assert_eq!(category, DictationAppCategory::Other);
+    }
+
+    #[test]
+    fn resolve_with_overrides_matches_first_enabled_override_in_order() {
+        let transcription = TranscriptionSettings {
+            dictation_app_category_overrides: vec![
+                DictationAppCategoryOverride {
+                    id: "1".to_string(),
+                    app_matcher: "notion".to_string(),
+                    category: "worklog".to_string(),
+                    enabled: true,
+                },
+                DictationAppCategoryOverride {
+                    id: "2".to_string(),
+                    app_matcher: "notion".to_string(),
+                    category: "notes".to_string(),
+                    enabled: true,
+                },
+            ],
+            ..TranscriptionSettings::default()
+        };
+
+        // First matching enabled override wins, even though the built-in
+        // classifier and a later override would both say Notes.
+        let category =
+            resolve_dictation_app_category_with_overrides(&transcription, Some("Notion"), None);
+        assert_eq!(category, DictationAppCategory::Worklog);
+    }
+
+    #[test]
+    fn resolve_with_overrides_skips_disabled_overrides() {
+        let transcription = TranscriptionSettings {
+            dictation_app_category_overrides: vec![
+                DictationAppCategoryOverride {
+                    id: "1".to_string(),
+                    app_matcher: "notion".to_string(),
+                    category: "worklog".to_string(),
+                    enabled: false,
+                },
+                DictationAppCategoryOverride {
+                    id: "2".to_string(),
+                    app_matcher: "notion".to_string(),
+                    category: "email".to_string(),
+                    enabled: true,
+                },
+            ],
+            ..TranscriptionSettings::default()
+        };
+
+        let category =
+            resolve_dictation_app_category_with_overrides(&transcription, Some("Notion"), None);
+        assert_eq!(category, DictationAppCategory::Email);
+    }
+
+    #[test]
+    fn resolve_with_overrides_falls_through_to_builtin_classifier_when_no_override_matches() {
+        let transcription = TranscriptionSettings {
+            dictation_app_category_overrides: vec![DictationAppCategoryOverride {
+                id: "1".to_string(),
+                app_matcher: "salesforce".to_string(),
+                category: "worklog".to_string(),
+                enabled: true,
+            }],
+            ..TranscriptionSettings::default()
+        };
+
+        // "Slack" doesn't match the "salesforce" override, so this should fall
+        // through to the built-in name classifier, which maps Slack to
+        // Messaging.
+        let category =
+            resolve_dictation_app_category_with_overrides(&transcription, Some("Slack"), None);
+        assert_eq!(category, DictationAppCategory::Messaging);
+    }
+
+    #[test]
+    fn dictation_app_category_override_blank_matcher_never_matches() {
+        let transcription = TranscriptionSettings {
+            dictation_app_category_overrides: vec![DictationAppCategoryOverride {
+                id: "1".to_string(),
+                app_matcher: "   ".to_string(),
+                category: "messaging".to_string(),
+                enabled: true,
+            }],
+            ..TranscriptionSettings::default()
+        };
+
+        // A blank matcher must not swallow every app; falls through to the
+        // built-in classifier (Gmail -> Email).
+        let category =
+            resolve_dictation_app_category_with_overrides(&transcription, Some("Gmail"), None);
+        assert_eq!(category, DictationAppCategory::Email);
     }
 }

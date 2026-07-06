@@ -6,12 +6,49 @@
 use regex::RegexBuilder;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DictationAppStyle {
-    Generic,
-    Chat,
+pub enum DictationAppCategory {
+    Other,
+    Messaging,
     Email,
-    Document,
+    Notes,
     Worklog,
+    AiChat,
+    CodeEditor,
+}
+
+/// Short LLM-prompt instruction fragment for a dictation destination-app
+/// category. Returns `None` for `Other`, which falls through to the
+/// existing generic dictation-formatting instructions unchanged.
+pub fn dictation_category_prompt_fragment(category: DictationAppCategory) -> Option<&'static str> {
+    match category {
+        DictationAppCategory::Email => Some(
+            "This is an email client. Use a formal, professional tone: full sentences, \
+             standard grammar, and minimal contractions.",
+        ),
+        DictationAppCategory::Messaging => Some(
+            "This is a messaging app. Keep the tone casual and conversational, and keep it \
+             brief, like a text message.",
+        ),
+        DictationAppCategory::AiChat => Some(
+            "This is an AI chat/assistant app. The user is composing a prompt or question - \
+             do not answer the question, do not add conversational filler, and preserve code \
+             blocks/technical syntax exactly as dictated.",
+        ),
+        DictationAppCategory::CodeEditor => Some(
+            "This is a code editor or terminal - preserve code identifiers, file paths, CLI \
+             flags, and technical casing exactly; prefer minimal literal transcription over \
+             prose polish.",
+        ),
+        DictationAppCategory::Notes => Some(
+            "This is a notes app. Preserve the existing structure and only clean up grammar \
+             and punctuation; do not force a tone rewrite.",
+        ),
+        DictationAppCategory::Worklog => Some(
+            "This is a worklog/project-tracking app. Keep status, blockers, and next-steps \
+             explicit and concise.",
+        ),
+        DictationAppCategory::Other => None,
+    }
 }
 
 /// Punctuation configuration
@@ -508,45 +545,116 @@ fn capitalize_after_bullet_markers(text: &str) -> String {
     .to_string()
 }
 
-fn resolve_dictation_app_style(app_target: Option<&str>) -> DictationAppStyle {
-    let normalized = app_target
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_ascii_lowercase());
+/// Bundle ids are the stable, locale-independent signal for app identity, so
+/// they are checked first whenever one is available. Name/domain substring
+/// matching remains as a fallback for apps we don't have a bundle id for
+/// (e.g. web apps identified only by a browser domain hint).
+fn resolve_dictation_app_category_from_bundle_id(bundle_id: &str) -> Option<DictationAppCategory> {
+    let bundle_id = bundle_id.to_ascii_lowercase();
 
-    let Some(app_name) = normalized.as_deref() else {
-        return DictationAppStyle::Generic;
-    };
+    let ai_chat_bundle_ids = [
+        "com.openai.chat",      // ChatGPT desktop
+        "com.anthropic.claude", // Claude desktop
+        "ai.perplexity.mac",    // Perplexity desktop
+    ];
+    if ai_chat_bundle_ids
+        .iter()
+        .any(|candidate| bundle_id == *candidate || bundle_id.contains(candidate))
+    {
+        return Some(DictationAppCategory::AiChat);
+    }
 
+    let code_editor_bundle_ids = [
+        "com.microsoft.vscode",          // VS Code
+        "com.todesktop.230313mzl4w4u92", // Cursor
+        "com.apple.dt.xcode",            // Xcode
+        "com.jetbrains.pycharm",         // PyCharm
+        "com.jetbrains.intellij",        // IntelliJ IDEA
+        "com.jetbrains.webstorm",        // WebStorm
+        "com.apple.terminal",            // Terminal.app
+        "com.googlecode.iterm2",         // iTerm2
+    ];
+    if code_editor_bundle_ids
+        .iter()
+        .any(|candidate| bundle_id == *candidate || bundle_id.contains(candidate))
+    {
+        return Some(DictationAppCategory::CodeEditor);
+    }
+
+    None
+}
+
+fn resolve_dictation_app_category_from_name(app_name: &str) -> DictationAppCategory {
     if ["slack", "messages", "imessage", "discord", "teams"]
         .iter()
         .any(|candidate| app_name.contains(candidate))
     {
-        return DictationAppStyle::Chat;
+        return DictationAppCategory::Messaging;
     }
 
     if ["gmail", "outlook", "mail", "superhuman"]
         .iter()
         .any(|candidate| app_name.contains(candidate))
     {
-        return DictationAppStyle::Email;
+        return DictationAppCategory::Email;
     }
 
     if ["google docs", "docs", "notion", "word", "notes", "obsidian"]
         .iter()
         .any(|candidate| app_name.contains(candidate))
     {
-        return DictationAppStyle::Document;
+        return DictationAppCategory::Notes;
     }
 
     if ["linear", "hubspot", "salesforce", "jira"]
         .iter()
         .any(|candidate| app_name.contains(candidate))
     {
-        return DictationAppStyle::Worklog;
+        return DictationAppCategory::Worklog;
     }
 
-    DictationAppStyle::Generic
+    if ["chatgpt", "claude", "perplexity"]
+        .iter()
+        .any(|candidate| app_name.contains(candidate))
+    {
+        return DictationAppCategory::AiChat;
+    }
+
+    if [
+        "code", "cursor", "xcode", "terminal", "iterm", "pycharm", "intellij", "webstorm",
+    ]
+    .iter()
+    .any(|candidate| app_name.contains(candidate))
+    {
+        return DictationAppCategory::CodeEditor;
+    }
+
+    DictationAppCategory::Other
+}
+
+pub fn resolve_dictation_app_category(
+    app_target: Option<&str>,
+    app_bundle_id: Option<&str>,
+) -> DictationAppCategory {
+    let normalized_bundle_id = app_bundle_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(bundle_id) = normalized_bundle_id {
+        if let Some(category) = resolve_dictation_app_category_from_bundle_id(bundle_id) {
+            return category;
+        }
+    }
+
+    let normalized = app_target
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+
+    let Some(app_name) = normalized.as_deref() else {
+        return DictationAppCategory::Other;
+    };
+
+    resolve_dictation_app_category_from_name(app_name)
 }
 
 fn ensure_terminal_punctuation(text: &str, punctuation: char) -> String {
@@ -584,7 +692,7 @@ fn merge_inline_conjunction_sentences(text: &str) -> String {
 fn normalize_for_app_style(
     text: String,
     mode_preset: &str,
-    app_style: DictationAppStyle,
+    app_style: DictationAppCategory,
 ) -> String {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -592,22 +700,22 @@ fn normalize_for_app_style(
     }
 
     match app_style {
-        DictationAppStyle::Chat => {
+        DictationAppCategory::Messaging => {
             if mode_preset == "messages" || mode_preset == "voice" {
                 trim_chatty_terminal_period(trimmed)
             } else {
                 trimmed.to_string()
             }
         }
-        DictationAppStyle::Email => {
+        DictationAppCategory::Email => {
             if mode_preset == "messages" {
                 trim_chatty_terminal_period(trimmed)
             } else {
                 ensure_terminal_punctuation(trimmed, '.')
             }
         }
-        DictationAppStyle::Document => trimmed.replace("\n\n\n", "\n\n").trim().to_string(),
-        DictationAppStyle::Worklog => {
+        DictationAppCategory::Notes => trimmed.replace("\n\n\n", "\n\n").trim().to_string(),
+        DictationAppCategory::Worklog => {
             let merged = merge_inline_conjunction_sentences(trimmed);
             if mode_preset == "messages" {
                 trim_chatty_terminal_period(&merged)
@@ -615,7 +723,12 @@ fn normalize_for_app_style(
                 ensure_terminal_punctuation(&merged, '.')
             }
         }
-        DictationAppStyle::Generic => trimmed.to_string(),
+        // AiChat and CodeEditor are passthrough for local punctuation formatting.
+        // These categories exist so a later step can attach LLM-prompt-level
+        // instructions; no local reformatting rules apply here.
+        DictationAppCategory::AiChat
+        | DictationAppCategory::CodeEditor
+        | DictationAppCategory::Other => trimmed.to_string(),
     }
 }
 
@@ -635,7 +748,7 @@ pub fn smart_format_dictation_text_for_app(
         &normalize_spacing_around_punctuation(&normalized),
     ));
     let normalized = preserve_structural_break_tokens(&normalized);
-    let app_style = resolve_dictation_app_style(app_target);
+    let app_style = resolve_dictation_app_category(app_target, None);
 
     if normalized.contains("__PLAINSONG_LINE_BREAK__")
         || normalized.contains("__PLAINSONG_PARAGRAPH_BREAK__")
@@ -659,7 +772,7 @@ pub fn smart_format_dictation_text_for_app(
             format_numbers: false,
             expand_contractions: false,
         },
-        ("notes", DictationAppStyle::Document) => PunctuationConfig {
+        ("notes", DictationAppCategory::Notes) => PunctuationConfig {
             capitalize_sentences: true,
             add_periods: true,
             add_commas: false,
@@ -679,7 +792,7 @@ pub fn smart_format_dictation_text_for_app(
             format_numbers: false,
             expand_contractions: false,
         },
-        ("email", _) | ("meeting_follow_up", _) | (_, DictationAppStyle::Email) => {
+        ("email", _) | ("meeting_follow_up", _) | (_, DictationAppCategory::Email) => {
             PunctuationConfig {
                 capitalize_sentences: true,
                 add_periods: true,
@@ -691,7 +804,7 @@ pub fn smart_format_dictation_text_for_app(
                 expand_contractions: false,
             }
         }
-        (_, DictationAppStyle::Document) => PunctuationConfig {
+        (_, DictationAppCategory::Notes) => PunctuationConfig {
             capitalize_sentences: true,
             add_periods: true,
             add_commas: true,
@@ -701,7 +814,7 @@ pub fn smart_format_dictation_text_for_app(
             format_numbers: false,
             expand_contractions: false,
         },
-        (_, DictationAppStyle::Worklog) => PunctuationConfig {
+        (_, DictationAppCategory::Worklog) => PunctuationConfig {
             capitalize_sentences: true,
             add_periods: true,
             add_commas: false,
@@ -915,5 +1028,44 @@ mod tests {
         let input = "open quote launch ready close quote at sign team slash ops";
         let result = smart_format_dictation_text_for_app(input, "messages", Some("Slack"));
         assert_eq!(result, "\"Launch ready\" @ team/ops");
+    }
+
+    #[test]
+    fn smart_format_dictation_uses_ai_chat_style_for_bundle_id() {
+        for bundle_id in [
+            "com.openai.chat",
+            "com.anthropic.claude",
+            "ai.perplexity.mac",
+        ] {
+            let category = resolve_dictation_app_category(None, Some(bundle_id));
+            assert_eq!(
+                category,
+                DictationAppCategory::AiChat,
+                "expected AiChat for bundle id {bundle_id:?}, got {category:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn smart_format_dictation_uses_code_editor_style_for_name() {
+        let input = "first section period new paragraph second section period";
+        let result =
+            smart_format_dictation_text_for_app(input, "voice", Some("Visual Studio Code"));
+        // CodeEditor is passthrough for local punctuation formatting: no
+        // paragraph-break normalization is applied like it would be for Notes.
+        assert_eq!(result, "First section.\n\nSecond section.");
+    }
+
+    #[test]
+    fn smart_format_dictation_falls_back_to_name_when_bundle_id_unknown() {
+        // Bundle id is unrecognized (or absent); category resolution should
+        // fall back to substring matching on the app name for both new
+        // categories.
+        let ai_chat_category =
+            resolve_dictation_app_category(Some("ChatGPT"), Some("com.example.unknownapp"));
+        assert_eq!(ai_chat_category, DictationAppCategory::AiChat);
+
+        let code_editor_category = resolve_dictation_app_category(Some("Cursor"), None);
+        assert_eq!(code_editor_category, DictationAppCategory::CodeEditor);
     }
 }

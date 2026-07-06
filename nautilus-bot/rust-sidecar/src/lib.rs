@@ -4134,23 +4134,42 @@ async fn resolve_dictation_command_prompt(
         .ok_or_else(|| format!("Unknown command key '{}'", command_key))
 }
 
-fn generate_default_dictation_prompt(active_app: Option<String>) -> String {
+/// Appends a destination-app-category prompt fragment (if any) as a
+/// supplement to an already-built prompt, without altering or replacing
+/// the existing prompt's own tone/instructions.
+fn append_category_prompt_fragment(base: String, fragment: Option<&'static str>) -> String {
+    match fragment {
+        Some(fragment) => format!("{}\n\n{}", base, fragment),
+        None => base,
+    }
+}
+
+fn generate_default_dictation_prompt(
+    active_app: Option<String>,
+    app_category: text::format::DictationAppCategory,
+) -> String {
+    let category_fragment = text::format::dictation_category_prompt_fragment(app_category)
+        .map(|fragment| format!("\n            {}", fragment))
+        .unwrap_or_default();
+
     if let Some(app_name) = active_app {
         format!(
-            "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
-            The user is currently dictating into the application: '{}'. 
-            Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). 
-            Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them. 
-            Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
+            "You are an AI dictation assistant. Your job is to format the user's raw dictated text.
+            The user is currently dictating into the application: '{}'.
+            Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). {}
+            Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
+            Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text.
             Just output the corrected text directly.",
-            app_name
+            app_name, category_fragment
         )
     } else {
-        "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
-        Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them. 
-        Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
-        Just output the corrected text directly."
-            .to_string()
+        format!(
+            "You are an AI dictation assistant. Your job is to format the user's raw dictated text. {}
+        Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
+        Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text.
+        Just output the corrected text directly.",
+            category_fragment
+        )
     }
 }
 
@@ -4178,6 +4197,13 @@ async fn run_dictation_formatting_with_selected_provider(
 
     let settings = state.settings_manager.lock().await.settings().clone();
 
+    let app_category = settings::resolve_dictation_app_category_with_overrides(
+        &settings.transcription,
+        active_app.as_deref(),
+        dictation_options.context_app_bundle_id.as_deref(),
+    );
+    let category_fragment = text::format::dictation_category_prompt_fragment(app_category);
+
     let system_prompt = if let Some(custom_prompt) = active_dictation_custom_mode(&settings)
         .and_then(|mode| mode.custom_prompt.as_deref())
         .map(str::trim)
@@ -4190,7 +4216,10 @@ async fn run_dictation_formatting_with_selected_provider(
                 base, app_name
             );
         }
-        base
+        // Supplement (not replace) the custom mode's own tone/instructions
+        // with the destination-app-category guardrail, e.g. so the AI-chat
+        // "don't touch code" instruction still applies under a custom mode.
+        append_category_prompt_fragment(base, category_fragment)
     } else if let Some(custom_prompt) = &settings.transcription.dictation_custom_prompt {
         if !custom_prompt.trim().is_empty() {
             let mut base = custom_prompt.trim().to_string();
@@ -4200,12 +4229,12 @@ async fn run_dictation_formatting_with_selected_provider(
                     base, app_name
                 );
             }
-            base
+            append_category_prompt_fragment(base, category_fragment)
         } else {
-            generate_default_dictation_prompt(active_app)
+            generate_default_dictation_prompt(active_app, app_category)
         }
     } else {
-        generate_default_dictation_prompt(active_app)
+        generate_default_dictation_prompt(active_app, app_category)
     };
 
     let system_prompt = if let Some(context_text) = dictation_options
@@ -6429,6 +6458,54 @@ mod tests {
         assert!(dictation_mode_transform_prompt("email").is_some());
         assert!(dictation_mode_transform_prompt("meeting_follow_up").is_some());
         assert!(dictation_mode_transform_prompt("voice").is_none());
+    }
+
+    #[test]
+    fn default_dictation_prompt_includes_ai_chat_guardrail_for_chatgpt() {
+        let category =
+            text::format::resolve_dictation_app_category(Some("ChatGPT"), Some("com.openai.chat"));
+        assert_eq!(category, text::format::DictationAppCategory::AiChat);
+
+        let prompt = generate_default_dictation_prompt(Some("ChatGPT".to_string()), category);
+        assert!(
+            prompt.contains("do not answer the question")
+                && prompt.contains("preserve code blocks/technical syntax exactly"),
+            "expected AI-chat guardrail in prompt, got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn default_dictation_prompt_includes_code_editor_guardrail_for_cursor_and_vscode() {
+        for (app_name, bundle_id) in [
+            ("Cursor", "com.todesktop.230313mzl4w4u92"),
+            ("Visual Studio Code", "com.microsoft.vscode"),
+        ] {
+            let category =
+                text::format::resolve_dictation_app_category(Some(app_name), Some(bundle_id));
+            assert_eq!(category, text::format::DictationAppCategory::CodeEditor);
+
+            let prompt = generate_default_dictation_prompt(Some(app_name.to_string()), category);
+            assert!(
+                prompt.contains("preserve code identifiers, file paths, CLI flags"),
+                "expected code-editor guardrail in prompt for {app_name}, got: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn category_fragment_is_appended_as_supplement_when_custom_prompt_is_active() {
+        let category =
+            text::format::resolve_dictation_app_category(Some("ChatGPT"), Some("com.openai.chat"));
+        let fragment = text::format::dictation_category_prompt_fragment(category);
+        assert!(fragment.is_some());
+
+        let custom_prompt = "Write in the voice of a pirate.".to_string();
+        let combined = append_category_prompt_fragment(custom_prompt.clone(), fragment);
+
+        // The custom mode's own tone/instructions must survive unchanged...
+        assert!(combined.starts_with(&custom_prompt));
+        // ...with the category guardrail appended as a supplement.
+        assert!(combined.contains("do not answer the question"));
     }
 
     #[test]
