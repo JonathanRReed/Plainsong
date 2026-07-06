@@ -92,6 +92,12 @@ pub struct AppState {
 
 const MIN_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 0.8;
 const MAX_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 30.0;
+/// Fallback silence-auto-stop duration used for hands-free dictation sessions
+/// when `dictation_silence_timeout_seconds` is unset/disabled (0). Hands-free
+/// sessions start automatically on detected speech, so without this fallback
+/// they would never auto-stop, contradicting the in-app copy that promises a
+/// 1.8s fallback (see dictation-view.tsx "Hands-free guide").
+const HANDS_FREE_DEFAULT_SILENCE_TIMEOUT_SECONDS: f32 = 1.8;
 const DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
 const DICTATION_IDLE_RESET_SUCCESS_MS: u64 = 1800;
 #[cfg(target_os = "macos")]
@@ -5277,6 +5283,44 @@ mod tests {
     }
 
     #[test]
+    fn hands_free_monitor_should_run_only_when_enabled_and_session_idle() {
+        // Setting off: never run, regardless of session state. This is the guard that
+        // keeps idle CPU/mic-hot behavior unchanged for users who don't opt in.
+        assert!(!hands_free_monitor_should_run(
+            false,
+            DictationSessionState::Idle
+        ));
+        assert!(!hands_free_monitor_should_run(
+            false,
+            DictationSessionState::Starting
+        ));
+        assert!(!hands_free_monitor_should_run(
+            false,
+            DictationSessionState::Recording
+        ));
+
+        // Setting on, but a session is already starting or recording: the monitor must
+        // not run (it would race the real dictation stream for the microphone, and
+        // there is no "idle" for it to listen into anyway). This is the guard that
+        // prevents the hands-free monitor from ever double-starting a session or
+        // stepping on an in-progress one.
+        assert!(!hands_free_monitor_should_run(
+            true,
+            DictationSessionState::Starting
+        ));
+        assert!(!hands_free_monitor_should_run(
+            true,
+            DictationSessionState::Recording
+        ));
+
+        // Setting on and genuinely idle: the monitor should run.
+        assert!(hands_free_monitor_should_run(
+            true,
+            DictationSessionState::Idle
+        ));
+    }
+
+    #[test]
     fn partial_should_decode_gates_correctly() {
         let min_samples = 8000; // 0.5 s at 16 kHz
 
@@ -5821,6 +5865,45 @@ mod tests {
         assert_eq!(normalize_dictation_silence_timeout_seconds(0.4), 0.8);
         assert_eq!(normalize_dictation_silence_timeout_seconds(8.0), 8.0);
         assert_eq!(normalize_dictation_silence_timeout_seconds(99.0), 30.0);
+    }
+
+    #[test]
+    fn hands_free_auto_stop_falls_back_to_1_8_seconds_when_disabled() {
+        // Hands-free with silence auto-stop disabled (0, the default/unset
+        // value) must fall back to the 1.8s timeout promised by the Settings
+        // UI ("Hands-free falls back to 1.8 seconds if this is off"),
+        // otherwise a hands-free session started via speech detection would
+        // never auto-stop.
+        assert_eq!(
+            resolve_dictation_auto_stop_silence_timeout_seconds(true, 0.0),
+            1.8
+        );
+        assert_eq!(
+            resolve_dictation_auto_stop_silence_timeout_seconds(true, -5.0),
+            1.8
+        );
+    }
+
+    #[test]
+    fn hands_free_auto_stop_respects_explicit_configured_timeout() {
+        assert_eq!(
+            resolve_dictation_auto_stop_silence_timeout_seconds(true, 5.0),
+            5.0
+        );
+    }
+
+    #[test]
+    fn non_hands_free_auto_stop_stays_disabled_when_configured_off() {
+        // Non-hands-free sessions (toggle/push-to-talk) preserve the existing
+        // "0 disables auto-stop" contract; only hands-free gets the fallback.
+        assert_eq!(
+            resolve_dictation_auto_stop_silence_timeout_seconds(false, 0.0),
+            0.0
+        );
+        assert_eq!(
+            resolve_dictation_auto_stop_silence_timeout_seconds(false, 5.0),
+            5.0
+        );
     }
 
     #[test]
@@ -9727,6 +9810,22 @@ fn normalize_dictation_silence_timeout_seconds(value: f32) -> f32 {
     }
 }
 
+/// Resolves the effective silence-auto-stop timeout for a dictation session,
+/// applying the hands-free fallback described in the Settings UI: hands-free
+/// sessions always auto-stop on silence, even if the user has silence
+/// auto-stop disabled (0) for non-hands-free sessions, since hands-free has
+/// no other way to end a session besides a second hotkey press.
+fn resolve_dictation_auto_stop_silence_timeout_seconds(
+    hands_free_enabled: bool,
+    configured_silence_timeout_seconds: f32,
+) -> f32 {
+    if hands_free_enabled && configured_silence_timeout_seconds <= 0.0 {
+        HANDS_FREE_DEFAULT_SILENCE_TIMEOUT_SECONDS
+    } else {
+        configured_silence_timeout_seconds
+    }
+}
+
 fn normalize_color_scheme_value(value: &str) -> String {
     match value.trim() {
         "default" | "rose-pine" | "rose-pine-dawn" | "solarized-dark" | "solarized-light"
@@ -12699,6 +12798,11 @@ async fn save_settings_for_sidecar(
         *active_dictation_options = dictation_options;
     }
 
+    // Pick up any change to `dictation_hands_free_enabled` immediately: starts the
+    // idle-time monitor if it was just turned on (and no session is active), or stops
+    // it right away if it was just turned off.
+    reconcile_hands_free_monitor(state, handle).await;
+
     Ok(serde_json::Value::Null)
 }
 
@@ -12829,6 +12933,83 @@ async fn reset_app_state_for_sidecar(
         "failedProviderSecretClears": failed_provider_secret_clears,
     }))
     .map_err(|e| e.to_string())
+}
+
+/// Whether the hands-free idle-time monitor should be running, given the setting and
+/// the current dictation session state. Pure decision table, factored out of
+/// `reconcile_hands_free_monitor` so the guard logic ("can't run alongside an active
+/// session; never runs at all unless the setting is on") is unit-testable without
+/// needing a full `AppState`/audio device.
+///
+/// - Setting off → never run, regardless of session state (this is what keeps
+///   idle CPU/mic-hot behavior unchanged for users who don't opt in).
+/// - Setting on + session not `Idle` (`Starting` or `Recording`) → must not run; the
+///   real dictation capture stream owns the microphone and the monitor must not race
+///   it for the same device, and a session is already starting/active so there is
+///   nothing for the monitor to trigger anyway.
+/// - Setting on + session `Idle` → should run.
+fn hands_free_monitor_should_run(enabled: bool, session_state: DictationSessionState) -> bool {
+    enabled && session_state == DictationSessionState::Idle
+}
+
+/// Reconcile the hands-free *idle-time* monitor (see
+/// `AudioCapture::start_hands_free_monitor`) against current settings and dictation
+/// session state, using the decision in `hands_free_monitor_should_run`. Idempotent and
+/// cheap to call from every place that can change either input: sidecar startup,
+/// `save_settings`, and after every dictation start/stop/abort.
+///
+/// This is the single choke point deciding whether the monitor should be running, so
+/// individual dictation code paths don't each need to remember to start/stop it. When
+/// the decision is "should run" but the monitor is already active, this is a no-op
+/// (`AudioCapture::start_hands_free_monitor` is itself idempotent too) — so it can never
+/// spin up a second monitor stream on top of an existing one.
+pub async fn reconcile_hands_free_monitor_for_sidecar(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+) {
+    reconcile_hands_free_monitor(state, handle).await;
+}
+
+async fn reconcile_hands_free_monitor(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+) {
+    let hands_free_enabled = {
+        let sm = state.settings_manager.lock().await;
+        sm.settings().transcription.dictation_hands_free_enabled
+    };
+
+    let session_state = {
+        let runtime_state = state.dictation_runtime_state.lock().await;
+        *runtime_state
+    };
+
+    let mut audio = state.audio_capture.lock().await;
+
+    if !hands_free_monitor_should_run(hands_free_enabled, session_state) {
+        audio.stop_hands_free_monitor();
+        return;
+    }
+
+    if audio.is_hands_free_monitor_active() {
+        return;
+    }
+
+    let preferred_input_device = {
+        let sm = state.settings_manager.lock().await;
+        let s = sm.settings();
+        if s.audio.dictation_input_override_enabled {
+            s.audio.dictation_input_device.clone()
+        } else {
+            s.audio.preferred_input_device.clone()
+        }
+    };
+
+    if let Err(error) =
+        audio.start_hands_free_monitor(preferred_input_device.as_ref(), handle.clone())
+    {
+        tracing::warn!("Failed to start hands-free idle monitor: {}", error);
+    }
 }
 
 /// Sidecar-compatible start_dictation: simplified version that emits events via SidecarHandle.
@@ -13086,6 +13267,27 @@ async fn start_dictation_for_sidecar(
         .dictation_live_preview_enabled
         && !dictation_provider.is_remote();
 
+    // Auto-stop after sustained silence: gated on `dictation_silence_timeout_seconds`
+    // (0 = disabled, matching the field's existing "0 disables" contract already
+    // used by the settings UI/normalizer). Works regardless of activation mode
+    // (toggle, push-to-talk, or hands-free) since it just stops the session the
+    // same way a manual stop would.
+    //
+    // Hands-free is a special case: it starts the session automatically on
+    // detected speech, so if silence auto-stop is left disabled it would never
+    // stop on its own. The Settings UI ("Hands-free guide") promises a 1.8s
+    // fallback in that case, so apply it here.
+    let effective_silence_timeout_seconds = resolve_dictation_auto_stop_silence_timeout_seconds(
+        settings_snapshot.transcription.dictation_hands_free_enabled,
+        settings_snapshot
+            .transcription
+            .dictation_silence_timeout_seconds,
+    );
+    let auto_stop_config = audio::DictationAutoStopConfig {
+        enabled: effective_silence_timeout_seconds > 0.0,
+        silence_timeout_seconds: effective_silence_timeout_seconds,
+    };
+
     // Handles captured under the audio lock when capture starts successfully, so
     // the partial-decode task can be spawned after the lock is released.
     let mut partial_task_handles: Option<PartialTaskHandles> = None;
@@ -13093,7 +13295,12 @@ async fn start_dictation_for_sidecar(
     {
         let mut audio = state.audio_capture.lock().await;
         audio.set_streaming_partials_enabled(streaming_partials_enabled);
-        match audio.start_dictation(preferred_input_device.as_ref()) {
+        match audio.start_dictation(
+            preferred_input_device.as_ref(),
+            session_id,
+            auto_stop_config,
+            Some(handle.clone()),
+        ) {
             Ok(resolved_input) => {
                 if let Some(advisory) = resolved_input.advisory.as_deref() {
                     handle.emit_event("audio-input-advisory", advisory.to_string());
@@ -14718,6 +14925,14 @@ pub async fn dispatch_command(
     match method {
         // ── Dictation ──────────────────────────────────────────────────────────
         "start_dictation" => {
+            // The idle-time hands-free monitor and a real dictation session must never
+            // hold the microphone at once; stop it defensively before attempting to
+            // start (no-op if it wasn't running, e.g. hands-free is off or this start
+            // came from the hotkey/native-helper path instead of the monitor itself).
+            {
+                let mut audio = state.audio_capture.lock().await;
+                audio.stop_hands_free_monitor();
+            }
             let options: models::DictationStartOptions = serde_json::from_value(
                 params
                     .get("options")
@@ -14726,6 +14941,11 @@ pub async fn dispatch_command(
             )
             .unwrap_or_default();
             let session_id = start_dictation_for_sidecar(state.as_ref(), handle, options).await?;
+            // If starting failed, the runtime state falls back to `Idle` inside
+            // `start_dictation_for_sidecar`'s own error handling, so it's always safe to
+            // reconcile here regardless of success/failure — this is what resumes idle
+            // listening if start_dictation errored out before ever recording.
+            reconcile_hands_free_monitor(state.as_ref(), handle).await;
             Ok(serde_json::json!({ "sessionId": session_id }))
         }
         "stop_dictation" => {
@@ -14734,6 +14954,7 @@ pub async fn dispatch_command(
                 .and_then(|v| v.as_str())
                 .unwrap_or("manual");
             let result = stop_dictation_for_sidecar(state.as_ref(), handle, stop_reason).await?;
+            reconcile_hands_free_monitor(state.as_ref(), handle).await;
             Ok(serde_json::json!({ "text": result }))
         }
         "force_stop_dictation" => {
@@ -14752,6 +14973,7 @@ pub async fn dispatch_command(
             }
             handle.emit_event("dictation-state-changed", serde_json::json!({ "phase": "idle", "stopReason": "force-stop", "outcome": "aborted" }));
             handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
+            reconcile_hands_free_monitor(state.as_ref(), handle).await;
             Ok(serde_json::json!({ "text": "" }))
         }
         "get_dictation_audio_level" => {

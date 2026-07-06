@@ -368,6 +368,11 @@ describe("SettingsView performance behavior", () => {
         "Hold-to-talk (hold to record, release to stop)",
       ),
     ).toBeInTheDocument();
+    expect(
+      within(hotkeySelect as HTMLSelectElement).getByText(
+        "Hands-free (starts automatically when you speak, no shortcut needed)",
+      ),
+    ).toBeInTheDocument();
 
     fireEvent.change(hotkeySelect, { target: { value: "hold_to_talk" } });
 
@@ -381,7 +386,7 @@ describe("SettingsView performance behavior", () => {
     expect(lastSave?.transcription?.dictationPushToTalk).toBe(true);
   });
 
-  it("keeps the honest toggle-only copy when the native shortcut helper is unavailable", async () => {
+  it("keeps the honest toggle-only copy when the native shortcut helper is unavailable, but still offers a selector without hold-to-talk", async () => {
     const backend = await import("@/lib/backend");
     vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
       nativeShortcutAvailable: false,
@@ -397,10 +402,61 @@ describe("SettingsView performance behavior", () => {
     fireEvent.click(screen.getByText("Transcription"));
     await screen.findAllByText("Capture and transcription");
 
-    expect(screen.queryByLabelText("Hotkey behavior")).not.toBeInTheDocument();
+    const hotkeySelect = await screen.findByLabelText("Hotkey behavior");
+    expect(hotkeySelect.tagName).toBe("SELECT");
+    expect(
+      within(hotkeySelect as HTMLSelectElement).queryByText(
+        "Hold-to-talk (hold to record, release to stop)",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(hotkeySelect as HTMLSelectElement).getByText(
+        "Toggle (press to start, press again to stop)",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(hotkeySelect as HTMLSelectElement).getByText(
+        "Hands-free (starts automatically when you speak, no shortcut needed)",
+      ),
+    ).toBeInTheDocument();
     expect(
       screen.getAllByText(/press to start, press again to stop/).length,
     ).toBeGreaterThan(0);
+  });
+
+  it("offers hands-free independent of native shortcut helper availability, and saves it distinctly from hold-to-talk/toggle", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: false,
+    });
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await waitFor(() => {
+      expect(backend.getDictationShortcutCapabilityStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findAllByText("Capture and transcription");
+
+    const hotkeySelect = await screen.findByLabelText("Hotkey behavior");
+    fireEvent.change(hotkeySelect, { target: { value: "hands_free" } });
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
+    const lastSave = saveCalls[saveCalls.length - 1]?.[0] as
+      | {
+          transcription?: {
+            dictationPushToTalk?: boolean;
+            dictationHandsFreeEnabled?: boolean;
+          };
+        }
+      | undefined;
+    expect(lastSave?.transcription?.dictationHandsFreeEnabled).toBe(true);
+    expect(lastSave?.transcription?.dictationPushToTalk).toBe(false);
   });
 
   it("shows personal profile sync actions and can restore the latest profile snapshot", async () => {

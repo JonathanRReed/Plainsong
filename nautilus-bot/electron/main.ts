@@ -532,6 +532,59 @@ async function handleDictationShortcutSignal(
   }
 }
 
+/**
+ * Handle a `dictation-vad-signal` event from the sidecar. Two distinct signals share
+ * this event name (see rust-sidecar/src/audio.rs):
+ *
+ * - `silence_stop`: sustained silence was detected after speech during the active
+ *   dictation session (the in-session `StreamingVadGate`/
+ *   `drive_dictation_auto_stop_gate`, installed by `start_dictation`). Reuses the
+ *   exact same stop path a manual toggle-stop takes (`stop_dictation` over the
+ *   JSON-RPC bridge) so auto-stop behaves identically to a user-initiated stop
+ *   regardless of activation mode (toggle, hold-to-talk, or hands-free).
+ *
+ * - `hands_free_start`: sustained speech was detected by the separate, always-on-
+ *   when-enabled idle-time monitor (`AudioCapture::start_hands_free_monitor`), which
+ *   only ever runs while no dictation session is active. Reuses the exact same start
+ *   path the hotkey/native-helper activation flows call (`start_dictation` over the
+ *   JSON-RPC bridge), so it passes through the identical `DictationSessionState::Idle`
+ *   guard on the Rust side and can't double-start a session.
+ */
+async function handleDictationVadSignal(payload: unknown): Promise<void> {
+  if (!ipcBridge) {
+    return;
+  }
+  const signal =
+    payload && typeof payload === "object" && "signal" in payload
+      ? (payload as { signal?: unknown }).signal
+      : undefined;
+
+  if (signal === "silence_stop") {
+    // Only stop if a session is actually in a stoppable phase; avoids racing a
+    // signal from a session that already finished stopping through another path.
+    if (dictationPhase !== "recording") {
+      return;
+    }
+    qaLog("dictation vad auto-stop", { phase: dictationPhase, signal });
+    await ipcBridge.invoke("stop_dictation", { stopReason: "auto_stop_silence" });
+    return;
+  }
+
+  if (signal === "hands_free_start") {
+    // Only start from a genuinely idle-like phase; avoids racing a stale signal
+    // (e.g. emitted just before the monitor was stopped for an in-flight start
+    // from another activation path) into double-starting a session. The Rust side
+    // additionally re-checks `DictationSessionState::Idle` itself, so this is
+    // defense-in-depth, not the only guard.
+    if (dictationPhase !== "idle" && dictationPhase !== "done" && dictationPhase !== "error") {
+      return;
+    }
+    qaLog("dictation hands-free auto-start", { phase: dictationPhase, signal });
+    await ipcBridge.invoke("start_dictation", {});
+    return;
+  }
+}
+
 async function handleDictationGlobalShortcut(settings: AppSettings): Promise<void> {
   if (!shouldHandleDictationShortcutSource({ source: "electron", nativeShortcutAvailable })) {
     return;
@@ -904,6 +957,12 @@ async function bootstrap() {
       typeof (payload as { phase?: unknown }).phase === "string"
     ) {
       dictationPhase = (payload as { phase: string }).phase;
+    }
+
+    if (eventName === "dictation-vad-signal") {
+      void handleDictationVadSignal(payload).catch((error) => {
+        console.error("[dictation] vad auto-stop signal failed", error);
+      });
     }
 
     broadcastRendererEvent(eventName, payload);
