@@ -8,8 +8,8 @@ explicitly so nothing is assumed.
 
 - **Free & open-source**: all commercial licensing/trial/nag/entitlement code
   removed; MIT LICENSE present.
-- **Compiles & passes CI gates**: `cargo clippy -D warnings` clean, 295 Rust
-  unit tests, 273 vitest, typecheck (both tsconfigs), IPC contract, knip,
+- **Compiles & passes CI gates**: `cargo clippy -D warnings` clean, 312 Rust
+  unit tests, 275 vitest, typecheck (both tsconfigs), IPC contract, knip,
   rustfmt — all green. CI runs the shipped default feature set + a production
   build.
 - **Competitive-parity push (2026-07-06)**: a research-driven pass closing the
@@ -47,6 +47,15 @@ explicitly so nothing is assumed.
     separate "AI formatting" toggle (a real bug, not just a sharp edge —
     found a second, previously-unnoticed call site with the same coupling
     while fixing the first).
+  - **Silero VAD v2 shipped**: a real ONNX-based voice-activity model
+    (MIT-licensed, ~2.3MB) is now selectable as a more-accurate alternative
+    to the energy-threshold hands-free gate — opt-in via an explicit
+    download in Settings, falls back to the energy-threshold gate at every
+    failure point, inference runs off the real-time audio thread. The exact
+    tensor contract was verified against the real downloaded model binary
+    and cross-checked against upstream's own reference implementation, not
+    guessed — see "Must be validated on a real Mac" below for the one thing
+    that genuinely can't be confirmed without real hardware.
   - See `[[project-nautilusbot-oss-relaunch]]` memory for the full research
     citations and per-phase engineering notes.
 - **Fast default route**: whisper.cpp (Metal/CoreML) `base.en`; measured
@@ -126,6 +135,12 @@ Expect this pass to surface a couple of small fixes; that's normal.
 10. **Destination-app formatting bundle-id list**: the built-in ChatGPT/
     Claude/Cursor/VS Code/etc. bundle-id matches were written from public
     knowledge, not spot-checked against real installed apps on this machine.
+11. **Silero VAD real-model smoke test**: the ONNX tensor contract (input/
+    state/sr names and shapes) was verified against the actual downloaded
+    model binary and cross-checked against upstream's reference
+    implementation, but the `ort` runtime's real behavior against that
+    binary — exact output ordering, real inference latency under load —
+    has not been exercised end-to-end (needs a real download + real mic).
 
 ## Known gaps (not hard blockers)
 
@@ -134,9 +149,6 @@ Expect this pass to surface a couple of small fixes; that's normal.
 - **Windows/Linux support** deliberately out of scope for this push (macOS-only
   focus); Willow Voice, Talon, and Handy already ship Windows — tracked as a
   future multi-week platform investment, not attempted here.
-- **Silero VAD v2**: the current hands-free gate is a cheap energy-threshold
-  heuristic (accurate enough for a quiet room, weaker in noisy/multi-speaker
-  environments); a proper VAD model is a deliberate v2, not done now.
 - **SenseVoice as a first-class ASR route**: investigated, not done — it has
   no native `AsrProviderType` counterpart the existing MLX-route-mapping
   pattern requires, so doing it properly is a separate, larger provider
