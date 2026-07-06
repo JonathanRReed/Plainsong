@@ -57,6 +57,7 @@ export function DashboardView() {
   }>>([]);
   const [selectedRecordingIds, setSelectedRecordingIds] = useState<string[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [lastSearchQuery, setLastSearchQuery] = useState("");
   const [analysisQuery, setAnalysisQuery] = useState("");
   const [multiAnalysisResult, setMultiAnalysisResult] = useState<string | null>(null);
   const [multiAnalysisCitations, setMultiAnalysisCitations] = useState<Array<{
@@ -207,11 +208,13 @@ export function DashboardView() {
       : `What have we learned about ${profile.name} across recent meetings? Include priorities, risks, decisions, and next steps.`;
 
   const runGlobalSearch = async () => {
-    if (!globalQuery.trim()) return;
+    const query = globalQuery.trim();
+    if (!query) return;
     setIsSearching(true);
+    setLastSearchQuery(query);
     setAnalysisError(null);
     try {
-      const hits = await searchTranscripts(globalQuery.trim(), 25);
+      const hits = await searchTranscripts(query, 25);
       setSearchResults(hits);
       const uniqueIds = [...new Set(hits.map((hit) => hit.recordingId))];
       setSelectedRecordingIds(uniqueIds);
@@ -286,24 +289,34 @@ export function DashboardView() {
                 </div>
                 <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
                   {[
-                    { label: "Dictation", ready: dictationReady, action: () => requestOnboarding("dictation") },
-                    { label: "Meetings", ready: meetingReady, action: () => requestOnboarding("meetings") },
+                    {
+                      label: "Dictation",
+                      ready: dictationReady,
+                      action: () =>
+                        dictationReady ? requestMainView("dictation") : requestOnboarding("dictation"),
+                    },
+                    {
+                      label: "Meetings",
+                      ready: meetingReady,
+                      action: () =>
+                        meetingReady ? requestMainView("recordings") : requestOnboarding("meetings"),
+                    },
                     { label: "Local memory", ready: true, action: () => requestMainView("settings") },
                   ].map((item) => (
                     <button
                       key={item.label}
                       type="button"
                       className="command-card flex items-center justify-between gap-3 rounded-xl px-3 py-3 text-left"
-                      onClick={item.ready ? undefined : item.action}
+                      onClick={item.action}
                     >
                       <span className="min-w-0">
                         <span className="block text-sm font-medium text-card-foreground">{item.label}</span>
                         <span className="mt-0.5 block text-xs text-muted-foreground">
-                          {item.ready ? "Ready" : "Review"}
+                          {item.ready ? "Open" : "Review"}
                         </span>
                       </span>
                       {item.ready ? (
-                        <CheckCircle2 className="h-4 w-4 shrink-0 text-gold-text" />
+                        <ArrowRight className="h-4 w-4 shrink-0 text-gold-text" />
                       ) : (
                         <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground" />
                       )}
@@ -610,6 +623,11 @@ export function DashboardView() {
                   })}
                 </div>
               )}
+              {lastSearchQuery && !isSearching && searchResults.length === 0 && !analysisError ? (
+                <div className="rounded-lg border border-border/60 bg-muted/15 px-3 py-3 text-sm text-muted-foreground">
+                  No transcript matches for "{lastSearchQuery}". Try a person, company, topic, or exact phrase from a meeting.
+                </div>
+              ) : null}
 
               <Separator />
 
@@ -629,6 +647,11 @@ export function DashboardView() {
                   Analyze
                 </Button>
               </div>
+              {selectedRecordingIds.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  Search transcripts first, then select one or more matching meetings to analyze.
+                </p>
+              ) : null}
 
               {analysisError && (
                 <p className="text-sm text-destructive">{analysisError}</p>

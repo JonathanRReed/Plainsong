@@ -1,5 +1,5 @@
-import { render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "@/components/sidebar";
 
 vi.mock("@/hooks/use-recording", () => ({
@@ -24,6 +24,45 @@ vi.mock("@/components/theme-toggle", () => ({
 }));
 
 describe("Sidebar collapsed layout", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("routes every primary, secondary, and more navigation item", async () => {
+    const onViewChange = vi.fn();
+
+    render(
+      <Sidebar
+        activeView="dashboard"
+        onToggleCollapse={vi.fn()}
+        onViewChange={onViewChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Dictation.*⌘\+D/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Meetings.*⌘\+M/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Projects.*⌘\+P/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Settings.*⌘\+,/ }));
+
+    const more = screen.getByRole("button", { name: "More" });
+    expect(more).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button", { name: "Setup" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Exports" })).not.toBeInTheDocument();
+
+    fireEvent.click(more);
+    expect(more).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Setup" }));
+    fireEvent.click(screen.getByRole("button", { name: "Exports" }));
+
+    expect(onViewChange).toHaveBeenNthCalledWith(1, "dictation");
+    expect(onViewChange).toHaveBeenNthCalledWith(2, "recordings");
+    expect(onViewChange).toHaveBeenNthCalledWith(3, "projects");
+    expect(onViewChange).toHaveBeenNthCalledWith(4, "settings");
+    expect(onViewChange).toHaveBeenNthCalledWith(5, "setup");
+    expect(onViewChange).toHaveBeenNthCalledWith(6, "exports");
+  });
+
   it("renders a stable icon rail with accessible controls", async () => {
     render(
       <Sidebar
@@ -56,5 +95,73 @@ describe("Sidebar collapsed layout", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("Toggle theme")).toBeInTheDocument();
     });
+  });
+
+  it("exposes collapse and expand controls with stable labels", () => {
+    const onToggleCollapse = vi.fn();
+    const { rerender } = render(
+      <Sidebar
+        activeView="dashboard"
+        onToggleCollapse={onToggleCollapse}
+        onViewChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+    expect(onToggleCollapse).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <Sidebar
+        activeView="dashboard"
+        isCollapsed
+        onToggleCollapse={onToggleCollapse}
+        onViewChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+    expect(onToggleCollapse).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens keyboard shortcut help from the collapsed rail", async () => {
+    render(
+      <Sidebar
+        activeView="dashboard"
+        isCollapsed
+        onToggleCollapse={vi.fn()}
+        onViewChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Keyboard shortcuts" }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Keyboard shortcuts" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Start dictation")).toBeInTheDocument();
+    expect(screen.getByText("Home")).toBeInTheDocument();
+    expect(screen.getByText("Dictation")).toBeInTheDocument();
+    expect(screen.getByText("Meetings")).toBeInTheDocument();
+    expect(screen.getByText("Settings")).toBeInTheDocument();
+  });
+
+  it("makes the local processing status keyboard reachable and actionable", async () => {
+    const onViewChange = vi.fn();
+
+    render(
+      <Sidebar
+        activeView="dashboard"
+        onToggleCollapse={vi.fn()}
+        onViewChange={onViewChange}
+      />,
+    );
+
+    const localStatus = await screen.findByRole("button", {
+      name: /Local only\. Remote processing is disabled by policy\./,
+    });
+
+    fireEvent.click(localStatus);
+
+    expect(onViewChange).toHaveBeenCalledWith("settings");
   });
 });

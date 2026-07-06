@@ -69,7 +69,7 @@ const SetupView = lazy(async () => ({
   default: (await import("@/components/views/setup-view")).SetupView,
 }));
 
-class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   constructor(props: ErrorBoundaryProps) {
     super(props);
     this.state = { hasError: false, error: null };
