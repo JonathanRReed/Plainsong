@@ -98,6 +98,11 @@ async fn run_sidecar() {
         }
     });
 
+    // If hands-free dictation is enabled, start the idle-time monitor right away so
+    // hands-free listening is live as soon as the app launches, not just after the
+    // first settings save. No-op (stays stopped) if the setting is off.
+    plainsong_lib::reconcile_hands_free_monitor_for_sidecar(&state, &handle).await;
+
     // Signal readiness to Electron
     eprintln!("[sidecar] ready");
 

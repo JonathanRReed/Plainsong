@@ -17,6 +17,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/theme-provider";
 import { FirstRunWizard } from "@/components/first-run-wizard";
 import { ToastProvider, useToast } from "@/components/toast";
+import { AppCommandPalette } from "@/components/app-command-palette";
 import {
   MEETING_ONBOARDING_STORAGE_KEY,
   ONBOARDING_STORAGE_KEY,
@@ -69,7 +70,7 @@ const SetupView = lazy(async () => ({
   default: (await import("@/components/views/setup-view")).SetupView,
 }));
 
-class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   constructor(props: ErrorBoundaryProps) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -179,6 +180,7 @@ function App() {
     null
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const firstViewMarked = useRef(false);
 
   // UI overlays
@@ -302,6 +304,25 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const handleCommandPaletteShortcut = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() !== "k" || (!event.metaKey && !event.ctrlKey)) {
+        return;
+      }
+      if (event.altKey || event.shiftKey) {
+        return;
+      }
+
+      event.preventDefault();
+      setCommandPaletteOpen((open) => !open);
+    };
+
+    window.addEventListener("keydown", handleCommandPaletteShortcut);
+    return () => {
+      window.removeEventListener("keydown", handleCommandPaletteShortcut);
+    };
+  }, []);
+
+  useEffect(() => {
     if (activeView !== "recordings" || !pendingRecordingWorkspaceId) {
       return;
     }
@@ -333,6 +354,7 @@ function App() {
     <ThemeProvider>
       <ToastProvider>
         <AppRuntimeListeners />
+        <AppCommandPalette open={commandPaletteOpen} onOpenChange={setCommandPaletteOpen} />
         <TooltipProvider>
           <ErrorBoundary>
             <RecordingProvider>

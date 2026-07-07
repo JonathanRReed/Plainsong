@@ -358,6 +358,11 @@ pub struct DictationDictionaryEntry {
     pub app_scope: Option<String>,
     pub case_sensitive: bool,
     pub enabled: bool,
+    /// Optional dictation-destination-app category key (other/messaging/email/
+    /// notes/worklog/ai_chat/code_editor, see `settings::dictation_app_category_to_key`).
+    /// `None` means the entry applies regardless of destination-app category.
+    #[serde(default)]
+    pub category_scope: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -373,6 +378,8 @@ pub struct CreateDictationDictionaryEntryRequest {
     pub case_sensitive: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub category_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -383,6 +390,8 @@ pub struct UpdateDictationDictionaryEntryRequest {
     pub app_scope: Option<Option<String>>,
     pub case_sensitive: Option<bool>,
     pub enabled: Option<bool>,
+    #[serde(default)]
+    pub category_scope: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,6 +458,9 @@ pub struct DictationSnippet {
     pub app_scope: Option<String>,
     pub case_sensitive: bool,
     pub enabled: bool,
+    /// See `DictationDictionaryEntry::category_scope`.
+    #[serde(default)]
+    pub category_scope: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -464,6 +476,8 @@ pub struct CreateDictationSnippetRequest {
     pub case_sensitive: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub category_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -474,6 +488,8 @@ pub struct UpdateDictationSnippetRequest {
     pub app_scope: Option<Option<String>>,
     pub case_sensitive: Option<bool>,
     pub enabled: Option<bool>,
+    #[serde(default)]
+    pub category_scope: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

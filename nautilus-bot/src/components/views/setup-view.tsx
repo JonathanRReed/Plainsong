@@ -50,6 +50,18 @@ function statusTone(ready: boolean) {
 const readinessDetailClass = "rounded-lg border border-border/60 bg-background/60 px-3 py-2";
 const readinessLabelClass = "rubric-muted text-current opacity-70";
 
+function permissionStatusLabel(
+  loading: boolean,
+  permissions: { speechRecognitionReady?: boolean } | null | undefined,
+  key: "speechRecognitionReady"
+) {
+  if (loading || !permissions) {
+    return "Checking";
+  }
+
+  return permissions[key] ? "Ready" : "Needs access";
+}
+
 function providerBadge(provider: AsrProviderInfo) {
   if (provider.runtimeStatus === "ready") {
     return (
@@ -262,7 +274,7 @@ export function SetupView() {
                   <div className={readinessDetailClass}>
                     <div className={readinessLabelClass}>Speech</div>
                     <div className="mt-1 font-medium">
-                      {permissions?.speechRecognitionReady ?? true ? "Ready" : "Needs access"}
+                      {permissionStatusLabel(loading, permissions, "speechRecognitionReady")}
                     </div>
                   </div>
                   <div className={readinessDetailClass}>
@@ -301,6 +313,9 @@ export function SetupView() {
                     </ul>
                   </div>
                 ) : null}
+                <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs leading-5 text-muted-foreground">
+                  Permission and insert tests may open macOS settings, show system prompts, or send test text to the current app. Run them when you are at this Mac.
+                </div>
                 <div className="flex flex-wrap gap-2">
                   <Button
                     variant="outline"

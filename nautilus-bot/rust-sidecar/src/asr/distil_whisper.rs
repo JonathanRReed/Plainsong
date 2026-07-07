@@ -68,7 +68,7 @@ pub(crate) fn clear_cached_runtime() {
         .join("Plainsong")
         .join("models")
         .join("distil_whisper");
-    super::canary::clear_cached_runtime(&model_dir);
+    super::whisper_candle::clear_cached_runtime(&model_dir);
 }
 
 #[cfg(not(feature = "asr-canary"))]
@@ -81,8 +81,8 @@ pub(crate) fn clear_cached_runtime() {}
 fn run_distil_candle(model_dir: &Path, audio_path: &Path) -> Result<String> {
     let samples = crate::audio::utils::load_audio_file(audio_path)
         .context("Failed to load audio for Distil-Whisper")?;
-    // DistilWhisper shares the same Whisper encoder-decoder architecture as Canary.
-    super::canary::run_canary_inference_on_samples(samples, model_dir)
+    // DistilWhisper shares the same Whisper encoder-decoder architecture as Whisper Candle.
+    super::whisper_candle::run_whisper_candle_inference_on_samples(samples, model_dir)
 }
 
 #[cfg(not(feature = "asr-canary"))]

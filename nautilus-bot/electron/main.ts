@@ -17,9 +17,22 @@ import path from "path";
 import { autoUpdater, type AppUpdater } from "electron-updater";
 import {
   resolveDictationShortcutBehavior,
+  resolveDictationShortcutCapability,
   resolveDictationShortcutDecision,
+  shouldHandleDictationShortcutSource,
 } from "./dictation-shortcut-controller";
 import { IpcBridge } from "./ipc-bridge";
+import {
+  normalizeNativeShortcutEvent,
+  type NativeShortcutController,
+  type NativeShortcutRawEvent,
+} from "./native-macos-shortcut";
+import { startNativeMacosShortcutController } from "./native-macos-shortcut-runtime";
+import {
+  convertShortcutToAccelerator,
+  findConflictingShortcuts,
+  type ShortcutConflictInfo,
+} from "./shortcut-registration";
 import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
 
 const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
@@ -40,6 +53,9 @@ let bootstrapComplete = false;
 let tray: Tray | null = null;
 let minimizeToTrayEnabled = false;
 let isQuitting = false;
+let nativeShortcutController: NativeShortcutController | null = null;
+let nativeShortcutAvailable = false;
+let shortcutConflicts: ShortcutConflictInfo[] = [];
 
 function qaLog(message: string, payload?: unknown): void {
   if (process.env.PLAINSONG_QA_PACKAGED_HOTKEY === "1") {
@@ -72,8 +88,11 @@ let updateStatus: UpdateStatusPayload = { status: "unknown" };
 
 type AppSettings = {
   shortcuts?: {
+    toggleRecording?: string;
     toggleDictation?: string;
     openWindow?: string;
+    quickExport?: string;
+    focusSearch?: string;
   };
   transcription?: {
     dictationPushToTalk?: boolean;
@@ -446,104 +465,58 @@ async function handleLocalCommand(
       return { handled: true, result: null };
     case "get_update_status":
       return { handled: true, result: updateStatus };
+    case "get_dictation_shortcut_capability_status":
+      return {
+        handled: true,
+        result: { nativeShortcutAvailable },
+      };
+    case "get_shortcut_conflicts":
+      return {
+        handled: true,
+        result: { conflicts: shortcutConflicts },
+      };
     default:
       return { handled: false };
   }
 }
 
-function convertShortcutToAccelerator(shortcut: string | undefined): string | null {
-  const value = shortcut?.trim();
-  if (!value) {
-    return null;
-  }
+type DictationShortcutPhase =
+  | "idle"
+  | "recording"
+  | "stopping"
+  | "transcribing"
+  | "delivering"
+  | "done"
+  | "error";
+type DictationShortcutSignal =
+  | "pressed"
+  | "released"
+  | "cancelled"
+  | "emergency_stop"
+  | "watchdog_timeout";
 
-  const tokens = value
-    .split("+")
-    .map((token) => token.trim())
-    .filter(Boolean);
-
-  if (tokens.length === 0) {
-    return null;
-  }
-
-  // Validate that the shortcut is not excessively long (security concern)
-  if (tokens.length > 5) {
-    console.error("[shortcuts] shortcut too long, rejecting:", value);
-    return null;
-  }
-
-  const mapped = tokens.map((token) => {
-    switch (token.toLowerCase()) {
-      case "cmd":
-      case "command":
-        return "Command";
-      case "ctrl":
-      case "control":
-        return "Control";
-      case "alt":
-      case "option":
-        return "Alt";
-      case "shift":
-        return "Shift";
-      case "space":
-        return "Space";
-      case "esc":
-        return "Escape";
-      case "enter":
-      case "return":
-        return "Enter";
-      case "up":
-        return "Up";
-      case "down":
-        return "Down";
-      case "left":
-        return "Left";
-      case "right":
-        return "Right";
-      default:
-        // Only allow single-character keys (letters, numbers, symbols)
-        if (token.length === 1) {
-          const char = token.toUpperCase();
-          // Validate it's a printable ASCII character
-          if (char >= '!' && char <= '~') {
-            return char;
-          }
-        }
-        console.error("[shortcuts] invalid token in shortcut:", token);
-        return null;
-    }
-  });
-
-  // If any token failed validation, reject the entire shortcut
-  if (mapped.includes(null)) {
-    return null;
-  }
-
-  return mapped.join("+");
-}
-
-async function handleDictationGlobalShortcut(settings: AppSettings): Promise<void> {
+async function handleDictationShortcutSignal(
+  settings: AppSettings,
+  signal: DictationShortcutSignal,
+): Promise<void> {
   if (!ipcBridge) {
     return;
   }
 
   const behavior = resolveDictationShortcutBehavior(settings.transcription ?? {});
-  const decision = resolveDictationShortcutDecision({
-    phase: dictationPhase as
-      | "idle"
-      | "recording"
-      | "stopping"
-      | "transcribing"
-      | "delivering"
-      | "done"
-      | "error",
+  const capability = resolveDictationShortcutCapability({
+    nativeShortcutAvailable,
     behavior,
-    capability: "press_only",
-    signal: "pressed",
+  });
+  const decision = resolveDictationShortcutDecision({
+    phase: dictationPhase as DictationShortcutPhase,
+    behavior,
+    capability,
+    signal,
   });
 
   if (decision.action === "start") {
-    qaLog("dictation shortcut start_dictation", { phase: dictationPhase, behavior });
+    qaLog("dictation shortcut start_dictation", { phase: dictationPhase, behavior, capability });
     await ipcBridge.invoke("start_dictation", {});
     return;
   }
@@ -552,12 +525,124 @@ async function handleDictationGlobalShortcut(settings: AppSettings): Promise<voi
     qaLog("dictation shortcut stop_dictation", {
       phase: dictationPhase,
       behavior,
+      capability,
       stopReason: decision.stopReason ?? "toggle",
     });
     await ipcBridge.invoke("stop_dictation", {
       stopReason: decision.stopReason ?? "toggle",
     });
+    return;
   }
+
+  if (decision.action === "cancel") {
+    qaLog("dictation shortcut force_stop_dictation", {
+      phase: dictationPhase,
+      behavior,
+      capability,
+      stopReason: decision.stopReason ?? "cancelled",
+    });
+    await ipcBridge.invoke("force_stop_dictation", {});
+  }
+}
+
+/**
+ * Handle a `dictation-vad-signal` event from the sidecar. Two distinct signals share
+ * this event name (see rust-sidecar/src/audio.rs):
+ *
+ * - `silence_stop`: sustained silence was detected after speech during the active
+ *   dictation session (the in-session `StreamingVadGate`/
+ *   `drive_dictation_auto_stop_gate`, installed by `start_dictation`). Reuses the
+ *   exact same stop path a manual toggle-stop takes (`stop_dictation` over the
+ *   JSON-RPC bridge) so auto-stop behaves identically to a user-initiated stop
+ *   regardless of activation mode (toggle, hold-to-talk, or hands-free).
+ *
+ * - `hands_free_start`: sustained speech was detected by the separate, always-on-
+ *   when-enabled idle-time monitor (`AudioCapture::start_hands_free_monitor`), which
+ *   only ever runs while no dictation session is active. Reuses the exact same start
+ *   path the hotkey/native-helper activation flows call (`start_dictation` over the
+ *   JSON-RPC bridge), so it passes through the identical `DictationSessionState::Idle`
+ *   guard on the Rust side and can't double-start a session.
+ */
+async function handleDictationVadSignal(payload: unknown): Promise<void> {
+  if (!ipcBridge) {
+    return;
+  }
+  const signal =
+    payload && typeof payload === "object" && "signal" in payload
+      ? (payload as { signal?: unknown }).signal
+      : undefined;
+
+  if (signal === "silence_stop") {
+    // Only stop if a session is actually in a stoppable phase; avoids racing a
+    // signal from a session that already finished stopping through another path.
+    if (dictationPhase !== "recording") {
+      return;
+    }
+    qaLog("dictation vad auto-stop", { phase: dictationPhase, signal });
+    await ipcBridge.invoke("stop_dictation", { stopReason: "auto_stop_silence" });
+    return;
+  }
+
+  if (signal === "hands_free_start") {
+    // Only start from a genuinely idle-like phase; avoids racing a stale signal
+    // (e.g. emitted just before the monitor was stopped for an in-flight start
+    // from another activation path) into double-starting a session. The Rust side
+    // additionally re-checks `DictationSessionState::Idle` itself, so this is
+    // defense-in-depth, not the only guard.
+    if (dictationPhase !== "idle" && dictationPhase !== "done" && dictationPhase !== "error") {
+      return;
+    }
+    qaLog("dictation hands-free auto-start", { phase: dictationPhase, signal });
+    await ipcBridge.invoke("start_dictation", {});
+    return;
+  }
+}
+
+async function handleDictationGlobalShortcut(settings: AppSettings): Promise<void> {
+  if (!shouldHandleDictationShortcutSource({ source: "electron", nativeShortcutAvailable })) {
+    return;
+  }
+  await handleDictationShortcutSignal(settings, "pressed");
+}
+
+async function handleNativeDictationShortcutEvent(
+  settings: AppSettings,
+  rawEvent: NativeShortcutRawEvent,
+): Promise<void> {
+  if (!shouldHandleDictationShortcutSource({ source: "native", nativeShortcutAvailable })) {
+    return;
+  }
+
+  const { signal } = normalizeNativeShortcutEvent(rawEvent);
+  await handleDictationShortcutSignal(settings, signal);
+}
+
+function disposeNativeShortcutController(): void {
+  nativeShortcutController?.dispose();
+  nativeShortcutController = null;
+  nativeShortcutAvailable = false;
+}
+
+function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
+  disposeNativeShortcutController();
+
+  const controller = startNativeMacosShortcutController({
+    platform: process.platform,
+    helperPath: getNativeShortcutHelperPath(),
+    shortcut: settings.shortcuts?.toggleDictation,
+    onEvent: (event) => {
+      void handleNativeDictationShortcutEvent(settings, event).catch((error) => {
+        console.error("[shortcuts] native dictation shortcut failed", error);
+      });
+    },
+    onUnavailable: (status) => {
+      console.warn("[shortcuts] native shortcut helper became unavailable", status);
+      nativeShortcutAvailable = false;
+    },
+  });
+
+  nativeShortcutController = controller;
+  nativeShortcutAvailable = controller.status.available;
 }
 
 async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
@@ -573,8 +658,29 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
     return;
   }
 
-  const dictationShortcut = convertShortcutToAccelerator(settings.shortcuts?.toggleDictation);
-  const openWindowShortcut = convertShortcutToAccelerator(settings.shortcuts?.openWindow);
+  startNativeShortcutControllerIfNeeded(settings);
+
+  const conflicts = findConflictingShortcuts(settings.shortcuts ?? {});
+  shortcutConflicts = conflicts;
+  if (conflicts.length > 0) {
+    for (const conflict of conflicts) {
+      console.warn("[shortcuts] conflict detected, skipping registration", {
+        reason,
+        skipped: conflict.label,
+        shortcut: conflict.shortcut,
+        keptOwner: conflict.conflictsWith,
+      });
+    }
+  }
+  broadcastRendererEvent("shortcut-conflicts-changed", { conflicts });
+  const skippedFields = new Set(conflicts.map((conflict) => conflict.field));
+
+  const dictationShortcut = skippedFields.has("toggleDictation")
+    ? null
+    : convertShortcutToAccelerator(settings.shortcuts?.toggleDictation);
+  const openWindowShortcut = skippedFields.has("openWindow")
+    ? null
+    : convertShortcutToAccelerator(settings.shortcuts?.openWindow);
   const behavior = resolveDictationShortcutBehavior(settings.transcription ?? {});
   const usesPressOnlyElectronFallback = behavior === "hold_to_talk";
 
@@ -613,6 +719,20 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
       });
     }
   }
+}
+
+function getNativeShortcutHelperBinaryName(): string {
+  return "plainsong-native-shortcut-helper";
+}
+
+function getNativeShortcutHelperPath(): string {
+  const binaryName = getNativeShortcutHelperBinaryName();
+
+  if (isDev) {
+    return path.join(__dirname, "../dist-native", binaryName);
+  }
+
+  return path.join(process.resourcesPath, "shortcut-helper", binaryName);
 }
 
 function getSidecarBinaryName(): string {
@@ -779,6 +899,7 @@ process.on("unhandledRejection", (reason) => {
 app.on("before-quit", () => {
   isQuitting = true;
   globalShortcut.unregisterAll();
+  disposeNativeShortcutController();
   ipcBridge?.shutdown();
   tray?.destroy();
   tray = null;
@@ -868,6 +989,12 @@ async function bootstrap() {
       typeof (payload as { phase?: unknown }).phase === "string"
     ) {
       dictationPhase = (payload as { phase: string }).phase;
+    }
+
+    if (eventName === "dictation-vad-signal") {
+      void handleDictationVadSignal(payload).catch((error) => {
+        console.error("[dictation] vad auto-stop signal failed", error);
+      });
     }
 
     broadcastRendererEvent(eventName, payload);

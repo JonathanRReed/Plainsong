@@ -161,7 +161,7 @@ impl MelSpectrogram {
     /// Compute Whisper-style mel spectrogram with max-normalization.
     ///
     /// Applies: `log10 → clamp(max-8) → (x+4)/4` as per OpenAI Whisper.
-    /// Use this for Whisper-based models (Canary, DistilWhisper).
+    /// Use this for Whisper-based models (Whisper Candle, DistilWhisper).
     pub fn compute_whisper_normalized(&self, samples: &[f32]) -> Vec<Vec<f32>> {
         let raw = self.compute(samples);
         if raw.is_empty() || raw[0].is_empty() {

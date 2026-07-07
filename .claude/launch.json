@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "renderer",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-lc", "cd nautilus-bot && bunx vite --port 1420 --strictPort"],
+      "port": 1420
+    }
+  ]
+}
