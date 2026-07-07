@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DictationView } from "@/components/views/dictation-view";
 
@@ -254,6 +254,7 @@ vi.mock("@/lib/backend/dictation", () => ({
       appScope: null,
       caseSensitive: false,
       enabled: true,
+      categoryScope: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
@@ -271,6 +272,7 @@ vi.mock("@/lib/backend/dictation", () => ({
       appScope: null,
       caseSensitive: false,
       enabled: true,
+      categoryScope: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
@@ -280,7 +282,7 @@ vi.mock("@/lib/backend/dictation", () => ({
   updateDictationSnippet: vi.fn(),
   deleteDictationSnippet: vi.fn(),
   listDictationCommandPresets: vi.fn(async () => []),
-  upsertDictationCommandPreset: vi.fn(),
+  upsertDictationCommandPreset: vi.fn(async (preset: any) => preset),
   deleteDictationCommandPreset: vi.fn(),
 }));
 
@@ -615,5 +617,353 @@ describe("DictationView modes", () => {
 
     expect((await screen.findAllByText("Microphone permission is not ready.")).length).toBeGreaterThan(0);
     expect(screen.getByText("Capture needs attention")).toBeInTheDocument();
+  });
+
+  it("creates dictionary entries and round-trips dictionary CSV", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    vi.mocked(backend.createDictationDictionaryEntry).mockResolvedValueOnce({
+      id: "dict-1",
+      spokenForm: "open ai",
+      replacement: "OpenAI",
+      appScope: "Slack",
+      caseSensitive: false,
+      enabled: true,
+      categoryScope: null,
+      createdAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+      updatedAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+    });
+
+    render(<DictationView />);
+
+    await screen.findByText("Dictionary");
+    fireEvent.change(screen.getByPlaceholderText("Say (e.g. open ai)"), {
+      target: { value: "open ai" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Insert (e.g. OpenAI)"), {
+      target: { value: "OpenAI" },
+    });
+    fireEvent.change(screen.getAllByPlaceholderText("App scope (optional)")[0], {
+      target: { value: "Slack" },
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Add" })[0]);
+
+    await waitFor(() => {
+      expect(backend.createDictationDictionaryEntry).toHaveBeenCalledWith({
+        spokenForm: "open ai",
+        replacement: "OpenAI",
+        appScope: "Slack",
+        caseSensitive: false,
+        enabled: true,
+      });
+    });
+    expect(await screen.findByDisplayValue("OpenAI")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Export CSV" }));
+
+    expect(await screen.findByText("Export Dictionary CSV")).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/open ai,OpenAI/)).toBeInTheDocument();
+    expect(backend.exportDictationDictionaryCsv).toHaveBeenCalled();
+  });
+
+  it("imports dictionary CSV through the merge dialog", async () => {
+    const backend = await import("@/lib/backend/dictation");
+
+    render(<DictationView />);
+
+    await screen.findByText("Dictionary");
+    fireEvent.click(screen.getByRole("button", { name: "Import CSV" }));
+
+    expect(await screen.findByText("Import Dictionary CSV")).toBeInTheDocument();
+    const csvEditor = screen.getByDisplayValue(/spoken_form,replacement/);
+    fireEvent.change(csvEditor, {
+      target: { value: "spoken_form,replacement\nopen ai,OpenAI" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Import & Merge" }));
+
+    await waitFor(() => {
+      expect(backend.importDictationDictionaryCsv).toHaveBeenCalledWith(
+        "spoken_form,replacement\nopen ai,OpenAI",
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getAllByText("Import complete: 1 created.").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("creates phrase expansion snippets", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    vi.mocked(backend.createDictationSnippet).mockResolvedValueOnce({
+      id: "snippet-1",
+      trigger: "brb",
+      expansion: "be right back",
+      appScope: "Slack",
+      caseSensitive: false,
+      enabled: true,
+      categoryScope: null,
+      createdAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+      updatedAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+    });
+
+    render(<DictationView />);
+
+    await screen.findByText("Phrase expansions");
+    fireEvent.change(screen.getByPlaceholderText("Trigger (e.g. brb)"), {
+      target: { value: "brb" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Expansion (e.g. be right back)"), {
+      target: { value: "be right back" },
+    });
+    fireEvent.change(screen.getAllByPlaceholderText("App scope (optional)")[1], {
+      target: { value: "Slack" },
+    });
+    const snippetSection = screen
+      .getByPlaceholderText("Trigger (e.g. brb)")
+      .closest(".mt-5");
+    expect(snippetSection).toBeTruthy();
+    fireEvent.click(within(snippetSection as HTMLElement).getByRole("button", { name: "Add" }));
+
+    await waitFor(() => {
+      expect(backend.createDictationSnippet).toHaveBeenCalledWith({
+        trigger: "brb",
+        expansion: "be right back",
+        appScope: "Slack",
+        caseSensitive: false,
+        enabled: true,
+      });
+    });
+    expect(await screen.findByDisplayValue("be right back")).toBeInTheDocument();
+  });
+
+  it("toggles category-aware dictation formatting", async () => {
+    render(<DictationView />);
+
+    const toggle = await screen.findByText("Format for destination app");
+    const card = toggle.closest(".rounded-2xl");
+    expect(card).toBeTruthy();
+    const switchControl = within(card as HTMLElement).getByRole("switch");
+    expect(switchControl).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.click(switchControl);
+
+    await waitFor(() => {
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
+    });
+
+    const saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+    const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
+    expect(latestSettings.transcription.dictationCategoryFormattingEnabled).toBe(false);
+  });
+
+  it("adds and removes a per-app category override", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("App overrides");
+    const appMatcherInput = screen.getByPlaceholderText("App matcher (e.g. slack)");
+    fireEvent.change(appMatcherInput, {
+      target: { value: "notion" },
+    });
+    const overridesSection = appMatcherInput.closest(".border-t");
+    expect(overridesSection).toBeTruthy();
+    fireEvent.click(
+      within(overridesSection as HTMLElement).getByRole("button", { name: "Add" }),
+    );
+
+    await waitFor(() => {
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
+    });
+
+    let saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+    let latestSettings = saveCalls[saveCalls.length - 1]?.[0];
+    expect(latestSettings.transcription.dictationAppCategoryOverrides).toHaveLength(1);
+    expect(latestSettings.transcription.dictationAppCategoryOverrides[0]).toMatchObject({
+      appMatcher: "notion",
+      category: "messaging",
+      enabled: true,
+    });
+
+    const overrideRow = (await screen.findByDisplayValue("notion")).closest(
+      ".space-y-2",
+    );
+    expect(overrideRow).toBeTruthy();
+    fireEvent.click(
+      within(overrideRow as HTMLElement).getByRole("button", { name: "Remove" }),
+    );
+
+    await waitFor(() => {
+      saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<[any]>;
+      latestSettings = saveCalls[saveCalls.length - 1]?.[0];
+      expect(latestSettings.transcription.dictationAppCategoryOverrides).toHaveLength(0);
+    });
+  });
+
+  it("persists command preset prompt edits", async () => {
+    const backend = await import("@/lib/backend/dictation");
+
+    render(<DictationView />);
+
+    const rewriteShorter = await screen.findByText("Rewrite Shorter");
+    const presetCard = rewriteShorter.closest(".rounded-md");
+    expect(presetCard).toBeTruthy();
+    const promptEditor = within(presetCard as HTMLElement).getByRole("textbox");
+
+    fireEvent.change(promptEditor, {
+      target: { value: "Make this shorter and keep product names exact." },
+    });
+    fireEvent.blur(promptEditor);
+
+    await waitFor(() => {
+      expect(backend.upsertDictationCommandPreset).toHaveBeenCalledWith(
+        {
+          commandKey: "rewrite_shorter",
+          systemPrompt: "Make this shorter and keep product names exact.",
+          enabled: true,
+        },
+      );
+    });
+  });
+
+  it("shows a recently learned list sourced from existing dictionary entries", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    vi.mocked(backend.listDictationDictionaryEntries).mockResolvedValueOnce([
+      {
+        id: "dict-older",
+        spokenForm: "jon",
+        replacement: "John",
+        appScope: null,
+        caseSensitive: false,
+        enabled: true,
+        categoryScope: null,
+        createdAt: new Date("2026-01-01T10:00:00Z").toISOString(),
+        updatedAt: new Date("2026-01-01T10:00:00Z").toISOString(),
+      },
+      {
+        id: "dict-newer",
+        spokenForm: "open ai",
+        replacement: "OpenAI",
+        appScope: null,
+        caseSensitive: false,
+        enabled: true,
+        categoryScope: null,
+        createdAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+        updatedAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+      },
+    ]);
+
+    render(<DictationView />);
+
+    const recentlyLearned = await screen.findByTestId(
+      "recently-learned-dictionary",
+    );
+    expect(
+      within(recentlyLearned).getByText("Recently learned"),
+    ).toBeInTheDocument();
+
+    const items = within(recentlyLearned).getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    // Newer updatedAt entry (open ai -> OpenAI) should be listed first.
+    expect(items[0]).toHaveTextContent("open ai");
+    expect(items[0]).toHaveTextContent("OpenAI");
+    expect(items[1]).toHaveTextContent("jon");
+    expect(items[1]).toHaveTextContent("John");
+  });
+
+  it("shows Fix capitalization only for a case-only diff of the latest result", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("Flow Profiles");
+    const handler = backendMocks.eventListeners.get("dictation-text-ready");
+    expect(handler).toBeTruthy();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          text: "hello world",
+          actualProvider: "distil_whisper",
+        },
+      });
+    });
+
+    const learnButton = await screen.findByRole("button", {
+      name: "Learn correction",
+    });
+    const textarea = learnButton
+      .closest(".space-y-3")
+      ?.querySelector("textarea");
+    expect(textarea).toBeTruthy();
+
+    // Unedited text: no pending correction of any kind yet.
+    expect(
+      screen.queryByRole("button", { name: "Fix capitalization" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.change(textarea as HTMLTextAreaElement, {
+      target: { value: "Hello World" },
+    });
+
+    expect(
+      await screen.findByRole("button", { name: "Fix capitalization" }),
+    ).toBeInTheDocument();
+
+    fireEvent.change(textarea as HTMLTextAreaElement, {
+      target: { value: "Hello there world" },
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: "Fix capitalization" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("sets a category scope on a new dictionary entry", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    vi.mocked(backend.createDictationDictionaryEntry).mockResolvedValueOnce({
+      id: "dict-scoped",
+      spokenForm: "standup",
+      replacement: "stand-up",
+      appScope: null,
+      caseSensitive: false,
+      enabled: true,
+      categoryScope: "worklog",
+      createdAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+      updatedAt: new Date("2026-03-14T10:00:00Z").toISOString(),
+    });
+
+    render(<DictationView />);
+
+    await screen.findByText("Dictionary");
+    fireEvent.change(screen.getByPlaceholderText("Say (e.g. open ai)"), {
+      target: { value: "standup" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Insert (e.g. OpenAI)"), {
+      target: { value: "stand-up" },
+    });
+
+    const dictionarySection = screen
+      .getByPlaceholderText("Say (e.g. open ai)")
+      .closest(".mt-5");
+    expect(dictionarySection).toBeTruthy();
+    const categoryTrigger = within(
+      dictionarySection as HTMLElement,
+    ).getByRole("combobox");
+    fireEvent.click(categoryTrigger);
+    fireEvent.click(await screen.findByRole("option", { name: "Worklog" }));
+
+    fireEvent.click(
+      within(dictionarySection as HTMLElement).getAllByRole("button", {
+        name: "Add",
+      })[0],
+    );
+
+    await waitFor(() => {
+      expect(backend.createDictationDictionaryEntry).toHaveBeenCalledWith({
+        spokenForm: "standup",
+        replacement: "stand-up",
+        appScope: null,
+        caseSensitive: false,
+        enabled: true,
+        categoryScope: "worklog",
+      });
+    });
   });
 });

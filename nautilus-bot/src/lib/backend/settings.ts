@@ -1,8 +1,10 @@
 export {
   clearProviderSecret,
+  getDictationShortcutCapabilityStatus,
   getPermissionDiagnostics,
   getSecurityStatus,
   getSettings,
+  getShortcutConflicts,
   hasProviderSecret,
   lockVault,
   migrateToEncryptedStorage,
@@ -19,7 +21,11 @@ export {
   verifySystemAudioSetup,
 } from "../backend";
 export type {
+  DictationShortcutCapabilityStatus,
   PermissionDiagnostics,
   SecurityStatus,
   SetupVerificationResult,
+  ShortcutConflict,
+  ShortcutConflictStatus,
+  ShortcutFieldKey,
 } from "../backend";

@@ -92,6 +92,12 @@ pub struct AppState {
 
 const MIN_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 0.8;
 const MAX_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 30.0;
+/// Fallback silence-auto-stop duration used for hands-free dictation sessions
+/// when `dictation_silence_timeout_seconds` is unset/disabled (0). Hands-free
+/// sessions start automatically on detected speech, so without this fallback
+/// they would never auto-stop, contradicting the in-app copy that promises a
+/// 1.8s fallback (see dictation-view.tsx "Hands-free guide").
+const HANDS_FREE_DEFAULT_SILENCE_TIMEOUT_SECONDS: f32 = 1.8;
 const DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
 const DICTATION_IDLE_RESET_SUCCESS_MS: u64 = 1800;
 #[cfg(target_os = "macos")]
@@ -2525,6 +2531,394 @@ async fn reprocess_dictation_text_impl(
     }))
 }
 
+/// Scope a selected-text transform actually ran against: an explicit text
+/// selection in the frontmost app, or (Quick-Fix-style commands only) the
+/// whole contents of the currently focused field when there was no
+/// selection to capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SelectedTextTransformTargetScope {
+    Selection,
+    FocusedField,
+}
+
+impl SelectedTextTransformTargetScope {
+    fn as_result_value(self) -> &'static str {
+        match self {
+            Self::Selection => "selection",
+            Self::FocusedField => "focused_field",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SelectedTextTransformTarget {
+    text: String,
+    scope: SelectedTextTransformTargetScope,
+}
+
+/// Runs a dictation command (by `command_key`) against `input_text`,
+/// dispatching to a pure-Rust local transform for the four case-transform
+/// commands, or to the AI-backed path (with local-transform fallback on
+/// error) for everything else. `app_category` is an optional supplemental
+/// hint — the same `DictationAppCategory` resolved for the existing
+/// dictation-formatting prompt — appended to the AI prompt via
+/// `append_category_prompt_fragment` so destination-app guardrails (e.g.
+/// "don't touch code" for a code editor) apply here too, without
+/// introducing a second, independent app-context branch.
+async fn transform_text_with_command(
+    state: &AppState,
+    command_key: &str,
+    input_text: &str,
+    action_label: &str,
+    app_category: Option<text::format::DictationAppCategory>,
+) -> Result<DictationTextTransformOutput, String> {
+    if crate::dictation_parity::is_local_only_selected_text_command(command_key) {
+        let raw_output = local_dictation_command_transform(command_key, input_text)?;
+        let output_text = sanitize_dictation_output(raw_output.trim(), input_text)
+            .trim()
+            .to_string();
+        if output_text.is_empty() {
+            return Err(format!("{} result is empty.", action_label));
+        }
+
+        return Ok(DictationTextTransformOutput {
+            output_text,
+            used_ai: false,
+            provider: None,
+            model_id: None,
+        });
+    }
+
+    let base_prompt = resolve_dictation_command_prompt(state, command_key).await?;
+    let category_fragment = app_category.and_then(text::format::dictation_category_prompt_fragment);
+    let prompt = append_category_prompt_fragment(base_prompt, category_fragment);
+
+    let (raw_output, used_ai, provider, model_id) =
+        match run_custom_dictation_transform_with_selected_provider(state, input_text, &prompt)
+            .await
+        {
+            Ok((output, provider, model_id)) => (
+                output,
+                true,
+                Some(provider.as_settings_value().to_string()),
+                Some(model_id),
+            ),
+            Err(error) => {
+                tracing::warn!("{} fell back to local transform: {}", action_label, error);
+                (
+                    local_dictation_command_transform(command_key, input_text)?,
+                    false,
+                    None,
+                    None,
+                )
+            }
+        };
+    let output_text = sanitize_dictation_output(raw_output.trim(), input_text)
+        .trim()
+        .to_string();
+    if output_text.is_empty() {
+        return Err(format!("{} result is empty.", action_label));
+    }
+
+    Ok(DictationTextTransformOutput {
+        output_text,
+        used_ai,
+        provider,
+        model_id,
+    })
+}
+
+struct DictationTextTransformOutput {
+    output_text: String,
+    used_ai: bool,
+    provider: Option<String>,
+    model_id: Option<String>,
+}
+
+/// Dispatches `command_key` to whichever local text-transform function
+/// backs it. Only the commands with local implementations today are
+/// supported: the four case-transform primitives (via `dictation_parity`)
+/// plus the three commands with an existing local AI-fallback
+/// implementation on main (`rewrite_shorter`, `rewrite_professional`,
+/// `bulletize_selection`). Every other AI-backed selected-text command
+/// (e.g. `expand_text`, `summarize_text`, `prompt_engineer`) has a default
+/// prompt via `default_dictation_command_prompt` and runs through the AI
+/// provider in `transform_text_with_command`; if that call fails, this
+/// function's `_ => Err(...)` arm surfaces a "fell back to local transform"
+/// warning and a plain error for those commands rather than a crude local
+/// rewrite, since no local heuristic exists for them.
+fn local_dictation_command_transform(command_key: &str, input: &str) -> Result<String, String> {
+    match command_key {
+        "rewrite_shorter" => Ok(rewrite_shorter_text(input)),
+        "rewrite_professional" => Ok(rewrite_professional_text(input)),
+        "bulletize_selection" => Ok(bulletize_text(input)),
+        "uppercase_selection" => crate::dictation_parity::uppercase_context_selection(input),
+        "lowercase_selection" => crate::dictation_parity::lowercase_context_selection(input),
+        "title_case_selection" => crate::dictation_parity::title_case_context_selection(input),
+        "sentence_case_selection" => {
+            crate::dictation_parity::sentence_case_context_selection(input)
+        }
+        _ => Err(format!(
+            "Unsupported dictation command transform: {}",
+            command_key
+        )),
+    }
+}
+
+/// Resolves the destination-app category for a selected-text transform the
+/// same way the dictation-formatting prompt resolves it: via
+/// `resolve_dictation_app_category_with_overrides`, using the transform
+/// target app's name/bundle id. Returned as an optional hint so callers can
+/// append it as a supplement to the transform prompt without it ever being
+/// required.
+///
+/// Like `run_dictation_formatting_with_selected_provider`, this is a
+/// prompt-fragment consumer, so it respects
+/// `dictation_category_formatting_enabled` itself (returning `Other` when
+/// disabled) rather than relying on the resolver to gate it — the resolver
+/// always returns the real category so non-prompt consumers (e.g.
+/// dictionary/snippet `category_scope` matching) are unaffected by this
+/// toggle.
+async fn resolve_selected_text_transform_app_category(
+    state: &AppState,
+    target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
+) -> text::format::DictationAppCategory {
+    let settings = state.settings_manager.lock().await.settings().clone();
+    if !settings.transcription.dictation_category_formatting_enabled {
+        return text::format::DictationAppCategory::Other;
+    }
+    settings::resolve_dictation_app_category_with_overrides(
+        &settings.transcription,
+        target_app,
+        target_app_bundle_id,
+    )
+}
+
+/// Implements the "transform text selected in any app" feature: captures
+/// the transform target (an explicit selection, falling back to the whole
+/// focused field for Quick-Fix-style commands only), runs the requested
+/// command against it, and writes the result back in place using whichever
+/// system-wide write path matches how the target was captured.
+async fn transform_selected_text_impl(
+    state: &AppState,
+    command_key: &str,
+) -> Result<serde_json::Value, String> {
+    let action_label = crate::dictation_parity::dictation_command_selected_text_label(command_key)
+        .ok_or_else(|| format!("Unsupported selected-text transform: {}", command_key))?;
+
+    #[cfg(target_os = "macos")]
+    let target = sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
+
+    #[cfg(target_os = "windows")]
+    let target = (get_frontmost_app_name(), None);
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let transform_target = capture_selected_text_transform_target(
+            command_key,
+            action_label,
+            target.0.as_deref(),
+            target.1.as_deref(),
+        )?;
+        let input_text = transform_target.text;
+        let app_category = resolve_selected_text_transform_app_category(
+            state,
+            target.0.as_deref(),
+            target.1.as_deref(),
+        )
+        .await;
+        let transform = transform_text_with_command(
+            state,
+            command_key,
+            input_text.as_str(),
+            action_label,
+            Some(app_category),
+        )
+        .await?;
+
+        let paste_outcome = match transform_target.scope {
+            SelectedTextTransformTargetScope::Selection => paste_text_systemwide(
+                state,
+                transform.output_text.as_str(),
+                true,
+                target.0.as_deref(),
+                target.1.as_deref(),
+            ),
+            SelectedTextTransformTargetScope::FocusedField => {
+                replace_focused_field_text_systemwide(
+                    transform.output_text.as_str(),
+                    target.0.as_deref(),
+                    target.1.as_deref(),
+                )
+            }
+        };
+
+        Ok(serde_json::json!({
+            "commandKey": command_key,
+            "inputText": input_text,
+            "outputText": transform.output_text,
+            "targetScope": transform_target.scope.as_result_value(),
+            "targetApp": target.0,
+            "targetBundleId": target.1,
+            "pasted": paste_outcome.pasted,
+            "copied": paste_outcome.copied,
+            "error": paste_outcome.error,
+            "usedAi": transform.used_ai,
+            "provider": transform.provider,
+            "modelId": transform.model_id,
+        }))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = state;
+        let _ = command_key;
+        Err("Selected-text transforms are only supported on macOS and Windows.".to_string())
+    }
+}
+
+/// Implements the "transform freshly-dictated text" variant of the same
+/// commands: unlike `transform_selected_text_impl`, the input is text the
+/// caller already has in hand (e.g. from a completed dictation session), so
+/// there is no capture step and no write-back — this just returns the
+/// transformed text for the caller to insert/display.
+async fn transform_dictation_text_impl(
+    state: &AppState,
+    text: String,
+    command_key: String,
+) -> Result<serde_json::Value, String> {
+    let input_text = text.trim();
+    if input_text.is_empty() {
+        return Err("Dictation text is empty.".to_string());
+    }
+
+    let action_label = crate::dictation_parity::dictation_command_selected_text_label(&command_key)
+        .ok_or_else(|| format!("Unsupported dictation text transform: {}", command_key))?;
+
+    #[cfg(target_os = "macos")]
+    let app_category = {
+        let target =
+            sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
+        Some(
+            resolve_selected_text_transform_app_category(
+                state,
+                target.0.as_deref(),
+                target.1.as_deref(),
+            )
+            .await,
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
+    let app_category: Option<text::format::DictationAppCategory> = None;
+
+    let transform =
+        transform_text_with_command(state, &command_key, input_text, action_label, app_category)
+            .await?;
+
+    Ok(serde_json::json!({
+        "commandKey": command_key,
+        "inputText": input_text,
+        "outputText": transform.output_text,
+        "usedAi": transform.used_ai,
+        "provider": transform.provider,
+        "modelId": transform.model_id,
+    }))
+}
+
+/// Pure scope-selection policy behind `capture_selected_text_transform_target`
+/// (macOS): given the *result* of trying to capture an explicit selection
+/// and (lazily) the *result* of trying to capture the focused-field
+/// contents, decides whether the transform target is the selection, the
+/// focused field, or an error — without itself touching the clipboard or
+/// Accessibility APIs. Factored out so this branching logic can be unit
+/// tested deterministically, independent of the live OS permission state
+/// that the real capture functions depend on.
+///
+/// `focused_field_capture` is a closure (rather than an already-computed
+/// value) so the real caller only pays the Accessibility round-trip when
+/// this policy actually needs it, matching the original inline control
+/// flow's laziness.
+fn resolve_selected_text_transform_target(
+    command_key: &str,
+    action_label: &str,
+    selection_capture: Result<Option<String>, String>,
+    focused_field_capture: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<SelectedTextTransformTarget, String> {
+    let allows_focused_field_fallback =
+        crate::dictation_parity::allows_focused_field_fallback(command_key);
+
+    match selection_capture {
+        Ok(Some(text)) => {
+            return Ok(SelectedTextTransformTarget {
+                text,
+                scope: SelectedTextTransformTargetScope::Selection,
+            });
+        }
+        Ok(None) => {}
+        Err(selection_error) => {
+            if !allows_focused_field_fallback {
+                return Err(selection_error);
+            }
+            if let Some(text) = focused_field_capture()? {
+                return Ok(SelectedTextTransformTarget {
+                    text,
+                    scope: SelectedTextTransformTargetScope::FocusedField,
+                });
+            }
+            return Err(selection_error);
+        }
+    }
+
+    if allows_focused_field_fallback {
+        if let Some(text) = focused_field_capture()? {
+            return Ok(SelectedTextTransformTarget {
+                text,
+                scope: SelectedTextTransformTargetScope::FocusedField,
+            });
+        }
+        return Err(format!(
+            "Select text or focus a text field to transform, then run {}.",
+            action_label
+        ));
+    }
+
+    Err(format!(
+        "Select text to transform, then run {}.",
+        action_label
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn capture_selected_text_transform_target(
+    command_key: &str,
+    action_label: &str,
+    target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
+) -> Result<SelectedTextTransformTarget, String> {
+    resolve_selected_text_transform_target(
+        command_key,
+        action_label,
+        capture_selected_text_via_clipboard(target_app),
+        || capture_focused_field_text_via_accessibility(target_app, target_app_bundle_id),
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn capture_selected_text_transform_target(
+    _command_key: &str,
+    action_label: &str,
+    target_app: Option<&str>,
+    _target_app_bundle_id: Option<&str>,
+) -> Result<SelectedTextTransformTarget, String> {
+    let text = capture_selected_text_via_clipboard(target_app)?
+        .ok_or_else(|| format!("Select text to transform, then run {}.", action_label))?;
+    Ok(SelectedTextTransformTarget {
+        text,
+        scope: SelectedTextTransformTargetScope::Selection,
+    })
+}
+
 async fn active_dictation_session_id(state: &AppState) -> Option<u64> {
     state
         .dictation_session_tracker
@@ -3781,6 +4175,7 @@ fn apply_dictation_snippets(
             app_scope: snippet.app_scope.clone(),
             case_sensitive: snippet.case_sensitive,
             enabled: snippet.enabled,
+            category_scope: snippet.category_scope.clone(),
         })
         .collect::<Vec<_>>();
     crate::dictation_parity::apply_dictation_snippets(input, &rules, app_target)
@@ -3882,6 +4277,7 @@ fn apply_learned_correction_candidate(
                     app_scope: Some(None),
                     case_sensitive: Some(false),
                     enabled: Some(true),
+                    category_scope: Some(None),
                 },
             )
             .map_err(|e| e.to_string())?;
@@ -3894,6 +4290,7 @@ fn apply_learned_correction_candidate(
                 app_scope: None,
                 case_sensitive: false,
                 enabled: true,
+                category_scope: None,
             })
             .map_err(|e| e.to_string())?;
         ("created".to_string(), created)
@@ -4134,23 +4531,42 @@ async fn resolve_dictation_command_prompt(
         .ok_or_else(|| format!("Unknown command key '{}'", command_key))
 }
 
-fn generate_default_dictation_prompt(active_app: Option<String>) -> String {
+/// Appends a destination-app-category prompt fragment (if any) as a
+/// supplement to an already-built prompt, without altering or replacing
+/// the existing prompt's own tone/instructions.
+fn append_category_prompt_fragment(base: String, fragment: Option<&'static str>) -> String {
+    match fragment {
+        Some(fragment) => format!("{}\n\n{}", base, fragment),
+        None => base,
+    }
+}
+
+fn generate_default_dictation_prompt(
+    active_app: Option<String>,
+    app_category: text::format::DictationAppCategory,
+) -> String {
+    let category_fragment = text::format::dictation_category_prompt_fragment(app_category)
+        .map(|fragment| format!("\n            {}", fragment))
+        .unwrap_or_default();
+
     if let Some(app_name) = active_app {
         format!(
-            "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
-            The user is currently dictating into the application: '{}'. 
-            Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). 
-            Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them. 
-            Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
+            "You are an AI dictation assistant. Your job is to format the user's raw dictated text.
+            The user is currently dictating into the application: '{}'.
+            Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). {}
+            Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
+            Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text.
             Just output the corrected text directly.",
-            app_name
+            app_name, category_fragment
         )
     } else {
-        "You are an AI dictation assistant. Your job is to format the user's raw dictated text. 
-        Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them. 
-        Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text. 
-        Just output the corrected text directly."
-            .to_string()
+        format!(
+            "You are an AI dictation assistant. Your job is to format the user's raw dictated text. {}
+        Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
+        Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text.
+        Just output the corrected text directly.",
+            category_fragment
+        )
     }
 }
 
@@ -4178,6 +4594,22 @@ async fn run_dictation_formatting_with_selected_provider(
 
     let settings = state.settings_manager.lock().await.settings().clone();
 
+    let resolved_app_category = settings::resolve_dictation_app_category_with_overrides(
+        &settings.transcription,
+        active_app.as_deref(),
+        dictation_options.context_app_bundle_id.as_deref(),
+    );
+    // The AI-category-formatting toggle only controls whether the LLM
+    // prompt gets a category-specific fragment; it must not affect other
+    // consumers of the resolver (e.g. dictionary/snippet category-scope
+    // matching), so the gating lives here rather than inside the resolver.
+    let app_category = if settings.transcription.dictation_category_formatting_enabled {
+        resolved_app_category
+    } else {
+        text::format::DictationAppCategory::Other
+    };
+    let category_fragment = text::format::dictation_category_prompt_fragment(app_category);
+
     let system_prompt = if let Some(custom_prompt) = active_dictation_custom_mode(&settings)
         .and_then(|mode| mode.custom_prompt.as_deref())
         .map(str::trim)
@@ -4190,7 +4622,10 @@ async fn run_dictation_formatting_with_selected_provider(
                 base, app_name
             );
         }
-        base
+        // Supplement (not replace) the custom mode's own tone/instructions
+        // with the destination-app-category guardrail, e.g. so the AI-chat
+        // "don't touch code" instruction still applies under a custom mode.
+        append_category_prompt_fragment(base, category_fragment)
     } else if let Some(custom_prompt) = &settings.transcription.dictation_custom_prompt {
         if !custom_prompt.trim().is_empty() {
             let mut base = custom_prompt.trim().to_string();
@@ -4200,12 +4635,12 @@ async fn run_dictation_formatting_with_selected_provider(
                     base, app_name
                 );
             }
-            base
+            append_category_prompt_fragment(base, category_fragment)
         } else {
-            generate_default_dictation_prompt(active_app)
+            generate_default_dictation_prompt(active_app, app_category)
         }
     } else {
-        generate_default_dictation_prompt(active_app)
+        generate_default_dictation_prompt(active_app, app_category)
     };
 
     let system_prompt = if let Some(context_text) = dictation_options
@@ -5242,9 +5677,48 @@ mod tests {
             app_scope: app_scope.map(str::to_string),
             case_sensitive,
             enabled: true,
+            category_scope: None,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn hands_free_monitor_should_run_only_when_enabled_and_session_idle() {
+        // Setting off: never run, regardless of session state. This is the guard that
+        // keeps idle CPU/mic-hot behavior unchanged for users who don't opt in.
+        assert!(!hands_free_monitor_should_run(
+            false,
+            DictationSessionState::Idle
+        ));
+        assert!(!hands_free_monitor_should_run(
+            false,
+            DictationSessionState::Starting
+        ));
+        assert!(!hands_free_monitor_should_run(
+            false,
+            DictationSessionState::Recording
+        ));
+
+        // Setting on, but a session is already starting or recording: the monitor must
+        // not run (it would race the real dictation stream for the microphone, and
+        // there is no "idle" for it to listen into anyway). This is the guard that
+        // prevents the hands-free monitor from ever double-starting a session or
+        // stepping on an in-progress one.
+        assert!(!hands_free_monitor_should_run(
+            true,
+            DictationSessionState::Starting
+        ));
+        assert!(!hands_free_monitor_should_run(
+            true,
+            DictationSessionState::Recording
+        ));
+
+        // Setting on and genuinely idle: the monitor should run.
+        assert!(hands_free_monitor_should_run(
+            true,
+            DictationSessionState::Idle
+        ));
     }
 
     #[test]
@@ -5795,6 +6269,45 @@ mod tests {
     }
 
     #[test]
+    fn hands_free_auto_stop_falls_back_to_1_8_seconds_when_disabled() {
+        // Hands-free with silence auto-stop disabled (0, the default/unset
+        // value) must fall back to the 1.8s timeout promised by the Settings
+        // UI ("Hands-free falls back to 1.8 seconds if this is off"),
+        // otherwise a hands-free session started via speech detection would
+        // never auto-stop.
+        assert_eq!(
+            resolve_dictation_auto_stop_silence_timeout_seconds(true, 0.0),
+            1.8
+        );
+        assert_eq!(
+            resolve_dictation_auto_stop_silence_timeout_seconds(true, -5.0),
+            1.8
+        );
+    }
+
+    #[test]
+    fn hands_free_auto_stop_respects_explicit_configured_timeout() {
+        assert_eq!(
+            resolve_dictation_auto_stop_silence_timeout_seconds(true, 5.0),
+            5.0
+        );
+    }
+
+    #[test]
+    fn non_hands_free_auto_stop_stays_disabled_when_configured_off() {
+        // Non-hands-free sessions (toggle/push-to-talk) preserve the existing
+        // "0 disables auto-stop" contract; only hands-free gets the fallback.
+        assert_eq!(
+            resolve_dictation_auto_stop_silence_timeout_seconds(false, 0.0),
+            0.0
+        );
+        assert_eq!(
+            resolve_dictation_auto_stop_silence_timeout_seconds(false, 5.0),
+            5.0
+        );
+    }
+
+    #[test]
     fn dictation_retention_normalization_defaults_to_never() {
         assert_eq!(
             normalize_dictation_retention_preset("immediate"),
@@ -6105,6 +6618,205 @@ mod tests {
         assert!(default_dictation_command_prompt("rewrite_professional").is_some());
         assert!(default_dictation_command_prompt("bulletize_selection").is_some());
         assert!(default_dictation_command_prompt("unknown").is_none());
+    }
+
+    #[test]
+    fn default_command_prompts_cover_every_selected_text_action_command() {
+        // Every AI-backed command key the renderer's SELECTED_TEXT_ACTIONS
+        // table (src/lib/selected-text-actions.ts) can send must resolve to
+        // a default prompt, or `resolve_dictation_command_prompt` errors
+        // with "Unknown command key" for any user without a saved custom
+        // preset for that command.
+        for command_key in [
+            "proofread_text",
+            "expand_text",
+            "continue_writing",
+            "simplify_language",
+            "rewrite_friendly",
+            "rewrite_casual",
+            "summarize_text",
+            "translate_english",
+            "explain_text",
+            "find_bugs",
+            "numbered_list_selection",
+            "polish_text",
+            "prompt_engineer",
+        ] {
+            assert!(
+                default_dictation_command_prompt(command_key).is_some(),
+                "expected '{}' to have a default prompt",
+                command_key
+            );
+        }
+    }
+
+    // ── Selected-text transform: local case-transform commands ──────────────
+
+    #[test]
+    fn local_dictation_command_transform_applies_case_transforms() {
+        assert_eq!(
+            local_dictation_command_transform("uppercase_selection", "hello world"),
+            Ok("HELLO WORLD".to_string())
+        );
+        assert_eq!(
+            local_dictation_command_transform("lowercase_selection", "HELLO WORLD"),
+            Ok("hello world".to_string())
+        );
+        assert_eq!(
+            local_dictation_command_transform("title_case_selection", "hello world"),
+            Ok("Hello World".to_string())
+        );
+        assert_eq!(
+            local_dictation_command_transform("sentence_case_selection", "hello world. bye."),
+            Ok("Hello world. Bye.".to_string())
+        );
+    }
+
+    #[test]
+    fn local_dictation_command_transform_covers_ai_backed_local_fallbacks() {
+        // These three commands are AI-backed but must also have a working
+        // local-only fallback, since `transform_text_with_command` calls
+        // straight into this function whenever the AI provider call fails.
+        assert!(!local_dictation_command_transform(
+            "rewrite_shorter",
+            "This is quite a long sentence that could be shortened considerably."
+        )
+        .expect("rewrite_shorter has a local fallback")
+        .is_empty());
+        assert!(
+            !local_dictation_command_transform("rewrite_professional", "hey whats up")
+                .expect("rewrite_professional has a local fallback")
+                .is_empty()
+        );
+        assert!(!local_dictation_command_transform(
+            "bulletize_selection",
+            "first point. second point."
+        )
+        .expect("bulletize_selection has a local fallback")
+        .is_empty());
+    }
+
+    #[test]
+    fn local_dictation_command_transform_rejects_unsupported_commands() {
+        let error = local_dictation_command_transform("translate_spanish", "hello")
+            .expect_err("unsupported command should error");
+        assert!(error.contains("Unsupported dictation command transform"));
+    }
+
+    // ── Selected-text transform: scope selection (selection vs. focused field) ──
+
+    #[test]
+    fn selected_text_transform_target_prefers_explicit_selection() {
+        let target = resolve_selected_text_transform_target(
+            "uppercase_selection",
+            "Uppercase Selected Text",
+            Ok(Some("selected text".to_string())),
+            || panic!("focused-field capture should not run when a selection was captured"),
+        )
+        .expect("selection capture should resolve the target");
+
+        assert_eq!(target.text, "selected text");
+        assert_eq!(target.scope, SelectedTextTransformTargetScope::Selection);
+        assert_eq!(target.scope.as_result_value(), "selection");
+    }
+
+    #[test]
+    fn selected_text_transform_target_falls_back_to_focused_field_when_no_selection() {
+        // No selection was found (Ok(None), not an error) and the command
+        // allows the focused-field fallback: this must consult the focused
+        // field rather than immediately erroring.
+        let target = resolve_selected_text_transform_target(
+            "rewrite_shorter",
+            "Rewrite Shorter Selected Text",
+            Ok(None),
+            || Ok(Some("focused field contents".to_string())),
+        )
+        .expect("focused-field capture should resolve the target");
+
+        assert_eq!(target.text, "focused field contents");
+        assert_eq!(target.scope, SelectedTextTransformTargetScope::FocusedField);
+        assert_eq!(target.scope.as_result_value(), "focused_field");
+    }
+
+    #[test]
+    fn selected_text_transform_target_falls_back_on_selection_capture_error() {
+        // Selection capture itself failed (e.g. no Accessibility/keyboard
+        // dispatch access): an eligible command should still try the
+        // focused field before giving up.
+        let target = resolve_selected_text_transform_target(
+            "bulletize_selection",
+            "Bulletize Selected Text",
+            Err("Selected text capture needs macOS keyboard-event access.".to_string()),
+            || Ok(Some("field text".to_string())),
+        )
+        .expect("focused-field capture should recover from a selection capture error");
+
+        assert_eq!(target.text, "field text");
+        assert_eq!(target.scope, SelectedTextTransformTargetScope::FocusedField);
+    }
+
+    #[test]
+    fn selected_text_transform_target_surfaces_original_error_when_focused_field_also_empty() {
+        let original_error = "Selected text capture needs macOS keyboard-event access.".to_string();
+        let error = resolve_selected_text_transform_target(
+            "rewrite_professional",
+            "Rewrite Professional Selected Text",
+            Err(original_error.clone()),
+            || Ok(None),
+        )
+        .expect_err("should surface the original selection error, not a generic one");
+
+        assert_eq!(error, original_error);
+    }
+
+    #[test]
+    fn selected_text_transform_target_reports_no_selection_error_when_nothing_available() {
+        let error = resolve_selected_text_transform_target(
+            "rewrite_shorter",
+            "Rewrite Shorter Selected Text",
+            Ok(None),
+            || Ok(None),
+        )
+        .expect_err("no selection and no focused field should error");
+
+        assert!(error.contains("Select text or focus a text field"));
+    }
+
+    #[test]
+    fn selected_text_transform_target_never_tries_focused_field_for_ineligible_commands() {
+        // `allows_focused_field_fallback` currently returns true for every
+        // command with a selected-text label, so this test documents the
+        // "unknown command" boundary: an unlabeled command key must not
+        // reach the focused-field closure at all.
+        let error = resolve_selected_text_transform_target(
+            "not_a_real_command",
+            "Not A Real Command",
+            Ok(None),
+            || panic!("focused-field capture must not run for an ineligible command"),
+        )
+        .expect_err("unlabeled command should error without attempting focused field");
+
+        assert!(error.contains("Select text to transform"));
+    }
+
+    // ── Selected-text transform: focused-field accessibility capture ────────
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn capture_focused_field_text_via_accessibility_does_not_error_without_a_focused_element() {
+        // This exercises the real macOS Accessibility path end-to-end. In a
+        // sandboxed/headless test runner there is normally no focused text
+        // element (and often no Accessibility trust either), so the
+        // contract under test is that the function degrades to `Ok(None)`
+        // instead of surfacing an internal AX error — callers rely on this
+        // to fall back to the "select some text" message rather than a
+        // confusing accessibility failure.
+        let result = capture_focused_field_text_via_accessibility(None, None);
+        assert!(
+            result.is_ok(),
+            "expected a graceful Ok(None)/Ok(Some(_)) result, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -6429,6 +7141,54 @@ mod tests {
         assert!(dictation_mode_transform_prompt("email").is_some());
         assert!(dictation_mode_transform_prompt("meeting_follow_up").is_some());
         assert!(dictation_mode_transform_prompt("voice").is_none());
+    }
+
+    #[test]
+    fn default_dictation_prompt_includes_ai_chat_guardrail_for_chatgpt() {
+        let category =
+            text::format::resolve_dictation_app_category(Some("ChatGPT"), Some("com.openai.chat"));
+        assert_eq!(category, text::format::DictationAppCategory::AiChat);
+
+        let prompt = generate_default_dictation_prompt(Some("ChatGPT".to_string()), category);
+        assert!(
+            prompt.contains("do not answer the question")
+                && prompt.contains("preserve code blocks/technical syntax exactly"),
+            "expected AI-chat guardrail in prompt, got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn default_dictation_prompt_includes_code_editor_guardrail_for_cursor_and_vscode() {
+        for (app_name, bundle_id) in [
+            ("Cursor", "com.todesktop.230313mzl4w4u92"),
+            ("Visual Studio Code", "com.microsoft.vscode"),
+        ] {
+            let category =
+                text::format::resolve_dictation_app_category(Some(app_name), Some(bundle_id));
+            assert_eq!(category, text::format::DictationAppCategory::CodeEditor);
+
+            let prompt = generate_default_dictation_prompt(Some(app_name.to_string()), category);
+            assert!(
+                prompt.contains("preserve code identifiers, file paths, CLI flags"),
+                "expected code-editor guardrail in prompt for {app_name}, got: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn category_fragment_is_appended_as_supplement_when_custom_prompt_is_active() {
+        let category =
+            text::format::resolve_dictation_app_category(Some("ChatGPT"), Some("com.openai.chat"));
+        let fragment = text::format::dictation_category_prompt_fragment(category);
+        assert!(fragment.is_some());
+
+        let custom_prompt = "Write in the voice of a pirate.".to_string();
+        let combined = append_category_prompt_fragment(custom_prompt.clone(), fragment);
+
+        // The custom mode's own tone/instructions must survive unchanged...
+        assert!(combined.starts_with(&custom_prompt));
+        // ...with the category guardrail appended as a supplement.
+        assert!(combined.contains("do not answer the question"));
     }
 
     #[test]
@@ -9095,6 +9855,10 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
         .unwrap_or(asr::AsrProviderType::DistilWhisper);
     transcription.dictation_route_preference =
         normalize_dictation_route_preference(&transcription.dictation_route_preference).to_string();
+    transcription.dictation_vad_backend =
+        audio::vad::VadBackendKind::from_settings_str(&transcription.dictation_vad_backend)
+            .as_settings_str()
+            .to_string();
     transcription.default_provider = asr_provider_to_settings_value(default_provider).to_string();
     transcription.selected_model_id =
         normalize_asr_model_id(default_provider, &transcription.selected_model_id);
@@ -9647,6 +10411,22 @@ fn normalize_dictation_silence_timeout_seconds(value: f32) -> f32 {
             MIN_DICTATION_SILENCE_TIMEOUT_SECONDS,
             MAX_DICTATION_SILENCE_TIMEOUT_SECONDS,
         )
+    }
+}
+
+/// Resolves the effective silence-auto-stop timeout for a dictation session,
+/// applying the hands-free fallback described in the Settings UI: hands-free
+/// sessions always auto-stop on silence, even if the user has silence
+/// auto-stop disabled (0) for non-hands-free sessions, since hands-free has
+/// no other way to end a session besides a second hotkey press.
+fn resolve_dictation_auto_stop_silence_timeout_seconds(
+    hands_free_enabled: bool,
+    configured_silence_timeout_seconds: f32,
+) -> f32 {
+    if hands_free_enabled && configured_silence_timeout_seconds <= 0.0 {
+        HANDS_FREE_DEFAULT_SILENCE_TIMEOUT_SECONDS
+    } else {
+        configured_silence_timeout_seconds
     }
 }
 
@@ -10375,6 +11155,8 @@ type AXError = i32;
 #[cfg(target_os = "macos")]
 const AX_ERROR_SUCCESS: AXError = 0;
 #[cfg(target_os = "macos")]
+const AX_ERROR_CANNOT_COMPLETE: AXError = -25204;
+#[cfg(target_os = "macos")]
 const AX_ERROR_ATTRIBUTE_UNSUPPORTED: AXError = -25205;
 #[cfg(target_os = "macos")]
 const AX_ERROR_NO_VALUE: AXError = -25212;
@@ -10993,6 +11775,215 @@ fn insert_text_via_accessibility(
         "Focused element role '{}' is not settable through macOS Accessibility, so Plainsong must fall back to paste.",
         role
     ))
+}
+
+/// Reactivates `target_app`/`target_app_bundle_id` (if needed) and copies the
+/// system-wide `AXFocusedUIElement`, mirroring the focused-element lookup
+/// that `insert_text_via_accessibility` performs inline. Factored out so the
+/// selected-text-transform focused-field capture/replace helpers below can
+/// share it without duplicating the reactivate+sleep+system-wide dance.
+///
+/// Returns `Ok(None)` (rather than an error) when accessibility is reachable
+/// but no element currently has focus, so callers can fall back to another
+/// capture strategy instead of surfacing a hard error.
+#[cfg(target_os = "macos")]
+fn copy_focused_accessibility_element(
+    target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
+    system_wide_error: String,
+) -> Result<Option<AXUIElementRef>, String> {
+    reactivate_target_application(target_app, target_app_bundle_id)?;
+    std::thread::sleep(std::time::Duration::from_millis(35));
+
+    let system_wide = unsafe { AXUIElementCreateSystemWide() };
+    if system_wide.is_null() {
+        return Err(system_wide_error);
+    }
+
+    let focused_element = match ax_copy_attribute_value(system_wide, "AXFocusedUIElement") {
+        Ok(Some(value)) => Some(value),
+        Ok(None) => None,
+        // `kAXErrorCannotComplete` from this specific lookup is macOS's way of
+        // saying there is currently no reachable focus target for the
+        // system-wide element (e.g. no window is frontmost/focused, or the
+        // calling process lacks a live window server session) — treat it the
+        // same as "no focused element" rather than a hard error, matching
+        // this function's own contract, so callers fall back to another
+        // capture strategy instead of surfacing an internal AX error string.
+        Err(error) if is_ax_cannot_complete_error(&error) => None,
+        Err(error) => {
+            unsafe { CFRelease(system_wide) };
+            return Err(error);
+        }
+    };
+    unsafe { CFRelease(system_wide) };
+
+    Ok(focused_element)
+}
+
+/// Whether an error string produced by `ax_copy_attribute_value` corresponds
+/// to `kAXErrorCannotComplete` (`AXError -25204`). String-matched (rather
+/// than threaded through as a typed error) because `ax_copy_attribute_value`
+/// already collapses the AXError into a formatted `String` for every other
+/// caller, and this is the one call site that needs to distinguish this
+/// specific code from other failures.
+#[cfg(target_os = "macos")]
+fn is_ax_cannot_complete_error(error: &str) -> bool {
+    error.contains(&format!("AXError {}", AX_ERROR_CANNOT_COMPLETE))
+}
+
+/// Reads the current text value of the system-wide focused element, without
+/// requiring an explicit text selection. Used as the Quick-Fix-style
+/// fallback when `capture_selected_text_via_clipboard` finds no selection:
+/// e.g. the user places the caret in a field (no highlighted text) and runs
+/// a command that should operate on the whole field.
+///
+/// Returns `Ok(None)` (not an error) whenever there's no usable focused
+/// text field, so `capture_selected_text_transform_target` can fall back to
+/// its own "select text" error message instead of surfacing an internal
+/// accessibility detail.
+#[cfg(target_os = "macos")]
+fn capture_focused_field_text_via_accessibility(
+    target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(focused_element) = copy_focused_accessibility_element(
+        target_app,
+        target_app_bundle_id,
+        "Accessibility could not create the system-wide element.".to_string(),
+    )?
+    else {
+        return Ok(None);
+    };
+
+    let value_settable = ax_is_attribute_settable(focused_element, "AXValue")?;
+    if !value_settable {
+        unsafe { CFRelease(focused_element) };
+        return Ok(None);
+    }
+
+    let current_value = ax_copy_string_attribute(focused_element, "AXValue")?;
+    unsafe { CFRelease(focused_element) };
+
+    Ok(current_value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty()))
+}
+
+/// Replaces the entire text value of the system-wide focused element with
+/// `text`, then places the caret at the end of the new value. This is the
+/// focused-field counterpart to `insert_text_via_accessibility`'s
+/// selection-based insertion: it is used when the transform target was
+/// captured via `capture_focused_field_text_via_accessibility` (no explicit
+/// selection), so the whole field's contents must be overwritten rather
+/// than a selected range.
+#[cfg(target_os = "macos")]
+fn replace_focused_field_text_via_accessibility(
+    text: &str,
+    target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(focused_element) = copy_focused_accessibility_element(
+        target_app,
+        target_app_bundle_id,
+        "Accessibility could not create the system-wide element.".to_string(),
+    )?
+    else {
+        return Err("Accessibility did not find a focused text element.".to_string());
+    };
+
+    let role = ax_copy_string_attribute(focused_element, "AXRole")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "unknown".to_string());
+    let value_settable = ax_is_attribute_settable(focused_element, "AXValue")?;
+    if !value_settable {
+        unsafe { CFRelease(focused_element) };
+        return Err(format!(
+            "Focused element role '{}' does not allow replacing the focused field.",
+            role
+        ));
+    }
+
+    ax_set_string_attribute(focused_element, "AXValue", text)?;
+    if ax_is_attribute_settable(focused_element, "AXSelectedTextRange").unwrap_or(false) {
+        let caret = text.encode_utf16().count();
+        if let Ok(location) = isize::try_from(caret) {
+            let _ = ax_set_cf_range_attribute(
+                focused_element,
+                "AXSelectedTextRange",
+                CFRange {
+                    location,
+                    length: 0,
+                },
+            );
+        }
+    }
+    unsafe { CFRelease(focused_element) };
+    Ok(())
+}
+
+/// System-wide entry point for replacing the focused field's full text
+/// (Quick-Fix-style scope, no explicit selection): tries direct
+/// Accessibility replacement first, then falls back to copying `text` to
+/// the clipboard so the user can paste manually. Mirrors
+/// `paste_text_systemwide`'s outcome shape/reporting so callers can treat
+/// both paths uniformly.
+fn replace_focused_field_text_systemwide(
+    text: &str,
+    target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
+) -> PasteOutcome {
+    #[cfg(target_os = "macos")]
+    {
+        match replace_focused_field_text_via_accessibility(text, target_app, target_app_bundle_id) {
+            Ok(()) => {
+                let copied = match copy_to_clipboard(text) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::warn!(
+                            "Focused-field replacement succeeded but clipboard update failed: {}",
+                            error
+                        );
+                        false
+                    }
+                };
+                PasteOutcome {
+                    pasted: true,
+                    copied,
+                    direct_accessibility: true,
+                    successful_strategy: Some(CursorInsertStrategy::AccessibilityDirectText),
+                    error: None,
+                }
+            }
+            Err(error) => {
+                let copied = copy_to_clipboard(text).is_ok();
+                PasteOutcome {
+                    pasted: false,
+                    copied,
+                    direct_accessibility: false,
+                    successful_strategy: None,
+                    error: Some(format!(
+                        "Result is ready, but Plainsong could not replace the focused field ({})",
+                        error
+                    )),
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = target_app;
+        let _ = target_app_bundle_id;
+        PasteOutcome {
+            pasted: false,
+            copied: copy_to_clipboard(text).is_ok(),
+            direct_accessibility: false,
+            successful_strategy: None,
+            error: Some("Focused-field replacement is only implemented on macOS.".to_string()),
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -12622,6 +13613,11 @@ async fn save_settings_for_sidecar(
         *active_dictation_options = dictation_options;
     }
 
+    // Pick up any change to `dictation_hands_free_enabled` immediately: starts the
+    // idle-time monitor if it was just turned on (and no session is active), or stops
+    // it right away if it was just turned off.
+    reconcile_hands_free_monitor(state, handle).await;
+
     Ok(serde_json::Value::Null)
 }
 
@@ -12752,6 +13748,116 @@ async fn reset_app_state_for_sidecar(
         "failedProviderSecretClears": failed_provider_secret_clears,
     }))
     .map_err(|e| e.to_string())
+}
+
+/// Whether the hands-free idle-time monitor should be running, given the setting and
+/// the current dictation session state. Pure decision table, factored out of
+/// `reconcile_hands_free_monitor` so the guard logic ("can't run alongside an active
+/// session; never runs at all unless the setting is on") is unit-testable without
+/// needing a full `AppState`/audio device.
+///
+/// - Setting off → never run, regardless of session state (this is what keeps
+///   idle CPU/mic-hot behavior unchanged for users who don't opt in).
+/// - Setting on + session not `Idle` (`Starting` or `Recording`) → must not run; the
+///   real dictation capture stream owns the microphone and the monitor must not race
+///   it for the same device, and a session is already starting/active so there is
+///   nothing for the monitor to trigger anyway.
+/// - Setting on + session `Idle` → should run.
+fn hands_free_monitor_should_run(enabled: bool, session_state: DictationSessionState) -> bool {
+    enabled && session_state == DictationSessionState::Idle
+}
+
+/// Reconcile the hands-free *idle-time* monitor (see
+/// `AudioCapture::start_hands_free_monitor`) against current settings and dictation
+/// session state, using the decision in `hands_free_monitor_should_run`. Idempotent and
+/// cheap to call from every place that can change either input: sidecar startup,
+/// `save_settings`, and after every dictation start/stop/abort.
+///
+/// This is the single choke point deciding whether the monitor should be running, so
+/// individual dictation code paths don't each need to remember to start/stop it. When
+/// the decision is "should run" but the monitor is already active, this is a no-op
+/// (`AudioCapture::start_hands_free_monitor` is itself idempotent too) — so it can never
+/// spin up a second monitor stream on top of an existing one.
+pub async fn reconcile_hands_free_monitor_for_sidecar(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+) {
+    reconcile_hands_free_monitor(state, handle).await;
+}
+
+async fn reconcile_hands_free_monitor(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+) {
+    let (hands_free_enabled, vad_backend) = {
+        let sm = state.settings_manager.lock().await;
+        let settings = sm.settings();
+        (
+            settings.transcription.dictation_hands_free_enabled,
+            audio::vad::VadBackendKind::from_settings_str(
+                &settings.transcription.dictation_vad_backend,
+            ),
+        )
+    };
+
+    let session_state = {
+        let runtime_state = state.dictation_runtime_state.lock().await;
+        *runtime_state
+    };
+
+    let mut audio = state.audio_capture.lock().await;
+
+    if !hands_free_monitor_should_run(hands_free_enabled, session_state) {
+        audio.stop_hands_free_monitor();
+        return;
+    }
+
+    if audio.is_hands_free_monitor_active() {
+        return;
+    }
+
+    let preferred_input_device = {
+        let sm = state.settings_manager.lock().await;
+        let s = sm.settings();
+        if s.audio.dictation_input_override_enabled {
+            s.audio.dictation_input_device.clone()
+        } else {
+            s.audio.preferred_input_device.clone()
+        }
+    };
+
+    let silero_model_path = resolve_silero_vad_model_path(vad_backend);
+
+    if let Err(error) = audio.start_hands_free_monitor(
+        preferred_input_device.as_ref(),
+        handle.clone(),
+        vad_backend,
+        silero_model_path,
+    ) {
+        tracing::warn!("Failed to start hands-free idle monitor: {}", error);
+    }
+}
+
+/// Resolve the on-disk path to the Silero VAD ONNX model, but only when
+/// `vad_backend` actually calls for it -- when the energy-threshold backend
+/// is selected, skip touching the filesystem/download-manager entirely and
+/// return `None`, since `build_vad_gate` never consults it in that case.
+///
+/// Returns `None` (rather than erroring) if the download manager can't be
+/// constructed or the model hasn't been downloaded yet; both are handled,
+/// expected cases that `crate::audio::silero_vad::build_vad_gate` already
+/// treats as "fall back to energy-threshold".
+fn resolve_silero_vad_model_path(
+    vad_backend: audio::vad::VadBackendKind,
+) -> Option<std::path::PathBuf> {
+    if vad_backend != audio::vad::VadBackendKind::Silero {
+        return None;
+    }
+    let manager = download::DownloadManager::new().ok()?;
+    if !manager.is_silero_vad_model_downloaded() {
+        return None;
+    }
+    Some(manager.silero_vad_model_path())
 }
 
 /// Sidecar-compatible start_dictation: simplified version that emits events via SidecarHandle.
@@ -13009,6 +14115,32 @@ async fn start_dictation_for_sidecar(
         .dictation_live_preview_enabled
         && !dictation_provider.is_remote();
 
+    // Auto-stop after sustained silence: gated on `dictation_silence_timeout_seconds`
+    // (0 = disabled, matching the field's existing "0 disables" contract already
+    // used by the settings UI/normalizer). Works regardless of activation mode
+    // (toggle, push-to-talk, or hands-free) since it just stops the session the
+    // same way a manual stop would.
+    //
+    // Hands-free is a special case: it starts the session automatically on
+    // detected speech, so if silence auto-stop is left disabled it would never
+    // stop on its own. The Settings UI ("Hands-free guide") promises a 1.8s
+    // fallback in that case, so apply it here.
+    let effective_silence_timeout_seconds = resolve_dictation_auto_stop_silence_timeout_seconds(
+        settings_snapshot.transcription.dictation_hands_free_enabled,
+        settings_snapshot
+            .transcription
+            .dictation_silence_timeout_seconds,
+    );
+    let vad_backend = audio::vad::VadBackendKind::from_settings_str(
+        &settings_snapshot.transcription.dictation_vad_backend,
+    );
+    let auto_stop_config = audio::DictationAutoStopConfig {
+        enabled: effective_silence_timeout_seconds > 0.0,
+        silence_timeout_seconds: effective_silence_timeout_seconds,
+        vad_backend,
+        silero_model_path: resolve_silero_vad_model_path(vad_backend),
+    };
+
     // Handles captured under the audio lock when capture starts successfully, so
     // the partial-decode task can be spawned after the lock is released.
     let mut partial_task_handles: Option<PartialTaskHandles> = None;
@@ -13016,7 +14148,12 @@ async fn start_dictation_for_sidecar(
     {
         let mut audio = state.audio_capture.lock().await;
         audio.set_streaming_partials_enabled(streaming_partials_enabled);
-        match audio.start_dictation(preferred_input_device.as_ref()) {
+        match audio.start_dictation(
+            preferred_input_device.as_ref(),
+            session_id,
+            auto_stop_config,
+            Some(handle.clone()),
+        ) {
             Ok(resolved_input) => {
                 if let Some(advisory) = resolved_input.advisory.as_deref() {
                     handle.emit_event("audio-input-advisory", advisory.to_string());
@@ -13462,6 +14599,11 @@ async fn stop_dictation_for_sidecar(
     }
 
     if command_applied.is_none() {
+        let destination_category = settings::resolve_dictation_app_category_with_overrides(
+            &settings_snapshot.transcription,
+            app_target.as_deref(),
+            app_bundle_id.as_deref(),
+        );
         let pipeline_result = crate::dictation_pipeline::apply_dictation_pipeline(
             crate::dictation_pipeline::DictationPipelineInput {
                 text: raw_transcribed_text.as_str(),
@@ -13472,6 +14614,7 @@ async fn stop_dictation_for_sidecar(
                 formatting_hint: formatting_hint.as_deref(),
                 smart_formatting_enabled: true,
                 recent_inserted_text,
+                destination_category,
             },
         );
         final_text = pipeline_result.text.trim().to_string();
@@ -14641,6 +15784,14 @@ pub async fn dispatch_command(
     match method {
         // ── Dictation ──────────────────────────────────────────────────────────
         "start_dictation" => {
+            // The idle-time hands-free monitor and a real dictation session must never
+            // hold the microphone at once; stop it defensively before attempting to
+            // start (no-op if it wasn't running, e.g. hands-free is off or this start
+            // came from the hotkey/native-helper path instead of the monitor itself).
+            {
+                let mut audio = state.audio_capture.lock().await;
+                audio.stop_hands_free_monitor();
+            }
             let options: models::DictationStartOptions = serde_json::from_value(
                 params
                     .get("options")
@@ -14649,6 +15800,11 @@ pub async fn dispatch_command(
             )
             .unwrap_or_default();
             let session_id = start_dictation_for_sidecar(state.as_ref(), handle, options).await?;
+            // If starting failed, the runtime state falls back to `Idle` inside
+            // `start_dictation_for_sidecar`'s own error handling, so it's always safe to
+            // reconcile here regardless of success/failure — this is what resumes idle
+            // listening if start_dictation errored out before ever recording.
+            reconcile_hands_free_monitor(state.as_ref(), handle).await;
             Ok(serde_json::json!({ "sessionId": session_id }))
         }
         "stop_dictation" => {
@@ -14657,6 +15813,7 @@ pub async fn dispatch_command(
                 .and_then(|v| v.as_str())
                 .unwrap_or("manual");
             let result = stop_dictation_for_sidecar(state.as_ref(), handle, stop_reason).await?;
+            reconcile_hands_free_monitor(state.as_ref(), handle).await;
             Ok(serde_json::json!({ "text": result }))
         }
         "force_stop_dictation" => {
@@ -14675,6 +15832,7 @@ pub async fn dispatch_command(
             }
             handle.emit_event("dictation-state-changed", serde_json::json!({ "phase": "idle", "stopReason": "force-stop", "outcome": "aborted" }));
             handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
+            reconcile_hands_free_monitor(state.as_ref(), handle).await;
             Ok(serde_json::json!({ "text": "" }))
         }
         "get_dictation_audio_level" => {
@@ -15968,6 +17126,29 @@ pub async fn dispatch_command(
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Null)
         }
+        "is_silero_vad_model_downloaded" => {
+            let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
+            Ok(serde_json::json!(manager.is_silero_vad_model_downloaded()))
+        }
+        "download_silero_vad_model" => {
+            let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
+            let progress_handle = handle.clone();
+            let path = manager
+                .download_silero_vad_model(move |progress: download::DownloadProgress| {
+                    progress_handle.emit_event(
+                        "model-download-progress",
+                        serde_json::json!({
+                            "modelName": "silero_vad",
+                            "percentage": progress.percentage,
+                            "bytesDownloaded": progress.bytes_downloaded,
+                            "totalBytes": progress.total_bytes,
+                        }),
+                    );
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!(path.to_string_lossy()))
+        }
 
         // ── Projects ───────────────────────────────────────────────────────
         "get_projects" => {
@@ -16215,6 +17396,7 @@ pub async fn dispatch_command(
                     if existing.replacement == request.replacement.trim()
                         && existing.case_sensitive == request.case_sensitive
                         && existing.enabled == request.enabled
+                        && existing.category_scope == request.category_scope
                     {
                         skipped_count += 1;
                         continue;
@@ -16227,6 +17409,7 @@ pub async fn dispatch_command(
                             app_scope: Some(request.app_scope.clone()),
                             case_sensitive: Some(request.case_sensitive),
                             enabled: Some(request.enabled),
+                            category_scope: Some(request.category_scope.clone()),
                         },
                     ) {
                         Ok(_) => updated_count += 1,
@@ -16751,6 +17934,18 @@ pub async fn dispatch_command(
             )
             .map_err(|e| e.to_string())?;
             reprocess_dictation_text_impl(state.as_ref(), text, mode_preset, app_target).await
+        }
+        "transform_selected_text" => {
+            let command_key: String =
+                serde_json::from_value(params["commandKey"].clone()).map_err(|e| e.to_string())?;
+            transform_selected_text_impl(state.as_ref(), &command_key).await
+        }
+        "transform_dictation_text" => {
+            let text: String =
+                serde_json::from_value(params["text"].clone()).map_err(|e| e.to_string())?;
+            let command_key: String =
+                serde_json::from_value(params["commandKey"].clone()).map_err(|e| e.to_string())?;
+            transform_dictation_text_impl(state.as_ref(), text, command_key).await
         }
 
         // ── Window management (handled by Electron) ──────────────────────────

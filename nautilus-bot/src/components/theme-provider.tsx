@@ -17,7 +17,7 @@ const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   // Dark (the candle-lit folio) is Plainsong's default.
   const [theme, setThemeState] = useState<Theme>("dark");
-  const [isDark, setIsDark] = useState(false);
+  const [isDark, setIsDark] = useState(true);
   const [colorScheme, setColorSchemeState] = useState<string>("default");
 
   const applyColorScheme = (scheme: string) => {

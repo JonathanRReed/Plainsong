@@ -142,6 +142,12 @@ vi.mock("@/lib/backend", () => ({
     notes: [],
   })),
   getBackupSetupReport: vi.fn(),
+  getDictationShortcutCapabilityStatus: vi.fn(async () => ({
+    nativeShortcutAvailable: false,
+  })),
+  getShortcutConflicts: vi.fn(async () => ({
+    conflicts: [],
+  })),
   getOllamaStatus: vi.fn(async () => true),
   getSecurityStatus: vi.fn(async () => ({
     vaultInitialized: false,
@@ -183,6 +189,8 @@ vi.mock("@/lib/backend", () => ({
   listDiarizationModels: vi.fn(async () => [
     { id: "ecapa_tdnn_speaker", label: "ECAPA-TDNN 512", description: "Recommended", installed: true },
   ]),
+  isSileroVadModelDownloaded: vi.fn(async () => false),
+  downloadSileroVadModel: vi.fn(async () => {}),
   migrateToEncryptedStorage: vi.fn(),
   openPermissionSettings: vi.fn(),
   requestDictationPermissions: vi.fn(async () => ({
@@ -340,6 +348,175 @@ describe("SettingsView performance behavior", () => {
     await waitFor(() => {
       expect(backend.saveSettings).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("offers a real hold-to-talk option once the native shortcut helper is available", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: true,
+    });
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await waitFor(() => {
+      expect(backend.getDictationShortcutCapabilityStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findAllByText("Capture and transcription");
+
+    const hotkeySelect = await screen.findByLabelText("Hotkey behavior");
+    expect(hotkeySelect.tagName).toBe("SELECT");
+    expect(
+      within(hotkeySelect as HTMLSelectElement).getByText(
+        "Hold-to-talk (hold to record, release to stop)",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(hotkeySelect as HTMLSelectElement).getByText(
+        "Hands-free (starts automatically when you speak, no shortcut needed)",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.change(hotkeySelect, { target: { value: "hold_to_talk" } });
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
+    const lastSave = saveCalls[saveCalls.length - 1]?.[0] as
+      | { transcription?: { dictationPushToTalk?: boolean } }
+      | undefined;
+    expect(lastSave?.transcription?.dictationPushToTalk).toBe(true);
+  });
+
+  it("keeps the honest toggle-only copy when the native shortcut helper is unavailable, but still offers a selector without hold-to-talk", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: false,
+    });
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await waitFor(() => {
+      expect(backend.getDictationShortcutCapabilityStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findAllByText("Capture and transcription");
+
+    const hotkeySelect = await screen.findByLabelText("Hotkey behavior");
+    expect(hotkeySelect.tagName).toBe("SELECT");
+    expect(
+      within(hotkeySelect as HTMLSelectElement).queryByText(
+        "Hold-to-talk (hold to record, release to stop)",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(hotkeySelect as HTMLSelectElement).getByText(
+        "Toggle (press to start, press again to stop)",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(hotkeySelect as HTMLSelectElement).getByText(
+        "Hands-free (starts automatically when you speak, no shortcut needed)",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/press to start, press again to stop/).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("offers hands-free independent of native shortcut helper availability, and saves it distinctly from hold-to-talk/toggle", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValue({
+      nativeShortcutAvailable: false,
+    });
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await waitFor(() => {
+      expect(backend.getDictationShortcutCapabilityStatus).toHaveBeenCalled();
+    });
+
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findAllByText("Capture and transcription");
+
+    const hotkeySelect = await screen.findByLabelText("Hotkey behavior");
+    fireEvent.change(hotkeySelect, { target: { value: "hands_free" } });
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
+    const lastSave = saveCalls[saveCalls.length - 1]?.[0] as
+      | {
+          transcription?: {
+            dictationPushToTalk?: boolean;
+            dictationHandsFreeEnabled?: boolean;
+          };
+        }
+      | undefined;
+    expect(lastSave?.transcription?.dictationHandsFreeEnabled).toBe(true);
+    expect(lastSave?.transcription?.dictationPushToTalk).toBe(false);
+  });
+
+  it("keeps Silero VAD opt-in: offers a download button (not a silent switch) until the model is present, then lets the user select it", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.isSileroVadModelDownloaded).mockResolvedValue(false);
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findAllByText("Capture and transcription");
+
+    await waitFor(() => {
+      expect(backend.isSileroVadModelDownloaded).toHaveBeenCalled();
+    });
+
+    // Model not downloaded yet: Silero is not selectable, only a download
+    // affordance is shown (no silent/automatic download).
+    expect(backend.downloadSileroVadModel).not.toHaveBeenCalled();
+    const downloadButton = await screen.findByText(/Download Silero/);
+    expect(screen.queryByText("Silero (accurate)")).not.toBeInTheDocument();
+
+    fireEvent.click(downloadButton);
+
+    await waitFor(() => {
+      expect(backend.downloadSileroVadModel).toHaveBeenCalledTimes(1);
+    });
+
+    // Once downloaded, the Silero option becomes available and selecting it
+    // persists dictationVadBackend: "silero" via the normal save path.
+    await screen.findByText("Silero (accurate)");
+    fireEvent.click(screen.getByText("Silero (accurate)"));
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
+    const lastSave = saveCalls[saveCalls.length - 1]?.[0] as
+      | { transcription?: { dictationVadBackend?: string } }
+      | undefined;
+    expect(lastSave?.transcription?.dictationVadBackend).toBe("silero");
+  });
+
+  it("defaults VAD backend to energy-threshold when unset, requiring no download", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.isSileroVadModelDownloaded).mockResolvedValue(false);
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findAllByText("Capture and transcription");
+
+    const energyOption = await screen.findByText("Energy-threshold");
+    expect(energyOption.className).toContain("border-rust/40");
   });
 
   it("shows personal profile sync actions and can restore the latest profile snapshot", async () => {
@@ -537,5 +714,56 @@ describe("SettingsView performance behavior", () => {
     const saveCalls = vi.mocked(backend.saveSettings).mock.calls;
     const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
     expect(latestSettings?.transcription.dictationActiveLanguages).toEqual(["fr"]);
+  });
+
+  it("warns inline when two shortcuts are bound to the same key combination", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        ...baseSettings.shortcuts,
+        toggleDictation: "Ctrl+Shift+Space",
+        openWindow: "Ctrl+Shift+Space",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("Global keyboard shortcuts");
+
+    expect(
+      await screen.findByText(/This conflicts with Dictation — only one will work\./),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no shortcut conflict warning when every binding is distinct", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      shortcuts: {
+        toggleRecording: "Ctrl+Shift+R",
+        toggleDictation: "Ctrl+Shift+Space",
+        toggleDictationAlternates: [],
+        openWindow: "Ctrl+Shift+N",
+        quickExport: "Ctrl+Shift+E",
+        focusSearch: "Ctrl+Shift+F",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    await screen.findByText("Global keyboard shortcuts");
+
+    expect(screen.queryByText(/This conflicts with/)).not.toBeInTheDocument();
   });
 });

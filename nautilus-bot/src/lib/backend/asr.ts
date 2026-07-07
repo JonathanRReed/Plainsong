@@ -1,10 +1,12 @@
 export {
   downloadAsrModels,
   downloadDiarizationModel,
+  downloadSileroVadModel,
   getAsrProviderInventory,
   getAsrProviders,
   getSpeakers,
   isDiarizationModelAvailable,
+  isSileroVadModelDownloaded,
   listDiarizationModels,
   refreshAsrRuntimeProbes,
   renameSpeaker,

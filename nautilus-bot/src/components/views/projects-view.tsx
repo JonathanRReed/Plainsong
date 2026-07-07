@@ -9,7 +9,8 @@ import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useProjects } from "@/hooks/use-projects";
 import { useRecordings } from "@/hooks/use-recordings";
-import { ChevronRight, Folder, MoreHorizontal, Plus } from "lucide-react";
+import { requestMainView } from "@/lib/navigation";
+import { ChevronRight, Folder, Plus } from "lucide-react";
 
 export function ProjectsView() {
   const { projects, isLoading, error, createProject } = useProjects();
@@ -89,7 +90,6 @@ export function ProjectsView() {
               {projects.map((project) => (
                 <Card
                   key={project.id}
-                  variant="interactive"
                   className="group"
                 >
                   <CardHeader className="pb-3">
@@ -105,8 +105,14 @@ export function ProjectsView() {
                           </p>
                         </div>
                       </div>
-                      <Button variant="ghost" size="icon" aria-label={`Options for ${project.name}`} className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <MoreHorizontal className="h-4 w-4" />
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="shrink-0"
+                        onClick={() => requestMainView("recordings")}
+                      >
+                        Open meetings
+                        <ChevronRight data-icon="inline-end" />
                       </Button>
                     </div>
                   </CardHeader>
@@ -118,9 +124,8 @@ export function ProjectsView() {
                       <span className="font-mono uppercase tracking-widest text-[10px]">
                         {project.encrypted ? "Encrypted" : "Standard"}
                       </span>
-                      <span className="transition-smooth flex items-center gap-2 text-muted-foreground group-hover:text-gold-text">
-                        View recordings
-                        <ChevronRight className="transition-smooth h-3 w-3 group-hover:translate-x-0.5" />
+                      <span>
+                        Recordings are managed in Meetings
                       </span>
                     </div>
                   </CardContent>

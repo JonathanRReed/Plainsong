@@ -180,6 +180,56 @@ export async function captureSelectedTextForPlayback(): Promise<string | null> {
   return await invoke("capture_selected_text_for_playback");
 }
 
+// Keep in sync with the command keys the Rust sidecar actually resolves via
+// `dictation_command_selected_text_label` in rust-sidecar/src/dictation_parity.rs.
+// That function currently only recognizes a subset of these
+// (rewrite_shorter, rewrite_professional, bulletize_selection, and the four
+// case-transform commands); the rest are declared here for the full
+// renderer metadata layer (src/lib/selected-text-actions.ts) and will 400
+// from the backend until the Rust side adds support for them.
+export type SelectedTextTransformCommand =
+  | "proofread_text"
+  | "rewrite_shorter"
+  | "expand_text"
+  | "continue_writing"
+  | "simplify_language"
+  | "rewrite_professional"
+  | "rewrite_friendly"
+  | "rewrite_casual"
+  | "summarize_text"
+  | "translate_english"
+  | "explain_text"
+  | "find_bugs"
+  | "bulletize_selection"
+  | "numbered_list_selection"
+  | "polish_text"
+  | "prompt_engineer"
+  | "uppercase_selection"
+  | "lowercase_selection"
+  | "title_case_selection"
+  | "sentence_case_selection";
+
+export interface SelectedTextTransformResult {
+  commandKey: string;
+  inputText: string;
+  outputText: string;
+  targetScope?: "selection" | "focused_field" | null;
+  targetApp?: string | null;
+  targetBundleId?: string | null;
+  pasted: boolean;
+  copied: boolean;
+  error?: string | null;
+  usedAi: boolean;
+  provider?: string | null;
+  modelId?: string | null;
+}
+
+export async function transformSelectedText(
+  commandKey: SelectedTextTransformCommand
+): Promise<SelectedTextTransformResult> {
+  return await invoke("transform_selected_text", { commandKey });
+}
+
 export async function getDictationAudioLevel(): Promise<number> {
   return await invoke("get_dictation_audio_level");
 }
@@ -415,6 +465,10 @@ export interface DictationDictionaryEntry {
   appScope: string | null;
   caseSensitive: boolean;
   enabled: boolean;
+  /** Optional dictation-destination-app category key (see DictationAppCategoryOverride's
+   * `category` values: other/messaging/email/notes/worklog/ai_chat/code_editor).
+   * `null`/absent means the entry applies regardless of destination-app category. */
+  categoryScope: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -425,6 +479,7 @@ interface CreateDictationDictionaryEntryRequest {
   appScope?: string | null;
   caseSensitive?: boolean;
   enabled?: boolean;
+  categoryScope?: string | null;
 }
 
 interface UpdateDictationDictionaryEntryRequest {
@@ -433,6 +488,7 @@ interface UpdateDictationDictionaryEntryRequest {
   appScope?: string | null;
   caseSensitive?: boolean;
   enabled?: boolean;
+  categoryScope?: string | null;
 }
 
 interface LearnDictationCorrectionRequest {
@@ -485,6 +541,8 @@ export interface DictationSnippet {
   appScope: string | null;
   caseSensitive: boolean;
   enabled: boolean;
+  /** See DictationDictionaryEntry.categoryScope. */
+  categoryScope: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -495,6 +553,7 @@ interface CreateDictationSnippetRequest {
   appScope?: string | null;
   caseSensitive?: boolean;
   enabled?: boolean;
+  categoryScope?: string | null;
 }
 
 interface UpdateDictationSnippetRequest {
@@ -503,6 +562,7 @@ interface UpdateDictationSnippetRequest {
   appScope?: string | null;
   caseSensitive?: boolean;
   enabled?: boolean;
+  categoryScope?: string | null;
 }
 
 export interface DictationCommandPreset {
@@ -799,6 +859,39 @@ export async function repairCursorInsertPermissions(): Promise<PermissionDiagnos
   return await invoke("repair_cursor_insert_permissions");
 }
 
+export interface DictationShortcutCapabilityStatus {
+  nativeShortcutAvailable: boolean;
+}
+
+/** Check whether the native hold-to-talk helper is available on this machine. */
+export async function getDictationShortcutCapabilityStatus(): Promise<DictationShortcutCapabilityStatus> {
+  return await invoke("get_dictation_shortcut_capability_status");
+}
+
+export type ShortcutFieldKey =
+  | "toggleDictation"
+  | "toggleRecording"
+  | "openWindow"
+  | "quickExport"
+  | "focusSearch";
+
+export interface ShortcutConflict {
+  field: ShortcutFieldKey;
+  label: string;
+  shortcut: string;
+  conflictsWith: string;
+  conflictsWithField: ShortcutFieldKey;
+}
+
+export interface ShortcutConflictStatus {
+  conflicts: ShortcutConflict[];
+}
+
+/** Ask whether any configured global shortcuts currently collide on the same key combination. */
+export async function getShortcutConflicts(): Promise<ShortcutConflictStatus> {
+  return await invoke("get_shortcut_conflicts");
+}
+
 // Diarization types
 interface Speaker {
   id: string;
@@ -842,6 +935,15 @@ export async function isDiarizationModelAvailable(modelId?: string): Promise<boo
 
 export async function downloadDiarizationModel(modelId?: string): Promise<void> {
   return await invoke("download_diarization_model", { modelId });
+}
+
+// Silero VAD APIs (opt-in, higher-accuracy hands-free/auto-stop backend)
+export async function isSileroVadModelDownloaded(): Promise<boolean> {
+  return await invoke("is_silero_vad_model_downloaded");
+}
+
+export async function downloadSileroVadModel(): Promise<void> {
+  await invoke("download_silero_vad_model");
 }
 
 export async function getSpeakers(recordingId: string): Promise<Speaker[]> {

@@ -924,7 +924,7 @@ function PermissionsStep({
           <div>
             <p className="text-sm font-medium">Auto-request permissions before dictation</p>
             <p className="text-xs text-muted-foreground">
-              Prompt for native speech and microphone access when needed instead of failing on first use.
+              Prompt for native speech and microphone access when needed. Leave this off if you are not at the Mac to respond to system prompts.
             </p>
           </div>
           <input

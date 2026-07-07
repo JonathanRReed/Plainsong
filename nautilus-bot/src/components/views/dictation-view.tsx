@@ -62,6 +62,14 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Keyboard,
   Mic,
@@ -93,7 +101,11 @@ import type {
   Recording,
   Transcript,
 } from "@/types";
-import type { DictationCustomMode } from "@/types/settings";
+import type {
+  DictationAppCategoryKey,
+  DictationAppCategoryOverride,
+  DictationCustomMode,
+} from "@/types/settings";
 import {
   useDictationRuntime,
   type DictationContextSource,
@@ -249,6 +261,24 @@ function formatInsertionModeLabel(value: string | null): string | null {
   return INSERTION_MODE_LABELS[normalized] ?? value.replace(/_/g, " ");
 }
 
+// Mirrors the case-only-match check inside `infer_learned_correction` in
+// rust-sidecar/src/dictation_parity.rs: two phrases are a "case-only" edit
+// when they're identical ignoring case but differ in actual casing (i.e. not
+// a no-op, and not a change to the underlying letters/words/whitespace).
+function isCaseOnlyDifference(original: string, corrected: string): boolean {
+  const normalizedOriginal = original.trim().split(/\s+/).join(" ");
+  const normalizedCorrected = corrected.trim().split(/\s+/).join(" ");
+  if (!normalizedOriginal || !normalizedCorrected) {
+    return false;
+  }
+  if (normalizedOriginal === normalizedCorrected) {
+    return false;
+  }
+  return (
+    normalizedOriginal.toLowerCase() === normalizedCorrected.toLowerCase()
+  );
+}
+
 type DictationModeSummaryItem = {
   label: string;
   value: string;
@@ -304,6 +334,63 @@ type DictationCoachCard = {
   body: string;
   actionLabel: string;
 };
+
+// Mirrors the built-in category descriptions from
+// rust-sidecar/src/text/format.rs's `dictation_category_prompt_fragment`.
+// Keep this in sync manually if the Rust copy changes (same precedent as
+// RECOMMENDED_APP_STYLES below, which duplicates Rust-default copy into TS).
+const DICTATION_APP_CATEGORY_REFERENCE: {
+  key: DictationAppCategoryKey;
+  label: string;
+  description: string;
+}[] = [
+  {
+    key: "messaging",
+    label: "Messaging",
+    description: "Casual and conversational, kept brief like a text message.",
+  },
+  {
+    key: "email",
+    label: "Email",
+    description:
+      "Formal, professional tone: full sentences, standard grammar, minimal contractions.",
+  },
+  {
+    key: "notes",
+    label: "Notes",
+    description:
+      "Preserves existing structure; only cleans up grammar and punctuation.",
+  },
+  {
+    key: "worklog",
+    label: "Worklog",
+    description:
+      "Keeps status, blockers, and next-steps explicit and concise.",
+  },
+  {
+    key: "ai_chat",
+    label: "AI Chat",
+    description:
+      "Formats as a prompt/question; preserves code blocks and technical syntax exactly.",
+  },
+  {
+    key: "code_editor",
+    label: "Code Editor",
+    description:
+      "Preserves code identifiers, file paths, CLI flags, and technical casing exactly.",
+  },
+];
+
+const DICTATION_APP_CATEGORY_SELECT_OPTIONS: {
+  value: DictationAppCategoryKey;
+  label: string;
+}[] = [
+  ...DICTATION_APP_CATEGORY_REFERENCE.map((entry) => ({
+    value: entry.key,
+    label: entry.label,
+  })),
+  { value: "other", label: "Other (no special formatting)" },
+];
 
 const ACTIVATION_APP_SUGGESTIONS = ["Slack", "Notion", "Cursor", "Messages"];
 const ACTIVATION_DOMAIN_SUGGESTIONS = [
@@ -1106,6 +1193,18 @@ export function DictationView() {
     useState(true);
   const [dictationAutoLearnCorrections, setDictationAutoLearnCorrections] =
     useState(true);
+  const [
+    dictationCategoryFormattingEnabled,
+    setDictationCategoryFormattingEnabled,
+  ] = useState(true);
+  const [
+    dictationAppCategoryOverrides,
+    setDictationAppCategoryOverrides,
+  ] = useState<DictationAppCategoryOverride[]>([]);
+  const [newCategoryOverrideAppMatcher, setNewCategoryOverrideAppMatcher] =
+    useState("");
+  const [newCategoryOverrideCategory, setNewCategoryOverrideCategory] =
+    useState<DictationAppCategoryKey>("messaging");
   const [dictationSilenceTimeoutSeconds, setDictationSilenceTimeoutSeconds] =
     useState(0);
   const [dictationDictionaryEntries, setDictationDictionaryEntries] = useState<
@@ -1125,6 +1224,8 @@ export function DictationView() {
   const [newDictionaryAppScope, setNewDictionaryAppScope] = useState("");
   const [newDictionaryCaseSensitive, setNewDictionaryCaseSensitive] =
     useState(false);
+  const [newDictionaryCategoryScope, setNewDictionaryCategoryScope] =
+    useState<DictationAppCategoryKey | "any">("any");
   const [dictionaryCsvDialogOpen, setDictionaryCsvDialogOpen] = useState(false);
   const [dictionaryCsvMode, setDictionaryCsvMode] = useState<
     "import" | "export"
@@ -1140,6 +1241,9 @@ export function DictationView() {
   const [newSnippetExpansion, setNewSnippetExpansion] = useState("");
   const [newSnippetAppScope, setNewSnippetAppScope] = useState("");
   const [newSnippetCaseSensitive, setNewSnippetCaseSensitive] = useState(false);
+  const [newSnippetCategoryScope, setNewSnippetCategoryScope] = useState<
+    DictationAppCategoryKey | "any"
+  >("any");
   const [dictationRetentionPreset, setDictationRetentionPreset] = useState<
     "immediate" | "24h" | "72h" | "never" | "custom"
   >("never");
@@ -1476,6 +1580,19 @@ export function DictationView() {
         new Date(left.updatedAt).getTime(),
     );
   }, [dictationCorrectionSuggestions]);
+
+  // Sourced entirely from the existing listDictationDictionaryEntries data
+  // (DictationDictionaryEntry already carries createdAt/updatedAt from the
+  // backend) — no new endpoint needed, just a client-side sort + slice.
+  const recentlyLearnedDictionaryEntries = useMemo(() => {
+    return [...dictationDictionaryEntries]
+      .sort(
+        (left, right) =>
+          new Date(right.updatedAt).getTime() -
+          new Date(left.updatedAt).getTime(),
+      )
+      .slice(0, 8);
+  }, [dictationDictionaryEntries]);
 
   const inferModePreset = (values: {
     profile: "normal_speed" | "power_rewrite";
@@ -1867,6 +1984,12 @@ export function DictationView() {
         setDictationRetentionCustomHours(
           settings.transcription.dictationRetentionCustomHours ?? 24,
         );
+        setDictationCategoryFormattingEnabled(
+          settings.transcription.dictationCategoryFormattingEnabled ?? true,
+        );
+        setDictationAppCategoryOverrides(
+          settings.transcription.dictationAppCategoryOverrides ?? [],
+        );
         const shortcut = settings.shortcuts.toggleDictation || defaultShortcut;
         setHotkeyLabel(formatShortcutForDisplay(shortcut));
         setHotkeyShortcut(shortcut);
@@ -1969,6 +2092,8 @@ export function DictationView() {
       silenceTimeoutSeconds: number;
       retentionPreset: "immediate" | "24h" | "72h" | "never" | "custom";
       retentionCustomHours: number;
+      categoryFormattingEnabled: boolean;
+      appCategoryOverrides: DictationAppCategoryOverride[];
     }>,
   ) => {
     try {
@@ -2006,6 +2131,10 @@ export function DictationView() {
       const nextSilenceTimeoutSeconds = normalizeDictationSilenceTimeoutSeconds(
         updates.silenceTimeoutSeconds ?? dictationSilenceTimeoutSeconds,
       );
+      const nextCategoryFormattingEnabled =
+        updates.categoryFormattingEnabled ?? dictationCategoryFormattingEnabled;
+      const nextAppCategoryOverrides =
+        updates.appCategoryOverrides ?? dictationAppCategoryOverrides;
       const nextModePreset =
         updates.modePreset ??
         inferModePreset({
@@ -2053,6 +2182,10 @@ export function DictationView() {
         updates.retentionPreset ?? dictationRetentionPreset;
       settings.transcription.dictationRetentionCustomHours =
         updates.retentionCustomHours ?? dictationRetentionCustomHours;
+      settings.transcription.dictationCategoryFormattingEnabled =
+        nextCategoryFormattingEnabled;
+      settings.transcription.dictationAppCategoryOverrides =
+        nextAppCategoryOverrides;
       await saveSettings(settings);
     } catch (error) {
       console.warn("Failed to persist dictation preferences:", error);
@@ -2670,12 +2803,16 @@ export function DictationView() {
         appScope: newSnippetAppScope.trim() || null,
         caseSensitive: newSnippetCaseSensitive,
         enabled: true,
+        ...(newSnippetCategoryScope !== "any"
+          ? { categoryScope: newSnippetCategoryScope }
+          : {}),
       });
       setDictationSnippets((prev) => [...prev, created]);
       setNewSnippetTrigger("");
       setNewSnippetExpansion("");
       setNewSnippetAppScope("");
       setNewSnippetCaseSensitive(false);
+      setNewSnippetCategoryScope("any");
     } catch (error) {
       console.warn("Failed to create dictation snippet:", error);
     }
@@ -2694,12 +2831,16 @@ export function DictationView() {
         appScope: newDictionaryAppScope.trim() || null,
         caseSensitive: newDictionaryCaseSensitive,
         enabled: true,
+        ...(newDictionaryCategoryScope !== "any"
+          ? { categoryScope: newDictionaryCategoryScope }
+          : {}),
       });
       setDictationDictionaryEntries((prev) => [...prev, created]);
       setNewDictionarySpokenForm("");
       setNewDictionaryReplacement("");
       setNewDictionaryAppScope("");
       setNewDictionaryCaseSensitive(false);
+      setNewDictionaryCategoryScope("any");
     } catch (error) {
       console.warn("Failed to create dictation dictionary entry:", error);
     }
@@ -2714,6 +2855,52 @@ export function DictationView() {
     } catch (error) {
       console.warn("Failed to delete dictation dictionary entry:", error);
     }
+  };
+
+  const handleAddCategoryOverride = () => {
+    const appMatcher = newCategoryOverrideAppMatcher.trim();
+    if (!appMatcher) {
+      return;
+    }
+    const created: DictationAppCategoryOverride = {
+      id:
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `override-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      appMatcher,
+      category: newCategoryOverrideCategory,
+      enabled: true,
+    };
+    const nextOverrides = [...dictationAppCategoryOverrides, created];
+    setDictationAppCategoryOverrides(nextOverrides);
+    setNewCategoryOverrideAppMatcher("");
+    setNewCategoryOverrideCategory("messaging");
+    void persistDictationPreferences({
+      appCategoryOverrides: nextOverrides,
+    });
+  };
+
+  const patchCategoryOverride = (
+    overrideId: string,
+    updates: Partial<Omit<DictationAppCategoryOverride, "id">>,
+  ) => {
+    const nextOverrides = dictationAppCategoryOverrides.map((entry) =>
+      entry.id === overrideId ? { ...entry, ...updates } : entry,
+    );
+    setDictationAppCategoryOverrides(nextOverrides);
+    void persistDictationPreferences({
+      appCategoryOverrides: nextOverrides,
+    });
+  };
+
+  const handleDeleteCategoryOverride = (overrideId: string) => {
+    const nextOverrides = dictationAppCategoryOverrides.filter(
+      (entry) => entry.id !== overrideId,
+    );
+    setDictationAppCategoryOverrides(nextOverrides);
+    void persistDictationPreferences({
+      appCategoryOverrides: nextOverrides,
+    });
   };
 
   const openDictionaryImportDialog = () => {
@@ -2882,6 +3069,7 @@ export function DictationView() {
       appScope: string | null;
       caseSensitive: boolean;
       enabled: boolean;
+      categoryScope: string | null;
     }>,
   ) => {
     setDictationSnippets((prev) =>
@@ -2912,6 +3100,7 @@ export function DictationView() {
       appScope: string | null;
       caseSensitive: boolean;
       enabled: boolean;
+      categoryScope: string | null;
     }>,
   ) => {
     setDictationDictionaryEntries((prev) =>
@@ -4755,6 +4944,32 @@ export function DictationView() {
                     >
                       Learn correction
                     </Button>
+                    {isCaseOnlyDifference(
+                      latestCorrectionBaseline,
+                      transcribedText,
+                    ) && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() =>
+                          void learnCorrection(
+                            latestCorrectionBaseline,
+                            transcribedText,
+                            {
+                              force: true,
+                              appTarget,
+                              setStatus: setLatestLearnStatus,
+                              onSuccess: () =>
+                                setLatestCorrectionBaseline(
+                                  transcribedText.trim(),
+                                ),
+                            },
+                          )
+                        }
+                      >
+                        Fix capitalization
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
                       size="sm"
@@ -5647,6 +5862,38 @@ export function DictationView() {
                   </div>
                 </div>
 
+                {recentlyLearnedDictionaryEntries.length > 0 && (
+                  <div
+                    className="rounded-md border bg-muted/20 p-3 space-y-2"
+                    data-testid="recently-learned-dictionary"
+                  >
+                    <p className="text-sm font-medium">Recently learned</p>
+                    <ul className="space-y-1">
+                      {recentlyLearnedDictionaryEntries.map((entry) => (
+                        <li
+                          key={entry.id}
+                          className="flex items-center justify-between gap-3 text-xs"
+                        >
+                          <span className="truncate">
+                            <span className="font-mono text-muted-foreground">
+                              {entry.spokenForm}
+                            </span>
+                            <span className="mx-1 text-muted-foreground">
+                              {"->"}
+                            </span>
+                            <span className="font-medium">
+                              {entry.replacement}
+                            </span>
+                          </span>
+                          <span className="shrink-0 text-muted-foreground">
+                            {new Date(entry.updatedAt).toLocaleString()}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr_1fr_auto] gap-2">
                   <input
                     type="text"
@@ -5681,6 +5928,30 @@ export function DictationView() {
                   >
                     Add
                   </Button>
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,240px)]">
+                  <Select
+                    value={newDictionaryCategoryScope}
+                    onValueChange={(value) =>
+                      setNewDictionaryCategoryScope(
+                        value as DictationAppCategoryKey | "any",
+                      )
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="any">
+                        Any destination category
+                      </SelectItem>
+                      {DICTATION_APP_CATEGORY_SELECT_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
                   <input
@@ -5768,6 +6039,35 @@ export function DictationView() {
                               })
                             }
                           />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,220px)]">
+                          <Select
+                            value={entry.categoryScope ?? "any"}
+                            onValueChange={(value) =>
+                              void patchDictionaryEntry(entry.id, {
+                                categoryScope: value === "any" ? null : value,
+                              })
+                            }
+                          >
+                            <SelectTrigger className="text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="any">
+                                Any destination category
+                              </SelectItem>
+                              {DICTATION_APP_CATEGORY_SELECT_OPTIONS.map(
+                                (option) => (
+                                  <SelectItem
+                                    key={option.value}
+                                    value={option.value}
+                                  >
+                                    {option.label}
+                                  </SelectItem>
+                                ),
+                              )}
+                            </SelectContent>
+                          </Select>
                         </div>
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-4 text-xs text-muted-foreground">
@@ -6044,6 +6344,30 @@ export function DictationView() {
                     Add
                   </Button>
                 </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,240px)]">
+                  <Select
+                    value={newSnippetCategoryScope}
+                    onValueChange={(value) =>
+                      setNewSnippetCategoryScope(
+                        value as DictationAppCategoryKey | "any",
+                      )
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="any">
+                        Any destination category
+                      </SelectItem>
+                      {DICTATION_APP_CATEGORY_SELECT_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
                 <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
                   <input
                     type="checkbox"
@@ -6131,6 +6455,35 @@ export function DictationView() {
                             }
                           />
                         </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,220px)]">
+                          <Select
+                            value={snippet.categoryScope ?? "any"}
+                            onValueChange={(value) =>
+                              void patchSnippet(snippet.id, {
+                                categoryScope: value === "any" ? null : value,
+                              })
+                            }
+                          >
+                            <SelectTrigger className="text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="any">
+                                Any destination category
+                              </SelectItem>
+                              {DICTATION_APP_CATEGORY_SELECT_OPTIONS.map(
+                                (option) => (
+                                  <SelectItem
+                                    key={option.value}
+                                    value={option.value}
+                                  >
+                                    {option.label}
+                                  </SelectItem>
+                                ),
+                              )}
+                            </SelectContent>
+                          </Select>
+                        </div>
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-4 text-xs text-muted-foreground">
                             <label className="inline-flex items-center gap-2">
@@ -6162,6 +6515,189 @@ export function DictationView() {
                             variant="ghost"
                             size="sm"
                             onClick={() => void handleDeleteSnippet(snippet.id)}
+                          >
+                            Remove
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">
+                Destination-aware formatting
+              </CardTitle>
+              <CardDescription>
+                Automatically adjust dictation tone and structure based on
+                what app you're dictating into.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
+                <div className="space-y-0.5">
+                  <p className="text-sm font-medium">
+                    Format for destination app
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    When on, Smart Format adapts tone and structure to the app
+                    you're dictating into. Turning this off restores the
+                    original, category-agnostic formatting.
+                  </p>
+                </div>
+                <Switch
+                  checked={dictationCategoryFormattingEnabled}
+                  onCheckedChange={(checked) => {
+                    setDictationCategoryFormattingEnabled(checked);
+                    void persistDictationPreferences({
+                      categoryFormattingEnabled: checked,
+                    });
+                  }}
+                />
+              </div>
+
+              <div className="rounded-md border bg-muted/20 p-3 space-y-2">
+                <p className="text-sm font-medium">Built-in categories</p>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {DICTATION_APP_CATEGORY_REFERENCE.map((entry) => (
+                    <div
+                      key={entry.key}
+                      className="rounded-md border bg-background px-3 py-2"
+                    >
+                      <p className="text-xs font-medium">{entry.label}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {entry.description}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="border-t pt-4 space-y-3">
+                <div>
+                  <p className="text-sm font-medium">App overrides</p>
+                  <p className="text-xs text-muted-foreground">
+                    Pin a specific app (matched by substring, e.g. "slack") to
+                    a category, overriding the built-in classifier. First
+                    matching enabled override wins.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-2">
+                  <input
+                    type="text"
+                    className="w-full p-2 border rounded-md bg-background"
+                    placeholder="App matcher (e.g. slack)"
+                    value={newCategoryOverrideAppMatcher}
+                    onChange={(event) =>
+                      setNewCategoryOverrideAppMatcher(event.target.value)
+                    }
+                  />
+                  <Select
+                    value={newCategoryOverrideCategory}
+                    onValueChange={(value) =>
+                      setNewCategoryOverrideCategory(
+                        value as DictationAppCategoryKey,
+                      )
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {DICTATION_APP_CATEGORY_SELECT_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    variant="outline"
+                    onClick={handleAddCategoryOverride}
+                  >
+                    Add
+                  </Button>
+                </div>
+
+                {dictationAppCategoryOverrides.length > 0 && (
+                  <div className="space-y-2">
+                    {dictationAppCategoryOverrides.map((override) => (
+                      <div
+                        key={override.id}
+                        className="rounded-md border p-2 space-y-2"
+                      >
+                        <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr] gap-2">
+                          <input
+                            type="text"
+                            className="w-full p-2 border rounded-md bg-background text-sm font-mono"
+                            value={override.appMatcher}
+                            onChange={(event) =>
+                              setDictationAppCategoryOverrides((prev) =>
+                                prev.map((current) =>
+                                  current.id === override.id
+                                    ? {
+                                        ...current,
+                                        appMatcher: event.target.value,
+                                      }
+                                    : current,
+                                ),
+                              )
+                            }
+                            onBlur={(event) =>
+                              patchCategoryOverride(override.id, {
+                                appMatcher: event.target.value.trim(),
+                              })
+                            }
+                          />
+                          <Select
+                            value={override.category}
+                            onValueChange={(value) =>
+                              patchCategoryOverride(override.id, {
+                                category: value as DictationAppCategoryKey,
+                              })
+                            }
+                          >
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {DICTATION_APP_CATEGORY_SELECT_OPTIONS.map(
+                                (option) => (
+                                  <SelectItem
+                                    key={option.value}
+                                    value={option.value}
+                                  >
+                                    {option.label}
+                                  </SelectItem>
+                                ),
+                              )}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <label className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                            <input
+                              type="checkbox"
+                              checked={override.enabled}
+                              onChange={(event) =>
+                                patchCategoryOverride(override.id, {
+                                  enabled: event.target.checked,
+                                })
+                              }
+                            />
+                            Enabled
+                          </label>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() =>
+                              handleDeleteCategoryOverride(override.id)
+                            }
                           >
                             Remove
                           </Button>
@@ -6683,6 +7219,36 @@ export function DictationView() {
                       >
                         Learn correction
                       </Button>
+                      {isCaseOnlyDifference(
+                        historyCorrectionBaseline,
+                        historyCorrectionText,
+                      ) && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            void learnCorrection(
+                              historyCorrectionBaseline,
+                              historyCorrectionText,
+                              {
+                                force: true,
+                                appTarget:
+                                  selectedHistoryDetails?.activationMatcher ??
+                                  selectedHistoryDetails?.appTarget ??
+                                  selectedHistoryDetails?.contextAppName ??
+                                  null,
+                                setStatus: setHistoryLearnStatus,
+                                onSuccess: () =>
+                                  setHistoryCorrectionBaseline(
+                                    historyCorrectionText.trim(),
+                                  ),
+                              },
+                            )
+                          }
+                        >
+                          Fix capitalization
+                        </Button>
+                      )}
                     </div>
                   </div>
                   <div className="rounded-lg bg-muted p-4 min-h-[180px]">

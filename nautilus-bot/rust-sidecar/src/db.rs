@@ -17,6 +17,20 @@ use std::path::Path;
 
 pub type SpeakerAlias = (Option<String>, Option<String>, i64);
 
+/// Normalizes a dictionary/snippet `category_scope` value for persistence.
+/// Trims whitespace, drops blank values (-> `None`, meaning "applies
+/// regardless of category"), and round-trips unrecognized keys through
+/// `dictation_app_category_from_key`/`to_key` so only the canonical category
+/// keys (other/messaging/email/notes/worklog/ai_chat/code_editor) are ever
+/// stored. An unrecognized key normalizes to "other", which is treated the
+/// same as unscoped since `Other` never matches an actual destination
+/// category via `category_scope_matches`.
+fn normalize_category_scope(value: Option<&str>) -> Option<String> {
+    let trimmed = value.map(str::trim).filter(|value| !value.is_empty())?;
+    let category = crate::settings::dictation_app_category_from_key(trimmed);
+    Some(crate::settings::dictation_app_category_to_key(category).to_string())
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -892,11 +906,21 @@ impl Database {
                 app_scope TEXT,
                 case_sensitive INTEGER NOT NULL DEFAULT 0,
                 enabled INTEGER NOT NULL DEFAULT 1,
+                category_scope TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",
             [],
         )?;
+        // Backward-compatible migration for existing local DBs created before
+        // category_scope existed. SQLite errors if the column is already
+        // present, so the error is deliberately discarded (same pattern as
+        // the transcripts/insertion_actions/meeting_artifacts/asr_benchmarks
+        // migrations above).
+        let _ = self.conn.execute(
+            "ALTER TABLE dictation_dictionary_entries ADD COLUMN category_scope TEXT",
+            [],
+        );
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_dictation_dictionary_entries_spoken_form
              ON dictation_dictionary_entries(spoken_form)",
@@ -911,11 +935,16 @@ impl Database {
                 app_scope TEXT,
                 case_sensitive INTEGER NOT NULL DEFAULT 0,
                 enabled INTEGER NOT NULL DEFAULT 1,
+                category_scope TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",
             [],
         )?;
+        let _ = self.conn.execute(
+            "ALTER TABLE dictation_snippets ADD COLUMN category_scope TEXT",
+            [],
+        );
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_dictation_snippets_trigger
              ON dictation_snippets(trigger)",
@@ -1865,7 +1894,7 @@ impl Database {
 
     pub fn list_dictation_snippets(&self) -> Result<Vec<DictationSnippet>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, trigger, expansion, app_scope, case_sensitive, enabled, created_at, updated_at
+            "SELECT id, trigger, expansion, app_scope, case_sensitive, enabled, category_scope, created_at, updated_at
              FROM dictation_snippets
              ORDER BY trigger ASC, created_at ASC",
         )?;
@@ -1878,12 +1907,13 @@ impl Database {
                 app_scope: row.get(3)?,
                 case_sensitive: row.get::<_, i64>(4)? != 0,
                 enabled: row.get::<_, i64>(5)? != 0,
+                category_scope: row.get(6)?,
                 created_at: row
-                    .get::<_, String>(6)?
+                    .get::<_, String>(7)?
                     .parse()
                     .unwrap_or_else(|_| Utc::now()),
                 updated_at: row
-                    .get::<_, String>(7)?
+                    .get::<_, String>(8)?
                     .parse()
                     .unwrap_or_else(|_| Utc::now()),
             })
@@ -1894,7 +1924,7 @@ impl Database {
 
     pub fn list_dictation_dictionary_entries(&self) -> Result<Vec<DictationDictionaryEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, spoken_form, replacement, app_scope, case_sensitive, enabled, created_at, updated_at
+            "SELECT id, spoken_form, replacement, app_scope, case_sensitive, enabled, category_scope, created_at, updated_at
              FROM dictation_dictionary_entries
              ORDER BY spoken_form ASC, created_at ASC",
         )?;
@@ -1907,12 +1937,13 @@ impl Database {
                 app_scope: row.get(3)?,
                 case_sensitive: row.get::<_, i64>(4)? != 0,
                 enabled: row.get::<_, i64>(5)? != 0,
+                category_scope: row.get(6)?,
                 created_at: row
-                    .get::<_, String>(6)?
+                    .get::<_, String>(7)?
                     .parse()
                     .unwrap_or_else(|_| Utc::now()),
                 updated_at: row
-                    .get::<_, String>(7)?
+                    .get::<_, String>(8)?
                     .parse()
                     .unwrap_or_else(|_| Utc::now()),
             })
@@ -1946,14 +1977,15 @@ impl Database {
                 .filter(|scope| !scope.is_empty()),
             case_sensitive: request.case_sensitive,
             enabled: request.enabled,
+            category_scope: normalize_category_scope(request.category_scope.as_deref()),
             created_at: now,
             updated_at: now,
         };
 
         self.conn.execute(
             "INSERT INTO dictation_dictionary_entries (
-                id, spoken_form, replacement, app_scope, case_sensitive, enabled, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                id, spoken_form, replacement, app_scope, case_sensitive, enabled, category_scope, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &entry.id,
                 &entry.spoken_form,
@@ -1961,6 +1993,7 @@ impl Database {
                 &entry.app_scope,
                 if entry.case_sensitive { 1 } else { 0 },
                 if entry.enabled { 1 } else { 0 },
+                &entry.category_scope,
                 entry.created_at.to_rfc3339(),
                 entry.updated_at.to_rfc3339(),
             ],
@@ -2009,18 +2042,23 @@ impl Database {
         };
         let case_sensitive = request.case_sensitive.unwrap_or(existing.case_sensitive);
         let enabled = request.enabled.unwrap_or(existing.enabled);
+        let category_scope = match &request.category_scope {
+            Some(value) => normalize_category_scope(value.as_deref()),
+            None => existing.category_scope.clone(),
+        };
         let updated_at = Utc::now();
 
         self.conn.execute(
             "UPDATE dictation_dictionary_entries
-             SET spoken_form = ?1, replacement = ?2, app_scope = ?3, case_sensitive = ?4, enabled = ?5, updated_at = ?6
-             WHERE id = ?7",
+             SET spoken_form = ?1, replacement = ?2, app_scope = ?3, case_sensitive = ?4, enabled = ?5, category_scope = ?6, updated_at = ?7
+             WHERE id = ?8",
             params![
                 &spoken_form,
                 &replacement,
                 &app_scope,
                 if case_sensitive { 1 } else { 0 },
                 if enabled { 1 } else { 0 },
+                &category_scope,
                 updated_at.to_rfc3339(),
                 entry_id,
             ],
@@ -2033,6 +2071,7 @@ impl Database {
             app_scope,
             case_sensitive,
             enabled,
+            category_scope,
             created_at: existing.created_at,
             updated_at,
         })
@@ -2224,14 +2263,15 @@ impl Database {
                 .filter(|scope| !scope.is_empty()),
             case_sensitive: request.case_sensitive,
             enabled: request.enabled,
+            category_scope: normalize_category_scope(request.category_scope.as_deref()),
             created_at: now,
             updated_at: now,
         };
 
         self.conn.execute(
             "INSERT INTO dictation_snippets (
-                id, trigger, expansion, app_scope, case_sensitive, enabled, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                id, trigger, expansion, app_scope, case_sensitive, enabled, category_scope, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 &snippet.id,
                 &snippet.trigger,
@@ -2239,6 +2279,7 @@ impl Database {
                 &snippet.app_scope,
                 if snippet.case_sensitive { 1 } else { 0 },
                 if snippet.enabled { 1 } else { 0 },
+                &snippet.category_scope,
                 snippet.created_at.to_rfc3339(),
                 snippet.updated_at.to_rfc3339(),
             ],
@@ -2287,18 +2328,23 @@ impl Database {
         };
         let case_sensitive = request.case_sensitive.unwrap_or(existing.case_sensitive);
         let enabled = request.enabled.unwrap_or(existing.enabled);
+        let category_scope = match &request.category_scope {
+            Some(value) => normalize_category_scope(value.as_deref()),
+            None => existing.category_scope.clone(),
+        };
         let updated_at = Utc::now();
 
         self.conn.execute(
             "UPDATE dictation_snippets
-             SET trigger = ?1, expansion = ?2, app_scope = ?3, case_sensitive = ?4, enabled = ?5, updated_at = ?6
-             WHERE id = ?7",
+             SET trigger = ?1, expansion = ?2, app_scope = ?3, case_sensitive = ?4, enabled = ?5, category_scope = ?6, updated_at = ?7
+             WHERE id = ?8",
             params![
                 &trigger,
                 &expansion,
                 &app_scope,
                 if case_sensitive { 1 } else { 0 },
                 if enabled { 1 } else { 0 },
+                &category_scope,
                 updated_at.to_rfc3339(),
                 snippet_id,
             ],
@@ -2311,6 +2357,7 @@ impl Database {
             app_scope,
             case_sensitive,
             enabled,
+            category_scope,
             created_at: existing.created_at,
             updated_at,
         })
@@ -3667,12 +3714,15 @@ mod tests {
                 app_scope: Some("Slack".to_string()),
                 case_sensitive: false,
                 enabled: true,
+                category_scope: Some("messaging".to_string()),
             })
             .unwrap();
         assert_eq!(created.trigger, "brb");
+        assert_eq!(created.category_scope.as_deref(), Some("messaging"));
 
         let list = db.list_dictation_snippets().unwrap();
         assert_eq!(list.len(), 1);
+        assert_eq!(list[0].category_scope.as_deref(), Some("messaging"));
 
         let updated = db
             .update_dictation_snippet(
@@ -3683,12 +3733,14 @@ mod tests {
                     app_scope: Some(None),
                     case_sensitive: Some(true),
                     enabled: Some(true),
+                    category_scope: Some(None),
                 },
             )
             .unwrap();
         assert_eq!(updated.trigger, "omw");
         assert!(updated.app_scope.is_none());
         assert!(updated.case_sensitive);
+        assert!(updated.category_scope.is_none());
 
         db.delete_dictation_snippet(&created.id).unwrap();
         assert!(db.list_dictation_snippets().unwrap().is_empty());
@@ -3704,12 +3756,15 @@ mod tests {
                 app_scope: Some("Slack".to_string()),
                 case_sensitive: false,
                 enabled: true,
+                category_scope: Some("code_editor".to_string()),
             })
             .unwrap();
         assert_eq!(created.spoken_form, "open ai");
+        assert_eq!(created.category_scope.as_deref(), Some("code_editor"));
 
         let list = db.list_dictation_dictionary_entries().unwrap();
         assert_eq!(list.len(), 1);
+        assert_eq!(list[0].category_scope.as_deref(), Some("code_editor"));
 
         let updated = db
             .update_dictation_dictionary_entry(
@@ -3720,11 +3775,13 @@ mod tests {
                     app_scope: Some(None),
                     case_sensitive: Some(true),
                     enabled: Some(true),
+                    category_scope: Some(None),
                 },
             )
             .unwrap();
         assert_eq!(updated.spoken_form, "nautilus bot");
         assert!(updated.app_scope.is_none());
+        assert!(updated.category_scope.is_none());
         assert!(updated.case_sensitive);
 
         db.delete_dictation_dictionary_entry(&created.id).unwrap();

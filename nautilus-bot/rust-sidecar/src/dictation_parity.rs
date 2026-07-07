@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::text::format::DictationAppCategory;
+
 pub const DEFAULT_COMMAND_PREFIX: &str = "command";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +35,14 @@ pub struct DictionaryRule {
     pub case_sensitive: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Optional dictation-destination-app category key (one of the
+    /// `dictation_app_category_to_key`/`from_key` strings in `settings.rs`:
+    /// other/messaging/email/notes/worklog/ai_chat/code_editor). When set,
+    /// this rule only applies if the current destination app resolves to the
+    /// same category. When `None` (the default), the rule applies regardless
+    /// of category, exactly as before this field existed.
+    #[serde(default)]
+    pub category_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +55,9 @@ pub struct SnippetRule {
     pub case_sensitive: bool,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// See `DictionaryRule::category_scope`.
+    #[serde(default)]
+    pub category_scope: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +215,24 @@ fn snippet_app_scope_matches(snippet_scope: Option<&str>, app_target: Option<&st
     app_name.to_lowercase().contains(&scope.to_lowercase())
 }
 
+/// Mirrors `snippet_app_scope_matches`'s blank-matches-everything convention:
+/// a missing/blank `category_scope` always matches (i.e. the rule is not
+/// category-scoped and applies regardless of destination-app category). When
+/// a category is set, it must match the resolved `destination_category`
+/// (via `dictation_app_category_to_key`) exactly.
+fn category_scope_matches(
+    category_scope: Option<&str>,
+    destination_category: DictationAppCategory,
+) -> bool {
+    let Some(scope) = category_scope
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return true;
+    };
+    crate::settings::dictation_app_category_from_key(scope) == destination_category
+}
+
 fn replace_dictionary_case_sensitive_all(
     haystack: &str,
     needle: &str,
@@ -270,6 +301,21 @@ pub fn apply_dictation_dictionary(
     rules: &[DictionaryRule],
     app_target: Option<&str>,
 ) -> (String, usize) {
+    apply_dictation_dictionary_for_category(input, rules, app_target, DictationAppCategory::Other)
+}
+
+/// Same as `apply_dictation_dictionary`, but additionally scopes rules whose
+/// `category_scope` is set to only apply when `destination_category` matches.
+/// Rules with `category_scope: None` are unaffected by `destination_category`
+/// and always apply (subject to the existing `app_scope`/`enabled` checks) —
+/// this preserves `apply_dictation_dictionary`'s exact prior behavior for
+/// every existing entry.
+pub fn apply_dictation_dictionary_for_category(
+    input: &str,
+    rules: &[DictionaryRule],
+    app_target: Option<&str>,
+    destination_category: DictationAppCategory,
+) -> (String, usize) {
     if input.trim().is_empty() || rules.is_empty() {
         return (input.to_string(), 0);
     }
@@ -284,6 +330,9 @@ pub fn apply_dictation_dictionary(
             continue;
         }
         if !snippet_app_scope_matches(rule.app_scope.as_deref(), app_target) {
+            continue;
+        }
+        if !category_scope_matches(rule.category_scope.as_deref(), destination_category) {
             continue;
         }
         if rule.spoken_form.trim().is_empty() {
@@ -317,6 +366,21 @@ pub fn apply_dictation_snippets(
     snippets: &[SnippetRule],
     app_target: Option<&str>,
 ) -> (String, usize) {
+    apply_dictation_snippets_for_category(input, snippets, app_target, DictationAppCategory::Other)
+}
+
+/// Same as `apply_dictation_snippets`, but additionally scopes snippets whose
+/// `category_scope` is set to only apply when `destination_category` matches.
+/// Snippets with `category_scope: None` are unaffected by
+/// `destination_category` and always apply (subject to the existing
+/// `app_scope`/`enabled` checks) — this preserves `apply_dictation_snippets`'s
+/// exact prior behavior for every existing entry.
+pub fn apply_dictation_snippets_for_category(
+    input: &str,
+    snippets: &[SnippetRule],
+    app_target: Option<&str>,
+    destination_category: DictationAppCategory,
+) -> (String, usize) {
     if input.trim().is_empty() || snippets.is_empty() {
         return (input.to_string(), 0);
     }
@@ -331,6 +395,9 @@ pub fn apply_dictation_snippets(
             continue;
         }
         if !snippet_app_scope_matches(snippet.app_scope.as_deref(), app_target) {
+            continue;
+        }
+        if !category_scope_matches(snippet.category_scope.as_deref(), destination_category) {
             continue;
         }
         if snippet.trigger.trim().is_empty() {
@@ -713,20 +780,152 @@ pub fn resolve_contextual_command_input(
 
 pub fn default_dictation_command_prompt(command_key: &str) -> Option<&'static str> {
     match command_key {
+        "proofread_text" => Some(
+            "Proofread the user's text. Correct spelling, grammar, punctuation, and \
+            capitalization while preserving meaning, tone, structure, and wording as much as \
+            possible. Return only the corrected text.",
+        ),
         "rewrite_shorter" => Some(
             "Rewrite the user's text to be shorter while preserving intent. \
             Keep the same language and tone. Return only the rewritten text.",
+        ),
+        "expand_text" => Some(
+            "Expand the user's text with useful context, clearer connective tissue, and \
+            concrete detail while preserving intent and avoiding unsupported assumptions. \
+            Return only the expanded text.",
+        ),
+        "continue_writing" => Some(
+            "Continue the user's text with the next useful sentence or paragraph while \
+            preserving style, facts, and direction. Do not repeat the original text unless \
+            needed for continuity. Return only the continued text.",
+        ),
+        "simplify_language" => Some(
+            "Rewrite the user's text in clear, plain language while preserving meaning, facts, \
+            and important nuance. Prefer shorter sentences and familiar words. Return only the \
+            simplified text.",
         ),
         "rewrite_professional" => Some(
             "Rewrite the user's text in a professional tone while preserving meaning. \
             Keep it clear and concise. Return only the rewritten text.",
         ),
+        "rewrite_friendly" => Some(
+            "Rewrite the user's text in a friendly, warm tone while preserving meaning and \
+            avoiding extra enthusiasm. Keep it clear and concise. Return only the rewritten \
+            text.",
+        ),
+        "rewrite_casual" => Some(
+            "Rewrite the user's text in a casual, conversational tone while preserving meaning \
+            and avoiding slang, filler, or extra enthusiasm. Return only the rewritten text.",
+        ),
+        "summarize_text" => Some(
+            "Summarize the user's text into the shortest useful summary while preserving key \
+            decisions, facts, and action items. Return only the summary.",
+        ),
+        "translate_english" => Some(
+            "Translate the user's text into clear, natural English while preserving names, \
+            product terms, code, URLs, and formatting. Return only the translated English \
+            text.",
+        ),
+        "explain_text" => Some(
+            "Explain the user's text in plain language for a competent reader who lacks the \
+            original context. Preserve important details. Return only the explanation.",
+        ),
+        "find_bugs" => Some(
+            "Review the user's selected code, instructions, or plan for concrete bugs, \
+            contradictions, edge cases, and missing checks. Return only concise findings. If \
+            no bugs are found, say No concrete bugs found.",
+        ),
         "bulletize_selection" => Some(
             "Convert the user's text into concise bullet points. \
             Use one bullet per idea. Return only the bullet list.",
         ),
+        "numbered_list_selection" => Some(
+            "Convert the user's text into a concise numbered list. Use one numbered item per \
+            step, idea, or decision. Return only the numbered list.",
+        ),
+        "polish_text" => Some(
+            "Improve the user's writing for clarity, flow, and concision while preserving \
+            meaning, voice, and important details. Return only the improved text.",
+        ),
+        "prompt_engineer" => Some(
+            "Rewrite the user's text as a clear, well-structured AI prompt. Include objective, \
+            context, constraints, output format, and success criteria when they are implied. \
+            Return only the prompt.",
+        ),
         _ => None,
     }
+}
+
+/// Human-readable label for a dictation command when it is applied to text
+/// that already exists somewhere on screen (an explicit selection, or a
+/// focused field for Quick-Fix-style commands), as opposed to freshly
+/// dictated text. Used by the selected-text transform feature to phrase
+/// status/error messages (e.g. "Rewrite Shorter Selected Text result is
+/// empty.").
+///
+/// Covers every selected-text command exposed by the renderer's
+/// `SELECTED_TEXT_ACTIONS`/command palette (see
+/// `src/lib/selected-text-actions.ts`): the AI-backed rewrite/transform
+/// commands (each with a matching `default_dictation_command_prompt` entry
+/// above) and the four local-only case-transform commands.
+pub fn dictation_command_selected_text_label(command_key: &str) -> Option<&'static str> {
+    match command_key {
+        "proofread_text" => Some("Quick Fix Selected Text"),
+        "rewrite_shorter" => Some("Rewrite Shorter Selected Text"),
+        "expand_text" => Some("Expand Selected Text"),
+        "continue_writing" => Some("Continue Writing Selected Text"),
+        "simplify_language" => Some("Simplify Language Selected Text"),
+        "rewrite_professional" => Some("Rewrite Professional Selected Text"),
+        "rewrite_friendly" => Some("Friendly Tone Selected Text"),
+        "rewrite_casual" => Some("Casual Tone Selected Text"),
+        "summarize_text" => Some("Summarize Selected Text"),
+        "translate_english" => Some("Translate Selected Text"),
+        "explain_text" => Some("Explain Selected Text"),
+        "find_bugs" => Some("Find Bugs in Selected Text"),
+        "bulletize_selection" => Some("Bulletize Selected Text"),
+        "numbered_list_selection" => Some("Numbered List Selected Text"),
+        "polish_text" => Some("Polish Selected Text"),
+        "prompt_engineer" => Some("Prompt Engineer Selected Text"),
+        "uppercase_selection" => Some("Uppercase Selected Text"),
+        "lowercase_selection" => Some("Lowercase Selected Text"),
+        "title_case_selection" => Some("Title Case Selected Text"),
+        "sentence_case_selection" => Some("Sentence Case Selected Text"),
+        _ => None,
+    }
+}
+
+/// Whether a command key is resolved purely with local Rust logic (no LLM
+/// call, no fallback needed) — currently the four case-transform commands.
+pub fn is_local_only_selected_text_command(command_key: &str) -> bool {
+    matches!(
+        command_key,
+        "uppercase_selection"
+            | "lowercase_selection"
+            | "title_case_selection"
+            | "sentence_case_selection"
+    )
+}
+
+/// Whether `command_key` is allowed to fall back to the whole focused-field
+/// contents (via `capture_focused_field_text_via_accessibility`) when no
+/// explicit text selection could be captured, rather than surfacing a
+/// "select some text" error immediately.
+///
+/// Every command with end-to-end support today is treated as eligible for
+/// the focused-field fallback (i.e. this is currently equivalent to "has a
+/// selected-text label"), even though the renderer's own metadata
+/// (`SELECTED_TEXT_TARGET_POLICY_LABELS` in
+/// src/lib/selected-text-actions.ts) only labels `proofread_text` (Quick
+/// Fix) as `prefer_selection`/fallback-eligible and everything else as
+/// `selection_required`. That renderer distinction is descriptive only —
+/// nothing in the renderer enforces it — so this function is the single
+/// place the real policy lives. Narrowing it to match the renderer's
+/// `selection_required` labels would be a behavior change (it would need
+/// its own test updates, e.g. `selected_text_transform_target_prefers_explicit_selection`'s
+/// fallback coverage), so it is left as-is here; a future change can
+/// narrow it deliberately without touching the capture/dispatch call sites.
+pub fn allows_focused_field_fallback(command_key: &str) -> bool {
+    dictation_command_selected_text_label(command_key).is_some()
 }
 
 pub fn apply_contextual_phrase_replacement(
@@ -863,6 +1062,7 @@ mod tests {
                 app_scope: None,
                 case_sensitive: false,
                 enabled: true,
+                category_scope: None,
             },
             DictionaryRule {
                 spoken_form: "open ai".to_string(),
@@ -870,6 +1070,7 @@ mod tests {
                 app_scope: None,
                 case_sensitive: false,
                 enabled: true,
+                category_scope: None,
             },
         ];
 
@@ -890,6 +1091,7 @@ mod tests {
             app_scope: Some("gmail".to_string()),
             case_sensitive: false,
             enabled: true,
+            category_scope: None,
         }];
 
         let (non_matching, non_matching_count) =
@@ -901,6 +1103,264 @@ mod tests {
             apply_dictation_dictionary("follow up tomorrow", &rules, Some("Gmail"));
         assert_eq!(matching, "follow-up tomorrow");
         assert_eq!(matching_count, 1);
+    }
+
+    #[test]
+    fn dictionary_category_scoped_entry_applies_only_when_category_matches() {
+        let rules = vec![DictionaryRule {
+            spoken_form: "brb".to_string(),
+            replacement: "be right back".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("messaging".to_string()),
+        }];
+
+        let (matching, matching_count) = apply_dictation_dictionary_for_category(
+            "brb everyone",
+            &rules,
+            Some("Slack"),
+            DictationAppCategory::Messaging,
+        );
+        assert_eq!(matching, "be right back everyone");
+        assert_eq!(matching_count, 1);
+    }
+
+    #[test]
+    fn dictionary_category_scoped_entry_is_skipped_for_non_matching_category() {
+        let rules = vec![DictionaryRule {
+            spoken_form: "brb".to_string(),
+            replacement: "be right back".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("messaging".to_string()),
+        }];
+
+        let (output, applied) = apply_dictation_dictionary_for_category(
+            "brb everyone",
+            &rules,
+            Some("Gmail"),
+            DictationAppCategory::Email,
+        );
+        assert_eq!(output, "brb everyone");
+        assert_eq!(applied, 0);
+    }
+
+    #[test]
+    fn dictionary_entry_without_category_scope_applies_regardless_of_category() {
+        // Regression-safety: entries with no category_scope must apply exactly
+        // as before this feature existed, no matter what destination category
+        // is passed in.
+        let rules = vec![DictionaryRule {
+            spoken_form: "open ai".to_string(),
+            replacement: "OpenAI".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+        }];
+
+        for category in [
+            DictationAppCategory::Other,
+            DictationAppCategory::Messaging,
+            DictationAppCategory::Email,
+            DictationAppCategory::Notes,
+            DictationAppCategory::Worklog,
+            DictationAppCategory::AiChat,
+            DictationAppCategory::CodeEditor,
+        ] {
+            let (output, applied) = apply_dictation_dictionary_for_category(
+                "please email open ai today",
+                &rules,
+                None,
+                category,
+            );
+            assert_eq!(output, "please email OpenAI today");
+            assert_eq!(
+                applied, 1,
+                "expected match regardless of category {category:?}"
+            );
+        }
+
+        // The plain (non-category-aware) entry point must also behave
+        // identically, since it defaults to Other internally.
+        let (output, applied) =
+            apply_dictation_dictionary("please email open ai today", &rules, None);
+        assert_eq!(output, "please email OpenAI today");
+        assert_eq!(applied, 1);
+    }
+
+    #[test]
+    fn snippet_category_scoped_entry_applies_only_when_category_matches() {
+        let snippets = vec![SnippetRule {
+            trigger: "omw".to_string(),
+            expansion: "on my way".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("messaging".to_string()),
+        }];
+
+        let (matching, matching_count) = apply_dictation_snippets_for_category(
+            "omw now",
+            &snippets,
+            Some("Slack"),
+            DictationAppCategory::Messaging,
+        );
+        assert_eq!(matching, "on my way now");
+        assert_eq!(matching_count, 1);
+    }
+
+    #[test]
+    fn snippet_category_scoped_entry_is_skipped_for_non_matching_category() {
+        let snippets = vec![SnippetRule {
+            trigger: "omw".to_string(),
+            expansion: "on my way".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("messaging".to_string()),
+        }];
+
+        let (output, applied) = apply_dictation_snippets_for_category(
+            "omw now",
+            &snippets,
+            Some("Notion"),
+            DictationAppCategory::Notes,
+        );
+        assert_eq!(output, "omw now");
+        assert_eq!(applied, 0);
+    }
+
+    #[test]
+    fn snippet_without_category_scope_applies_regardless_of_category() {
+        // Regression-safety: snippets with no category_scope must apply
+        // exactly as before this feature existed, no matter what destination
+        // category is passed in.
+        let snippets = vec![SnippetRule {
+            trigger: "brb".to_string(),
+            expansion: "be right back".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+        }];
+
+        for category in [
+            DictationAppCategory::Other,
+            DictationAppCategory::Messaging,
+            DictationAppCategory::Email,
+            DictationAppCategory::Notes,
+            DictationAppCategory::Worklog,
+            DictationAppCategory::AiChat,
+            DictationAppCategory::CodeEditor,
+        ] {
+            let (output, applied) =
+                apply_dictation_snippets_for_category("brb team", &snippets, None, category);
+            assert_eq!(output, "be right back team");
+            assert_eq!(
+                applied, 1,
+                "expected match regardless of category {category:?}"
+            );
+        }
+
+        let (output, applied) = apply_dictation_snippets("brb team", &snippets, None);
+        assert_eq!(output, "be right back team");
+        assert_eq!(applied, 1);
+    }
+
+    #[test]
+    fn category_scoped_dictionary_entry_applies_via_resolver_even_when_ai_formatting_toggle_is_off()
+    {
+        // Regression test: a user with a category-scoped dictionary entry
+        // (e.g. a medical term that should only expand in an EHR/notes app)
+        // expects that scoping to work regardless of whether they've
+        // separately disabled AI-category-formatting. That toggle only
+        // governs the LLM dictation-formatting prompt fragment; it must not
+        // affect dictionary/snippet category-scope matching, which depends
+        // on `resolve_dictation_app_category_with_overrides` always
+        // returning the real resolved category.
+        let transcription = crate::settings::TranscriptionSettings {
+            dictation_category_formatting_enabled: false,
+            dictation_app_category_overrides: vec![crate::settings::DictationAppCategoryOverride {
+                id: "1".to_string(),
+                app_matcher: "epic".to_string(),
+                category: "notes".to_string(),
+                enabled: true,
+            }],
+            ..crate::settings::TranscriptionSettings::default()
+        };
+
+        let destination_category = crate::settings::resolve_dictation_app_category_with_overrides(
+            &transcription,
+            Some("Epic EHR"),
+            None,
+        );
+        assert_eq!(destination_category, DictationAppCategory::Notes);
+
+        let rules = vec![DictionaryRule {
+            spoken_form: "htn".to_string(),
+            replacement: "hypertension".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("notes".to_string()),
+        }];
+
+        let (output, applied) = apply_dictation_dictionary_for_category(
+            "patient has htn",
+            &rules,
+            Some("Epic EHR"),
+            destination_category,
+        );
+        assert_eq!(output, "patient has hypertension");
+        assert_eq!(
+            applied, 1,
+            "category-scoped dictionary entry must apply even when \
+             dictation_category_formatting_enabled is false"
+        );
+    }
+
+    #[test]
+    fn category_scoped_snippet_entry_applies_via_resolver_even_when_ai_formatting_toggle_is_off() {
+        // Same regression as above, for snippets rather than dictionary
+        // entries.
+        let transcription = crate::settings::TranscriptionSettings {
+            dictation_category_formatting_enabled: false,
+            ..crate::settings::TranscriptionSettings::default()
+        };
+
+        // No override configured; relies on the built-in bundle-id/name
+        // classifier falling through correctly even with the toggle off.
+        let destination_category = crate::settings::resolve_dictation_app_category_with_overrides(
+            &transcription,
+            Some("Slack"),
+            None,
+        );
+        assert_eq!(destination_category, DictationAppCategory::Messaging);
+
+        let snippets = vec![SnippetRule {
+            trigger: "omw".to_string(),
+            expansion: "on my way".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("messaging".to_string()),
+        }];
+
+        let (output, applied) = apply_dictation_snippets_for_category(
+            "omw now",
+            &snippets,
+            Some("Slack"),
+            destination_category,
+        );
+        assert_eq!(output, "on my way now");
+        assert_eq!(
+            applied, 1,
+            "category-scoped snippet must apply even when \
+             dictation_category_formatting_enabled is false"
+        );
     }
 
     #[test]
@@ -1096,5 +1556,200 @@ mod tests {
             infer_learned_correction("we are", "we're", true).expect("manual learn can force");
         assert_eq!(forced.spoken_form, "we are");
         assert_eq!(forced.replacement, "we're");
+    }
+
+    /// Every selected-text command key the renderer's `SELECTED_TEXT_ACTIONS`
+    /// table (src/lib/selected-text-actions.ts) can send to
+    /// `transform_selected_text`/`transform_dictation_text`, i.e. the full
+    /// `SelectedTextTransformCommand` union in src/lib/backend.ts. Kept as a
+    /// single list so the "every renderer command has Rust support" tests
+    /// below stay in sync with each other.
+    const ALL_SELECTED_TEXT_TRANSFORM_COMMANDS: &[&str] = &[
+        "proofread_text",
+        "rewrite_shorter",
+        "expand_text",
+        "continue_writing",
+        "simplify_language",
+        "rewrite_professional",
+        "rewrite_friendly",
+        "rewrite_casual",
+        "summarize_text",
+        "translate_english",
+        "explain_text",
+        "find_bugs",
+        "bulletize_selection",
+        "numbered_list_selection",
+        "polish_text",
+        "prompt_engineer",
+        "uppercase_selection",
+        "lowercase_selection",
+        "title_case_selection",
+        "sentence_case_selection",
+    ];
+
+    #[test]
+    fn dictation_command_selected_text_label_covers_supported_commands() {
+        assert_eq!(
+            dictation_command_selected_text_label("proofread_text"),
+            Some("Quick Fix Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("rewrite_shorter"),
+            Some("Rewrite Shorter Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("expand_text"),
+            Some("Expand Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("continue_writing"),
+            Some("Continue Writing Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("simplify_language"),
+            Some("Simplify Language Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("rewrite_professional"),
+            Some("Rewrite Professional Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("rewrite_friendly"),
+            Some("Friendly Tone Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("rewrite_casual"),
+            Some("Casual Tone Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("summarize_text"),
+            Some("Summarize Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("translate_english"),
+            Some("Translate Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("explain_text"),
+            Some("Explain Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("find_bugs"),
+            Some("Find Bugs in Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("bulletize_selection"),
+            Some("Bulletize Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("numbered_list_selection"),
+            Some("Numbered List Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("polish_text"),
+            Some("Polish Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("prompt_engineer"),
+            Some("Prompt Engineer Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("uppercase_selection"),
+            Some("Uppercase Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("lowercase_selection"),
+            Some("Lowercase Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("title_case_selection"),
+            Some("Title Case Selected Text")
+        );
+        assert_eq!(
+            dictation_command_selected_text_label("sentence_case_selection"),
+            Some("Sentence Case Selected Text")
+        );
+    }
+
+    #[test]
+    fn dictation_command_selected_text_label_rejects_unknown_commands() {
+        assert_eq!(dictation_command_selected_text_label("delete_phrase"), None);
+        assert_eq!(dictation_command_selected_text_label("not_a_command"), None);
+    }
+
+    #[test]
+    fn every_renderer_selected_text_command_has_a_selected_text_label() {
+        // Regression guard for the "renderer exposes a command the Rust
+        // dispatch table doesn't recognize" class of bug: every command key
+        // in `SelectedTextTransformCommand`/`SELECTED_TEXT_ACTIONS` must
+        // resolve to a label here, or `transform_selected_text_impl` will
+        // hard-error with "Unsupported selected-text transform: <key>" the
+        // moment it is invoked from the command palette or a quick action.
+        for command_key in ALL_SELECTED_TEXT_TRANSFORM_COMMANDS {
+            assert!(
+                dictation_command_selected_text_label(command_key).is_some(),
+                "expected '{}' (exposed by SELECTED_TEXT_ACTIONS) to have a selected-text label",
+                command_key
+            );
+        }
+    }
+
+    #[test]
+    fn every_ai_backed_renderer_selected_text_command_has_a_default_prompt() {
+        // Companion regression guard: every command that isn't purely local
+        // (the four case-transform commands) must resolve to a default
+        // prompt, or `resolve_dictation_command_prompt` will error with
+        // "Unknown command key" once a user without a custom preset runs it.
+        for command_key in ALL_SELECTED_TEXT_TRANSFORM_COMMANDS {
+            if is_local_only_selected_text_command(command_key) {
+                continue;
+            }
+            assert!(
+                default_dictation_command_prompt(command_key).is_some(),
+                "expected AI-backed command '{}' to have a default prompt",
+                command_key
+            );
+        }
+    }
+
+    #[test]
+    fn is_local_only_selected_text_command_matches_case_transforms_only() {
+        for local_only in [
+            "uppercase_selection",
+            "lowercase_selection",
+            "title_case_selection",
+            "sentence_case_selection",
+        ] {
+            assert!(
+                is_local_only_selected_text_command(local_only),
+                "expected '{}' to be local-only",
+                local_only
+            );
+        }
+
+        for ai_backed in [
+            "proofread_text",
+            "rewrite_shorter",
+            "expand_text",
+            "continue_writing",
+            "simplify_language",
+            "rewrite_professional",
+            "rewrite_friendly",
+            "rewrite_casual",
+            "summarize_text",
+            "translate_english",
+            "explain_text",
+            "find_bugs",
+            "bulletize_selection",
+            "numbered_list_selection",
+            "polish_text",
+            "prompt_engineer",
+        ] {
+            assert!(
+                !is_local_only_selected_text_command(ai_backed),
+                "expected '{}' to require AI dispatch",
+                ai_backed
+            );
+        }
     }
 }

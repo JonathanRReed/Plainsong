@@ -32,9 +32,11 @@ import {
 import { useTheme } from "@/components/theme-provider";
 import {
   clearProviderSecret,
+  getDictationShortcutCapabilityStatus,
   getPermissionDiagnostics,
   getSecurityStatus,
   getSettings,
+  getShortcutConflicts,
   hasProviderSecret,
   lockVault,
   migrateToEncryptedStorage,
@@ -68,7 +70,9 @@ import {
 } from "@/lib/backend/ai";
 import {
   downloadDiarizationModel,
+  downloadSileroVadModel,
   isDiarizationModelAvailable,
+  isSileroVadModelDownloaded,
   listDiarizationModels,
 } from "@/lib/backend/asr";
 import {
@@ -81,7 +85,12 @@ import type {
   BackupInfo,
   CloudSetupReport,
 } from "@/lib/backend/storage";
-import type { PermissionDiagnostics, SecurityStatus } from "@/lib/backend/settings";
+import type {
+  DictationShortcutCapabilityStatus,
+  PermissionDiagnostics,
+  SecurityStatus,
+  ShortcutConflict,
+} from "@/lib/backend/settings";
 import type { DiarizationModelOption } from "@/lib/backend/asr";
 import type { Settings } from "@/types/settings";
 import { normalizeThemeScheme } from "@/lib/theme-schemes";
@@ -439,6 +448,11 @@ export function SettingsView() {
     useState<CloudSetupReport | null>(null);
   const [permissionDiagnostics, setPermissionDiagnostics] =
     useState<PermissionDiagnostics | null>(null);
+  const [nativeShortcutAvailable, setNativeShortcutAvailable] =
+    useState(false);
+  const [shortcutConflicts, setShortcutConflicts] = useState<
+    ShortcutConflict[]
+  >([]);
   const [securityStatus, setSecurityStatus] = useState<SecurityStatus | null>(
     null,
   );
@@ -456,6 +470,8 @@ export function SettingsView() {
   >([]);
   const [selectedDiarizationModel, setSelectedDiarizationModel] =
     useState("ecapa_tdnn_speaker");
+  const [sileroVadAvailable, setSileroVadAvailable] = useState(false);
+  const [sileroVadDownloading, setSileroVadDownloading] = useState(false);
   const [micTestActive, setMicTestActive] = useState(false);
   const [micTestLevel, setMicTestLevel] = useState(0);
   const [micTestRecording, setMicTestRecording] = useState(false);
@@ -510,10 +526,12 @@ export function SettingsView() {
     [settings, permissionDiagnostics],
   );
   const dictationShortcutBehavior = resolveDictationHotkeyBehavior(settings);
+  const dictationHoldToTalkActive =
+    nativeShortcutAvailable && settings?.transcription.dictationPushToTalk;
   const dictationShortcutBehaviorHint = settings?.transcription
     .dictationHandsFreeEnabled
-    ? "Press shortcut once to start hands-free dictation, then pause speaking or press again to stop"
-    : settings?.transcription.dictationPushToTalk
+    ? "Dictation starts automatically when you speak, no shortcut press needed — pause speaking (or press the shortcut) to stop"
+    : dictationHoldToTalkActive
       ? "Hold shortcut to record, release to stop"
       : "Press shortcut once to start, then press again to stop";
 
@@ -832,6 +850,42 @@ export function SettingsView() {
   }, [permissionDiagnostics]);
 
   useEffect(() => {
+    let mounted = true;
+    getDictationShortcutCapabilityStatus()
+      .then((status: DictationShortcutCapabilityStatus) => {
+        if (mounted) {
+          setNativeShortcutAvailable(status.nativeShortcutAvailable);
+        }
+      })
+      .catch((err) => {
+        // A native-helper probe failure should not block settings; hold-to-talk
+        // simply stays hidden and the honest toggle-only copy remains in place.
+        console.warn("getDictationShortcutCapabilityStatus check failed:", err);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    getShortcutConflicts()
+      .then((status) => {
+        if (mounted) {
+          setShortcutConflicts(status.conflicts);
+        }
+      })
+      .catch((err) => {
+        // A conflict-probe failure should not block settings; the shortcuts
+        // section simply renders without the inline conflict warning.
+        console.warn("getShortcutConflicts check failed:", err);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (activeTab !== "security" || hasLoadedSecurityTab) {
       return;
     }
@@ -974,6 +1028,22 @@ export function SettingsView() {
       if (!mounted) return;
       setDiarizationAvailable(avail);
       setDiarizationModels(models);
+    };
+    load();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      const avail = await withSettingsSectionTimeout(
+        "Silero VAD availability",
+        isSileroVadModelDownloaded(),
+      ).catch(() => false);
+      if (!mounted) return;
+      setSileroVadAvailable(avail);
     };
     load();
     return () => {
@@ -1405,6 +1475,62 @@ export function SettingsView() {
     }, 3000);
   }, [micTestPlaybackUrl]);
 
+  // Instant, local mirror of electron/shortcut-registration.ts's
+  // partitionUniqueShortcutRegistrations precedence: the field listed first
+  // in SHORTCUT_FIELD_CONFIG keeps a clashing shortcut, later fields are
+  // reported as conflicting. Recomputed on every render so a freshly-typed
+  // shortcut is flagged immediately, without waiting on a save round-trip.
+  // The backend's get_shortcut_conflicts result (fetched once above) is
+  // merged in as a fallback so a conflict the server already knows about
+  // (e.g. detected at startup) still shows even before settings finish
+  // loading into this form. Must run before the `if (!settings)` early
+  // return below to keep hook call order stable across renders.
+  const localShortcutConflictsByField = useMemo(() => {
+    const byField = new Map<ShortcutFieldKey, ShortcutConflict>();
+    if (!settings) {
+      return byField;
+    }
+
+    const owners = new Map<string, { key: ShortcutFieldKey; label: string }>();
+
+    for (const { key, label } of SHORTCUT_FIELD_CONFIG) {
+      const raw = settings.shortcuts[key];
+      if (!raw) {
+        continue;
+      }
+      const normalized = normalizeShortcut(raw);
+      if (!normalized) {
+        continue;
+      }
+      const owner = owners.get(normalized);
+      if (owner) {
+        byField.set(key, {
+          field: key,
+          label,
+          shortcut: raw,
+          conflictsWith: owner.label,
+          conflictsWithField: owner.key,
+        });
+        continue;
+      }
+      owners.set(normalized, { key, label });
+    }
+
+    return byField;
+  }, [settings]);
+
+  const shortcutConflictsByField = useMemo(() => {
+    const byField = new Map<ShortcutFieldKey, ShortcutConflict>(
+      localShortcutConflictsByField,
+    );
+    for (const conflict of shortcutConflicts) {
+      if (!byField.has(conflict.field)) {
+        byField.set(conflict.field, conflict);
+      }
+    }
+    return byField;
+  }, [localShortcutConflictsByField, shortcutConflicts]);
+
   if (!settings) {
     if (error) {
       return (
@@ -1449,50 +1575,64 @@ export function SettingsView() {
             ? formatShortcutForDisplay(settings.shortcuts[key])
             : "None";
           const isCapturing = capturingShortcut === key;
+          const conflict = shortcutConflictsByField.get(key);
           return (
             <div
               key={key}
-              className="flex flex-col gap-2 rounded-2xl border border-border/60 bg-muted/20 px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+              className="flex flex-col gap-2 rounded-2xl border border-border/60 bg-muted/20 px-3 py-3"
             >
-              <span className="text-sm text-muted-foreground">{label}</span>
-              <div className="flex items-center gap-2">
-                <Input
-                  value={isCapturing ? "Listening..." : currentVal}
-                  readOnly
-                  className={`h-9 w-36 text-center font-mono text-xs ${isCapturing ? "border-primary ring-1 ring-primary" : ""}`}
-                  onFocus={() => {
-                    setCapturingShortcut(key);
-                  }}
-                  onBlur={() => {
-                    if (capturingShortcut === key) {
-                      setCapturingShortcut(null);
-                    }
-                  }}
-                  onKeyDown={handleShortcutKeyDown(key)}
-                />
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-9 px-3"
-                  onClick={() => {
-                    const next: Settings = {
-                      ...settings,
-                      shortcuts: { ...settings.shortcuts, [key]: "" },
-                    };
-                    setDraftSettings(next);
-                    queueSettingsSave(next, 0);
-                  }}
-                >
-                  Clear
-                </Button>
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <span className="text-sm text-muted-foreground">{label}</span>
+                <div className="flex items-center gap-2">
+                  <Input
+                    value={isCapturing ? "Listening..." : currentVal}
+                    readOnly
+                    aria-invalid={conflict ? true : undefined}
+                    className={`h-9 w-36 text-center font-mono text-xs ${isCapturing ? "border-primary ring-1 ring-primary" : conflict ? "border-destructive/60" : ""}`}
+                    onFocus={() => {
+                      setCapturingShortcut(key);
+                    }}
+                    onBlur={() => {
+                      if (capturingShortcut === key) {
+                        setCapturingShortcut(null);
+                      }
+                    }}
+                    onKeyDown={handleShortcutKeyDown(key)}
+                  />
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-9 px-3"
+                    onClick={() => {
+                      const next: Settings = {
+                        ...settings,
+                        shortcuts: { ...settings.shortcuts, [key]: "" },
+                      };
+                      setDraftSettings(next);
+                      queueSettingsSave(next, 0);
+                    }}
+                  >
+                    Clear
+                  </Button>
+                </div>
               </div>
+              {conflict && (
+                <div className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    This conflicts with {conflict.conflictsWith} — only one
+                    will work.
+                  </span>
+                </div>
+              )}
             </div>
           );
         })}
       </div>
       <p className="mt-3 text-xs text-muted-foreground">
-        Changes save immediately, duplicate conflicts are blocked, and new
-        bindings apply instantly.
+        Changes save immediately and new bindings apply instantly. If two
+        shortcuts share the same keys, only one is registered — the other
+        is flagged above.
       </p>
     </div>
   );
@@ -1526,12 +1666,35 @@ export function SettingsView() {
             <p className="text-sm text-muted-foreground">
               {dictationShortcutBehaviorHint}
             </p>
-            <p className="w-full rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-foreground">
-              Toggle{" "}
-              <span className="text-muted-foreground">
-                — press to start, press again to stop
-              </span>
-            </p>
+            <select
+              aria-label="Hotkey behavior"
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+              value={dictationShortcutBehavior}
+              onChange={(event) => {
+                if (!settings) {
+                  return;
+                }
+                const behavior = event.target.value as DictationHotkeyBehavior;
+                updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationPushToTalk: behavior === "hold_to_talk",
+                    dictationHandsFreeEnabled: behavior === "hands_free",
+                  },
+                });
+              }}
+            >
+              <option value="toggle">Toggle (press to start, press again to stop)</option>
+              {nativeShortcutAvailable && (
+                <option value="hold_to_talk">
+                  Hold-to-talk (hold to record, release to stop)
+                </option>
+              )}
+              <option value="hands_free">
+                Hands-free (starts automatically when you speak, no shortcut needed)
+              </option>
+            </select>
           </div>
         )}
 
@@ -1913,6 +2076,103 @@ export function SettingsView() {
                       {preset}m
                     </button>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {settings.audio.voiceActivityDetection && (
+              <div className="space-y-3 rounded-2xl border border-border/60 bg-background/75 p-4">
+                <div className="space-y-0.5">
+                  <Label>VAD accuracy</Label>
+                  <p className="text-sm text-muted-foreground">
+                    Energy-threshold is the default: a lightweight heuristic
+                    that needs no download and works well in quiet rooms.
+                    Silero is a small ONNX speech-detection model that's more
+                    accurate in noisy environments, but requires a one-time
+                    ~2 MB model download before it can be enabled.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                      (settings.transcription.dictationVadBackend ??
+                        "energy_threshold") === "energy_threshold"
+                        ? "border-rust/40 bg-rust/8 text-rust"
+                        : "border-border bg-muted hover:bg-muted/80"
+                    }`}
+                    onClick={() =>
+                      void updateSettings({
+                        ...settings,
+                        transcription: {
+                          ...settings.transcription,
+                          dictationVadBackend: "energy_threshold",
+                        },
+                      })
+                    }
+                  >
+                    Energy-threshold
+                  </button>
+                  {sileroVadAvailable ? (
+                    <button
+                      type="button"
+                      className={`rounded-full border px-3 py-1.5 text-xs transition-colors ${
+                        settings.transcription.dictationVadBackend ===
+                        "silero"
+                          ? "border-rust/40 bg-rust/8 text-rust"
+                          : "border-border bg-muted hover:bg-muted/80"
+                      }`}
+                      onClick={() =>
+                        void updateSettings({
+                          ...settings,
+                          transcription: {
+                            ...settings.transcription,
+                            dictationVadBackend: "silero",
+                          },
+                        })
+                      }
+                    >
+                      Silero (accurate)
+                    </button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={sileroVadDownloading}
+                      onClick={async () => {
+                        setSileroVadDownloading(true);
+                        try {
+                          await downloadSileroVadModel();
+                          setSileroVadAvailable(true);
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationVadBackend: "silero",
+                            },
+                          });
+                        } catch (e) {
+                          const msg =
+                            e instanceof Error ? e.message : String(e);
+                          setError(`Download failed: ${msg}`);
+                        } finally {
+                          setSileroVadDownloading(false);
+                        }
+                      }}
+                    >
+                      {sileroVadDownloading ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Downloading Model...
+                        </>
+                      ) : (
+                        <>
+                          <Download className="mr-2 h-4 w-4" />
+                          Download Silero (~2 MB)
+                        </>
+                      )}
+                    </Button>
+                  )}
                 </div>
               </div>
             )}

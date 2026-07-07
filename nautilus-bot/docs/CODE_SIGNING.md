@@ -10,6 +10,7 @@ Plainsong ships as an Electron app packaged with `electron-builder`, with the Ru
 - macOS entitlements: `build-resources/entitlements.mac.plist`
 - macOS inherited entitlements: `build-resources/entitlements.mac.inherit.plist`
 - Packaged sidecar source: `rust-sidecar/target/release/plainsong-sidecar`
+- Packaged native shortcut helper source (macOS only): `dist-native/plainsong-native-shortcut-helper`
 - Release output directory: `release/`
 
 ## macOS
@@ -60,6 +61,21 @@ Plainsong currently requests:
 - runtime allowances required by the packaged Electron app
 
 If you need to change those capabilities, update the plist files in `build-resources/` and keep `electron-builder.yml` aligned.
+
+### Second executable: native shortcut helper
+
+The packaged app bundle contains a second executable, not just the main Electron binary and the `rust-sidecar`: a small Swift CLI helper (built from `scripts/native-macos-shortcut-helper.swift` via `bun run shortcut-helper:build`, output at `dist-native/plainsong-native-shortcut-helper`) that watches the dictation hotkey with a listen-only `CGEventTap` so press-and-hold works. It is copied into the app bundle's `Contents/Resources/shortcut-helper/` directory by the `mac.extraResources` entry in `electron-builder.yml`, the same way `rust-sidecar/target/release/plainsong-sidecar` is copied into `Contents/Resources/sidecar/`.
+
+Because it is a separate Mach-O binary inside the bundle, `codesign --deep` (or an equivalent explicit signing step for each embedded binary) must sign it with the **same Developer ID Application identity and entitlements** used for the main app and the Rust sidecar. It needs the Accessibility permission entitlement already required for text insertion — it does not require Input Monitoring, since it only observes events (`CGEvent.tapCreate(... options: .listenOnly ...)`) rather than intercepting them. It does not need any additional entitlement beyond what the app already declares.
+
+When verifying a packaged build (see "Verify a packaged app" above), confirm both embedded binaries pass:
+
+```bash
+codesign --verify --deep --strict --verbose=2 "release/mac-arm64/Plainsong.app/Contents/Resources/sidecar/plainsong-sidecar"
+codesign --verify --deep --strict --verbose=2 "release/mac-arm64/Plainsong.app/Contents/Resources/shortcut-helper/plainsong-native-shortcut-helper"
+```
+
+This is purely a packaging/signing-scope note — it does not change notarization credentials, the Apple Developer ID, or the existing sign/notarize pipeline gating.
 
 ## Windows
 

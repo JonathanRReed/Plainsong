@@ -366,6 +366,7 @@ export function Sidebar({
                 </Button>
                 <div
                   id="sidebar-more-items"
+                  hidden={!showMoreItems}
                   className={cn("ml-2 flex flex-col gap-1", !showMoreItems && "hidden")}
                 >
                   {moreNavItems.map((item) => {
@@ -449,15 +450,18 @@ export function Sidebar({
           <div className={cn("flex flex-col gap-2", isCollapsed && "items-center gap-2")}>
             <Tooltip delayDuration={0}>
               <TooltipTrigger asChild>
-                <div
+                <button
+                  type="button"
+                  onClick={() => onViewChange("settings")}
+                  aria-label={`${localModeStatus.label}. ${localModeStatus.detail}`}
                   className={cn(
-                    "flex h-9 cursor-help items-center gap-2 rounded-xl border border-border/60 bg-muted/30 px-2.5 text-xs text-muted-foreground",
+                    "flex h-9 cursor-help items-center gap-2 rounded-xl border border-border/60 bg-muted/30 px-2.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
                     isCollapsed && "h-10 w-10 justify-center p-0"
                   )}
                 >
                   <span className={localModeStatus.active ? "neume neume-lit" : "neume neume-hollow"} aria-hidden="true" />
                   {!isCollapsed && <span>{localModeStatus.label}</span>}
-                </div>
+                </button>
               </TooltipTrigger>
               <TooltipContent side="right">{localModeStatus.detail}</TooltipContent>
             </Tooltip>
