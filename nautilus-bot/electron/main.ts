@@ -12,6 +12,7 @@ import {
   Tray,
   type IpcMainInvokeEvent,
 } from "electron";
+import { execFile } from "child_process";
 import { existsSync } from "fs";
 import path from "path";
 import { autoUpdater, type AppUpdater } from "electron-updater";
@@ -33,6 +34,7 @@ import {
   findConflictingShortcuts,
   type ShortcutConflictInfo,
 } from "./shortcut-registration";
+import { resolveUpdaterChannel, type UpdateChannel } from "./updater-channel";
 import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
 
 const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
@@ -68,7 +70,6 @@ function qaLog(message: string, payload?: unknown): void {
   }
 }
 
-type UpdateChannel = "stable" | "beta";
 type UpdateInfoPayload = {
   version: string;
   notes: string;
@@ -87,9 +88,11 @@ type UpdateStatusPayload = {
   info?: UpdateInfoPayload;
   progress?: number;
   error?: string;
+  installBlockedReason?: "unsigned";
 };
 
 let updateStatus: UpdateStatusPayload = { status: "unknown" };
+let updateInstallBlockedReason: "unsigned" | undefined;
 
 type AppSettings = {
   shortcuts?: {
@@ -280,6 +283,7 @@ function configureAutoUpdater(updater: AppUpdater): void {
       setUpdateStatus({
         status: "updateAvailable",
         info: normalizeUpdateInfo(info),
+        installBlockedReason: updateInstallBlockedReason,
       });
     });
 
@@ -302,6 +306,7 @@ function configureAutoUpdater(updater: AppUpdater): void {
         status: "updateAvailable",
         info: normalizeUpdateInfo(info),
         progress: 100,
+        installBlockedReason: updateInstallBlockedReason,
       });
     });
 
@@ -322,6 +327,30 @@ function configureAutoUpdater(updater: AppUpdater): void {
   }
 }
 
+// Squirrel.Mac can only install updates into a code-signed app, and unsigned
+// releases are a supported configuration (no Developer ID secrets in CI). An
+// ad-hoc signature (what electron-builder applies on arm64 when no identity is
+// available) cannot be updated either, so it counts as unsigned here.
+let codeSignatureCheck: Promise<boolean> | null = null;
+
+function isMacAppCodeSigned(): Promise<boolean> {
+  if (process.platform !== "darwin" || !app.isPackaged) {
+    return Promise.resolve(true);
+  }
+
+  if (!codeSignatureCheck) {
+    codeSignatureCheck = new Promise((resolve) => {
+      const bundlePath = path.resolve(app.getPath("exe"), "..", "..", "..");
+      execFile("codesign", ["-dv", "--verbose=2", bundlePath], (error, stdout, stderr) => {
+        const output = `${stdout}\n${stderr}`;
+        resolve(!error && !output.includes("Signature=adhoc"));
+      });
+    });
+  }
+
+  return codeSignatureCheck;
+}
+
 async function checkForUpdatesInElectron(): Promise<UpdateInfoPayload | null> {
   if (!app.isPackaged) {
     const error = "Updates are only available in packaged builds.";
@@ -329,8 +358,12 @@ async function checkForUpdatesInElectron(): Promise<UpdateInfoPayload | null> {
     throw new Error(error);
   }
 
+  updateInstallBlockedReason = (await isMacAppCodeSigned()) ? undefined : "unsigned";
+
   const channel = await getUpdateChannelFromSidecar();
-  autoUpdater.channel = channel;
+  // Stable must request `latest-mac.yml` (what electron-builder publishes);
+  // requesting `stable-mac.yml` 404s with no fallback. See updater-channel.ts.
+  autoUpdater.channel = resolveUpdaterChannel(channel);
   autoUpdater.allowPrerelease = channel === "beta";
   autoUpdater.allowDowngrade = channel === "beta";
 
@@ -346,6 +379,19 @@ async function installUpdateInElectron(): Promise<void> {
 
   if (!updateStatus.info) {
     throw new Error("No downloaded or available update is ready to install.");
+  }
+
+  if (!(await isMacAppCodeSigned())) {
+    const error =
+      "This build is not code-signed, so the updater cannot install updates. " +
+      "Download the new version from GitHub Releases instead.";
+    setUpdateStatus({
+      status: "error",
+      info: updateStatus.info,
+      error,
+      installBlockedReason: "unsigned",
+    });
+    throw new Error(error);
   }
 
   if (!updateReadyToInstall) {

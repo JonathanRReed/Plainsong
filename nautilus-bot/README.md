@@ -68,12 +68,17 @@ bun run electron:build          # current platform
 bun run electron:build:mac      # macOS (run on macOS)
 bun run electron:build:win      # Windows (run on Windows)
 bun run release:mac             # build + publish a macOS release (CI)
-bun run release:win             # build + publish a Windows release (CI)
+bun run release:win             # build + publish a Windows release (future work, not in the v1 pipeline)
 ```
 
 macOS releases are signed and notarized when Developer ID secrets are present in
-CI; otherwise an unsigned build is produced (users clear the quarantine
-attribute once). See [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) and
+CI; otherwise an unsigned build is produced. Unsigned builds have two caveats:
+users clear the quarantine attribute once
+(`xattr -dr com.apple.quarantine /Applications/Plainsong.app`), and the in-app
+updater cannot install updates into an unsigned app — download new versions from
+[GitHub Releases](https://github.com/JonathanRReed/Plainsong/releases) instead
+(the in-app updater says so and links there). See
+[docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) and
 [docs/APPLE_DEVELOPER_SETUP.md](docs/APPLE_DEVELOPER_SETUP.md).
 
 ## Verify

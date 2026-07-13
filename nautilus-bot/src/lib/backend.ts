@@ -1124,6 +1124,8 @@ export interface UpdateStatusInfo {
   info?: UpdateInfo;
   progress?: number;
   error?: string;
+  /** Set when an update exists but this build cannot install it (e.g. unsigned macOS builds). */
+  installBlockedReason?: "unsigned";
 }
 
 /** Check for available updates. Returns update info if available, null if up to date. */

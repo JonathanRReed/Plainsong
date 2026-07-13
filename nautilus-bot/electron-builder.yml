@@ -63,6 +63,9 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+  # Avoid a space-containing default artifact name ("Plainsong Setup 1.0.0.exe")
+  # for cleaner download URLs.
+  artifactName: ${productName}-Setup-${version}.${ext}
 
 dmg:
   sign: false
