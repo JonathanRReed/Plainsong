@@ -163,8 +163,19 @@ impl OllamaClient {
         })
     }
 
-    /// Summarize meeting with optional template
-    pub async fn summarize(&self, transcript: &str, model: &str) -> Result<String> {
+    /// Summarize meeting with optional template. A non-empty `custom_prompt`
+    /// (the user's "Custom Meeting Summary Prompt" setting) replaces the
+    /// built-in summary instruction entirely.
+    pub async fn summarize(
+        &self,
+        transcript: &str,
+        model: &str,
+        custom_prompt: Option<&str>,
+    ) -> Result<String> {
+        if let Some(custom) = crate::llm::normalized_custom_summary_prompt(custom_prompt) {
+            let prompt = format!("{custom}\n\nTranscript:\n{transcript}\n\nSummary:");
+            return self.generate(model, &prompt).await;
+        }
         self.summarize_with_template(transcript, model, None).await
     }
 

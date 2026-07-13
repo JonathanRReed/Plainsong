@@ -1,11 +1,14 @@
 //! Settings and user preferences persistence
 //!
 //! Manages user configuration including:
-//! - Audio settings (sample rate, channels, etc.)
+//! - Audio settings (input device preferences)
 //! - Transcription preferences
 //! - UI settings
 //! - Keyboard shortcuts
-//! - Export templates
+//!
+//! Every field in this schema must have a real runtime reader. Dead
+//! "placebo" fields are removed outright (see `REMOVED_SETTINGS_KEYS` for
+//! the load-time migration that strips their stale keys from settings.json).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -38,7 +41,7 @@ pub struct Settings {
     pub transcription: TranscriptionSettings,
     /// UI preferences
     pub ui: UiSettings,
-    /// Export configuration
+    /// Export configuration (transitional empty container; see `ExportSettings`)
     pub export: ExportSettings,
     /// Privacy and security
     pub privacy: PrivacySettings,
@@ -46,8 +49,6 @@ pub struct Settings {
     pub shortcuts: KeyboardShortcuts,
     /// Update preferences
     pub updates: UpdateSettings,
-    /// Selected export template
-    pub default_template: String,
     /// Theme
     pub theme: String,
 }
@@ -62,24 +63,15 @@ impl Default for Settings {
             privacy: PrivacySettings::default(),
             shortcuts: KeyboardShortcuts::default(),
             updates: UpdateSettings::default(),
-            default_template: "meeting".to_string(),
             theme: "system".to_string(),
         }
     }
 }
 
 /// Audio recording settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AudioSettings {
-    /// Sample rate (Hz)
-    pub sample_rate: u32,
-    /// Number of channels (1=mono, 2=stereo)
-    pub channels: u16,
-    /// Enable system audio capture
-    pub capture_system_audio: bool,
-    /// Enable microphone capture
-    pub capture_microphone: bool,
     /// Preferred app-wide input device selection.
     pub preferred_input_device: Option<AudioInputDevicePreference>,
     /// Whether dictation should override the app-wide microphone selection.
@@ -90,37 +82,6 @@ pub struct AudioSettings {
     pub meeting_input_override_enabled: bool,
     /// Preferred microphone for meetings when override is enabled.
     pub meeting_input_device: Option<AudioInputDevicePreference>,
-    /// Enable noise suppression
-    pub noise_suppression: bool,
-    /// Enable VAD (auto-stop on silence)
-    pub voice_activity_detection: bool,
-    /// Silence threshold (seconds before auto-stop)
-    pub silence_timeout_seconds: f32,
-    /// Auto-gain control
-    pub auto_gain_control: bool,
-    /// Manual gain (dB) when auto-gain is off (-20 to +20)
-    pub manual_gain_db: f32,
-}
-
-impl Default for AudioSettings {
-    fn default() -> Self {
-        Self {
-            sample_rate: 16000,
-            channels: 1,
-            capture_system_audio: true,
-            capture_microphone: true,
-            preferred_input_device: None,
-            dictation_input_override_enabled: false,
-            dictation_input_device: None,
-            meeting_input_override_enabled: false,
-            meeting_input_device: None,
-            noise_suppression: true,
-            voice_activity_detection: true,
-            silence_timeout_seconds: 300.0,
-            auto_gain_control: true,
-            manual_gain_db: 0.0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -160,20 +121,10 @@ pub struct TranscriptionSettings {
     pub dictation_mlx_enabled: bool,
     /// Whether the meeting route slot should use MLX acceleration when available.
     pub meeting_mlx_enabled: bool,
-    /// Auto-transcribe after recording
-    pub auto_transcribe: bool,
     /// Enable speaker diarization
     pub enable_diarization: bool,
-    /// Enable intelligent punctuation
-    pub intelligent_punctuation: bool,
     /// Language (auto-detect if None)
     pub language: Option<String>,
-    /// Number of speakers (0 = auto-detect)
-    pub num_speakers: usize,
-    /// Speaker naming method: auto (infer from speech), numbered, manual
-    pub speaker_naming_method: String,
-    /// Selected diarization model id
-    pub diarization_model_id: String,
     /// Skip silence segments during transcription (Pro/Friends Club feature)
     pub silence_skip_enabled: bool,
     /// Dictation: Keep latest dictation result in clipboard
@@ -194,7 +145,10 @@ pub struct TranscriptionSettings {
     pub dictation_live_preview_enabled: bool,
     /// Dictation: Smart Format, LLM polishes text before insert
     pub dictation_ai_formatting: bool,
-    /// Dictation mode preset: voice, messages, email, notes, translate_english, meeting_follow_up, custom
+    /// Dictation mode preset: voice, messages, email, notes, meeting_follow_up,
+    /// custom. (`translate_english` is only valid as a custom mode's
+    /// `base_mode_preset`, not as the top-level preset — see
+    /// `normalize_dictation_mode_preset` in `lib.rs`.)
     pub dictation_mode_preset: String,
     /// Selected saved custom dictation mode id, if any.
     pub dictation_selected_custom_mode_id: Option<String>,
@@ -222,8 +176,6 @@ pub struct TranscriptionSettings {
     pub meeting_auto_name_enabled: bool,
     /// Optional model override for meeting title generation
     pub meeting_auto_name_model: Option<String>,
-    /// Save raw transcript without formatting
-    pub save_raw_transcript: bool,
     /// Persist dictation outputs into project storage.
     pub dictation_save_to_inbox: bool,
     /// Dictation profile preference: normal_speed or power_rewrite.
@@ -325,13 +277,8 @@ impl Default for TranscriptionSettings {
             mlx_accelerated_providers: Vec::new(),
             dictation_mlx_enabled: false,
             meeting_mlx_enabled: false,
-            auto_transcribe: true,
             enable_diarization: true,
-            intelligent_punctuation: true,
             language: None,
-            num_speakers: 0,
-            speaker_naming_method: "auto".to_string(),
-            diarization_model_id: "ecapa_tdnn_speaker".to_string(),
             silence_skip_enabled: false,
             dictation_copy_to_clipboard: true,
             dictation_auto_request_permissions: true,
@@ -357,7 +304,6 @@ impl Default for TranscriptionSettings {
             meeting_custom_prompt: None,
             meeting_auto_name_enabled: true,
             meeting_auto_name_model: None,
-            save_raw_transcript: false,
             dictation_save_to_inbox: true,
             dictation_profile: "normal_speed".to_string(),
             dictation_project_id: "inbox".to_string(),
@@ -442,12 +388,6 @@ pub struct UiSettings {
     pub always_on_top: bool,
     /// Minimize to tray on close
     pub minimize_to_tray: bool,
-    /// Window position (x, y)
-    pub window_position: Option<(i32, i32)>,
-    /// Window size (width, height)
-    pub window_size: Option<(u32, u32)>,
-    /// Font size
-    pub font_size: u32,
     /// Show dictation overlay popup
     pub show_dictation_popup: bool,
     /// Show meeting recording overlay popup
@@ -461,9 +401,6 @@ impl Default for UiSettings {
         Self {
             always_on_top: false,
             minimize_to_tray: true,
-            window_position: None,
-            window_size: None,
-            font_size: 14,
             show_dictation_popup: true,
             show_recording_popup: true,
             color_scheme: "default".to_string(),
@@ -471,51 +408,22 @@ impl Default for UiSettings {
     }
 }
 
-/// Export settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Export settings.
+///
+/// All previous fields (default format, export directory, include flags,
+/// open-after-export, auto-export) were placebo settings with no reader —
+/// export requests carry their own format/target. The empty container is
+/// kept transitionally so the renderer's `settings.export` access stays
+/// defined until the Storage-tab UI section is removed; drop the whole
+/// struct together with that UI.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
-pub struct ExportSettings {
-    /// Default export format
-    pub default_format: String,
-    /// Auto-export after transcription
-    pub auto_export: bool,
-    /// Export directory
-    pub export_directory: Option<PathBuf>,
-    /// Include timestamps
-    pub include_timestamps: bool,
-    /// Include speaker labels
-    pub include_speakers: bool,
-    /// Open after export
-    pub open_after_export: bool,
-}
-
-impl Default for ExportSettings {
-    fn default() -> Self {
-        Self {
-            default_format: "markdown".to_string(),
-            auto_export: false,
-            export_directory: None,
-            include_timestamps: true,
-            include_speakers: true,
-            open_after_export: false,
-        }
-    }
-}
+pub struct ExportSettings {}
 
 /// Privacy settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PrivacySettings {
-    /// Encrypt recordings at rest
-    pub encrypt_recordings: bool,
-    /// Auto-delete after days (0 = never)
-    pub auto_delete_days: u32,
-    /// Require password for access
-    pub require_password: bool,
-    /// Enable audit logging
-    pub audit_logging: bool,
-    /// Cloud sync enabled
-    pub cloud_sync: bool,
     /// Allow remote provider processing (local-first default)
     pub remote_processing_enabled: bool,
     /// Default analysis LLM provider
@@ -533,11 +441,6 @@ pub struct PrivacySettings {
 impl Default for PrivacySettings {
     fn default() -> Self {
         Self {
-            encrypt_recordings: false,
-            auto_delete_days: 0,
-            require_password: false,
-            audit_logging: true,
-            cloud_sync: false,
             remote_processing_enabled: false,
             llm_provider: "ollama".to_string(),
             llm_model_id: None,
@@ -552,29 +455,20 @@ impl Default for PrivacySettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct KeyboardShortcuts {
-    /// Toggle recording
-    pub toggle_recording: String,
     /// Toggle dictation mode
     pub toggle_dictation: String,
     /// Additional dictation bindings for platform parity (macOS command key, etc.)
     pub toggle_dictation_alternates: Vec<String>,
     /// Open main window
     pub open_window: String,
-    /// Quick export
-    pub quick_export: String,
-    /// Focus search
-    pub focus_search: String,
 }
 
 impl Default for KeyboardShortcuts {
     fn default() -> Self {
         Self {
-            toggle_recording: "Ctrl+Shift+R".to_string(),
             toggle_dictation: default_dictation_shortcut().to_string(),
             toggle_dictation_alternates: Vec::new(),
             open_window: "Ctrl+Shift+N".to_string(),
-            quick_export: "Ctrl+Shift+E".to_string(),
-            focus_search: "Ctrl+Shift+F".to_string(),
         }
     }
 }
@@ -1030,6 +924,61 @@ pub fn resolve_dictation_app_category_with_overrides_and_hint(
         .unwrap_or(DictationAppCategory::Other)
 }
 
+/// Settings keys that were removed from the schema because they had no
+/// runtime reader (placebo settings). Serde already ignores unknown keys on
+/// load; this list drives the load-time migration that rewrites
+/// settings.json without them so stale keys don't linger on disk implying
+/// behavior that doesn't exist. Paths are `(section, camelCase key)`; an
+/// empty section means a top-level key.
+const REMOVED_SETTINGS_KEYS: &[(&str, &str)] = &[
+    ("", "defaultTemplate"),
+    ("audio", "sampleRate"),
+    ("audio", "channels"),
+    ("audio", "captureSystemAudio"),
+    ("audio", "captureMicrophone"),
+    ("audio", "noiseSuppression"),
+    ("audio", "voiceActivityDetection"),
+    ("audio", "silenceTimeoutSeconds"),
+    ("audio", "autoGainControl"),
+    ("audio", "manualGainDb"),
+    ("transcription", "autoTranscribe"),
+    ("transcription", "intelligentPunctuation"),
+    ("transcription", "numSpeakers"),
+    ("transcription", "speakerNamingMethod"),
+    ("transcription", "diarizationModelId"),
+    ("transcription", "saveRawTranscript"),
+    ("ui", "windowPosition"),
+    ("ui", "windowSize"),
+    ("ui", "fontSize"),
+    ("export", "defaultFormat"),
+    ("export", "autoExport"),
+    ("export", "exportDirectory"),
+    ("export", "includeTimestamps"),
+    ("export", "includeSpeakers"),
+    ("export", "openAfterExport"),
+    ("privacy", "encryptRecordings"),
+    ("privacy", "autoDeleteDays"),
+    ("privacy", "requirePassword"),
+    ("privacy", "auditLogging"),
+    ("privacy", "cloudSync"),
+    ("shortcuts", "toggleRecording"),
+    ("shortcuts", "quickExport"),
+    ("shortcuts", "focusSearch"),
+];
+
+/// Whether a raw settings.json payload still carries any key that was
+/// removed from the schema (and should therefore be rewritten on load).
+fn raw_settings_contain_removed_keys(raw: &serde_json::Value) -> bool {
+    REMOVED_SETTINGS_KEYS.iter().any(|(section, key)| {
+        let scope = if section.is_empty() {
+            Some(raw)
+        } else {
+            raw.get(section)
+        };
+        scope.and_then(|value| value.get(key)).is_some()
+    })
+}
+
 /// Settings manager
 pub struct SettingsManager {
     settings: Settings,
@@ -1040,18 +989,27 @@ impl SettingsManager {
     /// Create new settings manager
     pub fn new() -> Result<Self> {
         let config_path = Self::config_path()?;
+        let mut needs_migration_rewrite = false;
         let mut settings = if config_path.exists() {
             match Self::load_from_file(&config_path) {
-                Ok(settings) => settings,
+                Ok((settings, raw)) => {
+                    needs_migration_rewrite = raw_settings_contain_removed_keys(&raw);
+                    settings
+                }
                 Err(err) => {
                     // A corrupt or truncated settings file must never block startup.
-                    // Move it aside for diagnostics and fall back to defaults.
+                    // Move it aside for diagnostics and fall back to defaults. The
+                    // backup name is timestamped so a later corruption never
+                    // overwrites an earlier diagnostic copy.
                     tracing::warn!(
                         "Settings file at {} is unreadable ({}); backing it up and using defaults",
                         config_path.display(),
                         err
                     );
-                    let backup_path = config_path.with_extension("json.corrupt");
+                    let backup_path = config_path.with_extension(format!(
+                        "json.corrupt-{}",
+                        chrono::Utc::now().format("%Y%m%dT%H%M%S")
+                    ));
                     if let Err(rename_err) = std::fs::rename(&config_path, &backup_path) {
                         tracing::warn!(
                             "Failed to move corrupt settings file aside: {}",
@@ -1069,10 +1027,23 @@ impl SettingsManager {
         normalize_loaded_transcription_settings(&mut settings.transcription);
         normalize_loaded_privacy_settings(&mut settings.privacy);
 
-        Ok(Self {
+        let manager = Self {
             settings,
             config_path,
-        })
+        };
+
+        // Migration: rewrite settings.json without keys removed from the
+        // schema, so the on-disk file honestly matches what the app reads.
+        if needs_migration_rewrite {
+            if let Err(error) = manager.save() {
+                tracing::warn!(
+                    "Failed to rewrite settings.json while dropping removed keys: {}",
+                    error
+                );
+            }
+        }
+
+        Ok(manager)
     }
 
     /// Get settings reference
@@ -1096,7 +1067,19 @@ impl SettingsManager {
         }
 
         let tmp_path = self.config_path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, json).context("Failed to write temp settings file")?;
+        {
+            use std::io::Write;
+            let mut tmp_file =
+                std::fs::File::create(&tmp_path).context("Failed to create temp settings file")?;
+            tmp_file
+                .write_all(json.as_bytes())
+                .context("Failed to write temp settings file")?;
+            // Flush file contents to stable storage before the rename so a
+            // power loss can't commit an empty/truncated file over the old one.
+            tmp_file
+                .sync_all()
+                .context("Failed to sync temp settings file")?;
+        }
         std::fs::rename(&tmp_path, &self.config_path).context("Failed to commit settings file")?;
 
         Ok(())
@@ -1107,14 +1090,17 @@ impl SettingsManager {
         self.settings = Settings::default();
     }
 
-    /// Load settings from file
-    fn load_from_file(path: &PathBuf) -> Result<Settings> {
+    /// Load settings from file, also returning the raw JSON value so the
+    /// caller can detect stale removed keys that need a migration rewrite.
+    fn load_from_file(path: &PathBuf) -> Result<(Settings, serde_json::Value)> {
         let json = std::fs::read_to_string(path).context("Failed to read settings file")?;
 
-        let settings: Settings =
+        let raw: serde_json::Value =
             serde_json::from_str(&json).context("Failed to parse settings file")?;
+        let settings: Settings =
+            serde_json::from_value(raw.clone()).context("Failed to parse settings file")?;
 
-        Ok(settings)
+        Ok((settings, raw))
     }
 
     /// Get config directory path
@@ -1142,6 +1128,43 @@ mod tests {
         TranscriptionSettings,
     };
     use crate::text::format::DictationAppCategory;
+
+    #[test]
+    fn removed_settings_keys_trigger_migration_rewrite() {
+        use super::raw_settings_contain_removed_keys;
+
+        // A legacy file still carrying placebo keys must be flagged for rewrite.
+        let legacy: serde_json::Value = serde_json::json!({
+            "audio": { "sampleRate": 16000 },
+            "privacy": { "encryptRecordings": true },
+        });
+        assert!(raw_settings_contain_removed_keys(&legacy));
+
+        let legacy_top_level: serde_json::Value =
+            serde_json::json!({ "defaultTemplate": "meeting" });
+        assert!(raw_settings_contain_removed_keys(&legacy_top_level));
+
+        // A current-schema file must not be rewritten on every load.
+        let current = serde_json::to_value(Settings::default()).expect("settings serialize");
+        assert!(!raw_settings_contain_removed_keys(&current));
+    }
+
+    #[test]
+    fn legacy_settings_with_removed_keys_still_deserialize() {
+        // serde must ignore removed keys instead of failing the load.
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "audio": { "sampleRate": 44100, "noiseSuppression": false },
+                "transcription": { "numSpeakers": 3, "speakerNamingMethod": "manual" },
+                "privacy": { "encryptRecordings": true, "autoDeleteDays": 7 },
+                "shortcuts": { "toggleRecording": "Ctrl+Shift+R" },
+                "defaultTemplate": "meeting"
+            }"#,
+        )
+        .expect("legacy settings should deserialize");
+        assert!(!parsed.privacy.vault_initialized);
+        assert_eq!(parsed.theme, "system");
+    }
 
     #[test]
     fn platform_optimization_defaults_are_stable() {

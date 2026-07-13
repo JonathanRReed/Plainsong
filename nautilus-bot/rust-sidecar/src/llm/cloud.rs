@@ -165,12 +165,21 @@ impl OllamaCloudClient {
         })
     }
 
-    /// Summarize meeting
-    pub async fn summarize(&self, transcript: &str, model: &str) -> Result<String> {
-        let prompt = format!(
-            "Provide a concise summary of the following meeting transcript. \
-            Focus on key points, decisions, and outcomes:\n\n{transcript}\n\nSummary:"
-        );
+    /// Summarize meeting. A non-empty `custom_prompt` (the user's "Custom
+    /// Meeting Summary Prompt" setting) replaces the default instruction.
+    pub async fn summarize(
+        &self,
+        transcript: &str,
+        model: &str,
+        custom_prompt: Option<&str>,
+    ) -> Result<String> {
+        let prompt = match crate::llm::normalized_custom_summary_prompt(custom_prompt) {
+            Some(custom) => format!("{custom}\n\nTranscript:\n{transcript}\n\nSummary:"),
+            None => format!(
+                "Provide a concise summary of the following meeting transcript. \
+                Focus on key points, decisions, and outcomes:\n\n{transcript}\n\nSummary:"
+            ),
+        };
 
         self.generate(model, &prompt).await
     }
