@@ -34,6 +34,11 @@ pub struct AnalysisResult {
     pub citations: Vec<Citation>,
     pub model: String,
     pub processing_time_ms: u64,
+    /// True only when the structured citations returned by the model were
+    /// verified against the provided transcript lines. False means the
+    /// response is served uncited (citations missing or unresolvable).
+    #[serde(default)]
+    pub grounded: bool,
 }
 
 /// Citation to transcript

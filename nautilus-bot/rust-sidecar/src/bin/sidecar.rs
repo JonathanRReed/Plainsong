@@ -103,6 +103,12 @@ async fn run_sidecar() {
     // first settings save. No-op (stays stopped) if the setting is off.
     plainsong_lib::reconcile_hands_free_monitor_for_sidecar(&state, &handle).await;
 
+    // Mark recordings stranded mid-capture/mid-transcription by a previous
+    // crash as errored, then start the daily storage retention schedule so
+    // retention settings are honored without requiring new recordings.
+    plainsong_lib::reconcile_interrupted_recordings_for_sidecar(&state, &handle).await;
+    plainsong_lib::spawn_storage_retention_maintenance(Arc::clone(&state), handle.clone());
+
     // Signal readiness to Electron
     eprintln!("[sidecar] ready");
 

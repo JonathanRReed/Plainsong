@@ -159,6 +159,7 @@ impl OllamaClient {
             citations,
             model: model.to_string(),
             processing_time_ms: start_time.elapsed().as_millis() as u64,
+            grounded: false,
         })
     }
 

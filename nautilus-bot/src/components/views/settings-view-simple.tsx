@@ -144,12 +144,20 @@ type ShortcutFieldKey =
   | "quickExport"
   | "focusSearch";
 
-const SHORTCUT_FIELD_CONFIG: Array<{ key: ShortcutFieldKey; label: string }> = [
-  { key: "toggleDictation", label: "Dictation" },
-  { key: "toggleRecording", label: "Recording" },
-  { key: "openWindow", label: "Open window" },
-  { key: "quickExport", label: "Quick export" },
-  { key: "focusSearch", label: "Search" },
+// `wired: false` fields exist in settings but are not connected to any
+// registration path yet (see electron/shortcut-registration.ts precedence
+// comment) — they are shown as "Not yet available" instead of silently
+// accepting a binding that will never fire.
+const SHORTCUT_FIELD_CONFIG: Array<{
+  key: ShortcutFieldKey;
+  label: string;
+  wired: boolean;
+}> = [
+  { key: "toggleDictation", label: "Dictation", wired: true },
+  { key: "toggleRecording", label: "Recording", wired: false },
+  { key: "openWindow", label: "Open window", wired: true },
+  { key: "quickExport", label: "Quick export", wired: false },
+  { key: "focusSearch", label: "Search", wired: false },
 ];
 
 const SETTINGS_SAVE_DEBOUNCE_MS = 350;
@@ -1570,12 +1578,27 @@ export function SettingsView() {
         </p>
       </div>
       <div className="mt-4 grid gap-3">
-        {SHORTCUT_FIELD_CONFIG.map(({ key, label }) => {
+        {SHORTCUT_FIELD_CONFIG.map(({ key, label, wired }) => {
           const currentVal = settings.shortcuts[key]
             ? formatShortcutForDisplay(settings.shortcuts[key])
             : "None";
           const isCapturing = capturingShortcut === key;
           const conflict = shortcutConflictsByField.get(key);
+          if (!wired) {
+            return (
+              <div
+                key={key}
+                className="flex flex-col gap-2 rounded-2xl border border-border/60 bg-muted/20 px-3 py-3 opacity-60"
+              >
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <span className="text-sm text-muted-foreground">{label}</span>
+                  <span className="text-xs text-muted-foreground">
+                    Not yet available
+                  </span>
+                </div>
+              </div>
+            );
+          }
           return (
             <div
               key={key}
@@ -4151,7 +4174,6 @@ export function SettingsView() {
                                 <option value="markdown">Markdown</option>
                                 <option value="json">JSON</option>
                                 <option value="text">Plain Text</option>
-                                <option value="pdf">PDF</option>
                               </select>
                             </div>
                             <div className="space-y-2">

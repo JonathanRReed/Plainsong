@@ -316,6 +316,12 @@ export async function deleteRecording(recordingId: string): Promise<void> {
   await invoke("delete_recording", { recordingId });
 }
 
+/** Re-run the full transcription pipeline for a meeting whose audio file is
+ * still on disk (recovery for interrupted or failed transcriptions). */
+export async function retranscribeRecording(recordingId: string): Promise<void> {
+  await invoke("retranscribe_recording", { recordingId });
+}
+
 export async function renameRecording(recordingId: string, newTitle: string): Promise<void> {
   await invoke("rename_recording", { recordingId, newTitle });
 }
@@ -436,6 +442,7 @@ export async function exportWithTemplate(
   options?: {
     target?: string;
     preview?: boolean;
+    redactionLevel?: "none" | "basic" | "strict";
   }
 ): Promise<TemplateExportResult> {
   return await invoke("export_with_template", {
@@ -443,6 +450,7 @@ export async function exportWithTemplate(
     templateId,
     target: options?.target,
     preview: options?.preview,
+    redactionLevel: options?.redactionLevel,
   });
 }
 
