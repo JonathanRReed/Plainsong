@@ -421,26 +421,45 @@ fn spoken_token_is_ambiguous(phrase: &str) -> bool {
 }
 
 /// Determiners/possessives that mark the token as a noun phrase ("a dash",
-/// "the colon", "my quote") rather than dictated punctuation.
+/// "the colon", "my quote") rather than dictated punctuation. Deliberately
+/// excludes "one"/"no": "one dash two" and "the answer is no period" are
+/// ordinary dictation.
 const SPOKEN_TOKEN_PRECEDING_GUARDS: &[&str] = &[
     "a", "an", "the", "this", "that", "these", "those", "my", "your", "his", "her", "its", "our",
-    "their", "each", "every", "any", "some", "no", "one",
+    "their", "each", "every", "any", "some",
 ];
 
-/// Verbs/prepositions that almost never start a fresh clause right after
-/// dictated punctuation but routinely follow the noun sense ("period is
-/// over", "dash of trouble", "quote from the report").
+/// Verbs/prepositions that are strong noun-sense signals ("period is over",
+/// "dash of trouble") AND weak clause openers. Common prepositions like
+/// in/on/at/for/to/with/from are excluded on purpose: they routinely open a
+/// clause right after dictated punctuation ("period In fact...", "comma at
+/// noon"), so guarding on them silently broke bread-and-butter dictation.
 const SPOKEN_TOKEN_FOLLOWING_GUARDS: &[&str] = &[
-    "is", "was", "are", "were", "be", "been", "of", "in", "on", "at", "for", "to", "with", "from",
-    "has", "have", "had", "ends", "ended", "between", "during", "lasts", "lasted",
+    "is", "was", "are", "were", "of", "ends", "ended", "between", "during", "lasts", "lasted",
 ];
+
+/// Per-token following-word guards. "comma" is the highest-frequency dictated
+/// token and its noun sense is nearly always determiner-marked ("the comma"),
+/// which the preceding-word guard already covers — so it gets no
+/// following-word guard at all ("comma of course" must convert).
+fn spoken_token_following_guards(phrase: &str) -> &'static [&'static str] {
+    match phrase {
+        "comma" => &[],
+        _ => SPOKEN_TOKEN_FOLLOWING_GUARDS,
+    }
+}
 
 fn normalize_guard_word(word: &str) -> String {
     word.trim_matches(|ch: char| !ch.is_alphanumeric())
         .to_ascii_lowercase()
 }
 
-fn spoken_token_guard_rejects(input: &str, match_start: usize, match_end: usize) -> bool {
+fn spoken_token_guard_rejects(
+    input: &str,
+    phrase: &str,
+    match_start: usize,
+    match_end: usize,
+) -> bool {
     let preceding_word = input[..match_start].split_whitespace().next_back();
     if let Some(word) = preceding_word {
         if SPOKEN_TOKEN_PRECEDING_GUARDS.contains(&normalize_guard_word(word).as_str()) {
@@ -449,7 +468,7 @@ fn spoken_token_guard_rejects(input: &str, match_start: usize, match_end: usize)
     }
     let following_word = input[match_end..].split_whitespace().next();
     if let Some(word) = following_word {
-        if SPOKEN_TOKEN_FOLLOWING_GUARDS.contains(&normalize_guard_word(word).as_str()) {
+        if spoken_token_following_guards(phrase).contains(&normalize_guard_word(word).as_str()) {
             return true;
         }
     }
@@ -480,7 +499,7 @@ fn replace_spoken_token(input: &str, phrase: &str, replacement: &str) -> String 
         if !(boundary_before && boundary_after) {
             continue;
         }
-        if ambiguous && spoken_token_guard_rejects(input, found.start(), found.end()) {
+        if ambiguous && spoken_token_guard_rejects(input, phrase, found.start(), found.end()) {
             continue;
         }
         output.push_str(&input[last_end..found.start()]);
@@ -1263,6 +1282,62 @@ mod tests {
         assert_eq!(
             smart_format_dictation_text_for_app("sounds good period", "voice", Some("Slack")),
             "Sounds good"
+        );
+    }
+
+    #[test]
+    fn spoken_punctuation_converts_before_clause_opening_prepositions() {
+        // Regression: shared following-word guards ("in", "at", "to", "of",
+        // "have", ...) silently kept the literal token in extremely common
+        // dictation like "comma of course" / "period in fact".
+        assert_eq!(
+            smart_format_dictation_text_for_app(
+                "i will be there comma of course",
+                "messages",
+                None
+            ),
+            "I will be there, of course"
+        );
+        assert_eq!(
+            smart_format_dictation_text_for_app("see you tomorrow comma at noon", "messages", None),
+            "See you tomorrow, at noon"
+        );
+        assert_eq!(
+            smart_format_dictation_text_for_app("thanks comma have a great day", "messages", None),
+            "Thanks, have a great day"
+        );
+        let shipped = smart_format_dictation_text_for_app(
+            "sounds good period in fact we should ship",
+            "voice",
+            None,
+        );
+        assert!(
+            shipped.starts_with("Sounds good. In fact"),
+            "period before clause-opening preposition must convert: {shipped:?}"
+        );
+        let final_word = smart_format_dictation_text_for_app(
+            "we are done period to be clear this is final",
+            "voice",
+            None,
+        );
+        assert!(
+            final_word.starts_with("We are done. To be clear"),
+            "period before infinitive clause must convert: {final_word:?}"
+        );
+    }
+
+    #[test]
+    fn spoken_punctuation_converts_after_one_and_no() {
+        // Regression: "one" and "no" in the preceding-word guard blocked
+        // ordinary dictation like "one dash two" and "... is no period".
+        assert_eq!(
+            smart_format_dictation_text_for_app("one dash two", "messages", None),
+            "One - two"
+        );
+        let answer = smart_format_dictation_text_for_app("the answer is no period", "voice", None);
+        assert!(
+            answer.starts_with("The answer is no."),
+            "trailing 'period' after 'no' must convert: {answer:?}"
         );
     }
 
