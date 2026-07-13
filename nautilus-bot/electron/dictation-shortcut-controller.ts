@@ -7,8 +7,14 @@ type DictationShortcutSignal =
   | "watchdog_timeout";
 type DictationShortcutCapability = "press_only" | "press_and_release";
 type DictationShortcutSource = "electron" | "native";
+// "primed" is emitted by the sidecar between the start_dictation ack and the
+// "recording" event; main.ts mirrors raw sidecar phases into this type, so it
+// must be part of the union. It is deliberately not idle-like (a press during
+// "primed" must not double-start) and not "recording" (the pure decision table
+// ignores a release seen then — the stateful runtime below handles that case).
 type DictationShortcutPhase =
   | "idle"
+  | "primed"
   | "recording"
   | "stopping"
   | "transcribing"
@@ -199,20 +205,35 @@ type DictationShortcutSignalInput = {
 
 export type DictationShortcutSignalRuntime = {
   handleSignal: (input: DictationShortcutSignalInput) => Promise<void>;
+  onPhase: (phase: string) => void;
   dispose: () => void;
 };
 
 /**
- * Stateful wrapper around resolveDictationShortcutDecision that closes two
- * hold-to-talk gaps the pure decision table cannot see:
+ * Stateful wrapper around resolveDictationShortcutDecision that closes
+ * hold-to-talk gaps the pure decision table cannot see. Sidecar command
+ * responses and dictation-state-changed events travel on independent paths
+ * (the response is written by the dispatch task, events drain through a
+ * separate channel task), so the start_dictation ack routinely reaches
+ * Electron before the phase "recording" event does:
  *
- * - A rapid press/release taps out before the sidecar reports
- *   phase "recording", so the release resolves to "ignore" and the microphone
- *   would stay live forever. The runtime remembers the release while a start
- *   is in flight and issues the stop as soon as the start resolves.
+ * - A rapid press/release taps out before the start_dictation invoke
+ *   resolves, so the release resolves to "ignore" and the microphone would
+ *   stay live forever. The runtime remembers the release while the start is
+ *   in flight and issues the stop as soon as the start resolves.
+ * - A release that lands after the start resolved but before the phase
+ *   "recording" event was observed (cached phase still "idle"/"primed") also
+ *   resolves to "ignore"; the armed watchdog marks the session as live, so
+ *   the runtime stops it immediately instead of dropping the release.
  * - A release that never arrives at all (helper respawned mid-hold, event tap
  *   outage) is bounded by a watchdog that emits the already-typed
  *   "watchdog_timeout" signal after DICTATION_HOLD_WATCHDOG_MS.
+ *
+ * The caller must forward every observed dictation phase into onPhase; the
+ * watchdog is cleared when the guarded session leaves its live phases
+ * ("primed"/"recording") through any path — VAD auto-stop, overlay stop,
+ * Escape force-stop, sidecar restart — so a stale timer can never stop a
+ * later unrelated session.
  */
 export function createDictationShortcutSignalRuntime(deps: {
   getPhase: () => DictationShortcutPhase;
@@ -249,16 +270,29 @@ export function createDictationShortcutSignalRuntime(deps: {
       input.behavior === "hold_to_talk" && input.capability === "press_and_release";
 
     if (decision.action === "ignore") {
-      // Rapid tap: the release arrived while start_dictation was still in
-      // flight (phase not yet "recording"). Remember it so the session is
-      // stopped the moment the start resolves.
-      if (input.signal === "released" && holdToTalkWithRelease && startInFlight) {
-        pendingHoldRelease = true;
-      } else if (input.signal === "released" || input.signal === "cancelled") {
-        // The hold ended but the session it was guarding is already gone
-        // (VAD auto-stop, overlay stop button, error phase). Drop the stale
-        // watchdog so it cannot stop a later unrelated dictation session.
-        clearWatchdog();
+      if (input.signal === "released" && holdToTalkWithRelease) {
+        if (startInFlight) {
+          // Rapid tap: the release arrived while start_dictation was still in
+          // flight. Remember it so the session is stopped the moment the
+          // start resolves.
+          pendingHoldRelease = true;
+        } else if (watchdogTimer !== null) {
+          // The start already resolved (watchdog armed) but the sidecar's
+          // phase "recording" event has not been observed yet, so the cached
+          // phase is still "idle"/"primed" and the decision table said
+          // ignore. The session is live — stop it now instead of dropping
+          // the release. (A watchdog armed for a session that ended through
+          // another path is cleared by onPhase, so it reliably marks a live
+          // hold session here.)
+          clearWatchdog();
+          deps.log?.("dictation shortcut stop_dictation", {
+            phase,
+            behavior: input.behavior,
+            capability: input.capability,
+            stopReason: "release",
+          });
+          await deps.invoke("stop_dictation", { stopReason: "release" });
+        }
       }
       return;
     }
@@ -324,8 +358,23 @@ export function createDictationShortcutSignalRuntime(deps: {
     }
   };
 
+  const onPhase = (phase: string): void => {
+    // The watchdog guards exactly one hold-to-talk session, armed when its
+    // start_dictation resolves. Once the observed phase leaves the session's
+    // live phases ("primed"/"recording") — VAD auto-stop, overlay stop,
+    // Escape force-stop, an error, or a sidecar restart — that session is
+    // over, so drop the timer before it can stop a later unrelated session.
+    // Events reach us in emission order, so a phase seen while the watchdog
+    // is armed always belongs to the guarded session (a press is only
+    // accepted after the previous session's terminal phase was processed).
+    if (watchdogTimer !== null && phase !== "primed" && phase !== "recording") {
+      clearWatchdog();
+    }
+  };
+
   return {
     handleSignal,
+    onPhase,
     dispose: clearWatchdog,
   };
 }

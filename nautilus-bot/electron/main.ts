@@ -533,6 +533,7 @@ async function handleLocalCommand(
 
 type DictationShortcutPhase =
   | "idle"
+  | "primed"
   | "recording"
   | "stopping"
   | "transcribing"
@@ -546,9 +547,12 @@ type DictationShortcutSignal =
   | "emergency_stop"
   | "watchdog_timeout";
 
-// Stateful signal runtime: buffers a hold-to-talk release that lands while
-// start_dictation is still in flight (rapid tap) and arms a max-hold watchdog,
-// so a dropped release can never leave the microphone recording forever.
+// Stateful signal runtime: handles a hold-to-talk release that lands before
+// the sidecar's phase "recording" event is observed (rapid tap) and arms a
+// max-hold watchdog, so a dropped release can never leave the microphone
+// recording forever. Observed dictation phases must be forwarded into
+// runtime.onPhase (see ipcBridge.onEvent/onTerminated below) so the watchdog
+// tracks the session it guards.
 const dictationShortcutSignalRuntime = createDictationShortcutSignalRuntime({
   getPhase: () => dictationPhase as DictationShortcutPhase,
   invoke: (command, args) => {
@@ -1050,6 +1054,10 @@ async function bootstrap() {
   // resolves to a failing stop_dictation, and the hotkey is wedged. Reset the
   // mirror and tell renderers so their UI resyncs too.
   ipcBridge.onTerminated(() => {
+    // Any hold-to-talk session died with the process: drop its watchdog even
+    // if the cached phase never left "idle" (start acked, recording event
+    // never observed before the crash).
+    dictationShortcutSignalRuntime.onPhase("idle");
     if (dictationPhase !== "idle") {
       dictationPhase = "idle";
       broadcastRendererEvent("dictation-state-changed", { phase: "idle" });
@@ -1065,6 +1073,10 @@ async function bootstrap() {
       typeof (payload as { phase?: unknown }).phase === "string"
     ) {
       dictationPhase = (payload as { phase: string }).phase;
+      // Keep the hold-to-talk watchdog in lockstep with the observed phase:
+      // it is cleared as soon as the guarded session leaves "primed"/
+      // "recording" through any path (VAD auto-stop, overlay stop, Escape).
+      dictationShortcutSignalRuntime.onPhase(dictationPhase);
     }
 
     if (eventName === "dictation-vad-signal") {

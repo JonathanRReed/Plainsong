@@ -190,16 +190,18 @@ describe("createDictationShortcutSignalRuntime", () => {
   function createHarness(options?: { failStart?: boolean }) {
     let phase = "idle";
     const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];
-    let resolveStart: (() => void) | null = null;
+    let resolveStart: ((deliverRecordingPhase: boolean) => void) | null = null;
     const invoke = vi.fn((command: string, args: Record<string, unknown>) => {
       invocations.push({ command, args });
       if (command === "start_dictation") {
         return new Promise<unknown>((resolve, reject) => {
-          resolveStart = () => {
+          resolveStart = (deliverRecordingPhase: boolean) => {
             if (options?.failStart) {
               reject(new Error("start failed"));
             } else {
-              phase = "recording";
+              if (deliverRecordingPhase) {
+                phase = "recording";
+              }
               resolve(null);
             }
           };
@@ -218,11 +220,23 @@ describe("createDictationShortcutSignalRuntime", () => {
       runtime,
       invocations,
       invoke,
+      // Mirrors main.ts, which updates the cached phase and forwards it into
+      // runtime.onPhase at the same site whenever a dictation-state-changed
+      // event (or a synthetic sidecar-termination reset) is observed.
       setPhase: (next: string) => {
         phase = next;
+        runtime.onPhase(next);
       },
       finishStart: () => {
-        resolveStart?.();
+        resolveStart?.(true);
+        resolveStart = null;
+      },
+      // Resolves the start_dictation invoke while leaving the cached phase
+      // untouched: sidecar command responses and phase events travel on
+      // independent paths, so the ack routinely wins the race against the
+      // phase "recording" event.
+      finishStartBeforePhaseEvent: () => {
+        resolveStart?.(false);
         resolveStart = null;
       },
     };
@@ -249,6 +263,72 @@ describe("createDictationShortcutSignalRuntime", () => {
       "stop_dictation",
     ]);
     expect(harness.invocations[1]?.args).toEqual({ stopReason: "release" });
+  });
+
+  it("stops a tap whose release lands after the start ack but before the recording phase event", async () => {
+    const harness = createHarness();
+
+    const press = harness.runtime.handleSignal({ ...holdToTalk, signal: "pressed" });
+    harness.finishStartBeforePhaseEvent();
+    await press;
+
+    // Cached phase is still "idle": the queued phase "recording" event has
+    // not been drained yet, so the decision table resolves the release to
+    // "ignore". Previously this cleared the watchdog and dropped the release,
+    // leaving the microphone recording forever with no backstop.
+    await harness.runtime.handleSignal({ ...holdToTalk, signal: "released" });
+
+    expect(harness.invocations.map((entry) => entry.command)).toEqual([
+      "start_dictation",
+      "stop_dictation",
+    ]);
+    expect(harness.invocations[1]?.args).toEqual({ stopReason: "release" });
+
+    // The lagging phase events drain afterwards; the watchdog must not fire
+    // a second stop.
+    harness.setPhase("recording");
+    harness.setPhase("stopping");
+    await vi.advanceTimersByTimeAsync(DICTATION_HOLD_WATCHDOG_MS * 2);
+    expect(
+      harness.invocations.filter((entry) => entry.command === "stop_dictation"),
+    ).toHaveLength(1);
+  });
+
+  it("stops a release seen while the sidecar phase is still primed", async () => {
+    const harness = createHarness();
+
+    const press = harness.runtime.handleSignal({ ...holdToTalk, signal: "pressed" });
+    harness.finishStartBeforePhaseEvent();
+    await press;
+    // "primed" is a live pre-recording phase of the guarded session: it must
+    // neither clear the watchdog nor swallow the release.
+    harness.setPhase("primed");
+
+    await harness.runtime.handleSignal({ ...holdToTalk, signal: "released" });
+
+    expect(harness.invocations.map((entry) => entry.command)).toEqual([
+      "start_dictation",
+      "stop_dictation",
+    ]);
+    expect(harness.invocations[1]?.args).toEqual({ stopReason: "release" });
+  });
+
+  it("keeps the watchdog armed across primed/recording phase events", async () => {
+    const harness = createHarness();
+
+    const press = harness.runtime.handleSignal({ ...holdToTalk, signal: "pressed" });
+    harness.finishStartBeforePhaseEvent();
+    await press;
+    harness.setPhase("primed");
+    harness.setPhase("recording");
+
+    await vi.advanceTimersByTimeAsync(DICTATION_HOLD_WATCHDOG_MS);
+
+    expect(harness.invocations.map((entry) => entry.command)).toEqual([
+      "start_dictation",
+      "stop_dictation",
+    ]);
+    expect(harness.invocations[1]?.args).toEqual({ stopReason: "watchdog_timeout" });
   });
 
   it("does not issue a buffered stop when the start itself failed", async () => {
@@ -318,9 +398,9 @@ describe("createDictationShortcutSignalRuntime", () => {
     harness.finishStart();
     await press;
 
-    // The session ends through a path the runtime never sees (VAD silence
-    // auto-stop, overlay stop button) while the key is still held; the
-    // release then resolves to "ignore".
+    // The session ends through another path (VAD silence auto-stop, overlay
+    // stop button) while the key is still held; the observed phase change
+    // clears the watchdog, so the later release resolves to a true "ignore".
     harness.setPhase("done");
     await harness.runtime.handleSignal({ ...holdToTalk, signal: "released" });
 
