@@ -243,6 +243,9 @@ struct GroundedSummaryResult {
     citations: Vec<llm::Citation>,
     model: String,
     processing_time_ms: u64,
+    /// False when the model's citations could not be verified against the
+    /// transcript and the summary is returned uncited instead of discarded.
+    grounded: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1083,10 +1086,45 @@ fn open_export_path_impl(target_path: &str) -> Result<(), String> {
     open_path_in_default_app(&canonical)
 }
 
+/// Grounded analysis serializes one prompt line per transcript segment, so
+/// long meetings must be windowed to fit model context.
+const ANALYSIS_CONTEXT_MAX_SEGMENTS: usize = 140;
+
+/// Reduce a transcript to at most `max_segments` context segments by sampling
+/// evenly across the whole meeting, instead of silently keeping only the
+/// first N segments (which dropped the entire back half of a long meeting).
+/// Returns the sampled segments and the original total so callers can append
+/// an explicit coverage note to the generated output.
+fn sample_analysis_context_segments(
+    segments: Vec<AnalysisContextSegment>,
+    max_segments: usize,
+) -> (Vec<AnalysisContextSegment>, usize) {
+    let total = segments.len();
+    if max_segments == 0 || total <= max_segments {
+        return (segments, total);
+    }
+    let sampled = (0..max_segments)
+        .map(|index| segments[index * total / max_segments].clone())
+        .collect();
+    (sampled, total)
+}
+
+/// User-visible note appended to LLM output that was grounded in a sampled
+/// context window, so a 2h meeting is never presented as fully summarized
+/// when only a subset of its segments fit the model context.
+fn analysis_context_coverage_note(used: usize, total: usize) -> Option<String> {
+    (used < total).then(|| {
+        format!(
+            "\n\n> Note: this response is grounded in {} of {} transcript segments, sampled evenly across the full meeting.",
+            used, total
+        )
+    })
+}
+
 async fn build_recording_analysis_context(
     state: &AppState,
     recording_id: &str,
-) -> Result<Vec<AnalysisContextSegment>, String> {
+) -> Result<(Vec<AnalysisContextSegment>, usize), String> {
     let (recording, transcript) = {
         let db = state.db.lock().await;
         let recording = db
@@ -1100,7 +1138,7 @@ async fn build_recording_analysis_context(
         (recording, transcript)
     };
 
-    let mut context_segments = transcript
+    let context_segments = transcript
         .segments
         .iter()
         .map(|segment| AnalysisContextSegment {
@@ -1116,11 +1154,11 @@ async fn build_recording_analysis_context(
     if context_segments.is_empty() {
         return Err("Transcript contains no segments for grounded analysis".to_string());
     }
-    if context_segments.len() > 140 {
-        context_segments.truncate(140);
-    }
 
-    Ok(context_segments)
+    Ok(sample_analysis_context_segments(
+        context_segments,
+        ANALYSIS_CONTEXT_MAX_SEGMENTS,
+    ))
 }
 
 fn inject_meeting_notes_into_query(query: &str, meeting_notes: Option<&str>) -> String {
@@ -1155,13 +1193,50 @@ fn serialize_analysis_context(context_segments: &[AnalysisContextSegment]) -> St
         .join("\n")
 }
 
+/// Apply the structured-citation contract leniently: prefer validated
+/// citations, but never discard an otherwise-usable model response just
+/// because citations were missing or unresolvable (a common outcome with
+/// small local models). `result.grounded` records whether the citations were
+/// actually verified against the provided transcript lines.
+fn finalize_grounded_analysis_result(
+    result: &mut llm::AnalysisResult,
+    context_segments: &[AnalysisContextSegment],
+) {
+    match parse_structured_analysis_json(&result.response) {
+        Some((response_text, citation_payloads)) => {
+            match validate_structured_citations(&citation_payloads, context_segments) {
+                Ok(validated) => {
+                    result.response = response_text;
+                    result.citations = validated;
+                    result.grounded = true;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "Citation validation failed; returning ungrounded response: {}",
+                        error
+                    );
+                    result.response = response_text;
+                    result.citations = Vec::new();
+                }
+            }
+        }
+        None => {
+            tracing::warn!(
+                "Model response did not include a structured citation payload; returning ungrounded text"
+            );
+            result.citations = Vec::new();
+        }
+    }
+}
+
 async fn run_grounded_response_query_for_recording(
     state: &AppState,
     recording_id: &str,
     query: &str,
     model: Option<&str>,
 ) -> Result<llm::AnalysisResult, String> {
-    let context_segments = build_recording_analysis_context(state, recording_id).await?;
+    let (context_segments, total_segments) =
+        build_recording_analysis_context(state, recording_id).await?;
     let meeting_notes = {
         let db = state.db.lock().await;
         db.get_recording(recording_id)
@@ -1187,12 +1262,10 @@ async fn run_grounded_response_query_for_recording(
     )
     .await?;
 
-    let structured = parse_structured_analysis_json(&result.response).ok_or_else(|| {
-        "Model response did not include required JSON citation payload".to_string()
-    })?;
-    let validated_citations = validate_structured_citations(&structured.1, &context_segments)?;
-    result.response = structured.0;
-    result.citations = validated_citations;
+    finalize_grounded_analysis_result(&mut result, &context_segments);
+    if let Some(note) = analysis_context_coverage_note(context_segments.len(), total_segments) {
+        result.response.push_str(&note);
+    }
 
     Ok(result)
 }
@@ -1218,6 +1291,7 @@ async fn summarize_recording_grounded_internal(
         citations: result.citations,
         model: result.model,
         processing_time_ms: result.processing_time_ms,
+        grounded: result.grounded,
     })
 }
 
@@ -1249,7 +1323,8 @@ async fn extract_action_items_grounded_internal(
     recording_id: &str,
     model: Option<&str>,
 ) -> Result<GroundedActionItemsResult, String> {
-    let context_segments = build_recording_analysis_context(state, recording_id).await?;
+    let (context_segments, _total_segments) =
+        build_recording_analysis_context(state, recording_id).await?;
     let meeting_notes = {
         let db = state.db.lock().await;
         db.get_recording(recording_id)
@@ -1287,10 +1362,20 @@ Citations must use exact recordingId/startTime/endTime from provided transcript 
     for parsed_item in parsed_items {
         let task = parsed_item.task.trim().to_string();
         if task.is_empty() {
-            return Err("Model returned action item with empty task".to_string());
+            // Skip malformed entries instead of discarding the whole batch.
+            continue;
         }
 
-        let citations = validate_structured_citations(&parsed_item.citations, &context_segments)?;
+        // Keep the item without citations if the model's citations cannot be
+        // verified; an uncited action item beats losing all of them.
+        let citations = validate_structured_citations(&parsed_item.citations, &context_segments)
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    "Action item citation validation failed; keeping item uncited: {}",
+                    error
+                );
+                Vec::new()
+            });
         let assignee = parsed_item.assignee.and_then(|value| {
             let trimmed = value.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
@@ -5747,6 +5832,102 @@ mod tests {
         }
     }
 
+    fn analysis_segment(index: usize) -> AnalysisContextSegment {
+        AnalysisContextSegment {
+            recording_id: "rec".to_string(),
+            recording_title: "Meeting".to_string(),
+            segment_id: format!("seg-{}", index),
+            text: format!("segment {}", index),
+            start_time: index as f64,
+            end_time: index as f64 + 1.0,
+        }
+    }
+
+    #[test]
+    fn sample_analysis_context_segments_keeps_short_transcripts_intact() {
+        let segments: Vec<_> = (0..100).map(analysis_segment).collect();
+        let (sampled, total) = sample_analysis_context_segments(segments, 140);
+        assert_eq!(total, 100);
+        assert_eq!(sampled.len(), 100);
+        assert_eq!(sampled[0].segment_id, "seg-0");
+        assert_eq!(sampled[99].segment_id, "seg-99");
+    }
+
+    #[test]
+    fn sample_analysis_context_segments_spans_the_whole_meeting() {
+        // A 2h meeting easily produces 1000+ segments; the sampled window must
+        // cover the back half instead of truncating to the first 140.
+        let segments: Vec<_> = (0..1000).map(analysis_segment).collect();
+        let (sampled, total) = sample_analysis_context_segments(segments, 140);
+        assert_eq!(total, 1000);
+        assert_eq!(sampled.len(), 140);
+        assert_eq!(sampled[0].segment_id, "seg-0");
+        let last_index: usize = sampled
+            .last()
+            .unwrap()
+            .segment_id
+            .trim_start_matches("seg-")
+            .parse()
+            .unwrap();
+        assert!(last_index >= 900, "last sampled index was {}", last_index);
+        // Strictly increasing: no duplicates from the stride arithmetic.
+        let indices: Vec<usize> = sampled
+            .iter()
+            .map(|segment| {
+                segment
+                    .segment_id
+                    .trim_start_matches("seg-")
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn analysis_context_coverage_note_only_when_sampled() {
+        assert!(analysis_context_coverage_note(140, 140).is_none());
+        let note = analysis_context_coverage_note(140, 900).expect("note for sampled context");
+        assert!(note.contains("140 of 900"));
+    }
+
+    #[test]
+    fn meeting_companion_audio_paths_derive_from_mixed_path() {
+        let (mic, system) = meeting_companion_audio_paths("/tmp/recordings/recording_123_abcd.wav")
+            .expect("companions derivable");
+        assert_eq!(
+            mic,
+            PathBuf::from("/tmp/recordings/recording_123_abcd_mic.wav")
+        );
+        assert_eq!(
+            system,
+            PathBuf::from("/tmp/recordings/recording_123_abcd_system.wav")
+        );
+    }
+
+    #[test]
+    fn remove_recording_audio_files_removes_companions() {
+        let root =
+            std::env::temp_dir().join(format!("nautilus-delete-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        let mixed = root.join("recording_1_ab.wav");
+        let mic = root.join("recording_1_ab_mic.wav");
+        let system = root.join("recording_1_ab_system.wav");
+        for path in [&mixed, &mic, &system] {
+            std::fs::write(path, b"fake wav").expect("write fixture");
+        }
+
+        let (deleted, failed) =
+            remove_recording_audio_files(mixed.to_string_lossy().as_ref(), "test");
+        assert_eq!(deleted, 3);
+        assert!(failed.is_empty());
+        assert!(!mixed.exists());
+        assert!(!mic.exists());
+        assert!(!system.exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn hands_free_monitor_should_run_only_when_enabled_and_session_idle() {
         // Setting off: never run, regardless of session state. This is the guard that
@@ -8445,6 +8626,58 @@ fn meeting_retention_cutoff(
     Some(now - chrono::Duration::days(i64::from(months) * 30))
 }
 
+/// Per-source companion WAVs written next to a mixed meeting recording
+/// (`{stem}_mic.wav` / `{stem}_system.wav`, see audio.rs). Only the mixed
+/// path is persisted in the DB, so cleanup and retranscription derive the
+/// companion paths from it.
+fn meeting_companion_audio_paths(
+    audio_path: &str,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let path = std::path::Path::new(audio_path);
+    let stem = path.file_stem()?.to_str()?;
+    Some((
+        path.with_file_name(format!("{}_mic.wav", stem)),
+        path.with_file_name(format!("{}_system.wav", stem)),
+    ))
+}
+
+/// Remove a recording's audio file plus any per-source companion WAVs.
+/// Returns how many files were deleted and which deletions failed (as
+/// "path (error)" strings) so callers can report partial failure honestly.
+fn remove_recording_audio_files(audio_path: &str, context: &str) -> (usize, Vec<String>) {
+    let trimmed = audio_path.trim();
+    if trimmed.is_empty() {
+        return (0, Vec::new());
+    }
+
+    let mut candidates = vec![std::path::PathBuf::from(trimmed)];
+    if let Some((mic_path, system_path)) = meeting_companion_audio_paths(trimmed) {
+        candidates.push(mic_path);
+        candidates.push(system_path);
+    }
+
+    let mut deleted = 0usize;
+    let mut failed = Vec::new();
+    for candidate in candidates {
+        if !candidate.exists() {
+            continue;
+        }
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => deleted += 1,
+            Err(error) => {
+                tracing::warn!(
+                    "Failed to remove recording audio '{}' during {}: {}",
+                    candidate.display(),
+                    context,
+                    error
+                );
+                failed.push(format!("{} ({})", candidate.display(), error));
+            }
+        }
+    }
+    (deleted, failed)
+}
+
 async fn enforce_dictation_retention_policy(
     state: &AppState,
     app: Option<&impl crate::sidecar_handle::AppEmitter>,
@@ -8500,19 +8733,9 @@ async fn enforce_dictation_retention_policy(
 
     let mut deleted_audio_files = 0usize;
     for audio_path in audio_paths {
-        let candidate = std::path::Path::new(&audio_path);
-        if candidate.exists() {
-            match std::fs::remove_file(candidate) {
-                Ok(()) => deleted_audio_files += 1,
-                Err(error) => {
-                    tracing::warn!(
-                        "Failed to remove dictation audio '{}' during retention cleanup: {}",
-                        audio_path,
-                        error
-                    );
-                }
-            }
-        }
+        let (deleted, _failed) =
+            remove_recording_audio_files(&audio_path, "dictation retention cleanup");
+        deleted_audio_files += deleted;
     }
 
     if deleted_recordings > 0 {
@@ -8610,22 +8833,11 @@ async fn enforce_meeting_retention_policy(
             continue;
         }
 
-        let candidate = std::path::Path::new(&recording.audio_path);
-        let mut audio_deleted_or_absent = true;
-        if candidate.exists() {
-            match std::fs::remove_file(candidate) {
-                Ok(()) => deleted_audio_files += 1,
-                Err(error) => {
-                    audio_deleted_or_absent = false;
-                    tracing::warn!(
-                        "Failed to remove meeting audio '{}' during retention cleanup: {}",
-                        recording.audio_path,
-                        error
-                    );
-                }
-            }
-        }
-        if !audio_deleted_or_absent {
+        let (deleted, failed) =
+            remove_recording_audio_files(&recording.audio_path, "meeting retention cleanup");
+        deleted_audio_files += deleted;
+        if !failed.is_empty() {
+            // Keep the audio path so a later maintenance pass retries.
             continue;
         }
         if let Err(error) = db.clear_recording_audio_path(&recording.id) {
@@ -8639,22 +8851,10 @@ async fn enforce_meeting_retention_policy(
         }
     }
 
-    if !audio_paths.is_empty() {
-        for audio_path in audio_paths {
-            let candidate = std::path::Path::new(&audio_path);
-            if candidate.exists() {
-                match std::fs::remove_file(candidate) {
-                    Ok(()) => deleted_audio_files += 1,
-                    Err(error) => {
-                        tracing::warn!(
-                            "Failed to remove meeting audio '{}' during retention cleanup: {}",
-                            audio_path,
-                            error
-                        );
-                    }
-                }
-            }
-        }
+    for audio_path in audio_paths {
+        let (deleted, _failed) =
+            remove_recording_audio_files(&audio_path, "meeting retention cleanup");
+        deleted_audio_files += deleted;
     }
 
     if deleted_recordings > 0 || deleted_audio_files > 0 || audio_only_clears > 0 {
@@ -8738,23 +8938,11 @@ async fn apply_meeting_transcript_only_storage_policy(
             continue;
         };
 
-        let candidate = std::path::Path::new(&recording.audio_path);
-        let mut audio_deleted_or_absent = true;
-        if candidate.exists() {
-            match std::fs::remove_file(candidate) {
-                Ok(()) => deleted_audio_files += 1,
-                Err(error) => {
-                    audio_deleted_or_absent = false;
-                    tracing::warn!(
-                        "Failed to remove meeting audio '{}' during transcript-only storage cleanup: {}",
-                        recording.audio_path,
-                        error
-                    );
-                }
-            }
-        }
-
-        if !audio_deleted_or_absent {
+        let (deleted, failed) =
+            remove_recording_audio_files(&recording.audio_path, "transcript-only storage cleanup");
+        deleted_audio_files += deleted;
+        if !failed.is_empty() {
+            // Keep the audio path so a later maintenance pass retries.
             continue;
         }
 
@@ -9049,6 +9237,11 @@ async fn transcribe_recording_in_chunks(
     let mut fallback_reason: Option<String> = None;
     let mut weighted_confidence_sum = 0.0_f64;
     let mut weighted_confidence_count = 0.0_f64;
+    // A transient failure on one chunk (e.g. a cloud-ASR hiccup at minute 100
+    // of a 2h meeting) must not discard everything transcribed so far; failed
+    // chunks are skipped and reported so the transcript is saved as partial.
+    let mut failed_chunks = 0usize;
+    let mut last_chunk_error: Option<String> = None;
 
     let process_chunk = |chunk: Vec<f32>,
                          chunk_start_frame: usize,
@@ -9142,13 +9335,29 @@ async fn transcribe_recording_in_chunks(
 
             if chunk_samples.len() >= chunk_size_frames {
                 let chunk = std::mem::take(&mut chunk_samples);
-                let result = process_chunk(
+                let result = match process_chunk(
                     chunk.clone(),
                     current_frame_start,
                     processed_frames,
                     chunk_count,
                 )
-                .await?;
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        tracing::warn!(
+                            "Transcription chunk {} failed for {}; continuing with remaining chunks: {}",
+                            chunk_count + 1,
+                            recording_id,
+                            error
+                        );
+                        failed_chunks += 1;
+                        last_chunk_error = Some(error);
+                        current_frame_start += chunk.len();
+                        chunk_count += 1;
+                        continue;
+                    }
+                };
 
                 let offset_seconds = current_frame_start as f64 / spec.sample_rate as f64;
                 if !result.text.trim().is_empty() {
@@ -9200,13 +9409,29 @@ async fn transcribe_recording_in_chunks(
 
             if chunk_samples.len() >= chunk_size_frames {
                 let chunk = std::mem::take(&mut chunk_samples);
-                let result = process_chunk(
+                let result = match process_chunk(
                     chunk.clone(),
                     current_frame_start,
                     processed_frames,
                     chunk_count,
                 )
-                .await?;
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        tracing::warn!(
+                            "Transcription chunk {} failed for {}; continuing with remaining chunks: {}",
+                            chunk_count + 1,
+                            recording_id,
+                            error
+                        );
+                        failed_chunks += 1;
+                        last_chunk_error = Some(error);
+                        current_frame_start += chunk.len();
+                        chunk_count += 1;
+                        continue;
+                    }
+                };
 
                 let offset_seconds = current_frame_start as f64 / spec.sample_rate as f64;
                 if !result.text.trim().is_empty() {
@@ -9248,49 +9473,85 @@ async fn transcribe_recording_in_chunks(
 
     if !chunk_samples.is_empty() {
         let chunk = std::mem::take(&mut chunk_samples);
-        let result = process_chunk(
+        match process_chunk(
             chunk.clone(),
             current_frame_start,
             processed_frames,
             chunk_count,
         )
-        .await?;
-        let offset_seconds = current_frame_start as f64 / spec.sample_rate as f64;
-        if !result.text.trim().is_empty() {
-            if !merged_text.is_empty() {
-                merged_text.push(' ');
+        .await
+        {
+            Ok(result) => {
+                let offset_seconds = current_frame_start as f64 / spec.sample_rate as f64;
+                if !result.text.trim().is_empty() {
+                    if !merged_text.is_empty() {
+                        merged_text.push(' ');
+                    }
+                    merged_text.push_str(result.text.trim());
+                }
+                for mut segment in result.segments {
+                    segment.start_time += offset_seconds;
+                    segment.end_time += offset_seconds;
+                    merged_segments.push(segment);
+                }
+                if language.is_empty() {
+                    language = result.language.clone();
+                }
+                if model_name.is_empty() {
+                    model_name = result.model_name.clone();
+                }
+                requested_provider = result.requested_provider;
+                actual_provider = result.actual_provider;
+                if requested_engine.is_none() {
+                    requested_engine = result.requested_engine.clone();
+                }
+                actual_engine = result.actual_engine.clone();
+                optimization_applied |= result.optimization_applied;
+                if fallback_reason.is_none() {
+                    fallback_reason = result.fallback_reason.clone();
+                }
+                let weight = result.text.chars().count().max(1) as f64;
+                weighted_confidence_sum += result.confidence * weight;
+                weighted_confidence_count += weight;
+                chunk_count += 1;
             }
-            merged_text.push_str(result.text.trim());
+            Err(error) => {
+                tracing::warn!(
+                    "Transcription chunk {} failed for {}: {}",
+                    chunk_count + 1,
+                    recording_id,
+                    error
+                );
+                failed_chunks += 1;
+                last_chunk_error = Some(error);
+                chunk_count += 1;
+            }
         }
-        for mut segment in result.segments {
-            segment.start_time += offset_seconds;
-            segment.end_time += offset_seconds;
-            merged_segments.push(segment);
-        }
-        if language.is_empty() {
-            language = result.language.clone();
-        }
-        if model_name.is_empty() {
-            model_name = result.model_name.clone();
-        }
-        requested_provider = result.requested_provider;
-        actual_provider = result.actual_provider;
-        if requested_engine.is_none() {
-            requested_engine = result.requested_engine.clone();
-        }
-        actual_engine = result.actual_engine.clone();
-        optimization_applied |= result.optimization_applied;
-        if fallback_reason.is_none() {
-            fallback_reason = result.fallback_reason.clone();
-        }
-        let weight = result.text.chars().count().max(1) as f64;
-        weighted_confidence_sum += result.confidence * weight;
-        weighted_confidence_count += weight;
-        chunk_count += 1;
     }
 
     if chunk_count == 0 {
         return Err("No chunks were processed for transcription".to_string());
+    }
+
+    // If nothing at all transcribed and at least one chunk errored, this is a
+    // hard failure; otherwise degrade gracefully and record the gap.
+    if failed_chunks > 0 {
+        if merged_segments.is_empty() && merged_text.trim().is_empty() {
+            return Err(format!(
+                "Transcription failed: all {} chunk(s) failed (last error: {})",
+                failed_chunks,
+                last_chunk_error.unwrap_or_else(|| "unknown".to_string())
+            ));
+        }
+        let note = format!(
+            "{} of {} transcription chunk(s) failed; transcript may be incomplete",
+            failed_chunks, chunk_count
+        );
+        tracing::warn!("Recording {}: {}", recording_id, note);
+        fallback_reason = Some(match fallback_reason {
+            Some(existing) => format!("{}; {}", existing, note),
+            None => note,
+        });
     }
 
     app.emit_event(
@@ -13820,14 +14081,9 @@ async fn reset_app_state_for_sidecar(
         if audio_path.is_empty() || !visited_paths.insert(audio_path.to_string()) {
             continue;
         }
-        let path = Path::new(audio_path);
-        if !path.exists() {
-            continue;
-        }
-        match std::fs::remove_file(path) {
-            Ok(_) => deleted_audio_files += 1,
-            Err(e) => failed_audio_file_deletions.push(format!("{} ({})", path.display(), e)),
-        }
+        let (deleted, failed) = remove_recording_audio_files(audio_path, "app state reset");
+        deleted_audio_files += deleted;
+        failed_audio_file_deletions.extend(failed);
     }
 
     {
@@ -13955,6 +14211,111 @@ pub async fn reconcile_hands_free_monitor_for_sidecar(
     handle: &crate::sidecar_handle::SidecarHandle,
 ) {
     reconcile_hands_free_monitor(state, handle).await;
+}
+
+/// Mark recordings stranded in "recording"/"processing" by a previous crash
+/// or restart as errored, so the meetings list stops showing an eternal
+/// spinner and the user can use retranscribe_recording instead. Runs at
+/// sidecar startup, before any new work can legitimately hold those states.
+pub async fn reconcile_interrupted_recordings_for_sidecar(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+) {
+    let mut db = state.db.lock().await;
+    let recordings = match db.get_recordings(None) {
+        Ok(recordings) => recordings,
+        Err(error) => {
+            tracing::warn!(
+                "Failed to scan recordings for startup reconciliation: {}",
+                error
+            );
+            return;
+        }
+    };
+    for recording in recordings
+        .into_iter()
+        .filter(|recording| matches!(recording.status.as_str(), "recording" | "processing"))
+    {
+        tracing::warn!(
+            "Recording {} was left in status '{}' by a previous session; marking as error",
+            recording.id,
+            recording.status
+        );
+        if let Err(error) = db.update_recording_status(&recording.id, "error") {
+            tracing::warn!(
+                "Failed to mark interrupted recording {} as error: {}",
+                recording.id,
+                error
+            );
+            continue;
+        }
+        let _ = db.log_audit_event(
+            "recording_interrupted_reconciled",
+            Some(serde_json::json!({
+                "recording_id": &recording.id,
+                "previous_status": &recording.status,
+            })),
+            "warning",
+        );
+        handle.emit_event(
+            "recording-status-changed",
+            serde_json::json!({
+                "recordingId": &recording.id, "status": "error",
+                "message": "Transcription was interrupted before it finished.",
+                "updatedAt": chrono::Utc::now().to_rfc3339(),
+            }),
+        );
+    }
+}
+
+/// Run the storage retention/cleanup policies immediately and then once a
+/// day, so "delete meetings after N months" and transcript-only storage are
+/// honored even when the user stops recording new meetings (previously
+/// retention only ran as a side effect of a meeting completing).
+pub fn spawn_storage_retention_maintenance(
+    state: Arc<AppState>,
+    handle: crate::sidecar_handle::SidecarHandle,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            // The first tick completes immediately, giving a startup pass.
+            interval.tick().await;
+            if let Err(error) = apply_meeting_transcript_only_storage_policy(
+                state.as_ref(),
+                Some(&handle),
+                "scheduled-maintenance",
+                None,
+            )
+            .await
+            {
+                tracing::warn!(
+                    "Scheduled transcript-only storage cleanup failed: {}",
+                    error
+                );
+            }
+            if let Err(error) = enforce_dictation_retention_policy(
+                state.as_ref(),
+                Some(&handle),
+                "scheduled-maintenance",
+            )
+            .await
+            {
+                tracing::warn!("Scheduled dictation retention cleanup failed: {}", error);
+            }
+            if let Err(error) = enforce_meeting_retention_policy(
+                state.as_ref(),
+                Some(&handle),
+                "scheduled-maintenance",
+                None,
+            )
+            .await
+            {
+                tracing::warn!("Scheduled meeting retention cleanup failed: {}", error);
+            }
+        }
+    });
 }
 
 async fn reconcile_hands_free_monitor(
@@ -15697,282 +16058,326 @@ async fn stop_recording_for_sidecar(
     // Hide the recording overlay. Transcription will happen in the background.
     handle.window_command("hide-recording-overlay", &serde_json::Value::Null);
 
-    let state_clone = Arc::clone(state);
-    let handle_clone = handle.clone();
-    let recording_id_clone = recording_id.clone();
-    let audio_path_clone = audio_path.clone();
-    let mic_audio_path_clone = stop_result.mic_audio_path.clone();
-    let system_audio_path_clone = stop_result.system_audio_path.clone();
+    tokio::spawn(run_meeting_transcription_pipeline(
+        Arc::clone(state),
+        handle.clone(),
+        recording_id.clone(),
+        audio_path.clone(),
+        stop_result.mic_audio_path.clone(),
+        stop_result.system_audio_path.clone(),
+    ));
 
-    tokio::spawn(async move {
-        let path = std::path::PathBuf::from(&audio_path_clone);
-        if !path.exists() {
-            tracing::error!("Audio file does not exist: {:?}", path);
-            let mut db = state_clone.db.lock().await;
-            let _ = db.update_recording_status(&recording_id_clone, "error");
-            drop(db);
+    Ok(())
+}
+
+/// Full post-capture meeting transcription pipeline: streaming preview,
+/// chunked ASR (source-aware when the per-source WAVs exist), diarization,
+/// persistence, storage policy, auto-naming, auto-analysis, and retention.
+/// Shared by the stop-recording flow and the `retranscribe_recording`
+/// command.
+async fn run_meeting_transcription_pipeline(
+    state_clone: Arc<AppState>,
+    handle_clone: crate::sidecar_handle::SidecarHandle,
+    recording_id_clone: String,
+    audio_path_clone: String,
+    mic_audio_path_clone: Option<String>,
+    system_audio_path_clone: Option<String>,
+) {
+    let path = std::path::PathBuf::from(&audio_path_clone);
+    if !path.exists() {
+        tracing::error!("Audio file does not exist: {:?}", path);
+        let mut db = state_clone.db.lock().await;
+        let _ = db.update_recording_status(&recording_id_clone, "error");
+        drop(db);
+        handle_clone.emit_event(
+            "recording-status-changed",
+            serde_json::json!({
+                "recordingId": &recording_id_clone, "status": "error",
+                "message": "Audio file not found", "updatedAt": chrono::Utc::now().to_rfc3339(),
+            }),
+        );
+        handle_clone.emit_event("meeting-recording-state-changed", serde_json::json!({
+                "phase": "error", "recordingId": &recording_id_clone, "message": "Audio file not found",
+            }));
+        return;
+    }
+
+    let meeting_selection = {
+        let settings = state_clone.settings_manager.lock().await.settings().clone();
+        resolve_ready_meeting_selection(state_clone.as_ref(), &settings.transcription).await
+    };
+    let (meeting_provider, meeting_model_id, meeting_route_warning) = match meeting_selection {
+        Ok(selection) => selection,
+        Err(error) => {
+            tracing::error!(
+                "Failed to resolve ready meeting route for {}: {}",
+                recording_id_clone,
+                error
+            );
+            {
+                let mut db = state_clone.db.lock().await;
+                let _ = db.update_recording_status(&recording_id_clone, "error");
+                let _ = db.log_audit_event(
+                    "transcription_failed",
+                    Some(serde_json::json!({"recording_id": &recording_id_clone, "error": &error})),
+                    "error",
+                );
+            }
             handle_clone.emit_event(
                 "recording-status-changed",
                 serde_json::json!({
                     "recordingId": &recording_id_clone, "status": "error",
-                    "message": "Audio file not found", "updatedAt": chrono::Utc::now().to_rfc3339(),
+                    "message": error, "updatedAt": chrono::Utc::now().to_rfc3339(),
                 }),
             );
-            handle_clone.emit_event("meeting-recording-state-changed", serde_json::json!({
-                "phase": "error", "recordingId": &recording_id_clone, "message": "Audio file not found",
-            }));
             return;
         }
+    };
+    if let Some(warning) = meeting_route_warning {
+        tracing::warn!("{}", warning);
+    }
 
-        let meeting_selection = {
-            let settings = state_clone.settings_manager.lock().await.settings().clone();
-            resolve_ready_meeting_selection(state_clone.as_ref(), &settings.transcription).await
-        };
-        let (meeting_provider, meeting_model_id, meeting_route_warning) = match meeting_selection {
-            Ok(selection) => selection,
-            Err(error) => {
-                tracing::error!(
-                    "Failed to resolve ready meeting route for {}: {}",
-                    recording_id_clone,
-                    error
-                );
-                {
-                    let mut db = state_clone.db.lock().await;
-                    let _ = db.update_recording_status(&recording_id_clone, "error");
-                    let _ = db.log_audit_event(
-                        "transcription_failed",
-                        Some(serde_json::json!({"recording_id": &recording_id_clone, "error": &error})),
-                        "error",
-                    );
-                }
-                handle_clone.emit_event(
-                    "recording-status-changed",
-                    serde_json::json!({
-                        "recordingId": &recording_id_clone, "status": "error",
-                        "message": error, "updatedAt": chrono::Utc::now().to_rfc3339(),
-                    }),
-                );
-                return;
-            }
-        };
-        if let Some(warning) = meeting_route_warning {
-            tracing::warn!("{}", warning);
-        }
-
-        let preview_handle = handle_clone.clone();
-        let preview_path = path.clone();
-        let preview_rec_id = recording_id_clone.clone();
-        let preview_transcriber = Arc::clone(&state_clone.streaming_transcriber);
-        let preview_model_id = meeting_model_id.clone();
-        let preview_task = tokio::spawn(async move {
-            if let Err(error) = emit_streaming_transcription_previews(
-                &preview_handle,
-                preview_transcriber,
-                &preview_rec_id,
-                &preview_path,
-                meeting_provider,
-                preview_model_id,
-            )
-            .await
-            {
-                tracing::warn!(
-                    "Streaming preview failed for recording {}: {}",
-                    preview_rec_id,
-                    error
-                );
-            }
-        });
-
-        match transcribe_meeting_recording(
-            &handle_clone,
-            Arc::clone(&state_clone.asr_manager),
-            &recording_id_clone,
-            &path,
-            mic_audio_path_clone.as_deref(),
-            system_audio_path_clone.as_deref(),
+    let preview_handle = handle_clone.clone();
+    let preview_path = path.clone();
+    let preview_rec_id = recording_id_clone.clone();
+    let preview_transcriber = Arc::clone(&state_clone.streaming_transcriber);
+    let preview_model_id = meeting_model_id.clone();
+    let preview_task = tokio::spawn(async move {
+        if let Err(error) = emit_streaming_transcription_previews(
+            &preview_handle,
+            preview_transcriber,
+            &preview_rec_id,
+            &preview_path,
             meeting_provider,
-            meeting_model_id.clone(),
+            preview_model_id,
         )
         .await
         {
-            Ok(output) => {
-                let mut transcript = output.transcript;
-                enrich_meeting_transcript(&mut transcript);
-
-                let enable_diarization = {
-                    let sm = state_clone.settings_manager.lock().await;
-                    sm.settings().transcription.enable_diarization
-                };
-                if enable_diarization
-                    && !transcript_has_source_aware_speakers(&transcript.segments)
-                    && diarization::DiarizationEngine::is_real_available()
-                {
-                    if let Ok(result) = diarization::run_diarization(&path).await {
-                        let engine = diarization::DiarizationEngine::new();
-                        engine.merge_with_transcript(&result, &mut transcript.segments);
-                    }
-                }
-
-                {
-                    let mut db = state_clone.db.lock().await;
-                    let _ = db.save_transcript(&transcript);
-                    let _ = db.update_recording_status(&recording_id_clone, "completed");
-                }
-
-                let _ = apply_meeting_transcript_only_storage_policy(
-                    state_clone.as_ref(),
-                    Some(&handle_clone),
-                    "meeting-transcript-saved",
-                    Some(&recording_id_clone),
-                )
-                .await;
-
-                handle_clone.emit_event(
-                    "recording-status-changed",
-                    serde_json::json!({
-                        "recordingId": &recording_id_clone, "status": "completed",
-                        "progress": 1.0, "updatedAt": chrono::Utc::now().to_rfc3339(),
-                        "transcriptFirstAvailableAt": chrono::Utc::now().to_rfc3339(),
-                    }),
-                );
-
-                let full_text = transcript.full_text.clone();
-                match auto_name_meeting_recording(
-                    state_clone.as_ref(),
-                    &handle_clone,
-                    &recording_id_clone,
-                    &full_text,
-                )
-                .await
-                {
-                    Ok(Some(title)) => {
-                        tracing::info!("Auto-named meeting '{}' to '{}'", recording_id_clone, title)
-                    }
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!(
-                        "Meeting auto-name failed for '{}': {}",
-                        recording_id_clone,
-                        e
-                    ),
-                }
-
-                let auto_analyze = {
-                    let sm = state_clone.settings_manager.lock().await;
-                    sm.settings().transcription.enable_auto_analysis
-                };
-                if auto_analyze && !full_text.trim().is_empty() {
-                    let (provider, model) = {
-                        let sm = state_clone.settings_manager.lock().await;
-                        let s = sm.settings();
-                        let p = AnalysisProvider::from_settings_value(&s.privacy.llm_provider);
-                        let m = s
-                            .privacy
-                            .llm_model_id
-                            .clone()
-                            .unwrap_or_else(|| p.default_model().to_string());
-                        (p, m)
-                    };
-                    let remote_processing_enabled = {
-                        let sm = state_clone.settings_manager.lock().await;
-                        sm.settings().privacy.remote_processing_enabled
-                    };
-                    let db_clone = Arc::clone(&state_clone.db);
-                    let ollama_clone = Arc::clone(&state_clone.ollama_client);
-                    let handle_analysis = handle_clone.clone();
-                    let rec_id_analysis = recording_id_clone.clone();
-                    let text_for_analysis = full_text.clone();
-                    tokio::spawn(async move {
-                        let summary = tokio::time::timeout(
-                            Duration::from_millis(90_000),
-                            run_summary_with_provider(
-                                provider,
-                                remote_processing_enabled,
-                                Some(model.clone()),
-                                ollama_clone.as_ref(),
-                                &text_for_analysis,
-                                Some(&model),
-                            ),
-                        )
-                        .await
-                        .ok()
-                        .and_then(|r| r.ok());
-                        let action_items: Vec<String> = tokio::time::timeout(
-                            Duration::from_millis(90_000),
-                            run_action_items_with_provider(
-                                provider,
-                                remote_processing_enabled,
-                                Some(model.clone()),
-                                ollama_clone.as_ref(),
-                                &text_for_analysis,
-                                Some(&model),
-                            ),
-                        )
-                        .await
-                        .ok()
-                        .and_then(|r| r.ok())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|item| item.task)
-                        .collect();
-                        if summary.is_some() || !action_items.is_empty() {
-                            let mut db = db_clone.lock().await;
-                            let _ = db.update_recording_analysis(
-                                &rec_id_analysis,
-                                summary.as_deref(),
-                                &action_items,
-                            );
-                            handle_analysis.emit_event(
-                                "recording-analysis-ready",
-                                serde_json::json!({
-                                    "recordingId": rec_id_analysis,
-                                    "summary": summary,
-                                    "actionItems": action_items,
-                                }),
-                            );
-                        }
-                    });
-                }
-
-                let _ = enforce_meeting_retention_policy(
-                    state_clone.as_ref(),
-                    None::<&crate::sidecar_handle::SidecarHandle>,
-                    "meeting-completed",
-                    None,
-                )
-                .await;
-            }
-            Err(e) => {
-                tracing::error!("Failed to transcribe {}: {}", recording_id_clone, e);
-                {
-                    let mut db = state_clone.db.lock().await;
-                    let _ = db.update_recording_status(&recording_id_clone, "error");
-                    let _ = db.log_audit_event(
-                        "transcription_failed",
-                        Some(serde_json::json!({"recording_id": &recording_id_clone, "error": &e})),
-                        "error",
-                    );
-                }
-                handle_clone.emit_event(
-                    "recording-status-changed",
-                    serde_json::json!({
-                        "recordingId": &recording_id_clone, "status": "error",
-                        "message": e, "updatedAt": chrono::Utc::now().to_rfc3339(),
-                    }),
-                );
-            }
+            tracing::warn!(
+                "Streaming preview failed for recording {}: {}",
+                preview_rec_id,
+                error
+            );
         }
-
-        preview_task.abort();
-        if let Ok(mut overlay) = state_clone.recording_overlay_state.lock() {
-            *overlay = RecordingOverlayState::default();
-        }
-        handle_clone.emit_event(
-            "meeting-recording-state-changed",
-            serde_json::json!({ "phase": "idle" }),
-        );
     });
 
-    Ok(())
+    match transcribe_meeting_recording(
+        &handle_clone,
+        Arc::clone(&state_clone.asr_manager),
+        &recording_id_clone,
+        &path,
+        mic_audio_path_clone.as_deref(),
+        system_audio_path_clone.as_deref(),
+        meeting_provider,
+        meeting_model_id.clone(),
+    )
+    .await
+    {
+        Ok(output) => {
+            let mut transcript = output.transcript;
+            enrich_meeting_transcript(&mut transcript);
+
+            let enable_diarization = {
+                let sm = state_clone.settings_manager.lock().await;
+                sm.settings().transcription.enable_diarization
+            };
+            if enable_diarization
+                && !transcript_has_source_aware_speakers(&transcript.segments)
+                && diarization::DiarizationEngine::is_real_available()
+            {
+                if let Ok(result) = diarization::run_diarization(&path).await {
+                    let engine = diarization::DiarizationEngine::new();
+                    engine.merge_with_transcript(&result, &mut transcript.segments);
+                }
+            }
+
+            {
+                let mut db = state_clone.db.lock().await;
+                let _ = db.save_transcript(&transcript);
+                let _ = db.update_recording_status(&recording_id_clone, "completed");
+            }
+
+            let _ = apply_meeting_transcript_only_storage_policy(
+                state_clone.as_ref(),
+                Some(&handle_clone),
+                "meeting-transcript-saved",
+                Some(&recording_id_clone),
+            )
+            .await;
+
+            handle_clone.emit_event(
+                "recording-status-changed",
+                serde_json::json!({
+                    "recordingId": &recording_id_clone, "status": "completed",
+                    "progress": 1.0, "updatedAt": chrono::Utc::now().to_rfc3339(),
+                    "transcriptFirstAvailableAt": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+
+            let full_text = transcript.full_text.clone();
+            match auto_name_meeting_recording(
+                state_clone.as_ref(),
+                &handle_clone,
+                &recording_id_clone,
+                &full_text,
+            )
+            .await
+            {
+                Ok(Some(title)) => {
+                    tracing::info!("Auto-named meeting '{}' to '{}'", recording_id_clone, title)
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    "Meeting auto-name failed for '{}': {}",
+                    recording_id_clone,
+                    e
+                ),
+            }
+
+            let auto_analyze = {
+                let sm = state_clone.settings_manager.lock().await;
+                sm.settings().transcription.enable_auto_analysis
+            };
+            if auto_analyze && !full_text.trim().is_empty() {
+                let (provider, model) = {
+                    let sm = state_clone.settings_manager.lock().await;
+                    let s = sm.settings();
+                    let p = AnalysisProvider::from_settings_value(&s.privacy.llm_provider);
+                    let m = s
+                        .privacy
+                        .llm_model_id
+                        .clone()
+                        .unwrap_or_else(|| p.default_model().to_string());
+                    (p, m)
+                };
+                let remote_processing_enabled = {
+                    let sm = state_clone.settings_manager.lock().await;
+                    sm.settings().privacy.remote_processing_enabled
+                };
+                let db_clone = Arc::clone(&state_clone.db);
+                let ollama_clone = Arc::clone(&state_clone.ollama_client);
+                let handle_analysis = handle_clone.clone();
+                let rec_id_analysis = recording_id_clone.clone();
+                let text_for_analysis = full_text.clone();
+                tokio::spawn(async move {
+                    // Track failures explicitly: auto-analysis is on by
+                    // default, so a silently swallowed provider error
+                    // (e.g. Ollama not installed) would mean summaries
+                    // just never appear with no explanation.
+                    let mut failure_reasons: Vec<String> = Vec::new();
+                    let summary = match tokio::time::timeout(
+                        Duration::from_millis(90_000),
+                        run_summary_with_provider(
+                            provider,
+                            remote_processing_enabled,
+                            Some(model.clone()),
+                            ollama_clone.as_ref(),
+                            &text_for_analysis,
+                            Some(&model),
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(summary)) => Some(summary),
+                        Ok(Err(error)) => {
+                            failure_reasons.push(format!("summary: {}", error));
+                            None
+                        }
+                        Err(_) => {
+                            failure_reasons.push("summary: timed out after 90s".to_string());
+                            None
+                        }
+                    };
+                    let action_items: Vec<String> = match tokio::time::timeout(
+                        Duration::from_millis(90_000),
+                        run_action_items_with_provider(
+                            provider,
+                            remote_processing_enabled,
+                            Some(model.clone()),
+                            ollama_clone.as_ref(),
+                            &text_for_analysis,
+                            Some(&model),
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(items)) => items.into_iter().map(|item| item.task).collect(),
+                        Ok(Err(error)) => {
+                            failure_reasons.push(format!("action items: {}", error));
+                            Vec::new()
+                        }
+                        Err(_) => {
+                            failure_reasons.push("action items: timed out after 90s".to_string());
+                            Vec::new()
+                        }
+                    };
+                    if summary.is_some() || !action_items.is_empty() {
+                        let mut db = db_clone.lock().await;
+                        let _ = db.update_recording_analysis(
+                            &rec_id_analysis,
+                            summary.as_deref(),
+                            &action_items,
+                        );
+                        handle_analysis.emit_event(
+                            "recording-analysis-ready",
+                            serde_json::json!({
+                                "recordingId": rec_id_analysis,
+                                "summary": summary,
+                                "actionItems": action_items,
+                            }),
+                        );
+                    }
+                    if !failure_reasons.is_empty() {
+                        let reason = failure_reasons.join("; ");
+                        tracing::warn!("Auto-analysis for {} failed: {}", rec_id_analysis, reason);
+                        handle_analysis.emit_event(
+                            "recording-analysis-failed",
+                            serde_json::json!({
+                                "recordingId": rec_id_analysis,
+                                "reason": reason,
+                            }),
+                        );
+                    }
+                });
+            }
+
+            let _ = enforce_meeting_retention_policy(
+                state_clone.as_ref(),
+                None::<&crate::sidecar_handle::SidecarHandle>,
+                "meeting-completed",
+                None,
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::error!("Failed to transcribe {}: {}", recording_id_clone, e);
+            {
+                let mut db = state_clone.db.lock().await;
+                let _ = db.update_recording_status(&recording_id_clone, "error");
+                let _ = db.log_audit_event(
+                    "transcription_failed",
+                    Some(serde_json::json!({"recording_id": &recording_id_clone, "error": &e})),
+                    "error",
+                );
+            }
+            handle_clone.emit_event(
+                "recording-status-changed",
+                serde_json::json!({
+                    "recordingId": &recording_id_clone, "status": "error",
+                    "message": e, "updatedAt": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+        }
+    }
+
+    preview_task.abort();
+    if let Ok(mut overlay) = state_clone.recording_overlay_state.lock() {
+        *overlay = RecordingOverlayState::default();
+    }
+    handle_clone.emit_event(
+        "meeting-recording-state-changed",
+        serde_json::json!({ "phase": "idle" }),
+    );
 }
 
 /// Dispatch a JSON-RPC command by name to the appropriate handler function.
@@ -16139,9 +16544,102 @@ pub async fn dispatch_command(
             let recording_id: String =
                 serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
             let mut db = state.db.lock().await;
-            db.delete_recording(&recording_id)
+            // Refuse to delete a meeting that is still capturing: the audio
+            // session would keep writing files for a row that no longer exists.
+            if let Ok(Some(recording)) = db.get_recording(&recording_id) {
+                if recording.status == "recording" {
+                    return Err("Stop the meeting before deleting it.".to_string());
+                }
+            }
+            let audio_path = db
+                .delete_recording(&recording_id)
                 .map_err(|e| e.to_string())?;
-            Ok(serde_json::Value::Null)
+            // The delete confirmation dialog promises the saved audio file is
+            // removed too, so delete the mixed WAV plus any per-source
+            // companion WAVs alongside the DB rows.
+            let (deleted_audio_files, failed_audio_file_deletions) =
+                remove_recording_audio_files(&audio_path, "recording delete");
+            let _ = db.log_audit_event(
+                "recording_deleted",
+                Some(serde_json::json!({
+                    "recording_id": &recording_id,
+                    "deleted_audio_files": deleted_audio_files,
+                    "failed_audio_file_deletions": &failed_audio_file_deletions,
+                })),
+                "info",
+            );
+            Ok(serde_json::json!({
+                "deletedAudioFiles": deleted_audio_files,
+                "failedAudioFileDeletions": failed_audio_file_deletions,
+            }))
+        }
+        "retranscribe_recording" => {
+            // Recovery path for meetings stuck in error/processing (crash,
+            // transient ASR failure): re-run the full transcription pipeline
+            // from the audio that is still on disk.
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let recording = {
+                let db = state.db.lock().await;
+                db.get_recording(&recording_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("Recording not found")?
+            };
+            if recording.status == "recording" {
+                return Err("Stop the meeting before re-transcribing it.".to_string());
+            }
+            if recording.status == "processing" {
+                // A pipeline is already running in this session (stale
+                // "processing" rows from crashes are reconciled to "error"
+                // at startup); don't spawn a second one.
+                return Err("This meeting is already being transcribed.".to_string());
+            }
+            let audio_path = recording.audio_path.trim().to_string();
+            if audio_path.is_empty() || !std::path::Path::new(&audio_path).exists() {
+                return Err(
+                    "The audio file for this meeting is no longer available, so it cannot be re-transcribed."
+                        .to_string(),
+                );
+            }
+            {
+                let mut db = state.db.lock().await;
+                db.update_recording_status(&recording_id, "processing")
+                    .map_err(|e| e.to_string())?;
+                let _ = db.log_audit_event(
+                    "recording_retranscribe_requested",
+                    Some(serde_json::json!({ "recording_id": &recording_id })),
+                    "info",
+                );
+            }
+            handle.emit_event(
+                "recording-status-changed",
+                serde_json::json!({
+                    "recordingId": &recording_id, "status": "processing",
+                    "message": "Processing transcript", "progress": 0.0,
+                    "updatedAt": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+            // Per-source companion WAVs only exist for system-audio captures
+            // and may already have been cleaned up; fall back to mixed-only.
+            let (mic_audio_path, system_audio_path) =
+                match meeting_companion_audio_paths(&audio_path) {
+                    Some((mic, system)) => (
+                        mic.exists().then(|| mic.to_string_lossy().to_string()),
+                        system
+                            .exists()
+                            .then(|| system.to_string_lossy().to_string()),
+                    ),
+                    None => (None, None),
+                };
+            tokio::spawn(run_meeting_transcription_pipeline(
+                Arc::clone(state),
+                handle.clone(),
+                recording_id,
+                audio_path,
+                mic_audio_path,
+                system_audio_path,
+            ));
+            Ok(serde_json::json!({ "status": "processing" }))
         }
         "rename_recording" => {
             let recording_id: String =
@@ -16470,7 +16968,7 @@ pub async fn dispatch_command(
                     .ok_or("Transcript not found")?;
                 (r, t)
             };
-            let mut context_segments: Vec<AnalysisContextSegment> = transcript
+            let context_segments: Vec<AnalysisContextSegment> = transcript
                 .segments
                 .iter()
                 .map(|seg| AnalysisContextSegment {
@@ -16485,9 +16983,8 @@ pub async fn dispatch_command(
             if context_segments.is_empty() {
                 return Err("Transcript contains no segments for grounded analysis".to_string());
             }
-            if context_segments.len() > 140 {
-                context_segments.truncate(140);
-            }
+            let (context_segments, total_segments) =
+                sample_analysis_context_segments(context_segments, ANALYSIS_CONTEXT_MAX_SEGMENTS);
             let transcript_context = serialize_analysis_context(&context_segments);
             let strict_query = format!(
                 "{}\n\nReturn JSON only with schema:\n{{\"response\":\"string\",\"citations\":[{{\"recordingId\":\"string\",\"startTime\":number,\"endTime\":number,\"text\":\"string\",\"certainty\":number}}]}}\nCitations must use exact recordingId/startTime/endTime from provided transcript lines.",
@@ -16505,10 +17002,12 @@ pub async fn dispatch_command(
                 },
             )
             .await?;
-            let structured = parse_structured_analysis_json(&result.response)
-                .ok_or("Model response did not include required JSON citation payload")?;
-            result.citations = validate_structured_citations(&structured.1, &context_segments)?;
-            result.response = structured.0;
+            finalize_grounded_analysis_result(&mut result, &context_segments);
+            if let Some(note) =
+                analysis_context_coverage_note(context_segments.len(), total_segments)
+            {
+                result.response.push_str(&note);
+            }
             let mut db = state.db.lock().await;
             let _ = db.log_audit_event("analysis_completed", Some(serde_json::json!({ "recording_id": &recording_id, "query": &query, "model": &result.model })), "info");
             serde_json::to_value(result).map_err(|e| e.to_string())
@@ -16584,10 +17083,7 @@ pub async fn dispatch_command(
                 },
             )
             .await?;
-            let structured = parse_structured_analysis_json(&result.response)
-                .ok_or("Model response did not include required JSON citation payload")?;
-            result.citations = validate_structured_citations(&structured.1, &context_segments)?;
-            result.response = structured.0;
+            finalize_grounded_analysis_result(&mut result, &context_segments);
             let mut db = state.db.lock().await;
             let _ = db.log_audit_event("analysis_multi_recording_completed", Some(serde_json::json!({ "recording_ids": &recording_ids, "query": &query, "model": &result.model, "citation_count": result.citations.len() })), "info");
             serde_json::to_value(result).map_err(|e| e.to_string())
@@ -16726,24 +17222,26 @@ pub async fn dispatch_command(
                 None,
             )
             .await?;
-            if let Some(structured) = parse_structured_analysis_json(&result.response) {
-                if let Ok(validated) =
-                    validate_structured_citations(&structured.1, &context_segments)
-                {
-                    result.response = structured.0;
-                    result.citations = validated;
-                }
-            }
+            finalize_grounded_analysis_result(&mut result, &context_segments);
             let mut db = state.db.lock().await;
             let _ = db.log_audit_event("memory_query", Some(serde_json::json!({ "query": &query, "model": &result.model, "citation_count": result.citations.len() })), "info");
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "get_relationship_memory" => {
+            // Cap how many transcripts are loaded and parsed per call:
+            // recordings come back newest-first, and without a cap this scan
+            // grows linearly with the lifetime meeting library on every
+            // meetings-view mount.
+            const RELATIONSHIP_MEMORY_MAX_RECORDINGS: usize = 100;
             let sources = {
                 let db = state.db.lock().await;
                 let recordings = db.get_recordings(None).map_err(|e| e.to_string())?;
-                let mut sources = Vec::with_capacity(recordings.len());
-                for recording in recordings {
+                let mut sources =
+                    Vec::with_capacity(recordings.len().min(RELATIONSHIP_MEMORY_MAX_RECORDINGS));
+                for recording in recordings
+                    .into_iter()
+                    .take(RELATIONSHIP_MEMORY_MAX_RECORDINGS)
+                {
                     let transcript = db
                         .get_transcript(&recording.id)
                         .map_err(|e| e.to_string())?;
@@ -18418,6 +18916,14 @@ pub async fn dispatch_command(
                 .get("preview")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
+            // Template exports honor the same redaction control as plain
+            // exports; content is redacted before rendering so the chosen
+            // level applies to every templated field.
+            let redaction_level: String = params
+                .get("redactionLevel")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                .to_string();
             let (recording, transcript, speaker_aliases) = {
                 let db = state.db.lock().await;
                 let recording = db
@@ -18432,7 +18938,7 @@ pub async fn dispatch_command(
             };
             let full_text = transcript
                 .as_ref()
-                .map(|t| t.full_text.clone())
+                .map(|t| transcription::apply_redaction(&t.full_text, &redaction_level))
                 .unwrap_or_default();
             let speakers: Vec<export::templates::SpeakerInfo> = {
                 use std::collections::BTreeMap;
@@ -18446,7 +18952,7 @@ pub async fn dispatch_command(
                         by_speaker.entry(sid).or_default().push((
                             seg.start_time,
                             seg.end_time,
-                            seg.text.clone(),
+                            transcription::apply_redaction(&seg.text, &redaction_level),
                         ));
                     }
                 }
@@ -18499,8 +19005,12 @@ pub async fn dispatch_command(
                 duration_seconds: recording.duration as u64,
                 transcript: full_text,
                 speakers,
-                action_items,
-                summary,
+                action_items: action_items
+                    .into_iter()
+                    .map(|item| transcription::apply_redaction(&item, &redaction_level))
+                    .collect(),
+                summary: summary
+                    .map(|value| transcription::apply_redaction(&value, &redaction_level)),
             };
             let rendered = state
                 .template_manager

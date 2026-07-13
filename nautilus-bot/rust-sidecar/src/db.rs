@@ -2762,7 +2762,10 @@ impl Database {
             .map_err(|e| e.into())
     }
 
-    /// Delete a recording and its associated transcript and speaker aliases
+    /// Delete a recording and all of its derived content: transcript, FTS rows,
+    /// speaker aliases, meeting artifacts (summary/action items/chat), and
+    /// vector embeddings. Returns the stored audio path so callers can remove
+    /// the file(s) on disk as well.
     pub fn delete_recording(&mut self, recording_id: &str) -> Result<String> {
         let audio_path: Option<String> = self
             .conn
@@ -2784,6 +2787,14 @@ impl Database {
         )?;
         tx.execute(
             "DELETE FROM transcript_fts WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        tx.execute(
+            "DELETE FROM meeting_artifacts WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        tx.execute(
+            "DELETE FROM transcript_embeddings WHERE recording_id = ?1",
             params![recording_id],
         )?;
         tx.execute(
@@ -2937,6 +2948,7 @@ impl Database {
         tx.execute("DELETE FROM speaker_aliases", [])?;
         tx.execute("DELETE FROM transcripts", [])?;
         let _ = tx.execute("DELETE FROM transcript_fts", []);
+        tx.execute("DELETE FROM meeting_artifacts", [])?;
         tx.execute("DELETE FROM recordings", [])?;
         tx.execute("DELETE FROM asr_benchmarks", [])?;
         tx.execute("DELETE FROM transcript_embeddings", [])?;
@@ -2975,31 +2987,52 @@ impl Database {
         query_embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
+        // Bound the in-memory cosine-similarity scan so a multi-year meeting
+        // library cannot balloon a single Ask into deserializing hundreds of
+        // thousands of embedding blobs; the most recent rows win.
+        const EMBEDDING_SCAN_LIMIT: usize = 50_000;
+
+        // Join against recordings so segments from deleted meetings can never
+        // surface in cross-meeting recall, and titles come back in one pass.
         let mut stmt = self.conn.prepare(
-            "SELECT recording_id, segment_id, text, embedding, start_time, end_time
-             FROM transcript_embeddings",
+            "SELECT te.recording_id, te.segment_id, te.text, te.embedding,
+                    te.start_time, te.end_time, r.title
+             FROM transcript_embeddings te
+             JOIN recordings r ON r.id = te.recording_id
+             ORDER BY te.created_at DESC
+             LIMIT ?1",
         )?;
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![EMBEDDING_SCAN_LIMIT as i64], |row| {
             let recording_id: String = row.get(0)?;
             let segment_id: String = row.get(1)?;
             let text: String = row.get(2)?;
             let blob: Vec<u8> = row.get(3)?;
             let start_time: f64 = row.get(4)?;
             let end_time: f64 = row.get(5)?;
-            Ok((recording_id, segment_id, text, blob, start_time, end_time))
+            let recording_title: String = row.get(6)?;
+            Ok((
+                recording_id,
+                segment_id,
+                text,
+                blob,
+                start_time,
+                end_time,
+                recording_title,
+            ))
         })?;
 
         let mut scored: Vec<(f64, SearchHit)> = Vec::new();
         for row in rows {
-            let (recording_id, segment_id, text, blob, start_time, end_time) = row?;
+            let (recording_id, segment_id, text, blob, start_time, end_time, recording_title) =
+                row?;
             let embedding = blob_to_f32_vec(&blob);
             let score = crate::llm::cosine_similarity(query_embedding, &embedding) as f64;
             scored.push((
                 score,
                 SearchHit {
                     recording_id,
-                    recording_title: String::new(),
+                    recording_title,
                     project_id: String::new(),
                     segment_id,
                     text,
@@ -3013,22 +3046,7 @@ impl Database {
         scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(limit);
 
-        // Backfill recording titles
-        let hits: Vec<SearchHit> = scored
-            .into_iter()
-            .map(|(_, mut hit)| {
-                if let Ok(title) = self.conn.query_row(
-                    "SELECT title FROM recordings WHERE id = ?1",
-                    params![&hit.recording_id],
-                    |row| row.get::<_, String>(0),
-                ) {
-                    hit.recording_title = title;
-                }
-                hit
-            })
-            .collect();
-
-        Ok(hits)
+        Ok(scored.into_iter().map(|(_, hit)| hit).collect())
     }
 
     pub fn embedding_count(&self) -> Result<i64> {
@@ -3447,6 +3465,59 @@ mod tests {
         assert!(db.get_transcript("r1").unwrap().is_none());
         let hits = db.search_transcripts("hello", 10, None).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn test_delete_recording_removes_artifacts_and_embeddings() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_transcript("r1")).unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
+        db.save_embedding("r1", "s1", "hello world", &[0.1, 0.2, 0.3], "m", 0.0, 1.0)
+            .unwrap();
+        assert!(db.has_embeddings("r1"));
+
+        db.delete_recording("r1").unwrap();
+
+        assert!(db.get_meeting_artifact("r1").unwrap().is_none());
+        assert!(!db.has_embeddings("r1"));
+    }
+
+    #[test]
+    fn test_purge_user_content_removes_meeting_artifacts() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
+
+        db.purge_user_content().unwrap();
+
+        assert!(db.get_meeting_artifact("r1").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_search_embeddings_excludes_deleted_recordings() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.create_recording(&sample_recording("r2", "inbox"))
+            .unwrap();
+        db.save_embedding("r1", "s1", "kept", &[1.0, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        // Simulate a legacy orphaned embedding whose recording row is gone.
+        db.save_embedding("r2", "s2", "orphaned", &[1.0, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        db.conn
+            .execute("DELETE FROM recordings WHERE id = 'r2'", [])
+            .unwrap();
+
+        let hits = db.search_embeddings(&[1.0, 0.0], 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].recording_id, "r1");
+        assert_eq!(hits[0].recording_title, "Recording r1");
     }
 
     #[test]

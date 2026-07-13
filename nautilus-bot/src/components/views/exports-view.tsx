@@ -135,7 +135,10 @@ export function ExportsView() {
       if (!selectedTemplateId) {
         throw new Error("Select a template first");
       }
-      const rendered = await exportWithTemplate(recordingId, selectedTemplateId, { preview: true });
+      const rendered = await exportWithTemplate(recordingId, selectedTemplateId, {
+        preview: true,
+        redactionLevel,
+      });
       setTemplatePreview(rendered.content ?? "");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Template preview failed");
@@ -156,6 +159,7 @@ export function ExportsView() {
       const result = await exportWithTemplate(recordingId, selectedTemplateId, {
         preview: false,
         target: templateTargetPath.trim() || undefined,
+        redactionLevel,
       });
       if (!result.exportPath) {
         throw new Error("Template export did not return a file path");

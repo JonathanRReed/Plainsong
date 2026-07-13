@@ -135,6 +135,7 @@ describe("ExportsView", () => {
     expect(await screen.findByText("Follow-up memo preview")).toBeInTheDocument();
     expect(exportsMocks.exportWithTemplate).toHaveBeenCalledWith("rec-1", "template-1", {
       preview: true,
+      redactionLevel: "basic",
     });
 
     exportsMocks.exportWithTemplate.mockResolvedValueOnce({

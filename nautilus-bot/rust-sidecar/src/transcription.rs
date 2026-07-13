@@ -17,9 +17,12 @@ pub fn export_with_policy(
     redaction_level: &str,
     preview: bool,
 ) -> Result<crate::models::ExportResponse> {
-    let export_format = format
-        .parse::<ExportFormat>()
-        .unwrap_or(ExportFormat::Markdown);
+    // Fail loudly on formats this build cannot produce (e.g. "pdf" without the
+    // export-pdf feature) instead of silently writing Markdown into a
+    // mislabeled file.
+    let export_format = format.parse::<ExportFormat>().map_err(|_| {
+        anyhow::anyhow!("Export format '{}' is not supported in this build", format)
+    })?;
 
     let content = export_recording(recording, transcript, export_format, true)?;
     let redacted_content = apply_redaction(&content, redaction_level);
@@ -59,9 +62,9 @@ pub fn export(
     format: &str,
     target: Option<&str>,
 ) -> Result<String> {
-    let export_format = format
-        .parse::<ExportFormat>()
-        .unwrap_or(ExportFormat::Markdown);
+    let export_format = format.parse::<ExportFormat>().map_err(|_| {
+        anyhow::anyhow!("Export format '{}' is not supported in this build", format)
+    })?;
 
     let export_path = match target {
         Some(path) => PathBuf::from(path),
@@ -80,7 +83,7 @@ pub fn export(
     Ok(export_path.to_string_lossy().to_string())
 }
 
-fn apply_redaction(content: &str, redaction_level: &str) -> String {
+pub(crate) fn apply_redaction(content: &str, redaction_level: &str) -> String {
     match redaction_level {
         "none" => content.to_string(),
         "strict" => redact_strict(content),
@@ -88,14 +91,36 @@ fn apply_redaction(content: &str, redaction_level: &str) -> String {
     }
 }
 
+/// True when a phone-candidate match is actually a date or date-time
+/// (`2026-07-13`, `2026-07-13 14`, `07-13-2026`, ...). The `regex` crate has
+/// no lookarounds, so candidates are matched broadly and then vetted here to
+/// keep export metadata lines and spoken dates intact.
+fn is_date_like(candidate: &str) -> bool {
+    let date_like =
+        Regex::new(r"^(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2}-\d{4})(?:[\sT]+\d{1,2})?$")
+            .expect("valid date-like regex");
+    date_like.is_match(candidate.trim())
+}
+
 fn redact_basic(content: &str) -> String {
     let email =
         Regex::new(r"(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b").expect("valid email regex");
-    let phone = Regex::new(r"\+?\d[\d\-\s\(\)]{7,}\d").expect("valid phone regex");
+    // Broad phone candidate: optional +/( prefix, then digits with common
+    // separators. Real redaction is decided per match below so date-like
+    // strings survive.
+    let phone = Regex::new(r"\+?\(?\d[\d\-\s\(\)]{7,}\d").expect("valid phone regex");
 
     let without_email = email.replace_all(content, "[REDACTED_EMAIL]");
     phone
-        .replace_all(&without_email, "[REDACTED_PHONE]")
+        .replace_all(&without_email, |caps: &regex::Captures<'_>| {
+            let matched = caps.get(0).expect("match 0 always present").as_str();
+            let digit_count = matched.chars().filter(char::is_ascii_digit).count();
+            if !(7..=15).contains(&digit_count) || is_date_like(matched) {
+                matched.to_string()
+            } else {
+                "[REDACTED_PHONE]".to_string()
+            }
+        })
         .to_string()
 }
 
@@ -135,5 +160,48 @@ mod tests {
     fn redact_none_is_passthrough() {
         let input = "plain text with a@b.com";
         assert_eq!(apply_redaction(input, "none"), input);
+    }
+
+    #[test]
+    fn redact_basic_preserves_dates_and_datetimes() {
+        let input = "- **Date:** 2026-07-13 14:30\nDue on 2026-07-13 and 07-13-2026.";
+        assert_eq!(apply_redaction(input, "basic"), input);
+    }
+
+    #[test]
+    fn redact_basic_consumes_leading_paren_of_phone() {
+        let out = apply_redaction("call me at (555) 123-4567 today", "basic");
+        assert_eq!(out, "call me at [REDACTED_PHONE] today");
+    }
+
+    #[test]
+    fn export_with_policy_rejects_unsupported_format() {
+        use crate::models::Recording;
+        use chrono::Utc;
+        let recording = Recording {
+            id: "r1".to_string(),
+            title: "Test".to_string(),
+            project_id: "inbox".to_string(),
+            duration: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            source_type: "meeting".to_string(),
+            audio_path: String::new(),
+            status: "completed".to_string(),
+            summary: None,
+            action_items: None,
+            meeting_notes: None,
+            meeting_template_id: None,
+            meeting_capture_mode: None,
+            notes_updated_at: None,
+            consent_prompt_shown: false,
+            consent_notice_mode: None,
+            consent_notice_surface: None,
+            consent_notice_message: None,
+            consent_notice_updated_at: None,
+        };
+        let error = export_with_policy(&recording, None, "bogus", None, "none", true)
+            .expect_err("unknown format must not silently fall back");
+        assert!(error.to_string().contains("not supported"));
     }
 }

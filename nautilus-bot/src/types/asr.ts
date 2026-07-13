@@ -100,6 +100,9 @@ export interface LlmAnalysisResult {
   citations: LlmCitation[];
   model: string;
   processingTimeMs: number;
+  /** False when the model's citations could not be verified and the
+   * response is returned uncited instead of discarded. */
+  grounded?: boolean;
 }
 
 export interface LlmCitation {
@@ -121,6 +124,9 @@ export interface GroundedSummaryResult {
   citations: LlmCitation[];
   model: string;
   processingTimeMs: number;
+  /** False when the model's citations could not be verified and the
+   * summary is returned uncited instead of discarded. */
+  grounded?: boolean;
 }
 
 interface GroundedActionItem extends ActionItem {
