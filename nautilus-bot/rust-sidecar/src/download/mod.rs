@@ -30,6 +30,20 @@ const SILERO_VAD_ONNX_FILE: &str = "silero_vad.onnx";
 /// `min_expected_model_bytes` for Whisper models).
 const SILERO_VAD_MIN_EXPECTED_BYTES: u64 = 512 * 1024;
 
+/// HTTP client for model downloads. Deliberately no total-request timeout:
+/// model files run to ~1.5 GB, and a total timeout kills any healthy
+/// transfer slower than (size / timeout) — e.g. a 5-minute cap required
+/// ~41 Mbps sustained for distil-large-v3.5, so slower connections failed
+/// on every attempt. Instead, bound how long we wait to connect and how
+/// long a read may sit idle, which still catches dead connections quickly.
+fn build_download_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+}
+
 /// Download progress information
 #[derive(Debug, Clone)]
 #[expect(
@@ -53,10 +67,7 @@ impl DownloadManager {
 
         std::fs::create_dir_all(&models_dir)?;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .build()?;
+        let client = build_download_client()?;
 
         Ok(Self { client, models_dir })
     }
@@ -81,7 +92,7 @@ impl DownloadManager {
         let temp_path = destination.with_extension("tmp");
 
         // Check for partial download
-        let start_byte = if temp_path.exists() {
+        let mut start_byte = if temp_path.exists() {
             let metadata = tokio::fs::metadata(&temp_path).await?;
             metadata.len()
         } else {
@@ -94,7 +105,20 @@ impl DownloadManager {
             request = request.header("Range", format!("bytes={}-", start_byte));
         }
 
-        let response = request.send().await?;
+        let mut response = request.send().await?;
+
+        // 416 means our tmp file is unusable as a resume base (e.g. already
+        // complete); discard it and start over instead of failing forever.
+        if start_byte > 0 && response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            tracing::warn!(
+                "Resume of {} rejected with 416; discarding partial file and restarting",
+                url
+            );
+            tokio::fs::remove_file(&temp_path).await.ok();
+            start_byte = 0;
+            response = self.client.get(url).send().await?;
+        }
+
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
@@ -112,18 +136,33 @@ impl DownloadManager {
         }
         let expected_sha256 = extract_sha256_from_headers(response.headers());
 
+        // Only a 206 Partial Content reply actually honored the Range header.
+        // A server/proxy that ignores Range replies 200 with the entire body,
+        // which must overwrite the partial tmp file -- appending it after the
+        // existing bytes would silently corrupt the artifact.
+        let resuming = start_byte > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        if start_byte > 0 && !resuming {
+            tracing::warn!(
+                "Server ignored Range request for {} (HTTP {}); restarting download from scratch",
+                url,
+                response.status()
+            );
+            start_byte = 0;
+        }
+
         // Get total size
         let total_size = response
             .content_length()
             .map(|l| l + start_byte)
             .unwrap_or(0);
 
-        // Open file for writing (append if resuming)
-        let mut file = File::options()
-            .create(true)
-            .append(true)
-            .open(&temp_path)
-            .await?;
+        // Open file for writing (append only when the server honored the
+        // resume; otherwise truncate any stale partial content).
+        let mut file = if resuming {
+            File::options().append(true).open(&temp_path).await?
+        } else {
+            File::create(&temp_path).await?
+        };
 
         let mut stream = response.bytes_stream();
         let bytes_downloaded = Arc::new(AtomicU64::new(start_byte));
@@ -331,6 +370,31 @@ impl DownloadManager {
             .map(|l| l + start_byte)
             .unwrap_or(0);
 
+        // Preflight: refuse to stream a download the disk can't hold, so the
+        // user gets a clear "need N free" error instead of a mid-download
+        // ENOSPC after minutes of waiting. Fails open when the free-space
+        // probe itself is unavailable.
+        if total_size > start_byte {
+            let remaining = total_size - start_byte;
+            match available_space_for_path(&self.models_dir) {
+                Ok(available) if available < remaining => {
+                    return Err(anyhow::anyhow!(
+                        "Not enough disk space to download {}: need {} free, only {} available.",
+                        url,
+                        format_bytes(remaining),
+                        format_bytes(available)
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        "Free-space preflight unavailable, continuing download: {}",
+                        error
+                    );
+                }
+            }
+        }
+
         let mut file = if resuming {
             File::options().append(true).open(&temp_path).await?
         } else {
@@ -344,7 +408,19 @@ impl DownloadManager {
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
-            file.write_all(&chunk).await?;
+            if let Err(error) = file.write_all(&chunk).await {
+                // A full disk leaves a useless (and space-hogging) partial
+                // file on an already-full volume; remove it before erroring.
+                if error.raw_os_error() == Some(libc::ENOSPC) {
+                    drop(file);
+                    tokio::fs::remove_file(&temp_path).await.ok();
+                    return Err(anyhow::anyhow!(
+                        "The disk ran out of space while downloading {}. Free up space and retry.",
+                        url
+                    ));
+                }
+                return Err(error.into());
+            }
 
             let current = bytes_downloaded.fetch_add(chunk.len() as u64, Ordering::SeqCst)
                 + chunk.len() as u64;
@@ -521,11 +597,12 @@ impl DownloadManager {
         Ok(destination)
     }
 
-    /// Get available space in models directory
+    /// Get available space (bytes) on the volume holding the models directory.
+    ///
+    /// Returns an error on platforms without an implementation — callers must
+    /// treat that as "unknown" and fail open, never assume space is available.
     pub async fn get_available_space(&self) -> Result<u64> {
-        // This is platform-specific
-        // For now, return a large number
-        Ok(100 * 1024 * 1024 * 1024) // 100 GB
+        available_space_for_path(&self.models_dir)
     }
 
     /// List downloaded models
@@ -828,21 +905,46 @@ impl Default for DownloadManager {
                         create_error
                     );
                 }
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(300))
-                    .redirect(reqwest::redirect::Policy::limited(10))
-                    .build()
-                    .unwrap_or_else(|client_error| {
-                        tracing::error!(
-                            "Failed to build configured download client, using default client: {}",
-                            client_error
-                        );
-                        reqwest::Client::new()
-                    });
+                let client = build_download_client().unwrap_or_else(|client_error| {
+                    tracing::error!(
+                        "Failed to build configured download client, using default client: {}",
+                        client_error
+                    );
+                    reqwest::Client::new()
+                });
                 Self { client, models_dir }
             }
         }
     }
+}
+
+/// Free space (bytes) available to unprivileged callers on the volume
+/// containing `path`, via `statvfs` (`f_bavail * f_frsize`).
+#[cfg(unix)]
+fn available_space_for_path(path: &std::path::Path) -> Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .context("Models directory path contains an interior NUL byte")?;
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::statvfs(c_path.as_ptr(), &mut stats) };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("statvfs failed for {}", path.display()));
+    }
+    // The statvfs field widths differ across unix platforms; keep both casts.
+    #[allow(clippy::unnecessary_cast)]
+    Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
+}
+
+#[cfg(not(unix))]
+fn available_space_for_path(path: &std::path::Path) -> Result<u64> {
+    // No implementation on this platform. Return an honest error instead of
+    // a fabricated value; callers fail open (skip the preflight check).
+    Err(anyhow::anyhow!(
+        "Free-space check is not implemented on this platform (path: {})",
+        path.display()
+    ))
 }
 
 /// Information about a downloaded model
@@ -1055,6 +1157,21 @@ mod tests {
         let info = info.unwrap();
         assert_eq!(info.file_name, "ggml-base.en.bin");
         assert_eq!(info.size_mb, 142.0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_available_space_for_path_reports_real_value() {
+        // Regression: this used to be a stub hardcoded to 100 GB. A real
+        // probe of the temp dir must succeed and report a nonzero value.
+        let space =
+            available_space_for_path(&std::env::temp_dir()).expect("statvfs should succeed");
+        assert!(space > 0);
+    }
+
+    #[test]
+    fn test_download_client_builds_without_total_timeout() {
+        build_download_client().expect("download client should build");
     }
 
     #[test]

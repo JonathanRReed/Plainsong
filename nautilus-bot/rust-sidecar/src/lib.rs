@@ -109,8 +109,6 @@ const MEETING_CONSENT_TARGET_MAX_AGE_MS: i64 = 12_000;
 const DICTATION_COMMAND_PREFIX_DEFAULT: &str = "command";
 const APP_BUNDLE_IDENTIFIER: &str = "com.plainsong.app";
 const STREAMING_PREVIEW_MAX_SECONDS: f64 = 90.0;
-const MIN_SILENCE_TIMEOUT_SECONDS: f32 = 60.0;
-const MAX_SILENCE_TIMEOUT_SECONDS: f32 = 1800.0;
 const VAULT_DB_KEY_SECRET: &str = "vault_db_key";
 const VAULT_UNLOCK_CHECK_SECRET: &str = "vault_unlock_check";
 const VAULT_RECORDING_KEY_SALT_LEN: usize = 16;
@@ -2311,7 +2309,7 @@ async fn resolve_ready_meeting_selection(
                 meeting_route_policy_from_settings(&transcription.meeting_route_policy);
             let default_provider =
                 asr_provider_from_settings_value(&transcription.default_provider)
-                    .unwrap_or(asr::AsrProviderType::DistilWhisper);
+                    .unwrap_or(asr::AsrProviderType::Whisper);
             let dictation_provider =
                 asr_provider_from_settings_value(&transcription.dictation_provider)
                     .unwrap_or(default_provider);
@@ -2430,7 +2428,7 @@ async fn resolve_ready_dictation_selection(
 
                 let default_provider =
                     asr_provider_from_settings_value(&transcription.default_provider)
-                        .unwrap_or(asr::AsrProviderType::DistilWhisper);
+                        .unwrap_or(asr::AsrProviderType::Whisper);
                 let dictation_provider =
                     asr_provider_from_settings_value(&transcription.dictation_provider)
                         .unwrap_or(default_provider);
@@ -2477,7 +2475,7 @@ async fn resolve_ready_dictation_selection(
     }
 
     let default_provider = asr_provider_from_settings_value(&transcription.default_provider)
-        .unwrap_or(asr::AsrProviderType::DistilWhisper);
+        .unwrap_or(asr::AsrProviderType::Whisper);
     let dictation_provider = asr_provider_from_settings_value(&transcription.dictation_provider)
         .unwrap_or(default_provider);
     let provider_infos = state
@@ -4942,6 +4940,7 @@ async fn run_summary_with_selected_provider(
 ) -> Result<String, String> {
     let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state).await;
+    let custom_prompt = meeting_custom_prompt_from_settings(state).await;
     run_summary_with_provider(
         provider,
         remote_processing_enabled,
@@ -4949,8 +4948,23 @@ async fn run_summary_with_selected_provider(
         &state.ollama_client,
         transcript,
         model,
+        custom_prompt.as_deref(),
     )
     .await
+}
+
+/// The user's "Custom Meeting Summary Prompt" (Settings -> Transcription),
+/// trimmed; `None` when unset/blank so summaries use the default prompt.
+async fn meeting_custom_prompt_from_settings(state: &AppState) -> Option<String> {
+    let settings_manager = state.settings_manager.lock().await;
+    settings_manager
+        .settings()
+        .transcription
+        .meeting_custom_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 async fn run_summary_with_provider(
@@ -4960,6 +4974,7 @@ async fn run_summary_with_provider(
     ollama_client: &llm::OllamaClient,
     transcript: &str,
     model: Option<&str>,
+    custom_prompt: Option<&str>,
 ) -> Result<String, String> {
     enforce_remote_provider_policy(provider, remote_processing_enabled)?;
 
@@ -4971,41 +4986,41 @@ async fn run_summary_with_provider(
 
     match provider {
         AnalysisProvider::Ollama => ollama_client
-            .summarize(transcript, selected_model)
+            .summarize(transcript, selected_model, custom_prompt)
             .await
             .map_err(|e| e.to_string()),
         AnalysisProvider::OpenAi => {
             let api_key = provider_secret_for(provider)?;
             llm::OpenAIClient::with_api_key(Some(api_key))
-                .summarize(transcript, selected_model)
+                .summarize(transcript, selected_model, custom_prompt)
                 .await
                 .map_err(|e| e.to_string())
         }
         AnalysisProvider::Anthropic => {
             let api_key = provider_secret_for(provider)?;
             llm::AnthropicClient::with_api_key(Some(api_key))
-                .summarize(transcript, selected_model)
+                .summarize(transcript, selected_model, custom_prompt)
                 .await
                 .map_err(|e| e.to_string())
         }
         AnalysisProvider::Gemini => {
             let api_key = provider_secret_for(provider)?;
             llm::GeminiClient::with_api_key(Some(api_key))
-                .summarize(transcript, selected_model)
+                .summarize(transcript, selected_model, custom_prompt)
                 .await
                 .map_err(|e| e.to_string())
         }
         AnalysisProvider::DeepSeek => {
             let api_key = provider_secret_for(provider)?;
             llm::DeepSeekClient::with_api_key(Some(api_key))
-                .summarize(transcript, selected_model)
+                .summarize(transcript, selected_model, custom_prompt)
                 .await
                 .map_err(|e| e.to_string())
         }
         AnalysisProvider::OllamaCloud => {
             let api_key = provider_secret_for(provider)?;
             llm::OllamaCloudClient::with_api_key(Some(api_key))
-                .summarize(transcript, selected_model)
+                .summarize(transcript, selected_model, custom_prompt)
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -5101,7 +5116,10 @@ async fn build_security_status(state: &AppState) -> Result<SecurityStatus, Strin
         vault_initialized: privacy.vault_initialized,
         vault_unlocked,
         database_encrypted: db_encrypted,
-        recordings_encrypted: privacy.encrypt_recordings,
+        // Recording files are only ever encrypted by the vault migration
+        // (`migrate_storage_encryption`), so report that reality instead of
+        // a user-flippable settings flag that never encrypted anything.
+        recordings_encrypted: privacy.vault_initialized,
         llm_provider: AnalysisProvider::from_settings_value(&privacy.llm_provider)
             .as_settings_value()
             .to_string(),
@@ -5277,7 +5295,6 @@ async fn migrate_storage_encryption(state: &AppState, password: &str) -> Result<
     {
         let mut settings_manager = state.settings_manager.lock().await;
         let privacy = &mut settings_manager.settings_mut().privacy;
-        privacy.encrypt_recordings = true;
         privacy.vault_initialized = true;
         privacy.vault_salt = Some(crate::crypto::ProjectKeyManager::salt_to_string(&salt));
         settings_manager.save().map_err(|e| e.to_string())?;
@@ -8380,7 +8397,7 @@ fn normalize_dictation_custom_mode(
         normalize_optional_trimmed(mode.dictation_provider.clone()).map(|provider| {
             asr_provider_to_settings_value(
                 asr_provider_from_settings_value(&provider)
-                    .unwrap_or(asr::AsrProviderType::DistilWhisper),
+                    .unwrap_or(asr::AsrProviderType::Whisper),
             )
             .to_string()
         });
@@ -10273,7 +10290,7 @@ fn normalize_contextual_asr_settings(transcription: &mut settings::Transcription
     migrate_legacy_mlx_route_selection(transcription);
     let meeting_policy = meeting_route_policy_from_settings(&transcription.meeting_route_policy);
     let default_provider = asr_provider_from_settings_value(&transcription.default_provider)
-        .unwrap_or(asr::AsrProviderType::DistilWhisper);
+        .unwrap_or(asr::AsrProviderType::Whisper);
     transcription.dictation_route_preference =
         normalize_dictation_route_preference(&transcription.dictation_route_preference).to_string();
     transcription.dictation_vad_backend =
@@ -10493,16 +10510,16 @@ fn resolve_transcription_provider_and_model(
         }
     };
 
-    let provider = asr_provider_from_settings_value(provider_value)
-        .unwrap_or(asr::AsrProviderType::DistilWhisper);
+    let provider =
+        asr_provider_from_settings_value(provider_value).unwrap_or(asr::AsrProviderType::Whisper);
     let provider =
         if matches!(scope, TranscriptionScope::Meeting) && provider_is_dictation_only(provider) {
             preferred_meeting_provider(
                 meeting_policy,
                 asr_provider_from_settings_value(&transcription.default_provider)
-                    .unwrap_or(asr::AsrProviderType::DistilWhisper),
+                    .unwrap_or(asr::AsrProviderType::Whisper),
                 asr_provider_from_settings_value(&transcription.dictation_provider)
-                    .unwrap_or(asr::AsrProviderType::DistilWhisper),
+                    .unwrap_or(asr::AsrProviderType::Whisper),
                 asr_provider_from_settings_value(&transcription.meeting_provider),
             )
         } else {
@@ -10820,10 +10837,6 @@ async fn transcribe_meeting_recording(
     })
 }
 
-fn normalize_silence_timeout_seconds(value: f32) -> f32 {
-    value.clamp(MIN_SILENCE_TIMEOUT_SECONDS, MAX_SILENCE_TIMEOUT_SECONDS)
-}
-
 fn normalize_dictation_silence_timeout_seconds(value: f32) -> f32 {
     if !value.is_finite() || value <= 0.0 {
         0.0
@@ -10851,14 +10864,10 @@ fn resolve_dictation_auto_stop_silence_timeout_seconds(
     }
 }
 
-fn normalize_color_scheme_value(value: &str) -> String {
-    match value.trim() {
-        "default" | "rose-pine" | "rose-pine-dawn" | "solarized-dark" | "solarized-light"
-        | "dracula" | "tokyo-night" | "gruvbox" | "nord" | "rose-pine-moon" | "catppuccin" => {
-            value.trim().to_string()
-        }
-        _ => "default".to_string(),
-    }
+fn normalize_color_scheme_value(_value: &str) -> String {
+    // Plainsong ships a single palette; legacy multi-scheme values collapse
+    // to "default" (matches the renderer's `theme-schemes.ts`).
+    "default".to_string()
 }
 
 fn normalize_asr_model_id(provider_type: asr::AsrProviderType, model_id: &str) -> String {
@@ -13861,6 +13870,15 @@ pub async fn build_app_state() -> Result<AppState, String> {
 
     let initial_dictation_options = dictation_options_from_settings(settings_manager.settings());
     let asr_manager = Arc::new(asr::AsrManager::new());
+    // Sync the manager from persisted settings right away: `AsrManager::new`
+    // hardcodes silence-skip/MLX/platform-optimization defaults, and without
+    // this the user's saved transcription settings only take effect after the
+    // next save_settings call instead of at every launch.
+    apply_transcription_settings_to_asr_manager(
+        &asr_manager,
+        &settings_manager.settings().transcription,
+    )
+    .await;
     let streaming_transcriber = Arc::new(streaming::StreamingTranscriber::new(Arc::clone(
         &asr_manager,
     )));
@@ -13893,6 +13911,58 @@ pub async fn build_app_state() -> Result<AppState, String> {
     })
 }
 
+/// Push persisted transcription settings into the live `AsrManager`.
+///
+/// Shared by `build_app_state` (startup) and `save_settings_for_sidecar`
+/// (every save) so runtime routing state — provider/model map, per-slot MLX
+/// flags, silence skip, platform optimization — always mirrors settings.json
+/// instead of silently reverting to `AsrManager::new` defaults until the
+/// first save. Expects already-normalized settings (load-time normalizers or
+/// `normalize_contextual_asr_settings` have run).
+async fn apply_transcription_settings_to_asr_manager(
+    asr_manager: &asr::AsrManager,
+    transcription: &settings::TranscriptionSettings,
+) {
+    let default_provider = asr_provider_from_settings_value(&transcription.default_provider)
+        .unwrap_or(asr::AsrProviderType::Whisper);
+    let mut provider_model_map = provider_model_map_from_settings(transcription);
+    let selected_for_default =
+        normalize_asr_model_id(default_provider, &transcription.selected_model_id);
+    provider_model_map.insert(default_provider, selected_for_default);
+
+    asr_manager.set_provider_model_map(provider_model_map).await;
+    asr_manager
+        .set_mlx_accelerated_providers(mlx_accelerated_provider_set_from_settings(transcription))
+        .await;
+    asr_manager
+        .set_dictation_mlx_enabled(transcription.dictation_mlx_enabled)
+        .await;
+    asr_manager
+        .set_meeting_mlx_enabled(transcription.meeting_mlx_enabled)
+        .await;
+    asr_manager.set_default_provider(default_provider).await;
+    asr_manager
+        .set_silence_skip_enabled(transcription.silence_skip_enabled)
+        .await;
+    asr_manager
+        .set_platform_optimization(transcription.platform_optimization.clone())
+        .await;
+}
+
+/// Broadcast the full persisted settings to every window after any writer
+/// (save_settings, set_update_channel, …) commits them. Lets renderer
+/// surfaces holding a settings draft refresh instead of later clobbering
+/// another writer's change with a stale whole-object save.
+fn emit_settings_changed(
+    handle: &crate::sidecar_handle::SidecarHandle,
+    settings: &settings::Settings,
+) {
+    match serde_json::to_value(settings) {
+        Ok(payload) => handle.emit_event("settings-changed", payload),
+        Err(error) => tracing::warn!("Failed to serialize settings-changed payload: {}", error),
+    }
+}
+
 /// Sidecar-compatible save_settings: applies normalized settings and emits frontend events.
 async fn save_settings_for_sidecar(
     state: &AppState,
@@ -13900,8 +13970,6 @@ async fn save_settings_for_sidecar(
     mut settings: settings::Settings,
 ) -> Result<serde_json::Value, String> {
     settings::normalize_loaded_audio_settings(&mut settings.audio);
-    settings.audio.silence_timeout_seconds =
-        normalize_silence_timeout_seconds(settings.audio.silence_timeout_seconds);
     settings.ui.color_scheme = normalize_color_scheme_value(&settings.ui.color_scheme);
     settings.transcription.dictation_silence_timeout_seconds =
         normalize_dictation_silence_timeout_seconds(
@@ -13910,9 +13978,12 @@ async fn save_settings_for_sidecar(
     normalize_platform_optimization(&mut settings.transcription.platform_optimization);
     normalize_contextual_asr_settings(&mut settings.transcription);
 
+    // Unparseable provider values fall back to whisper.cpp — the same fast
+    // default `settings::normalize_transcription_provider_value` uses — so
+    // Rust-side fallbacks never steer users onto the slower Distil route.
     let default_provider =
         asr_provider_from_settings_value(&settings.transcription.default_provider)
-            .unwrap_or(asr::AsrProviderType::DistilWhisper);
+            .unwrap_or(asr::AsrProviderType::Whisper);
     settings.transcription.default_provider =
         asr_provider_to_settings_value(default_provider).to_string();
 
@@ -13925,36 +13996,7 @@ async fn save_settings_for_sidecar(
 
     let dictation_options = dictation_options_from_settings(&settings);
 
-    state
-        .asr_manager
-        .set_provider_model_map(provider_model_map)
-        .await;
-    state
-        .asr_manager
-        .set_mlx_accelerated_providers(mlx_accelerated_provider_set_from_settings(
-            &settings.transcription,
-        ))
-        .await;
-    state
-        .asr_manager
-        .set_dictation_mlx_enabled(settings.transcription.dictation_mlx_enabled)
-        .await;
-    state
-        .asr_manager
-        .set_meeting_mlx_enabled(settings.transcription.meeting_mlx_enabled)
-        .await;
-    state
-        .asr_manager
-        .set_default_provider(default_provider)
-        .await;
-    state
-        .asr_manager
-        .set_silence_skip_enabled(settings.transcription.silence_skip_enabled)
-        .await;
-    state
-        .asr_manager
-        .set_platform_optimization(settings.transcription.platform_optimization.clone())
-        .await;
+    apply_transcription_settings_to_asr_manager(&state.asr_manager, &settings.transcription).await;
 
     let previous_provider = {
         let sm = state.settings_manager.lock().await;
@@ -14039,6 +14081,7 @@ async fn save_settings_for_sidecar(
         let mut settings_manager = state.settings_manager.lock().await;
         *settings_manager.settings_mut() = settings;
         settings_manager.save().map_err(|e| e.to_string())?;
+        emit_settings_changed(handle, settings_manager.settings());
     }
 
     {
@@ -14100,26 +14143,13 @@ async fn reset_app_state_for_sidecar(
         let mut settings_manager = state.settings_manager.lock().await;
         settings_manager.reset();
         if db_encrypted {
-            let privacy = &mut settings_manager.settings_mut().privacy;
-            privacy.vault_initialized = true;
-            privacy.encrypt_recordings = true;
+            settings_manager.settings_mut().privacy.vault_initialized = true;
         }
         settings_manager.save().map_err(|e| e.to_string())?;
         settings_manager.settings().clone()
     };
 
-    let default_provider =
-        asr_provider_from_settings_value(&defaults.transcription.default_provider)
-            .unwrap_or(asr::AsrProviderType::DistilWhisper);
-    let provider_model_map = provider_model_map_from_settings(&defaults.transcription);
-    state
-        .asr_manager
-        .set_provider_model_map(provider_model_map)
-        .await;
-    state
-        .asr_manager
-        .set_default_provider(default_provider)
-        .await;
+    apply_transcription_settings_to_asr_manager(&state.asr_manager, &defaults.transcription).await;
     state.asr_manager.clear_runtime_errors().await;
     asr::python_runtime::shutdown_python_workers().await;
     asr::python_runtime::clear_runtime_probe_cache();
@@ -15705,6 +15735,19 @@ async fn stop_dictation_for_sidecar(
         }),
     );
 
+    // Honor the dictation retention preset as soon as a session completes
+    // (mirrors `enforce_meeting_retention_policy` after meeting
+    // transcription), so "Immediately"/short retention windows work without
+    // waiting for the daily maintenance pass.
+    if let Err(error) =
+        enforce_dictation_retention_policy(state, Some(handle), "dictation-completed").await
+    {
+        tracing::warn!(
+            "Dictation retention cleanup after session completion failed: {}",
+            error
+        );
+    }
+
     // Keep the result visible briefly, then reset to idle — but do it on a
     // detached task so this command returns immediately. Otherwise the stop
     // handler blocks for ~1.8s, which (a) delays the response and (b) prevented
@@ -16239,7 +16282,7 @@ async fn run_meeting_transcription_pipeline(
                 sm.settings().transcription.enable_auto_analysis
             };
             if auto_analyze && !full_text.trim().is_empty() {
-                let (provider, model) = {
+                let (provider, model, custom_summary_prompt) = {
                     let sm = state_clone.settings_manager.lock().await;
                     let s = sm.settings();
                     let p = AnalysisProvider::from_settings_value(&s.privacy.llm_provider);
@@ -16248,7 +16291,14 @@ async fn run_meeting_transcription_pipeline(
                         .llm_model_id
                         .clone()
                         .unwrap_or_else(|| p.default_model().to_string());
-                    (p, m)
+                    let custom = s
+                        .transcription
+                        .meeting_custom_prompt
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string);
+                    (p, m, custom)
                 };
                 let remote_processing_enabled = {
                     let sm = state_clone.settings_manager.lock().await;
@@ -16274,6 +16324,7 @@ async fn run_meeting_transcription_pipeline(
                             ollama_clone.as_ref(),
                             &text_for_analysis,
                             Some(&model),
+                            custom_summary_prompt.as_deref(),
                         ),
                     )
                     .await
@@ -19260,10 +19311,14 @@ pub async fn dispatch_command(
         "set_update_channel" => {
             let channel: String =
                 serde_json::from_value(params["channel"].clone()).map_err(|e| e.to_string())?;
-            let mut settings_manager = state.settings_manager.lock().await;
-            settings_manager.settings_mut().updates.channel =
-                settings::UpdateChannel::from(channel);
-            settings_manager.save().map_err(|e| e.to_string())?;
+            let updated = {
+                let mut settings_manager = state.settings_manager.lock().await;
+                settings_manager.settings_mut().updates.channel =
+                    settings::UpdateChannel::from(channel);
+                settings_manager.save().map_err(|e| e.to_string())?;
+                settings_manager.settings().clone()
+            };
+            emit_settings_changed(handle, &updated);
             Ok(serde_json::Value::Null)
         }
 

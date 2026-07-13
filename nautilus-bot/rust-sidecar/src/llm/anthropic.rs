@@ -160,18 +160,16 @@ impl AnthropicClient {
         })
     }
 
-    /// Summarize meeting
-    pub async fn summarize(&self, transcript: &str, model: &str) -> Result<String> {
-        let system_prompt = "You are Plainsong, a precise and forensic meeting intelligence assistant. \
-Your task is to produce a comprehensive, well-structured, and highly readable summary of the following meeting transcript. \
-\
-Organize the summary into the following sections:\
-1. **Executive Summary**: A brief 2-3 sentence overview of the meeting's main purpose and conclusion.\
-2. **Key Discussion Points**: Bullet points detailing the most important topics discussed, preserving context and nuance.\
-3. **Decisions Made**: A clear list of any final decisions or agreements reached during the meeting.\
-4. **Action Items**: A list of tasks assigned, including who is responsible and any mentioned deadlines.\
-\
-Ensure the tone is professional, objective, and easy to skim. Cite transcript time references where relevant.";
+    /// Summarize meeting. A non-empty `custom_prompt` (the user's "Custom
+    /// Meeting Summary Prompt" setting) replaces the default system prompt.
+    pub async fn summarize(
+        &self,
+        transcript: &str,
+        model: &str,
+        custom_prompt: Option<&str>,
+    ) -> Result<String> {
+        let system_prompt = crate::llm::normalized_custom_summary_prompt(custom_prompt)
+            .unwrap_or(crate::llm::DEFAULT_MEETING_SUMMARY_SYSTEM_PROMPT);
 
         self.generate(model, transcript, Some(system_prompt)).await
     }

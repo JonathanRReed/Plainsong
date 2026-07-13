@@ -25,6 +25,28 @@ pub use gemini::GeminiClient;
 pub use ollama::OllamaClient;
 pub use openai::OpenAIClient;
 
+/// Default Plainsong meeting-summary system prompt shared by the remote
+/// providers (Ollama local uses its own template-based prompt). The user's
+/// "Custom Meeting Summary Prompt" setting overrides this when set.
+pub(crate) const DEFAULT_MEETING_SUMMARY_SYSTEM_PROMPT: &str = "You are Plainsong, a precise and forensic meeting intelligence assistant. \
+Your task is to produce a comprehensive, well-structured, and highly readable summary of the following meeting transcript. \
+\
+Organize the summary into the following sections:\
+1. **Executive Summary**: A brief 2-3 sentence overview of the meeting's main purpose and conclusion.\
+2. **Key Discussion Points**: Bullet points detailing the most important topics discussed, preserving context and nuance.\
+3. **Decisions Made**: A clear list of any final decisions or agreements reached during the meeting.\
+4. **Action Items**: A list of tasks assigned, including who is responsible and any mentioned deadlines.\
+\
+Ensure the tone is professional, objective, and easy to skim. Cite transcript time references where relevant.";
+
+/// Normalizes the user's custom meeting-summary prompt: trims it and treats
+/// empty/whitespace-only values as "not set" so they fall back to the default.
+pub(crate) fn normalized_custom_summary_prompt(custom_prompt: Option<&str>) -> Option<&str> {
+    custom_prompt
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// Analysis result with citations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
