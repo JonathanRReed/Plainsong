@@ -19,16 +19,24 @@ pub type SpeakerAlias = (Option<String>, Option<String>, i64);
 
 /// Normalizes a dictionary/snippet `category_scope` value for persistence.
 /// Trims whitespace, drops blank values (-> `None`, meaning "applies
-/// regardless of category"), and round-trips unrecognized keys through
-/// `dictation_app_category_from_key`/`to_key` so only the canonical category
-/// keys (other/messaging/email/notes/worklog/ai_chat/code_editor) are ever
-/// stored. An unrecognized key normalizes to "other", which is treated the
-/// same as unscoped since `Other` never matches an actual destination
-/// category via `category_scope_matches`.
-fn normalize_category_scope(value: Option<&str>) -> Option<String> {
-    let trimmed = value.map(str::trim).filter(|value| !value.is_empty())?;
-    let category = crate::settings::dictation_app_category_from_key(trimmed);
-    Some(crate::settings::dictation_app_category_to_key(category).to_string())
+/// regardless of category"), canonicalizes casing of the known category
+/// keys (other/messaging/email/notes/worklog/ai_chat/code_editor), and
+/// rejects unrecognized keys so a typo'd value (e.g. "ai chat" from a CSV
+/// import) fails loudly instead of being stored and silently matching the
+/// wrong apps.
+fn normalize_category_scope(value: Option<&str>) -> Result<Option<String>> {
+    let Some(trimmed) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(category) = crate::settings::dictation_app_category_from_key_strict(trimmed) else {
+        anyhow::bail!(
+            "Unknown category scope '{}' (expected one of: other, messaging, email, notes, worklog, ai_chat, code_editor)",
+            trimmed
+        );
+    };
+    Ok(Some(
+        crate::settings::dictation_app_category_to_key(category).to_string(),
+    ))
 }
 
 pub struct Database {
@@ -1977,7 +1985,7 @@ impl Database {
                 .filter(|scope| !scope.is_empty()),
             case_sensitive: request.case_sensitive,
             enabled: request.enabled,
-            category_scope: normalize_category_scope(request.category_scope.as_deref()),
+            category_scope: normalize_category_scope(request.category_scope.as_deref())?,
             created_at: now,
             updated_at: now,
         };
@@ -2043,7 +2051,7 @@ impl Database {
         let case_sensitive = request.case_sensitive.unwrap_or(existing.case_sensitive);
         let enabled = request.enabled.unwrap_or(existing.enabled);
         let category_scope = match &request.category_scope {
-            Some(value) => normalize_category_scope(value.as_deref()),
+            Some(value) => normalize_category_scope(value.as_deref())?,
             None => existing.category_scope.clone(),
         };
         let updated_at = Utc::now();
@@ -2263,7 +2271,7 @@ impl Database {
                 .filter(|scope| !scope.is_empty()),
             case_sensitive: request.case_sensitive,
             enabled: request.enabled,
-            category_scope: normalize_category_scope(request.category_scope.as_deref()),
+            category_scope: normalize_category_scope(request.category_scope.as_deref())?,
             created_at: now,
             updated_at: now,
         };
@@ -2329,7 +2337,7 @@ impl Database {
         let case_sensitive = request.case_sensitive.unwrap_or(existing.case_sensitive);
         let enabled = request.enabled.unwrap_or(existing.enabled);
         let category_scope = match &request.category_scope {
-            Some(value) => normalize_category_scope(value.as_deref()),
+            Some(value) => normalize_category_scope(value.as_deref())?,
             None => existing.category_scope.clone(),
         };
         let updated_at = Utc::now();

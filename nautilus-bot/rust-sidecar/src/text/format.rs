@@ -168,8 +168,14 @@ impl IntelligentPunctuator {
             result = result.replace(&pattern, &replacement);
         }
 
-        // Ensure there's a space after periods
-        result = result.replace(".", ". ");
+        // Ensure there's a space after sentence-ending periods. Only split
+        // a lowercase-letter '.' uppercase-letter join ("done.Next"): this
+        // deliberately leaves decimals ("3.14"), versions ("2.5"), domains
+        // and hosts ("linear.app", "docs.google.com"), and acronyms
+        // ("U.S.A.") intact, which a blanket `.` -> `. ` replace mangles.
+        if let Ok(re) = RegexBuilder::new(r"([a-z])\.([A-Z])").build() {
+            result = re.replace_all(&result, "$1. $2").to_string();
+        }
         result = result.replace("  ", " ");
 
         result
@@ -185,12 +191,27 @@ impl IntelligentPunctuator {
 
         let mut result = text.to_string();
 
-        // Check for question patterns at start
+        // Check for question patterns at start. Whole-word matches only:
+        // "Whatever"/"Islands"/"Cannot" must not count as question starters
+        // just because they begin with "what"/"is"/"can".
         let lowercase = result.to_lowercase();
         for word in question_words {
-            if lowercase.starts_with(&format!("{} ", word)) || lowercase.starts_with(word) {
-                // Find the end of the sentence
-                if let Some(end_pos) = result.find(['.', '!'].as_ref()) {
+            let is_bare_question_word =
+                lowercase.trim_end().trim_end_matches(['.', '!', '?']) == word;
+            if lowercase.starts_with(&format!("{} ", word)) || is_bare_question_word {
+                // Rewrite the terminator of the first sentence only, and
+                // only where it truly ends a sentence (followed by
+                // whitespace or end-of-text) so a '.' inside "3.14" or
+                // "linear.app" is never turned into '?'.
+                let end_pos = result.char_indices().find_map(|(index, ch)| {
+                    let ends_sentence = matches!(ch, '.' | '!')
+                        && result[index + ch.len_utf8()..]
+                            .chars()
+                            .next()
+                            .map_or(true, char::is_whitespace);
+                    ends_sentence.then_some(index)
+                });
+                if let Some(end_pos) = end_pos {
                     result.replace_range(end_pos..end_pos + 1, "?");
                 } else {
                     result.push('?');
@@ -202,19 +223,28 @@ impl IntelligentPunctuator {
         result
     }
 
-    /// Capitalize sentences properly
+    /// Capitalize sentences properly. A terminator only starts a new
+    /// sentence when followed by whitespace, so "linear.app", "3.14", or
+    /// "v2.5beta" never get a letter uppercased mid-token.
     fn capitalize_sentences(&self, text: &str) -> String {
         let mut result = String::new();
         let mut capitalize_next = true;
+        let mut boundary_pending = false;
 
         for c in text.chars() {
+            if boundary_pending {
+                boundary_pending = false;
+                if c.is_whitespace() {
+                    capitalize_next = true;
+                }
+            }
             if capitalize_next && c.is_ascii_lowercase() {
                 result.push(c.to_ascii_uppercase());
                 capitalize_next = false;
             } else {
                 result.push(c);
                 if c == '.' || c == '!' || c == '?' {
-                    capitalize_next = true;
+                    boundary_pending = true;
                 } else if c.is_alphanumeric() {
                     capitalize_next = false;
                 }
@@ -377,17 +407,88 @@ impl Default for IntelligentPunctuator {
     }
 }
 
+/// Spoken-punctuation tokens that are also common English nouns/verbs
+/// ("the trial period", "a dash of", "the colon", "a quote from"). These
+/// only convert to symbols when the surrounding words don't look like
+/// ordinary prose (see `spoken_token_guard_rejects`); the unambiguous forms
+/// ("full stop", "question mark", "new paragraph", ...) are always
+/// converted.
+fn spoken_token_is_ambiguous(phrase: &str) -> bool {
+    matches!(
+        phrase,
+        "bullet" | "dash" | "quote" | "comma" | "period" | "colon" | "semicolon"
+    )
+}
+
+/// Determiners/possessives that mark the token as a noun phrase ("a dash",
+/// "the colon", "my quote") rather than dictated punctuation.
+const SPOKEN_TOKEN_PRECEDING_GUARDS: &[&str] = &[
+    "a", "an", "the", "this", "that", "these", "those", "my", "your", "his", "her", "its", "our",
+    "their", "each", "every", "any", "some", "no", "one",
+];
+
+/// Verbs/prepositions that almost never start a fresh clause right after
+/// dictated punctuation but routinely follow the noun sense ("period is
+/// over", "dash of trouble", "quote from the report").
+const SPOKEN_TOKEN_FOLLOWING_GUARDS: &[&str] = &[
+    "is", "was", "are", "were", "be", "been", "of", "in", "on", "at", "for", "to", "with", "from",
+    "has", "have", "had", "ends", "ended", "between", "during", "lasts", "lasted",
+];
+
+fn normalize_guard_word(word: &str) -> String {
+    word.trim_matches(|ch: char| !ch.is_alphanumeric())
+        .to_ascii_lowercase()
+}
+
+fn spoken_token_guard_rejects(input: &str, match_start: usize, match_end: usize) -> bool {
+    let preceding_word = input[..match_start].split_whitespace().next_back();
+    if let Some(word) = preceding_word {
+        if SPOKEN_TOKEN_PRECEDING_GUARDS.contains(&normalize_guard_word(word).as_str()) {
+            return true;
+        }
+    }
+    let following_word = input[match_end..].split_whitespace().next();
+    if let Some(word) = following_word {
+        if SPOKEN_TOKEN_FOLLOWING_GUARDS.contains(&normalize_guard_word(word).as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
 fn replace_spoken_token(input: &str, phrase: &str, replacement: &str) -> String {
     let escaped = regex::escape(phrase);
-    let pattern = format!(r"(^|[\s])({})([\s]|$)", escaped);
-    let Ok(re) = RegexBuilder::new(&pattern).case_insensitive(true).build() else {
+    let Ok(re) = RegexBuilder::new(&escaped).case_insensitive(true).build() else {
         return input.to_string();
     };
+    let ambiguous = spoken_token_is_ambiguous(phrase);
 
-    re.replace_all(input, |captures: &regex::Captures<'_>| {
-        format!("{}{}{}", &captures[1], replacement, &captures[3])
-    })
-    .to_string()
+    // Manual scan with zero-width boundary checks instead of a regex that
+    // consumes the surrounding whitespace: a consuming pattern skips every
+    // other occurrence in runs like "comma comma".
+    let mut output = String::with_capacity(input.len());
+    let mut last_end = 0usize;
+    for found in re.find_iter(input) {
+        let boundary_before = input[..found.start()]
+            .chars()
+            .next_back()
+            .map_or(true, char::is_whitespace);
+        let boundary_after = input[found.end()..]
+            .chars()
+            .next()
+            .map_or(true, char::is_whitespace);
+        if !(boundary_before && boundary_after) {
+            continue;
+        }
+        if ambiguous && spoken_token_guard_rejects(input, found.start(), found.end()) {
+            continue;
+        }
+        output.push_str(&input[last_end..found.start()]);
+        output.push_str(replacement);
+        last_end = found.end();
+    }
+    output.push_str(&input[last_end..]);
+    output
 }
 
 fn normalize_spoken_punctuation(text: &str) -> String {
@@ -505,13 +606,26 @@ fn restore_structural_break_tokens(text: &str) -> String {
 }
 
 fn capitalize_standalone_i(text: &str) -> String {
-    let Ok(re) = RegexBuilder::new(r"(^|[^A-Za-z])i($|[^A-Za-z])").build() else {
-        return text.to_string();
-    };
-    re.replace_all(text, |captures: &regex::Captures<'_>| {
-        format!("{}I{}", &captures[1], &captures[2])
-    })
-    .to_string()
+    // Char-walk with lookaround-style checks (rather than a regex that
+    // consumes the neighboring characters) so back-to-back standalones like
+    // "i i i" are all capitalized.
+    let chars: Vec<char> = text.chars().collect();
+    chars
+        .iter()
+        .enumerate()
+        .map(|(index, &ch)| {
+            let standalone = ch == 'i'
+                && (index == 0 || !chars[index - 1].is_ascii_alphabetic())
+                && chars
+                    .get(index + 1)
+                    .map_or(true, |next| !next.is_ascii_alphabetic());
+            if standalone {
+                'I'
+            } else {
+                ch
+            }
+        })
+        .collect()
 }
 
 fn capitalize_after_line_breaks(text: &str) -> String {
@@ -552,10 +666,24 @@ fn capitalize_after_bullet_markers(text: &str) -> String {
 fn resolve_dictation_app_category_from_bundle_id(bundle_id: &str) -> Option<DictationAppCategory> {
     let bundle_id = bundle_id.to_ascii_lowercase();
 
+    let messaging_bundle_ids = [
+        "com.tdesktop.telegram",             // Telegram
+        "net.whatsapp.whatsapp",             // WhatsApp
+        "org.whispersystems.signal-desktop", // Signal
+    ];
+    if messaging_bundle_ids
+        .iter()
+        .any(|candidate| bundle_id == *candidate || bundle_id.contains(candidate))
+    {
+        return Some(DictationAppCategory::Messaging);
+    }
+
     let ai_chat_bundle_ids = [
-        "com.openai.chat",      // ChatGPT desktop
-        "com.anthropic.claude", // Claude desktop
-        "ai.perplexity.mac",    // Perplexity desktop
+        "com.openai.chat",         // ChatGPT desktop
+        "com.anthropic.claude",    // Claude desktop
+        "ai.perplexity.mac",       // Perplexity desktop
+        "com.google.geminimacos",  // Gemini desktop
+        "ai.elementlabs.lmstudio", // LM Studio
     ];
     if ai_chat_bundle_ids
         .iter()
@@ -567,12 +695,17 @@ fn resolve_dictation_app_category_from_bundle_id(bundle_id: &str) -> Option<Dict
     let code_editor_bundle_ids = [
         "com.microsoft.vscode",          // VS Code
         "com.todesktop.230313mzl4w4u92", // Cursor
+        "com.exafunction.windsurf",      // Windsurf
+        "com.google.antigravity",        // Antigravity
+        "dev.zed.zed",                   // Zed
         "com.apple.dt.xcode",            // Xcode
         "com.jetbrains.pycharm",         // PyCharm
         "com.jetbrains.intellij",        // IntelliJ IDEA
         "com.jetbrains.webstorm",        // WebStorm
         "com.apple.terminal",            // Terminal.app
         "com.googlecode.iterm2",         // iTerm2
+        "com.mitchellh.ghostty",         // Ghostty
+        "dev.warp.warp-stable",          // Warp
     ];
     if code_editor_bundle_ids
         .iter()
@@ -585,9 +718,11 @@ fn resolve_dictation_app_category_from_bundle_id(bundle_id: &str) -> Option<Dict
 }
 
 fn resolve_dictation_app_category_from_name(app_name: &str) -> DictationAppCategory {
-    if ["slack", "messages", "imessage", "discord", "teams"]
-        .iter()
-        .any(|candidate| app_name.contains(candidate))
+    if [
+        "slack", "messages", "imessage", "discord", "teams", "telegram", "whatsapp", "signal",
+    ]
+    .iter()
+    .any(|candidate| app_name.contains(candidate))
     {
         return DictationAppCategory::Messaging;
     }
@@ -613,7 +748,7 @@ fn resolve_dictation_app_category_from_name(app_name: &str) -> DictationAppCateg
         return DictationAppCategory::Worklog;
     }
 
-    if ["chatgpt", "claude", "perplexity"]
+    if ["chatgpt", "claude", "perplexity", "gemini", "lm studio"]
         .iter()
         .any(|candidate| app_name.contains(candidate))
     {
@@ -621,7 +756,19 @@ fn resolve_dictation_app_category_from_name(app_name: &str) -> DictationAppCateg
     }
 
     if [
-        "code", "cursor", "xcode", "terminal", "iterm", "pycharm", "intellij", "webstorm",
+        "code",
+        "cursor",
+        "xcode",
+        "terminal",
+        "iterm",
+        "pycharm",
+        "intellij",
+        "webstorm",
+        "ghostty",
+        "zed",
+        "warp",
+        "windsurf",
+        "antigravity",
     ]
     .iter()
     .any(|candidate| app_name.contains(candidate))
@@ -737,6 +884,24 @@ pub fn smart_format_dictation_text_for_app(
     mode_preset: &str,
     app_target: Option<&str>,
 ) -> String {
+    smart_format_dictation_text_with_category(
+        text,
+        mode_preset,
+        resolve_dictation_app_category(app_target, None),
+    )
+}
+
+/// Same as `smart_format_dictation_text_for_app`, but takes an
+/// already-resolved destination-app category so callers that resolve the
+/// category once (settings overrides + bundle id + browser-domain hint, see
+/// `resolve_dictation_app_category_with_overrides`) can reuse it here instead
+/// of this function re-deriving a possibly different category from the raw
+/// app name.
+pub fn smart_format_dictation_text_with_category(
+    text: &str,
+    mode_preset: &str,
+    app_style: DictationAppCategory,
+) -> String {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -748,7 +913,6 @@ pub fn smart_format_dictation_text_for_app(
         &normalize_spacing_around_punctuation(&normalized),
     ));
     let normalized = preserve_structural_break_tokens(&normalized);
-    let app_style = resolve_dictation_app_category(app_target, None);
 
     if normalized.contains("__PLAINSONG_LINE_BREAK__")
         || normalized.contains("__PLAINSONG_PARAGRAPH_BREAK__")
@@ -1028,6 +1192,133 @@ mod tests {
         let input = "open quote launch ready close quote at sign team slash ops";
         let result = smart_format_dictation_text_for_app(input, "messages", Some("Slack"));
         assert_eq!(result, "\"Launch ready\" @ team/ops");
+    }
+
+    #[test]
+    fn smart_format_dictation_preserves_decimals_versions_and_domains() {
+        // Regression: a blanket `.` -> `. ` replace plus naive sentence
+        // capitalization mangled "3.14" into "3. 14" and "linear.app" into
+        // "Linear. App" in the default voice mode.
+        assert_eq!(
+            smart_format_dictation_text_for_app("the price is 3.14 dollars", "voice", None),
+            "The price is 3.14 dollars"
+        );
+        assert_eq!(
+            smart_format_dictation_text_for_app("we shipped version 2.5 today", "voice", None),
+            "We shipped version 2.5 today"
+        );
+        assert_eq!(
+            smart_format_dictation_text_for_app(
+                "check docs.google.com and linear.app",
+                "voice",
+                None
+            ),
+            "Check docs.google.com and linear.app"
+        );
+    }
+
+    #[test]
+    fn detect_questions_requires_a_whole_question_word() {
+        // "Whatever"/"Islands"/"Cannot" begin with question-word substrings
+        // but must not have their first period rewritten into '?'.
+        let punctuator = IntelligentPunctuator::default();
+        for input in [
+            "whatever you do. keep going",
+            "islands are nice. we should go",
+            "cannot wait for launch. see you",
+        ] {
+            let result = punctuator.punctuate(input);
+            assert!(
+                !result.contains('?'),
+                "statement was wrongly marked as question: {result:?}"
+            );
+        }
+
+        let question = punctuator.punctuate("where should we meet. see you soon");
+        assert!(question.starts_with("Where should we meet?"));
+    }
+
+    #[test]
+    fn spoken_punctuation_handles_adjacent_tokens_and_standalone_i_runs() {
+        // Regression: consuming boundary groups skipped every other match in
+        // runs like "comma comma" and "i i i".
+        assert_eq!(
+            smart_format_dictation_text_for_app("hello comma comma world", "messages", None),
+            "Hello, world"
+        );
+        assert_eq!(capitalize_standalone_i("i i i"), "I I I");
+    }
+
+    #[test]
+    fn spoken_punctuation_leaves_common_noun_senses_alone() {
+        assert_eq!(
+            smart_format_dictation_text_for_app("the trial period is over", "messages", None),
+            "The trial period is over"
+        );
+        assert_eq!(
+            smart_format_dictation_text_for_app("we hit a dash of trouble", "messages", None),
+            "We hit a dash of trouble"
+        );
+        // ...while clearly-dictated punctuation still converts.
+        assert_eq!(
+            smart_format_dictation_text_for_app("sounds good period", "voice", Some("Slack")),
+            "Sounds good"
+        );
+    }
+
+    #[test]
+    fn smart_format_dictation_with_category_matches_name_based_resolution() {
+        let input = "sounds good period";
+        assert_eq!(
+            smart_format_dictation_text_with_category(
+                input,
+                "voice",
+                DictationAppCategory::Messaging
+            ),
+            smart_format_dictation_text_for_app(input, "voice", Some("Slack"))
+        );
+    }
+
+    #[test]
+    fn resolve_dictation_app_category_covers_common_desktop_apps() {
+        for (bundle_id, expected) in [
+            ("com.tdesktop.Telegram", DictationAppCategory::Messaging),
+            ("net.whatsapp.WhatsApp", DictationAppCategory::Messaging),
+            (
+                "org.whispersystems.signal-desktop",
+                DictationAppCategory::Messaging,
+            ),
+            ("com.google.GeminiMacOS", DictationAppCategory::AiChat),
+            ("ai.elementlabs.lmstudio", DictationAppCategory::AiChat),
+            ("com.mitchellh.ghostty", DictationAppCategory::CodeEditor),
+            ("dev.zed.Zed", DictationAppCategory::CodeEditor),
+            ("dev.warp.Warp-Stable", DictationAppCategory::CodeEditor),
+            ("com.exafunction.windsurf", DictationAppCategory::CodeEditor),
+            ("com.google.antigravity", DictationAppCategory::CodeEditor),
+        ] {
+            assert_eq!(
+                resolve_dictation_app_category(None, Some(bundle_id)),
+                expected,
+                "bundle id {bundle_id:?}"
+            );
+        }
+
+        for (app_name, expected) in [
+            ("Telegram", DictationAppCategory::Messaging),
+            ("WhatsApp", DictationAppCategory::Messaging),
+            ("Signal", DictationAppCategory::Messaging),
+            ("Gemini", DictationAppCategory::AiChat),
+            ("Ghostty", DictationAppCategory::CodeEditor),
+            ("Zed", DictationAppCategory::CodeEditor),
+            ("Warp", DictationAppCategory::CodeEditor),
+            ("Windsurf", DictationAppCategory::CodeEditor),
+        ] {
+            assert_eq!(
+                resolve_dictation_app_category(Some(app_name), None),
+                expected,
+                "app name {app_name:?}"
+            );
+        }
     }
 
     #[test]

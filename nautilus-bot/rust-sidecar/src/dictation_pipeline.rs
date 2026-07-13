@@ -20,16 +20,16 @@ pub struct DictationPipelineInput<'a> {
     pub snippets: &'a [DictationSnippet],
     pub app_target: Option<&'a str>,
     pub mode_preset: &'a str,
-    pub formatting_hint: Option<&'a str>,
     pub smart_formatting_enabled: bool,
     pub recent_inserted_text: Option<&'a str>,
     /// Resolved destination-app category (via `resolve_dictation_app_category`
     /// or the settings-aware `resolve_dictation_app_category_with_overrides`),
-    /// used to scope dictionary/snippet entries whose `category_scope` is
-    /// set. Defaults to `DictationAppCategory::Other` when not provided,
-    /// which never matches a set `category_scope`, so category-scoped
-    /// entries simply won't apply unless the caller resolves and passes the
-    /// real category here.
+    /// used both to scope dictionary/snippet entries whose `category_scope`
+    /// is set and to pick the local smart-formatting style, so all pipeline
+    /// stages agree on one category. Defaults to
+    /// `DictationAppCategory::Other` when not provided, which never matches
+    /// a set `category_scope`, so category-scoped entries simply won't apply
+    /// unless the caller resolves and passes the real category here.
     pub destination_category: DictationAppCategory,
 }
 
@@ -93,10 +93,10 @@ pub fn apply_dictation_pipeline(input: DictationPipelineInput<'_>) -> DictationP
     }
 
     if input.smart_formatting_enabled && command_applied.is_none() && !text.trim().is_empty() {
-        let formatted_text = crate::text::format::smart_format_dictation_text_for_app(
+        let formatted_text = crate::text::format::smart_format_dictation_text_with_category(
             text.as_str(),
             input.mode_preset,
-            input.formatting_hint,
+            input.destination_category,
         );
         formatting_applied = formatted_text != text;
         if formatting_applied {
@@ -294,12 +294,14 @@ fn matches_undo_phrase(value: &str) -> bool {
 }
 
 fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    if value.len() < prefix.len() {
-        return None;
-    }
-
-    if value[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        Some(&value[prefix.len()..])
+    // `get` (rather than direct slicing) so a multibyte character straddling
+    // `prefix.len()` yields `None` instead of panicking on a non-char
+    // boundary (e.g. Japanese/Chinese dictation checked against "scratch
+    // that ").
+    let head = value.get(..prefix.len())?;
+    let tail = value.get(prefix.len()..)?;
+    if head.eq_ignore_ascii_case(prefix) {
+        Some(tail)
     } else {
         None
     }
@@ -307,11 +309,14 @@ fn strip_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str>
 
 fn parse_phrase_swap_command(input: &str, verb: &str, separator: &str) -> Option<(String, String)> {
     let remainder = strip_prefix_ignore_case(input.trim(), &format!("{} ", verb))?;
-    let lowercase = remainder.to_lowercase();
+    // ASCII lowercasing is byte-length preserving, so byte indices found in
+    // `lowercase` map 1:1 back onto `remainder` (Unicode lowercasing does
+    // not, e.g. 'İ' expands from 2 to 3 bytes and would corrupt the slice).
+    let lowercase = remainder.to_ascii_lowercase();
     let marker = format!(" {} ", separator);
     let separator_index = lowercase.find(&marker)?;
-    let target = remainder[..separator_index].trim();
-    let replacement = remainder[separator_index + marker.len()..].trim();
+    let target = remainder.get(..separator_index)?.trim();
+    let replacement = remainder.get(separator_index + marker.len()..)?.trim();
 
     if target.is_empty() || replacement.is_empty() {
         return None;
@@ -361,7 +366,6 @@ mod tests {
             snippets: &[snippet("brb", "be right back")],
             app_target: None,
             mode_preset: "voice",
-            formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: None,
             destination_category: DictationAppCategory::Other,
@@ -384,7 +388,6 @@ mod tests {
             snippets: &[],
             app_target: None,
             mode_preset: "voice",
-            formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("ship it today"),
             destination_category: DictationAppCategory::Other,
@@ -408,7 +411,6 @@ mod tests {
             snippets: &[],
             app_target: None,
             mode_preset: "voice",
-            formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("ship it Friday"),
             destination_category: DictationAppCategory::Other,
@@ -432,7 +434,6 @@ mod tests {
             snippets: &[],
             app_target: None,
             mode_preset: "voice",
-            formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("ship it tomorrow"),
             destination_category: DictationAppCategory::Other,
@@ -456,7 +457,6 @@ mod tests {
             snippets: &[],
             app_target: None,
             mode_preset: "voice",
-            formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: None,
             destination_category: DictationAppCategory::Other,
@@ -480,7 +480,6 @@ mod tests {
             snippets: &[],
             app_target: None,
             mode_preset: "voice",
-            formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("ship it today"),
             destination_category: DictationAppCategory::Other,
@@ -503,7 +502,6 @@ mod tests {
             snippets: &[],
             app_target: None,
             mode_preset: "voice",
-            formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("sam is ready"),
             destination_category: DictationAppCategory::Other,
@@ -525,7 +523,6 @@ mod tests {
             snippets: &[],
             app_target: None,
             mode_preset: "voice",
-            formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("ship it tomorrow morning"),
             destination_category: DictationAppCategory::Other,
@@ -542,6 +539,38 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_handles_multibyte_text_after_recent_insert_without_panicking() {
+        // Regression: backtrack prefix matching used direct byte slicing and
+        // panicked on any utterance where a multibyte char straddled a
+        // prefix length (e.g. Japanese text checked against "scratch that ").
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "日本語のテキストです",
+            dictionary_entries: &[],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            recent_inserted_text: Some("前のテキスト"),
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert_eq!(result.text, "日本語のテキストです");
+        assert!(result.command_applied.is_none());
+    }
+
+    #[test]
+    fn phrase_swap_parsing_survives_length_changing_case_folds() {
+        // Regression: byte indices were computed on the Unicode-lowercased
+        // string but applied to the original ('İ' lowercases from 2 bytes to
+        // 3, shifting every later index).
+        let (target, replacement) =
+            parse_phrase_swap_command("replace İstanbul trip with Ankara trip", "replace", "with")
+                .expect("phrase swap should parse");
+        assert_eq!(target, "İstanbul trip");
+        assert_eq!(replacement, "Ankara trip");
+    }
+
+    #[test]
     fn pipeline_rewrites_recent_insert_for_change_phrase_backtrack() {
         let result = apply_dictation_pipeline(DictationPipelineInput {
             text: "change tomorrow to Monday",
@@ -549,7 +578,6 @@ mod tests {
             snippets: &[],
             app_target: None,
             mode_preset: "voice",
-            formatting_hint: None,
             smart_formatting_enabled: false,
             recent_inserted_text: Some("ship it tomorrow morning"),
             destination_category: DictationAppCategory::Other,
