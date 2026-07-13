@@ -311,6 +311,47 @@ describe("createDictationShortcutSignalRuntime", () => {
     ).toHaveLength(1);
   });
 
+  it("clears the stale watchdog when the release lands after the session already ended", async () => {
+    const harness = createHarness();
+
+    const press = harness.runtime.handleSignal({ ...holdToTalk, signal: "pressed" });
+    harness.finishStart();
+    await press;
+
+    // The session ends through a path the runtime never sees (VAD silence
+    // auto-stop, overlay stop button) while the key is still held; the
+    // release then resolves to "ignore".
+    harness.setPhase("done");
+    await harness.runtime.handleSignal({ ...holdToTalk, signal: "released" });
+
+    // A later unrelated session (UI- or hands-free-started) is recording when
+    // the stale timer would have fired — it must not be stopped.
+    harness.setPhase("recording");
+    await vi.advanceTimersByTimeAsync(DICTATION_HOLD_WATCHDOG_MS * 2);
+
+    expect(
+      harness.invocations.filter((entry) => entry.command === "stop_dictation"),
+    ).toHaveLength(0);
+  });
+
+  it("clears the stale watchdog when a cancel lands after the session already ended", async () => {
+    const harness = createHarness();
+
+    const press = harness.runtime.handleSignal({ ...holdToTalk, signal: "pressed" });
+    harness.finishStart();
+    await press;
+
+    harness.setPhase("done");
+    await harness.runtime.handleSignal({ ...holdToTalk, signal: "cancelled" });
+
+    harness.setPhase("recording");
+    await vi.advanceTimersByTimeAsync(DICTATION_HOLD_WATCHDOG_MS * 2);
+
+    expect(
+      harness.invocations.filter((entry) => entry.command === "stop_dictation"),
+    ).toHaveLength(0);
+  });
+
   it("cancels a recording session on a cancelled signal", async () => {
     const harness = createHarness();
     harness.setPhase("recording");
