@@ -2080,7 +2080,13 @@ export function SettingsView() {
               </div>
             )}
 
-            {settings.audio.voiceActivityDetection && (
+            {/* The VAD backend drives dictation auto-stop-on-silence and
+                hands-free auto-start (not the recording silence-timeout
+                toggle above), so show the picker whenever either of those
+                features is in use. */}
+            {(settings.transcription.dictationHandsFreeEnabled ||
+              (settings.transcription.dictationSilenceTimeoutSeconds ?? 0) >
+                0) && (
               <div className="space-y-3 rounded-2xl border border-border/60 bg-background/75 p-4">
                 <div className="space-y-0.5">
                   <Label>VAD accuracy</Label>

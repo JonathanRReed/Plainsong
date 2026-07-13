@@ -36,8 +36,12 @@
 //!   16 kHz, 256 samples / 32-sample context at 8 kHz. No other chunk size
 //!   is accepted by the upstream model.
 //!
-//! This module only supports 16 kHz, matching the rest of Plainsong's audio
-//! pipeline (see `VadConfig::default`, which also assumes 16 kHz).
+//! The model itself only supports 16 kHz here (matching `VadConfig::default`),
+//! but dictation/hands-free capture runs at the input device's native rate
+//! (typically 44.1/48 kHz). [`SileroBackedVadGate`] therefore resamples its
+//! input down to [`SILERO_VAD_MODEL_SAMPLE_RATE`] before chunking whenever the
+//! configured capture rate differs, so the model's `"sr"` contract is honored
+//! on every real device.
 
 use crate::audio::vad::{VadBackendKind, VadConfig, VadEdge, VadGate};
 use anyhow::{Context, Result};
@@ -56,13 +60,10 @@ const SILERO_VAD_STATE_SHAPE: [usize; 3] = [2, 1, 128];
 const SILERO_VAD_STATE_LEN: usize =
     SILERO_VAD_STATE_SHAPE[0] * SILERO_VAD_STATE_SHAPE[1] * SILERO_VAD_STATE_SHAPE[2];
 
-/// Sample rate fed to the model's `"sr"` input. Only used by
-/// [`OrtSileroVadBackend`] -- the `StubBackend` used in this module's tests
-/// bypasses the ONNX session entirely. Feature-gated (rather than using a
-/// dead-code lint suppression) because it is genuinely unused, not just
-/// untested, when built without `asr-parakeet`.
-#[cfg(feature = "asr-parakeet")]
-const SILERO_VAD_SAMPLE_RATE: i64 = 16_000;
+/// Sample rate the Silero model is run at (and fed to its `"sr"` input).
+/// [`SileroBackedVadGate`] resamples device-rate capture input down to this
+/// rate before chunking, so the value is always accurate at inference time.
+pub const SILERO_VAD_MODEL_SAMPLE_RATE: u32 = 16_000;
 
 /// Backing inference implementation, swappable so unit tests can exercise
 /// the chunk-buffering / state-plumbing logic without loading a real ONNX
@@ -126,7 +127,7 @@ impl SileroVadBackend for OrtSileroVadBackend {
             Array::from_shape_vec(IxDyn(&SILERO_VAD_STATE_SHAPE), state_in.to_vec())
                 .context("Failed to build Silero VAD state array")?;
         let sr_arr: Array<i64, IxDyn> =
-            Array::from_shape_vec(IxDyn(&[1]), vec![SILERO_VAD_SAMPLE_RATE])
+            Array::from_shape_vec(IxDyn(&[1]), vec![i64::from(SILERO_VAD_MODEL_SAMPLE_RATE)])
                 .context("Failed to build Silero VAD sample-rate array")?;
 
         let input_tensor =
@@ -278,6 +279,70 @@ impl SileroVadDetector {
 /// recommend 0.5 as the standard operating point.
 const SILERO_SPEECH_PROBABILITY_THRESHOLD: f32 = 0.5;
 
+/// Streaming linear resampler used to convert device-rate capture audio
+/// (typically 44.1/48 kHz) down to [`SILERO_VAD_MODEL_SAMPLE_RATE`] before
+/// chunking for the model.
+///
+/// Linear interpolation is deliberate: it is O(1) per output sample with no
+/// allocation (safe for the cpal callback path that drives
+/// [`SileroBackedVadGate::push_samples`]), and VAD only needs the coarse
+/// spectral envelope to survive, not audiophile-grade anti-aliasing -- the
+/// same trade-off `audio::utils::resample` already makes for batch ASR
+/// preprocessing. Unlike that batch helper, this one carries its fractional
+/// read position and the last input sample across calls, so chunk boundaries
+/// introduced by the audio callback cadence don't create discontinuities.
+struct StreamingResampler {
+    /// Input samples advanced per output sample (`from_rate / to_rate`).
+    step: f64,
+    /// Fractional position (in input samples) of the next output sample,
+    /// relative to the start of `[carry, input...]` for the current call.
+    pos: f64,
+    /// Last input sample from the previous call, kept so interpolation is
+    /// continuous across call boundaries.
+    carry: Option<f32>,
+}
+
+impl StreamingResampler {
+    fn new(from_rate: u32, to_rate: u32) -> Self {
+        Self {
+            step: f64::from(from_rate.max(1)) / f64::from(to_rate.max(1)),
+            pos: 0.0,
+            carry: None,
+        }
+    }
+
+    /// Resample `input` and append the output samples to `output`.
+    fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        if input.is_empty() {
+            return;
+        }
+        let carry_len = usize::from(self.carry.is_some());
+        let total_len = carry_len + input.len();
+        let sample_at = |index: usize| -> f32 {
+            if index < carry_len {
+                self.carry.unwrap_or(0.0)
+            } else {
+                input[index - carry_len]
+            }
+        };
+
+        // Emit every output sample whose interpolation neighbors are both
+        // available in `[carry, input...]`.
+        while self.pos + 1.0 < total_len as f64 {
+            let index = self.pos as usize;
+            let frac = (self.pos - index as f64) as f32;
+            output.push(sample_at(index) * (1.0 - frac) + sample_at(index + 1) * frac);
+            self.pos += self.step;
+        }
+
+        // Keep the final input sample for next call's interpolation and
+        // rebase the read position onto it (the loop guarantees
+        // `pos >= total_len - 1` on exit, so the new position is >= 0).
+        self.carry = Some(sample_at(total_len - 1));
+        self.pos -= (total_len - 1) as f64;
+    }
+}
+
 /// Messages sent from the background inference worker (see
 /// [`SileroBackedVadGate`]) back to the real-time-adjacent caller.
 enum SileroWorkerMsg {
@@ -346,9 +411,16 @@ pub struct SileroBackedVadGate {
     /// is dropped or inference fails.
     _worker: std::thread::JoinHandle<()>,
     /// Samples accumulated so far towards the next full
-    /// `SILERO_VAD_CHUNK_SAMPLES` chunk.
+    /// `SILERO_VAD_CHUNK_SAMPLES` chunk, always at
+    /// [`SILERO_VAD_MODEL_SAMPLE_RATE`] (post-resampling).
     pending_samples: Vec<f32>,
-    /// Chunks per second, i.e. `sample_rate / SILERO_VAD_CHUNK_SAMPLES`.
+    /// Converts device-rate input to [`SILERO_VAD_MODEL_SAMPLE_RATE`] before
+    /// chunking. `None` when the capture already runs at the model rate.
+    resampler: Option<StreamingResampler>,
+    /// Chunks per second at the model rate, i.e.
+    /// `SILERO_VAD_MODEL_SAMPLE_RATE / SILERO_VAD_CHUNK_SAMPLES` (a constant
+    /// 31.25 regardless of the device rate, since input is resampled to the
+    /// model rate before chunking).
     chunks_per_second: f32,
     /// Hysteresis: consecutive speech-probability chunks required before
     /// latching into "speech" (mirrors `StreamingVadGate`'s `min_speech_frames`,
@@ -414,8 +486,17 @@ impl SileroBackedVadGate {
             })
             .expect("failed to spawn silero-vad-worker thread");
 
-        let sample_rate = config.sample_rate.max(1) as f32;
-        let chunks_per_second = sample_rate / SILERO_VAD_CHUNK_SAMPLES as f32;
+        // The model contract is fixed at 16 kHz, but dictation/hands-free
+        // capture runs at the device's native rate (typically 44.1/48 kHz on
+        // macOS). Feeding device-rate samples straight in would present
+        // time-stretched, pitched-down audio labeled as 16 kHz, so resample
+        // to the model rate first. Chunk timing is therefore always at the
+        // model rate too.
+        let resampler = (config.sample_rate != SILERO_VAD_MODEL_SAMPLE_RATE).then(|| {
+            StreamingResampler::new(config.sample_rate.max(1), SILERO_VAD_MODEL_SAMPLE_RATE)
+        });
+        let chunks_per_second =
+            SILERO_VAD_MODEL_SAMPLE_RATE as f32 / SILERO_VAD_CHUNK_SAMPLES as f32;
         let min_speech_chunks = (config.min_speech_duration * chunks_per_second)
             .ceil()
             .max(1.0) as u32;
@@ -428,6 +509,7 @@ impl SileroBackedVadGate {
             result_rx,
             _worker: worker,
             pending_samples: Vec::with_capacity(SILERO_VAD_CHUNK_SAMPLES),
+            resampler,
             chunks_per_second,
             min_speech_chunks,
             min_silence_chunks,
@@ -519,7 +601,14 @@ impl VadGate for SileroBackedVadGate {
             return fallback.push_samples(mono_samples);
         }
 
-        self.pending_samples.extend_from_slice(mono_samples);
+        // `pending_samples` is kept at the model rate; the fallback handoffs
+        // below feed it into a device-rate energy gate, but at most one
+        // partial chunk (~32ms of audio) is ever pending, so the resulting
+        // timing skew is immaterial next to the hysteresis windows.
+        match self.resampler.as_mut() {
+            Some(resampler) => resampler.process(mono_samples, &mut self.pending_samples),
+            None => self.pending_samples.extend_from_slice(mono_samples),
+        }
 
         let mut chunk_start = 0;
         while self.pending_samples.len() - chunk_start >= SILERO_VAD_CHUNK_SAMPLES {
@@ -634,6 +723,30 @@ pub fn build_vad_gate(
                          energy-threshold VAD",
                         error
                     );
+                    // The file exists but won't load (truncated/corrupt
+                    // download): quarantine it so
+                    // `is_silero_vad_model_downloaded()` stops reporting the
+                    // model as available and the Settings UI offers a fresh
+                    // download, instead of silently degrading to the fallback
+                    // on every session forever. Only when ort support is
+                    // compiled in -- otherwise the load error just means
+                    // "feature missing", not "file corrupt".
+                    #[cfg(feature = "asr-parakeet")]
+                    {
+                        let quarantine_path = path.with_extension("onnx.corrupt");
+                        match std::fs::rename(path, &quarantine_path) {
+                            Ok(()) => tracing::warn!(
+                                "Quarantined unloadable Silero VAD model to {:?}; \
+                                 re-download it from Settings to restore the Silero backend",
+                                quarantine_path
+                            ),
+                            Err(rename_error) => tracing::warn!(
+                                "Failed to quarantine unloadable Silero VAD model {:?}: {}",
+                                path,
+                                rename_error
+                            ),
+                        }
+                    }
                     Box::new(super::vad::EnergyThresholdVadGate::new(config))
                 }
             }
@@ -956,6 +1069,15 @@ mod gate_tests {
             "energy_threshold",
             "a corrupt/invalid model file must fall back, not panic or propagate an error"
         );
+        assert!(
+            !bogus_model_path.exists(),
+            "an unloadable model file must be quarantined (renamed away) so \
+             is_silero_vad_model_downloaded() stops reporting it as available"
+        );
+        assert!(
+            tmp_dir.join("silero_vad.onnx.corrupt").exists(),
+            "quarantine must preserve the file for diagnosis, not delete it"
+        );
 
         std::fs::remove_dir_all(&tmp_dir).ok();
     }
@@ -1016,6 +1138,101 @@ mod gate_tests {
         );
     }
 
+    // --- Device-rate input handling (resampling to the model's 16 kHz contract) ---
+
+    #[test]
+    fn streaming_resampler_decimates_48k_to_16k_on_exact_grid() {
+        // 48k -> 16k is an integer step of 3: outputs must be exactly every
+        // third input sample (frac is always 0), regardless of call framing.
+        let mut resampler = StreamingResampler::new(48_000, 16_000);
+        let input: Vec<f32> = (0..30).map(|i| i as f32).collect();
+        let mut output = Vec::new();
+        resampler.process(&input, &mut output);
+        let expected: Vec<f32> = (0..output.len()).map(|i| (i * 3) as f32).collect();
+        assert_eq!(output, expected);
+        // ~1/3 of the input length (edge samples may be held as carry).
+        assert!((9..=10).contains(&output.len()), "got {}", output.len());
+    }
+
+    #[test]
+    fn streaming_resampler_is_continuous_across_call_boundaries() {
+        // Feeding the same signal in one shot vs. in callback-sized slices
+        // must produce identical output: the carry/pos state is what makes
+        // the resampler safe to drive from per-callback pushes.
+        let signal: Vec<f32> = (0..4410).map(|i| ((i as f32) * 0.013).sin()).collect();
+
+        let mut one_shot = Vec::new();
+        StreamingResampler::new(44_100, 16_000).process(&signal, &mut one_shot);
+
+        let mut chunked = Vec::new();
+        let mut resampler = StreamingResampler::new(44_100, 16_000);
+        for chunk in signal.chunks(441) {
+            resampler.process(chunk, &mut chunked);
+        }
+
+        assert_eq!(one_shot, chunked);
+        // 44.1k -> 16k over 4410 input samples is ~1600 output samples.
+        assert!(
+            (1595..=1600).contains(&one_shot.len()),
+            "got {}",
+            one_shot.len()
+        );
+    }
+
+    #[test]
+    fn silero_gate_resamples_device_rate_input_before_chunking() {
+        let mut config = test_config();
+        config.sample_rate = 48_000;
+        let gate_48k = gate_with_always_failing_backend(&config);
+
+        // Chunk timing must be at the model rate (16000/512 = 31.25 chunks/s)
+        // regardless of the device rate -- the old bug derived it from the
+        // device rate (48000/512 = 93.75), shrinking hysteresis windows 3x.
+        assert_eq!(gate_48k.frames_per_second(), 31.25);
+        config.sample_rate = 16_000;
+        let gate_16k = gate_with_always_failing_backend(&config);
+        assert_eq!(gate_16k.frames_per_second(), 31.25);
+
+        // Hysteresis chunk counts must therefore agree across device rates.
+        let mut config_1s = test_config();
+        config_1s.min_silence_duration = 1.0;
+        config_1s.sample_rate = 48_000;
+        let gate_a = gate_with_always_failing_backend(&config_1s);
+        config_1s.sample_rate = 16_000;
+        let gate_b = gate_with_always_failing_backend(&config_1s);
+        assert_eq!(gate_a.min_silence_chunks, 32); // ceil(1.0 * 31.25)
+        assert_eq!(gate_a.min_silence_chunks, gate_b.min_silence_chunks);
+
+        // 1532 device-rate samples at 48 kHz resample to 511 model-rate
+        // samples: one short of a full Silero chunk, so nothing may be
+        // dispatched to the worker yet (the old code would have sent two
+        // 512-sample device-rate chunks by now).
+        let mut config = test_config();
+        config.sample_rate = 48_000;
+        let mut gate = gate_with_always_failing_backend(&config);
+        gate.push_samples(&vec![0.25_f32; 1532]);
+        assert_eq!(gate.pending_samples.len(), 511);
+        assert_eq!(
+            gate.backend_name(),
+            "silero",
+            "no chunk should have been scored yet"
+        );
+    }
+
+    #[test]
+    fn silero_gate_at_model_rate_does_not_resample() {
+        let mut config = test_config();
+        config.sample_rate = 16_000;
+        let mut gate = gate_with_always_failing_backend(&config);
+        assert!(gate.resampler.is_none());
+        gate.push_samples(&vec![0.25_f32; 511]);
+        assert_eq!(
+            gate.pending_samples.len(),
+            511,
+            "16 kHz input must pass through 1:1"
+        );
+    }
+
     #[test]
     fn silero_gate_reports_silero_backend_name_before_any_failure() {
         // Sanity check on the naming contract itself: a healthy gate that
@@ -1028,5 +1245,200 @@ mod gate_tests {
             &config,
         );
         assert_eq!(gate.backend_name(), "silero");
+    }
+
+    /// End-to-end smoke test against the *real* downloaded `silero_vad.onnx`,
+    /// exercising the actual `ort` session rather than a stub backend: model
+    /// load through the production `build_vad_gate` factory, silence scoring,
+    /// real speech latching, and per-chunk inference latency staying inside
+    /// the real-time budget.
+    ///
+    /// `#[ignore]`d because unit-test runs must not depend on a ~2.3MB
+    /// network download. To run it, download the model the app itself uses
+    /// (URL in `crate::download::SILERO_VAD_MODEL_URL`) and point the env var
+    /// at it:
+    ///
+    /// ```sh
+    /// PLAINSONG_SILERO_VAD_MODEL_PATH=/path/to/silero_vad.onnx \
+    ///     cargo test --manifest-path rust-sidecar/Cargo.toml --lib \
+    ///     silero_real_model_smoke -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "needs the real silero_vad.onnx; set PLAINSONG_SILERO_VAD_MODEL_PATH and pass --ignored"]
+    #[cfg(feature = "asr-parakeet")]
+    fn silero_real_model_smoke() {
+        let model_path = std::env::var_os("PLAINSONG_SILERO_VAD_MODEL_PATH")
+            .map(std::path::PathBuf::from)
+            .expect("set PLAINSONG_SILERO_VAD_MODEL_PATH to a downloaded silero_vad.onnx");
+
+        // 1. The real model must load through the exact factory production
+        // uses, and must come back as Silero -- not the silent fallback.
+        let config = VadConfig::default();
+        let mut gate = build_vad_gate(VadBackendKind::Silero, &config, Some(&model_path));
+        assert_eq!(
+            gate.backend_name(),
+            "silero",
+            "real model failed to load; build_vad_gate silently fell back to energy-threshold"
+        );
+
+        // Helper: push audio in real-callback-sized chunks, giving the
+        // background worker time to score them, until `stop` says we're done.
+        let feed = |gate: &mut Box<dyn VadGate + Send>,
+                    samples: &[f32],
+                    stop: &dyn Fn(&Box<dyn VadGate + Send>) -> bool| {
+            for chunk in samples.chunks(SILERO_VAD_CHUNK_SAMPLES) {
+                gate.push_samples(chunk);
+                if stop(gate) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            // Let any in-flight results drain.
+            for _ in 0..50 {
+                gate.push_samples(&[]);
+                if stop(gate) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+
+        // 2. Two seconds of digital silence must not read as speech, and must
+        // not trip a runtime inference failure (which would switch the
+        // backend name to the fallback).
+        let silence = vec![0.0_f32; 2 * config.sample_rate as usize];
+        feed(&mut gate, &silence, &|_| false);
+        assert!(
+            !gate.is_speaking(),
+            "real Silero model scored digital silence as speech"
+        );
+        assert_eq!(
+            gate.backend_name(),
+            "silero",
+            "inference failed at runtime on silence (gate degraded to fallback)"
+        );
+
+        // 3. Real recorded speech must latch the gate into speech. NOTE:
+        // `local-perf-30s.wav` is deliberately NOT used here -- it is a pure
+        // sine tone (fine for latency benchmarking, but the model correctly
+        // scores it as non-speech, max probability ~0.22).
+        // `local-quality-gate.wav` contains actual spoken words.
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../scripts/fixtures/local-quality-gate.wav");
+        let mut reader = hound::WavReader::open(&fixture_path)
+            .unwrap_or_else(|e| panic!("failed to open speech fixture {fixture_path:?}: {e}"));
+        let spec = reader.spec();
+        assert_eq!(spec.sample_rate, 16_000, "fixture must be 16kHz");
+        assert_eq!(spec.channels, 1, "fixture must be mono");
+        let speech: Vec<f32> = reader
+            .samples::<i16>()
+            .map(|s| s.unwrap() as f32 / 32_768.0)
+            .collect();
+        // Diagnostic pre-pass: score the fixture sequentially with a direct
+        // (synchronous) detector and report the probability distribution, so
+        // a latching failure below is attributable to either "model scores
+        // speech low" or "async gate logic never sees the scores".
+        {
+            let mut probe =
+                SileroVadDetector::load(&model_path).expect("direct detector load failed");
+            let mut max_p = 0.0_f32;
+            let mut above = 0_usize;
+            let mut total = 0_usize;
+            for chunk in speech.chunks(SILERO_VAD_CHUNK_SAMPLES).take(600) {
+                if chunk.len() < SILERO_VAD_CHUNK_SAMPLES {
+                    break;
+                }
+                let p = probe
+                    .detect_speech_probability(chunk)
+                    .expect("direct real-model inference failed on speech");
+                max_p = max_p.max(p);
+                if p >= SILERO_SPEECH_PROBABILITY_THRESHOLD {
+                    above += 1;
+                }
+                total += 1;
+            }
+            println!(
+                "silero_real_model_smoke diagnostic: {total} sequential speech chunks, \
+                 max probability {max_p:.3}, {above} above threshold"
+            );
+        }
+
+        feed(&mut gate, &speech, &|g| g.is_speaking());
+        assert!(
+            gate.is_speaking(),
+            "real Silero model never detected speech in the recorded-speech fixture"
+        );
+        assert_eq!(
+            gate.backend_name(),
+            "silero",
+            "inference failed at runtime on real speech (gate degraded to fallback)"
+        );
+
+        // 4. Device-rate regression: the same recorded speech naively
+        // upsampled to 48 kHz (the typical macOS capture rate) must still
+        // latch a gate configured with sample_rate=48_000, proving the
+        // gate's internal resampling presents the model with valid 16 kHz
+        // audio rather than 3x time-stretched input.
+        let mut speech_48k = Vec::with_capacity(speech.len() * 3);
+        for pair in speech.windows(2) {
+            speech_48k.push(pair[0]);
+            speech_48k.push(pair[0] + (pair[1] - pair[0]) / 3.0);
+            speech_48k.push(pair[0] + (pair[1] - pair[0]) * 2.0 / 3.0);
+        }
+        let config_48k = VadConfig {
+            sample_rate: 48_000,
+            frame_size: 1_440, // 30ms at 48kHz, matching audio.rs's scaling
+            ..VadConfig::default()
+        };
+        let mut gate_48k = build_vad_gate(VadBackendKind::Silero, &config_48k, Some(&model_path));
+        assert_eq!(gate_48k.backend_name(), "silero");
+        feed(&mut gate_48k, &speech_48k, &|g| g.is_speaking());
+        assert!(
+            gate_48k.is_speaking(),
+            "real Silero model never detected speech in 48 kHz device-rate input \
+             (gate resampling to the model rate is broken)"
+        );
+        assert_eq!(
+            gate_48k.backend_name(),
+            "silero",
+            "inference failed at runtime on 48 kHz input (gate degraded to fallback)"
+        );
+
+        // 5. Direct (synchronous) detector checks: output must be a sane
+        // probability and per-chunk latency must fit the real-time budget --
+        // each chunk represents 32ms of audio, so scoring one must take well
+        // under that on average for the worker to keep up.
+        let mut detector =
+            SileroVadDetector::load(&model_path).expect("direct detector load failed");
+        let silence_chunk = vec![0.0_f32; SILERO_VAD_CHUNK_SAMPLES];
+        let speech_chunk = &speech[..SILERO_VAD_CHUNK_SAMPLES.min(speech.len())];
+
+        let started = std::time::Instant::now();
+        let mut iterations = 0_u32;
+        let mut last_probability = 0.0_f32;
+        for i in 0..200 {
+            let chunk: &[f32] = if i % 2 == 0 {
+                &silence_chunk
+            } else {
+                speech_chunk
+            };
+            last_probability = detector
+                .detect_speech_probability(chunk)
+                .expect("direct real-model inference failed");
+            assert!(
+                (0.0..=1.0).contains(&last_probability),
+                "speech probability out of range: {last_probability}"
+            );
+            iterations += 1;
+        }
+        let average = started.elapsed() / iterations;
+        println!(
+            "silero_real_model_smoke: {iterations} chunks scored, avg {average:?}/chunk \
+             (budget 32ms), last probability {last_probability:.3}"
+        );
+        assert!(
+            average < std::time::Duration::from_millis(32),
+            "average real-model inference latency {average:?} exceeds the 32ms real-time budget"
+        );
     }
 }

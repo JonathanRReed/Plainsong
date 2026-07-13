@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
 const DICTATION_MIN_CAPTURE_SECONDS: f32 = 0.35;
@@ -83,6 +83,21 @@ pub struct ResolvedAudioInputDevice {
     pub advisory: Option<String>,
 }
 
+/// Snapshot of the configuration a running hands-free monitor was started
+/// with, so `reconcile_hands_free_monitor` (lib.rs) can detect when settings
+/// changed out from under a running monitor (VAD backend selected, Silero
+/// model downloaded, input device switched) and restart it with the new
+/// configuration instead of letting the stale stream run forever.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandsFreeMonitorConfig {
+    pub vad_backend: VadBackendKind,
+    pub silero_model_path: Option<PathBuf>,
+    /// Requested device preference (not the resolved device), matching what
+    /// reconcile derives from settings so comparisons are settings-vs-settings.
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+}
+
 pub struct AudioCapture {
     is_dictating: Arc<AtomicBool>,
     dictation_buffer: Arc<crossbeam::queue::SegQueue<f32>>,
@@ -104,10 +119,14 @@ pub struct AudioCapture {
     dictation_audio_level: Arc<std::sync::atomic::AtomicU32>,
     /// Number of callback invocations observed for the active dictation stream
     dictation_callback_count: Arc<AtomicU64>,
-    /// Last speech detection timestamp (milliseconds since start) for auto-stop
-    last_speech_ms: Arc<std::sync::atomic::AtomicU64>,
-    /// Dictation start instant for timing
-    dictation_start: Arc<std::sync::Mutex<Option<Instant>>>,
+    /// Stop flag owned by the *current* dictation capture session's thread and
+    /// callbacks. A fresh Arc per `start_dictation` (unlike the long-lived
+    /// `is_dictating`, which is shared across sessions): if an old capture
+    /// thread outlives its stop (slow stream teardown, detached abort join), a
+    /// new session flipping `is_dictating` back to true can no longer re-arm
+    /// the old thread's parking loop or its callbacks, so a stale stream can
+    /// never push interleaved samples into a new session's buffer.
+    dictation_capture_stop: Option<Arc<AtomicBool>>,
     /// UI-only accumulator of mono dictation samples for streaming partials.
     /// Never feeds the final transcription; only read by the partial-decode task.
     dictation_partial_buffer: Arc<std::sync::Mutex<Vec<f32>>>,
@@ -146,6 +165,9 @@ pub struct AudioCapture {
     hands_free_monitor_active: Arc<AtomicBool>,
     /// Join handle for the hands-free monitor's capture thread, if currently running.
     hands_free_monitor_thread: Option<JoinHandle<()>>,
+    /// Configuration the currently running hands-free monitor was started
+    /// with (see [`HandsFreeMonitorConfig`]); `None` when it isn't running.
+    hands_free_monitor_config: Option<HandsFreeMonitorConfig>,
 }
 
 struct ActiveRecordingSession {
@@ -181,18 +203,6 @@ pub struct RecordingStopResult {
     pub dropped_mic_samples: u64,
     pub dropped_system_samples: u64,
     pub dropped_mixed_chunks: u64,
-}
-
-fn dictation_start_elapsed_ms(dictation_start: &std::sync::Mutex<Option<Instant>>) -> Option<u64> {
-    match dictation_start.lock() {
-        Ok(guard) => guard
-            .as_ref()
-            .map(|start| start.elapsed().as_millis() as u64),
-        Err(error) => {
-            tracing::error!("Dictation timing state lock poisoned: {}", error);
-            None
-        }
-    }
 }
 
 /// Feed this callback's mono samples through the active dictation auto-stop VAD
@@ -374,8 +384,7 @@ impl AudioCapture {
             noise_suppression_enabled: true,
             dictation_audio_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             dictation_callback_count: Arc::new(AtomicU64::new(0)),
-            last_speech_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            dictation_start: Arc::new(std::sync::Mutex::new(None)),
+            dictation_capture_stop: None,
             dictation_partial_buffer: Arc::new(std::sync::Mutex::new(Vec::new())),
             dictation_streaming_active: Arc::new(AtomicBool::new(false)),
             dictation_vad_gate: Arc::new(std::sync::Mutex::new(None)),
@@ -383,6 +392,7 @@ impl AudioCapture {
             dictation_vad_gate_active: Arc::new(AtomicBool::new(false)),
             hands_free_monitor_active: Arc::new(AtomicBool::new(false)),
             hands_free_monitor_thread: None,
+            hands_free_monitor_config: None,
         }
     }
 
@@ -622,28 +632,17 @@ impl AudioCapture {
         self.is_dictating.store(true, Ordering::SeqCst);
         self.dictation_callback_count.store(0, Ordering::SeqCst);
 
-        // Reset speech tracking
-        self.last_speech_ms.store(0, Ordering::SeqCst);
-        match self.dictation_start.lock() {
-            Ok(mut start) => {
-                *start = Some(Instant::now());
-            }
-            Err(error) => {
-                self.is_dictating.store(false, Ordering::SeqCst);
-                return Err(anyhow::anyhow!(
-                    "Dictation timing state is unavailable: {}",
-                    error
-                ));
-            }
-        }
+        // Per-session stop flag: this session's capture thread and callbacks
+        // park/act on this Arc, NOT on the shared `is_dictating`, so a
+        // previous session's still-draining thread can never be re-armed by
+        // this session setting `is_dictating` back to true.
+        let capture_stop = Arc::new(AtomicBool::new(true));
+        self.dictation_capture_stop = Some(Arc::clone(&capture_stop));
 
-        let is_dictating = Arc::clone(&self.is_dictating);
         let buffer = Arc::clone(&self.dictation_buffer);
         let callback_count = Arc::clone(&self.dictation_callback_count);
         let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
         let audio_level = Arc::clone(&self.dictation_audio_level);
-        let last_speech_ms = Arc::clone(&self.last_speech_ms);
-        let dictation_start = Arc::clone(&self.dictation_start);
         let partial_buffer = Arc::clone(&self.dictation_partial_buffer);
         let streaming_active = Arc::clone(&self.dictation_streaming_active);
         let vad_gate = Arc::clone(&self.dictation_vad_gate);
@@ -652,7 +651,7 @@ impl AudioCapture {
         let vad_event_handle = event_handle;
 
         let capture_handle = std::thread::spawn(move || {
-            let capture_flag = Arc::clone(&is_dictating);
+            let capture_flag = Arc::clone(&capture_stop);
             let device = device;
             let config = match device.default_input_config() {
                 Ok(config) => config,
@@ -673,18 +672,12 @@ impl AudioCapture {
             // amortized to roughly once per window rather than every callback.
             let max_partial_samples = (config.sample_rate() as usize).saturating_mul(30);
             let err_fn = |err| tracing::error!("Dictation stream error: {}", err);
-            let is_dictating_f32 = Arc::clone(&is_dictating);
-            let is_dictating_i16 = Arc::clone(&is_dictating);
-            let is_dictating_u8 = Arc::clone(&is_dictating);
+            let capture_stop_f32 = Arc::clone(&capture_stop);
+            let capture_stop_i16 = Arc::clone(&capture_stop);
+            let capture_stop_u8 = Arc::clone(&capture_stop);
             let audio_level_f32 = Arc::clone(&audio_level);
             let audio_level_i16 = Arc::clone(&audio_level);
             let audio_level_u8 = Arc::clone(&audio_level);
-            let last_speech_f32 = Arc::clone(&last_speech_ms);
-            let last_speech_i16 = Arc::clone(&last_speech_ms);
-            let last_speech_u8 = Arc::clone(&last_speech_ms);
-            let dictation_start_f32 = Arc::clone(&dictation_start);
-            let dictation_start_i16 = Arc::clone(&dictation_start);
-            let dictation_start_u8 = Arc::clone(&dictation_start);
             let partial_buffer_f32 = Arc::clone(&partial_buffer);
             let partial_buffer_i16 = Arc::clone(&partial_buffer);
             let partial_buffer_u8 = Arc::clone(&partial_buffer);
@@ -703,13 +696,12 @@ impl AudioCapture {
             let vad_event_handle_f32 = vad_event_handle.clone();
             let vad_event_handle_i16 = vad_event_handle.clone();
             let vad_event_handle_u8 = vad_event_handle;
-            const SPEECH_THRESHOLD: f32 = 0.02;
 
             let stream_result = match config.sample_format() {
                 cpal::SampleFormat::F32 => device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        if is_dictating_f32.load(Ordering::SeqCst) {
+                        if capture_stop_f32.load(Ordering::SeqCst) {
                             callback_count.fetch_add(1, Ordering::Relaxed);
                             let streaming = streaming_active_f32.load(Ordering::Relaxed);
                             // Cheap relaxed check first: skips the (SeqCst) session-id
@@ -758,16 +750,14 @@ impl AudioCapture {
                                     }
                                 }
                             }
-                            let rms = (sum_sq / data.len() as f64).sqrt() as f32;
+                            // RMS over *mono* samples: `sum_sq` accumulates one entry
+                            // per mono frame, so divide by the frame count, not the
+                            // raw interleaved length (which understated multi-channel
+                            // levels by sqrt(num_channels)).
+                            let mono_len = (data.len() / num_channels).max(1);
+                            let rms = (sum_sq / mono_len as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
                             audio_level_f32.store(level, Ordering::SeqCst);
-                            if rms > SPEECH_THRESHOLD {
-                                if let Some(elapsed_ms) =
-                                    dictation_start_elapsed_ms(&dictation_start_f32)
-                                {
-                                    last_speech_f32.store(elapsed_ms, Ordering::SeqCst);
-                                }
-                            }
                             if vad_active {
                                 drive_dictation_auto_stop_gate(
                                     &mono_scratch,
@@ -785,7 +775,7 @@ impl AudioCapture {
                 cpal::SampleFormat::I16 => device.build_input_stream(
                     &config.into(),
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        if is_dictating_i16.load(Ordering::SeqCst) {
+                        if capture_stop_i16.load(Ordering::SeqCst) {
                             callback_count.fetch_add(1, Ordering::Relaxed);
                             let streaming = streaming_active_i16.load(Ordering::Relaxed);
                             let vad_active = vad_gate_active_i16.load(Ordering::Relaxed)
@@ -833,16 +823,11 @@ impl AudioCapture {
                                     }
                                 }
                             }
-                            let rms = (sum_sq / data.len() as f64).sqrt() as f32;
+                            // See the F32 callback: RMS is over mono frames.
+                            let mono_len = (data.len() / num_channels).max(1);
+                            let rms = (sum_sq / mono_len as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
                             audio_level_i16.store(level, Ordering::SeqCst);
-                            if rms > SPEECH_THRESHOLD {
-                                if let Some(elapsed_ms) =
-                                    dictation_start_elapsed_ms(&dictation_start_i16)
-                                {
-                                    last_speech_i16.store(elapsed_ms, Ordering::SeqCst);
-                                }
-                            }
                             if vad_active {
                                 drive_dictation_auto_stop_gate(
                                     &mono_scratch,
@@ -860,7 +845,7 @@ impl AudioCapture {
                 cpal::SampleFormat::U8 => device.build_input_stream(
                     &config.into(),
                     move |data: &[u8], _: &cpal::InputCallbackInfo| {
-                        if is_dictating_u8.load(Ordering::SeqCst) {
+                        if capture_stop_u8.load(Ordering::SeqCst) {
                             callback_count.fetch_add(1, Ordering::Relaxed);
                             let streaming = streaming_active_u8.load(Ordering::Relaxed);
                             let vad_active = vad_gate_active_u8.load(Ordering::Relaxed)
@@ -908,16 +893,11 @@ impl AudioCapture {
                                     }
                                 }
                             }
-                            let rms = (sum_sq / data.len() as f64).sqrt() as f32;
+                            // See the F32 callback: RMS is over mono frames.
+                            let mono_len = (data.len() / num_channels).max(1);
+                            let rms = (sum_sq / mono_len as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
                             audio_level_u8.store(level, Ordering::SeqCst);
-                            if rms > SPEECH_THRESHOLD {
-                                if let Some(elapsed_ms) =
-                                    dictation_start_elapsed_ms(&dictation_start_u8)
-                                {
-                                    last_speech_u8.store(elapsed_ms, Ordering::SeqCst);
-                                }
-                            }
                             if vad_active {
                                 drive_dictation_auto_stop_gate(
                                     &mono_scratch,
@@ -979,6 +959,7 @@ impl AudioCapture {
             }
             Ok(Err(error)) => {
                 self.is_dictating.store(false, Ordering::SeqCst);
+                self.signal_capture_stop();
                 if let Some(handle) = self.dictation_thread.take() {
                     let _ = handle.join();
                 }
@@ -986,6 +967,7 @@ impl AudioCapture {
             }
             Err(_) => {
                 self.is_dictating.store(false, Ordering::SeqCst);
+                self.signal_capture_stop();
                 if let Some(handle) = self.dictation_thread.take() {
                     let _ = handle.join();
                 }
@@ -998,6 +980,28 @@ impl AudioCapture {
         Ok(resolved_device)
     }
 
+    /// Tell the current capture session's thread and callbacks to stop, and
+    /// drop our handle to its per-session flag (each `start_dictation` mints
+    /// a fresh one, so a slow-to-exit old thread can never be re-armed).
+    fn signal_capture_stop(&mut self) {
+        if let Some(flag) = self.dictation_capture_stop.take() {
+            flag.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Clear the auto-stop VAD gate slot so a finished session doesn't retain
+    /// its gate (for the Silero backend that keeps a worker thread and its
+    /// loaded ort session alive) until the next `start_dictation` replaces it.
+    fn clear_dictation_vad_gate(&mut self) {
+        self.dictation_vad_gate_active
+            .store(false, Ordering::SeqCst);
+        let mut gate_slot = match self.dictation_vad_gate.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *gate_slot = None;
+    }
+
     pub fn stop_dictation(&mut self) -> Result<Vec<u8>> {
         if !self.is_dictating.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("No dictation in progress"));
@@ -1006,6 +1010,8 @@ impl AudioCapture {
         tracing::info!("Stopping dictation capture...");
         std::thread::sleep(Duration::from_millis(DICTATION_STOP_CAPTURE_TAIL_MS));
         self.is_dictating.store(false, Ordering::SeqCst);
+        self.signal_capture_stop();
+        self.clear_dictation_vad_gate();
 
         if let Some(handle) = self.dictation_thread.take() {
             let (done_tx, done_rx) = bounded::<()>(1);
@@ -1105,6 +1111,8 @@ impl AudioCapture {
 
     pub fn abort_dictation(&mut self) {
         self.is_dictating.store(false, Ordering::SeqCst);
+        self.signal_capture_stop();
+        self.clear_dictation_vad_gate();
         self.dictation_streaming_active
             .store(false, Ordering::SeqCst);
 
@@ -1683,6 +1691,15 @@ impl AudioCapture {
             return Ok(());
         }
 
+        // Recorded on successful start so `reconcile_hands_free_monitor` can
+        // detect settings changing under a running monitor and restart it.
+        let monitor_config = HandsFreeMonitorConfig {
+            vad_backend,
+            silero_model_path: silero_model_path.clone(),
+            device_id: preference.map(|p| p.device_id.clone()),
+            device_name: preference.map(|p| p.device_name.clone()),
+        };
+
         let (device, _resolved_device) = self.resolve_input_device(preference)?;
         let config = device.default_input_config()?;
         let sample_rate = config.sample_rate();
@@ -1742,7 +1759,16 @@ impl AudioCapture {
             let handle_f32 = event_handle.clone();
             let handle_i16 = event_handle.clone();
             let handle_u8 = event_handle;
-            let err_fn = |err| tracing::error!("Hands-free monitor stream error: {}", err);
+            // A cpal stream error is fatal for this stream: mark the monitor
+            // inactive so the parking loop below exits (dropping the dead
+            // stream) and the next reconcile can restart the monitor, instead
+            // of a dead stream reporting "active" forever and blocking every
+            // future reconcile from ever bringing hands-free back.
+            let err_active = Arc::clone(&monitor_active);
+            let err_fn = move |err| {
+                tracing::error!("Hands-free monitor stream error: {}", err);
+                err_active.store(false, Ordering::SeqCst);
+            };
 
             fn handle_frame(
                 mono: &[f32],
@@ -1869,7 +1895,10 @@ impl AudioCapture {
         self.hands_free_monitor_thread = Some(capture_handle);
 
         match startup_rx.recv_timeout(Duration::from_millis(1500)) {
-            Ok(Ok(())) => Ok(()),
+            Ok(Ok(())) => {
+                self.hands_free_monitor_config = Some(monitor_config);
+                Ok(())
+            }
             Ok(Err(error)) => {
                 self.hands_free_monitor_active
                     .store(false, Ordering::SeqCst);
@@ -1895,6 +1924,7 @@ impl AudioCapture {
     /// isn't running (no-op). Always call this before opening the real dictation capture
     /// stream, and again once a dictation session ends (to resume idle listening).
     pub fn stop_hands_free_monitor(&mut self) {
+        self.hands_free_monitor_config = None;
         if !self.hands_free_monitor_active.load(Ordering::SeqCst) {
             return;
         }
@@ -1903,6 +1933,13 @@ impl AudioCapture {
         if let Some(handle) = self.hands_free_monitor_thread.take() {
             let _ = handle.join();
         }
+    }
+
+    /// Configuration the currently running hands-free monitor was started
+    /// with, for `reconcile_hands_free_monitor` to compare against the
+    /// currently desired configuration. `None` when the monitor isn't running.
+    pub fn hands_free_monitor_config(&self) -> Option<&HandsFreeMonitorConfig> {
+        self.hands_free_monitor_config.as_ref()
     }
 }
 
@@ -2154,6 +2191,83 @@ mod dictation_auto_stop_gate_tests {
         drive_dictation_auto_stop_gate(&loud_samples(6), 1, &gate, &session_id, None);
 
         assert!(gate.lock().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod dictation_capture_lifecycle_tests {
+    use super::AudioCapture;
+    use crate::audio::vad::{EnergyThresholdVadGate, VadConfig, VadGate};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// The per-session capture stop flag must be signalled (and the handle
+    /// dropped) by both stop paths, so an old capture thread parked on it can
+    /// never be re-armed by a subsequent session setting `is_dictating` back
+    /// to true.
+    #[test]
+    fn abort_dictation_signals_the_sessions_capture_stop_flag() {
+        let mut audio = AudioCapture::new();
+        let session_flag = Arc::new(AtomicBool::new(true));
+        audio.dictation_capture_stop = Some(Arc::clone(&session_flag));
+        audio.is_dictating.store(true, Ordering::SeqCst);
+
+        audio.abort_dictation();
+
+        assert!(
+            !session_flag.load(Ordering::SeqCst),
+            "abort must stop the session's own capture flag, not just is_dictating"
+        );
+        assert!(
+            audio.dictation_capture_stop.is_none(),
+            "the handle must be dropped so a new session mints a fresh flag"
+        );
+        assert!(!audio.is_dictating.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stop_dictation_signals_the_sessions_capture_stop_flag() {
+        let mut audio = AudioCapture::new();
+        let session_flag = Arc::new(AtomicBool::new(true));
+        audio.dictation_capture_stop = Some(Arc::clone(&session_flag));
+        audio.is_dictating.store(true, Ordering::SeqCst);
+
+        // No capture thread ran, so no samples were collected: the stop path
+        // errors out ("no audio"), but must still have signalled the flag.
+        let _ = audio.stop_dictation();
+
+        assert!(!session_flag.load(Ordering::SeqCst));
+        assert!(audio.dictation_capture_stop.is_none());
+    }
+
+    /// Both stop paths must clear the auto-stop VAD gate slot so a finished
+    /// session doesn't retain its gate (for Silero: a worker thread holding
+    /// the loaded ort session) until the next start_dictation replaces it.
+    #[test]
+    fn stop_and_abort_clear_the_vad_gate_slot() {
+        let gate_config = VadConfig::default();
+
+        let mut audio = AudioCapture::new();
+        audio.is_dictating.store(true, Ordering::SeqCst);
+        *audio.dictation_vad_gate.lock().unwrap() =
+            Some(Box::new(EnergyThresholdVadGate::new(&gate_config)) as Box<dyn VadGate + Send>);
+        audio
+            .dictation_vad_gate_active
+            .store(true, Ordering::SeqCst);
+        let _ = audio.stop_dictation();
+        assert!(audio.dictation_vad_gate.lock().unwrap().is_none());
+        assert!(!audio.dictation_vad_gate_active.load(Ordering::SeqCst));
+
+        let mut audio = AudioCapture::new();
+        audio.is_dictating.store(true, Ordering::SeqCst);
+        *audio.dictation_vad_gate.lock().unwrap() =
+            Some(Box::new(EnergyThresholdVadGate::new(&gate_config)) as Box<dyn VadGate + Send>);
+        audio
+            .dictation_vad_gate_active
+            .store(true, Ordering::SeqCst);
+        audio.abort_dictation();
+        assert!(audio.dictation_vad_gate.lock().unwrap().is_none());
+        assert!(!audio.dictation_vad_gate_active.load(Ordering::SeqCst));
     }
 }
 
