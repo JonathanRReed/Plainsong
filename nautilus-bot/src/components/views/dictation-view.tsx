@@ -52,6 +52,7 @@ import {
 import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labels";
 import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
+import { useToast } from "@/components/toast";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import {
@@ -1093,6 +1094,7 @@ export function DictationView() {
     textReadyEvent: dictationTextReadyEvent,
   } = useDictationRuntime();
   const { formattedDuration, startDictation, stopDictation } = useRecording();
+  const { toast } = useToast();
   const { projects } = useProjects();
   const {
     recordings,
@@ -2189,6 +2191,13 @@ export function DictationView() {
       await saveSettings(settings);
     } catch (error) {
       console.warn("Failed to persist dictation preferences:", error);
+      const changed = Object.keys(updates).join(", ");
+      toast(
+        changed
+          ? `Couldn't save dictation settings (${changed}) — the change may not stick.`
+          : "Couldn't save dictation settings — the change may not stick.",
+        "error",
+      );
     }
   };
 
@@ -2388,6 +2397,7 @@ export function DictationView() {
         await saveSettings(settings);
       } catch (error) {
         console.warn("Failed to apply custom mode engine settings:", error);
+        toast("Couldn't apply this mode's engine settings — check Settings.", "error");
       }
     })();
   };
@@ -2456,6 +2466,7 @@ export function DictationView() {
       await saveSettings(settings);
     } catch (error) {
       console.warn("Failed to persist custom mode engine snapshot:", error);
+      toast("Couldn't save this mode's engine settings — they may reset on restart.", "error");
     }
   };
 
@@ -3403,6 +3414,7 @@ export function DictationView() {
       setPasteStatus("Copied dictation history item");
     } catch (error) {
       console.warn("Failed to copy dictation history transcript:", error);
+      toast("Couldn't copy that dictation to the clipboard.", "error");
     }
   };
 
@@ -3420,6 +3432,7 @@ export function DictationView() {
       await refreshDictationInsights();
     } catch (error) {
       console.warn("Failed to delete dictation history item:", error);
+      toast("Couldn't delete that dictation — it's still in your history.", "error");
     }
   };
 

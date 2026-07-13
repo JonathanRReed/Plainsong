@@ -21,6 +21,7 @@ import {
   dictationInstruction,
   formatShortcutForDisplay,
 } from "@/lib/shortcuts";
+import { formatNavShortcut, navShortcutKeys } from "@/lib/nav-shortcuts";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
@@ -43,15 +44,15 @@ interface SidebarProps {
 }
 
 const primaryNavItems = [
-  { id: "dashboard", label: "Home", icon: FileText, shortcut: "⌘+H" },
-  { id: "dictation", label: "Dictation", icon: Mic, shortcut: "⌘+D" },
-  { id: "recordings", label: "Meetings", icon: AudioWaveform, shortcut: "⌘+M" },
-];
+  { id: "dashboard" as const, label: "Home", icon: FileText },
+  { id: "dictation" as const, label: "Dictation", icon: Mic },
+  { id: "recordings" as const, label: "Meetings", icon: AudioWaveform },
+].map((item) => ({ ...item, shortcut: formatNavShortcut(item.id) ?? "" }));
 
 const secondaryNavItems = [
-  { id: "projects", label: "Projects", icon: Folder, shortcut: "⌘+P" },
-  { id: "settings", label: "Settings", icon: Settings, shortcut: "⌘+," },
-];
+  { id: "projects" as const, label: "Projects", icon: Folder },
+  { id: "settings" as const, label: "Settings", icon: Settings },
+].map((item) => ({ ...item, shortcut: formatNavShortcut(item.id) ?? "" }));
 
 const moreNavItems = [
   { id: "setup", label: "Setup", icon: Sparkles },
@@ -95,6 +96,14 @@ const DEFAULT_LOCAL_MODE_STATUS: LocalModeStatus = {
   detail: "Using local analysis with privacy-first defaults.",
 };
 
+// Honesty contract: when settings can't be read we don't assert a Local claim
+// we can't verify — the chip goes hollow and says so.
+const UNKNOWN_LOCAL_MODE_STATUS: LocalModeStatus = {
+  active: false,
+  label: "Status unavailable",
+  detail: "Couldn't read privacy settings, so the processing mode is unknown.",
+};
+
 function deriveLocalModeStatus(
   llmProvider: string,
   remoteProcessingEnabled: boolean
@@ -136,7 +145,7 @@ export function Sidebar({
   const [showMoreItems, setShowMoreItems] = useState(isMoreView);
 
   const navShortcuts: ShortcutHelpItem[] = [...primaryNavItems, ...secondaryNavItems].map(
-    (item) => ({ label: item.label, keys: shortcutKeys(item.shortcut) })
+    (item) => ({ label: item.label, keys: navShortcutKeys(item.id) ?? [] })
   );
   const shortcutGroups: ShortcutHelpItem[] = [
     { label: "Start dictation", keys: shortcutKeys(dictationHotkey.label.replace(/ \+ /g, "+")) },
@@ -173,7 +182,7 @@ export function Sidebar({
         });
       } catch {
         if (mounted) {
-          setLocalModeStatus(DEFAULT_LOCAL_MODE_STATUS);
+          setLocalModeStatus(UNKNOWN_LOCAL_MODE_STATUS);
           setDictationHotkey(DEFAULT_DICTATION_HOTKEY);
         }
       }

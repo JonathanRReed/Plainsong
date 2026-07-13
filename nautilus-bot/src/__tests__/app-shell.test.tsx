@@ -122,25 +122,31 @@ describe("App shell", () => {
 
     expect(await screen.findByText("Mock dictation workspace")).toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "h", metaKey: true });
+    // jsdom reports a non-mac platform, so the primary modifier is Ctrl.
+    fireEvent.keyDown(window, { key: "h", ctrlKey: true, shiftKey: true });
     expect(await screen.findByText("Mock home workspace")).toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "d", metaKey: true });
+    fireEvent.keyDown(window, { key: "d", ctrlKey: true });
     expect(await screen.findByText("Mock dictation workspace")).toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "m", metaKey: true });
+    fireEvent.keyDown(window, { key: "m", ctrlKey: true, shiftKey: true });
     expect(await screen.findByText("Mock meetings workspace")).toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "p", metaKey: true });
+    // Plain Ctrl+M (without Shift) belongs to the OS minimize accelerator and
+    // must not navigate.
+    fireEvent.keyDown(window, { key: "h", ctrlKey: true });
+    expect(screen.getByText("Mock meetings workspace")).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "p", ctrlKey: true });
     expect(await screen.findByText("Mock projects workspace")).toBeInTheDocument();
 
     const input = document.createElement("input");
     document.body.appendChild(input);
-    fireEvent.keyDown(input, { key: "h", metaKey: true });
+    fireEvent.keyDown(input, { key: "h", ctrlKey: true, shiftKey: true });
     expect(screen.getByText("Mock projects workspace")).toBeInTheDocument();
     input.remove();
 
-    fireEvent.keyDown(window, { key: ",", metaKey: true });
+    fireEvent.keyDown(window, { key: ",", ctrlKey: true });
     expect(await screen.findByText("Mock settings workspace")).toBeInTheDocument();
   });
 

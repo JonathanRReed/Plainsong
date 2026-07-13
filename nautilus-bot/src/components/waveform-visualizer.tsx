@@ -204,14 +204,21 @@ export function RecordingWaveform({
   useEffect(() => {
     if (!isRecording) return;
 
-    // Poll for waveform data every 100ms
+    // STYLE.md §4: JS-driven canvas motion must respect reduced motion. Slow
+    // the poll to a calm once-a-second refresh instead of a 10fps animation
+    // (matching ui/audio-waveform.tsx's reduced-motion behavior).
+    const reducedMotion =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    // Poll for waveform data every 100ms (1s under reduced motion)
     intervalRef.current = setInterval(() => {
       getWaveformData(recordingId)
         .then((data) => setWaveformData(data))
         .catch((error) => {
           console.error("Failed to get waveform data:", error);
         });
-    }, 100);
+    }, reducedMotion ? 1000 : 100);
 
     return () => {
       if (intervalRef.current) {

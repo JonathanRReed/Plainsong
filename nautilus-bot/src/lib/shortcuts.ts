@@ -1,6 +1,6 @@
 type DictationShortcutMode = "hold_to_talk" | "toggle" | "hands_free";
 
-function isMacPlatform(): boolean {
+export function isMacPlatform(): boolean {
   if (typeof navigator === "undefined") return false;
   return /Mac|iPhone|iPad/.test(navigator.platform);
 }
