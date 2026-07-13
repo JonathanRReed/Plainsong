@@ -13805,17 +13805,6 @@ async fn reconcile_hands_free_monitor(
         *runtime_state
     };
 
-    let mut audio = state.audio_capture.lock().await;
-
-    if !hands_free_monitor_should_run(hands_free_enabled, session_state) {
-        audio.stop_hands_free_monitor();
-        return;
-    }
-
-    if audio.is_hands_free_monitor_active() {
-        return;
-    }
-
     let preferred_input_device = {
         let sm = state.settings_manager.lock().await;
         let s = sm.settings();
@@ -13826,7 +13815,34 @@ async fn reconcile_hands_free_monitor(
         }
     };
 
+    let mut audio = state.audio_capture.lock().await;
+
+    if !hands_free_monitor_should_run(hands_free_enabled, session_state) {
+        audio.stop_hands_free_monitor();
+        return;
+    }
+
     let silero_model_path = resolve_silero_vad_model_path(vad_backend);
+    let desired_config = audio::HandsFreeMonitorConfig {
+        vad_backend,
+        silero_model_path: silero_model_path.clone(),
+        device_id: preferred_input_device.as_ref().map(|p| p.device_id.clone()),
+        device_name: preferred_input_device
+            .as_ref()
+            .map(|p| p.device_name.clone()),
+    };
+
+    if audio.is_hands_free_monitor_active() {
+        if audio.hands_free_monitor_config() == Some(&desired_config) {
+            return;
+        }
+        // Settings changed under a running monitor (VAD backend selected,
+        // Silero model downloaded, input device switched): restart it so the
+        // change takes effect now instead of only after the next dictation
+        // session happens to cycle the monitor.
+        tracing::info!("Hands-free monitor configuration changed; restarting the idle monitor");
+        audio.stop_hands_free_monitor();
+    }
 
     if let Err(error) = audio.start_hands_free_monitor(
         preferred_input_device.as_ref(),
@@ -14311,14 +14327,29 @@ async fn start_dictation_for_sidecar(
 }
 
 /// Sidecar-compatible stop_dictation.
+///
+/// `expected_session_id`, when provided, scopes the stop to a specific
+/// session: if the currently active session differs (e.g. a delayed VAD
+/// auto-stop for session A arriving after session B already started), the
+/// stop is rejected without touching any state, so a stale stop can never
+/// tear down a session it doesn't own.
 async fn stop_dictation_for_sidecar(
     state: &AppState,
     handle: &crate::sidecar_handle::SidecarHandle,
     stop_reason: &str,
+    expected_session_id: Option<u64>,
 ) -> Result<String, String> {
     let session_id = active_dictation_session_id(state)
         .await
         .ok_or_else(|| "No active dictation session to stop".to_string())?;
+    if let Some(expected) = expected_session_id {
+        if expected != session_id {
+            return Err(format!(
+                "Stale stop request for dictation session {} ignored (active session is {})",
+                expected, session_id
+            ));
+        }
+    }
     let dictation_options = state.dictation_start_options.lock().await.clone();
     let settings_snapshot = {
         let sm = state.settings_manager.lock().await;
@@ -15812,7 +15843,17 @@ pub async fn dispatch_command(
                 .get("stopReason")
                 .and_then(|v| v.as_str())
                 .unwrap_or("manual");
-            let result = stop_dictation_for_sidecar(state.as_ref(), handle, stop_reason).await?;
+            // Optional session scoping (used by the VAD auto-stop path): a
+            // stop carrying a sessionId only applies while that session is
+            // still the active one. Manual stops omit it and behave as before.
+            let expected_session_id = params.get("sessionId").and_then(|v| v.as_u64());
+            let result = stop_dictation_for_sidecar(
+                state.as_ref(),
+                handle,
+                stop_reason,
+                expected_session_id,
+            )
+            .await?;
             reconcile_hands_free_monitor(state.as_ref(), handle).await;
             Ok(serde_json::json!({ "text": result }))
         }

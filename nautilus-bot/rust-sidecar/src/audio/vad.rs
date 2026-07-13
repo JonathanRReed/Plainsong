@@ -314,13 +314,23 @@ pub trait VadGate {
 pub struct EnergyThresholdVadGate {
     gate: StreamingVadGate,
     frame_size: usize,
+    /// Samples accumulated towards the next full `frame_size` frame.
+    /// `StreamingVadGate` converts hysteresis durations to frame counts
+    /// assuming every `push_frame` call represents exactly `frame_size`
+    /// samples, so partial cpal callback buffers must be carried across
+    /// `push_samples` calls rather than each counted as a whole frame
+    /// (which would make silence timeouts fire several times too fast).
+    /// Mirrors `SileroBackedVadGate::pending_samples`.
+    pending_samples: Vec<f32>,
 }
 
 impl EnergyThresholdVadGate {
     pub fn new(config: &VadConfig) -> Self {
+        let frame_size = config.frame_size.max(1);
         Self {
             gate: StreamingVadGate::new(config),
-            frame_size: config.frame_size.max(1),
+            frame_size,
+            pending_samples: Vec::with_capacity(frame_size),
         }
     }
 }
@@ -328,12 +338,20 @@ impl EnergyThresholdVadGate {
 impl VadGate for EnergyThresholdVadGate {
     fn push_samples(&mut self, mono_samples: &[f32]) -> VadEdge {
         let mut most_significant = VadEdge::NoChange;
-        for chunk in mono_samples.chunks(self.frame_size) {
-            let energy_db = calculate_energy_db(chunk);
+        self.pending_samples.extend_from_slice(mono_samples);
+        let mut frame_start = 0;
+        while self.pending_samples.len() - frame_start >= self.frame_size {
+            let frame_end = frame_start + self.frame_size;
+            let energy_db = calculate_energy_db(&self.pending_samples[frame_start..frame_end]);
             let edge = self.gate.push_frame(energy_db);
             if edge != VadEdge::NoChange {
                 most_significant = edge;
             }
+            frame_start = frame_end;
+        }
+        // Keep any leftover partial frame for the next call.
+        if frame_start > 0 {
+            self.pending_samples.drain(0..frame_start);
         }
         most_significant
     }
@@ -537,6 +555,107 @@ pub fn trim_silence(samples: &[f32], sample_rate: u32, threshold_db: f32) -> Vec
     }
 
     samples[start_sample..end_sample].to_vec()
+}
+
+#[cfg(test)]
+mod energy_gate_framing_tests {
+    //! Regression tests for `EnergyThresholdVadGate`'s sample framing: each
+    //! `push_frame` must represent exactly `frame_size` samples of audio, no
+    //! matter how the incoming samples are sliced across `push_samples`
+    //! calls (cpal callback buffers are typically much smaller than the 30ms
+    //! VAD frame, and were previously each mis-counted as a full frame).
+    use super::{EnergyThresholdVadGate, VadConfig, VadEdge, VadGate};
+
+    fn gate() -> EnergyThresholdVadGate {
+        EnergyThresholdVadGate::new(&VadConfig {
+            frame_size: 160, // 10ms at 16kHz
+            sample_rate: 16_000,
+            threshold_db: Some(-40.0),
+            min_speech_duration: 0.05,  // 5 frames = 800 samples
+            min_silence_duration: 0.05, // 5 frames = 800 samples
+            padding_seconds: 0.0,
+        })
+    }
+
+    /// Push `samples` through `gate` in `buffer_len`-sample slices (like a
+    /// cpal callback cadence smaller than the frame size), returning how
+    /// many samples had been consumed when `expected` first fired.
+    fn samples_until_edge(
+        gate: &mut EnergyThresholdVadGate,
+        samples: &[f32],
+        buffer_len: usize,
+        expected: VadEdge,
+    ) -> Option<usize> {
+        let mut consumed = 0;
+        for chunk in samples.chunks(buffer_len) {
+            consumed += chunk.len();
+            if gate.push_samples(chunk) == expected {
+                return Some(consumed);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn sub_frame_buffers_are_not_each_counted_as_a_full_frame() {
+        let mut gate = gate();
+
+        // 5 frames (800 samples) of sustained loud audio are required before
+        // SpeechStarted. Delivered in 50-sample buffers, the edge must not
+        // fire until ~800 samples have actually been consumed -- the old
+        // chunking counted every 50-sample buffer as a 160-sample frame and
+        // would have fired after only 250 samples.
+        let loud = vec![0.5_f32; 1600];
+        let consumed = samples_until_edge(&mut gate, &loud, 50, VadEdge::SpeechStarted)
+            .expect("speech edge must eventually fire");
+        assert_eq!(
+            consumed, 800,
+            "speech must arm after exactly min_speech frames worth of samples"
+        );
+
+        // Same for the silence timeout: 5 frames (800 samples) of quiet.
+        let quiet = vec![0.0_f32; 1600];
+        let consumed = samples_until_edge(&mut gate, &quiet, 50, VadEdge::SilenceStarted)
+            .expect("silence edge must eventually fire");
+        assert_eq!(
+            consumed, 800,
+            "silence timeout must take the full configured duration of real samples"
+        );
+    }
+
+    #[test]
+    fn framing_is_independent_of_push_granularity() {
+        // The number of samples needed to trip each edge must be identical
+        // whether audio arrives in tiny buffers, odd-sized buffers, or one
+        // exact-multiple slab.
+        for buffer_len in [1_usize, 53, 160, 480, 1600] {
+            let mut gate = gate();
+            let loud = vec![0.5_f32; 1600];
+            let consumed = samples_until_edge(&mut gate, &loud, buffer_len, VadEdge::SpeechStarted)
+                .expect("speech edge must fire");
+            // The edge is only observable at a push boundary, so allow the
+            // edge to surface within the buffer that completes frame 5.
+            assert!(
+                (800..800 + buffer_len).contains(&consumed),
+                "buffer_len {buffer_len}: speech fired after {consumed} samples"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_frame_tail_carries_over_between_calls() {
+        let mut gate = gate();
+        // 4.5 frames of loud audio: not enough to arm speech...
+        gate.push_samples(&vec![0.5_f32; 720]);
+        assert!(!gate.is_speaking());
+        // ...but the 80-sample tail must be remembered, so 80 more samples
+        // complete frame 5 and fire the edge.
+        assert_eq!(
+            gate.push_samples(&vec![0.5_f32; 80]),
+            VadEdge::SpeechStarted
+        );
+        assert!(gate.is_speaking());
+    }
 }
 
 #[cfg(test)]

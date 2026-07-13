@@ -269,7 +269,7 @@ impl DownloadManager {
         let client = &self.client;
         let mut request = client.get(url);
 
-        let start_byte = if temp_path.exists() {
+        let mut start_byte = if temp_path.exists() {
             let metadata = tokio::fs::metadata(&temp_path).await?;
             metadata.len()
         } else {
@@ -280,7 +280,22 @@ impl DownloadManager {
             request = request.header("Range", format!("bytes={}-", start_byte));
         }
 
-        let response = request.send().await?;
+        let mut response = request.send().await?;
+
+        // 416 means our tmp file is already at least as long as the remote
+        // file (e.g. a completed download that crashed before the rename) or
+        // otherwise unusable as a resume base. Discard it and start over,
+        // instead of erroring on every retry forever.
+        if start_byte > 0 && response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            tracing::warn!(
+                "Resume of {} rejected with 416; discarding partial file and restarting",
+                url
+            );
+            tokio::fs::remove_file(&temp_path).await.ok();
+            start_byte = 0;
+            response = client.get(url).send().await?;
+        }
+
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
@@ -296,16 +311,32 @@ impl DownloadManager {
                 }
             ));
         }
+
+        // Only a 206 Partial Content reply actually honored the Range header.
+        // A server/proxy that ignores Range replies 200 with the entire body,
+        // which must overwrite the partial tmp file -- appending it after the
+        // existing bytes would silently corrupt the artifact.
+        let resuming = start_byte > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        if start_byte > 0 && !resuming {
+            tracing::warn!(
+                "Server ignored Range request for {} (HTTP {}); restarting download from scratch",
+                url,
+                response.status()
+            );
+            start_byte = 0;
+        }
+
         let total_size = response
             .content_length()
             .map(|l| l + start_byte)
             .unwrap_or(0);
 
-        let mut file = File::options()
-            .create(true)
-            .append(true)
-            .open(&temp_path)
-            .await?;
+        let mut file = if resuming {
+            File::options().append(true).open(&temp_path).await?
+        } else {
+            // Truncates any stale partial content.
+            File::create(&temp_path).await?
+        };
 
         let mut stream = response.bytes_stream();
         let bytes_downloaded = Arc::new(AtomicU64::new(start_byte));
@@ -331,6 +362,24 @@ impl DownloadManager {
         }
 
         file.flush().await?;
+        drop(file);
+
+        // Validate the finished file against the server-declared length
+        // before renaming into place, so a truncated stream can never be
+        // installed as a supposedly-complete artifact. The tmp file is kept
+        // for the next attempt to resume from.
+        if total_size > 0 {
+            let final_len = tokio::fs::metadata(&temp_path).await?.len();
+            if final_len != total_size {
+                return Err(anyhow::anyhow!(
+                    "Download of {} is incomplete: got {} bytes, expected {}. Re-try download.",
+                    url,
+                    final_len,
+                    total_size
+                ));
+            }
+        }
+
         tokio::fs::rename(temp_path, destination).await?;
         Ok(())
     }

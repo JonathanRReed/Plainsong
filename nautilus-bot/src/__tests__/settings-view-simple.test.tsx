@@ -34,6 +34,9 @@ const baseSettings = {
     dictationSaveToInbox: true,
     dictationProfile: "normal_speed" as const,
     dictationProjectId: "inbox",
+    // Auto-stop-on-silence is a consumer of the VAD backend, so the "VAD
+    // accuracy" picker (exercised below) renders with this fixture.
+    dictationSilenceTimeoutSeconds: 5,
     speakerNamingMethod: "auto" as const,
     silenceSkipEnabled: false,
     memorySearchMode: "fts" as const,

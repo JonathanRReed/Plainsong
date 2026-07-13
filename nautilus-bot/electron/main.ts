@@ -47,6 +47,9 @@ if (isDev) {
 let mainWindow: BrowserWindow | null = null;
 let ipcBridge: IpcBridge | null = null;
 let dictationPhase = "idle";
+// Session id from the most recent `dictation-state-changed` event, used to
+// drop stale VAD `silence_stop` signals emitted for an earlier session.
+let dictationSessionId: number | null = null;
 let updaterConfigured = false;
 let updateReadyToInstall = false;
 let bootstrapComplete = false;
@@ -578,8 +581,29 @@ async function handleDictationVadSignal(payload: unknown): Promise<void> {
     if (dictationPhase !== "recording") {
       return;
     }
+    // Scope the auto-stop to the session that emitted it: a delayed signal
+    // from an already-stopped session must not stop a newer session that
+    // started in the meantime. The sidecar re-checks the sessionId too.
+    const payloadSessionId =
+      payload && typeof payload === "object" && "sessionId" in payload
+        ? (payload as { sessionId?: unknown }).sessionId
+        : undefined;
+    if (
+      typeof payloadSessionId === "number" &&
+      dictationSessionId !== null &&
+      payloadSessionId !== dictationSessionId
+    ) {
+      qaLog("dictation vad auto-stop dropped (stale session)", {
+        payloadSessionId,
+        activeSessionId: dictationSessionId,
+      });
+      return;
+    }
     qaLog("dictation vad auto-stop", { phase: dictationPhase, signal });
-    await ipcBridge.invoke("stop_dictation", { stopReason: "auto_stop_silence" });
+    await ipcBridge.invoke("stop_dictation", {
+      stopReason: "auto_stop_silence",
+      ...(typeof payloadSessionId === "number" ? { sessionId: payloadSessionId } : {}),
+    });
     return;
   }
 
@@ -989,6 +1013,10 @@ async function bootstrap() {
       typeof (payload as { phase?: unknown }).phase === "string"
     ) {
       dictationPhase = (payload as { phase: string }).phase;
+      const sessionId = (payload as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId === "number") {
+        dictationSessionId = sessionId;
+      }
     }
 
     if (eventName === "dictation-vad-signal") {
