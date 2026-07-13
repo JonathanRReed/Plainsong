@@ -254,6 +254,11 @@ export function createDictationShortcutSignalRuntime(deps: {
       // stopped the moment the start resolves.
       if (input.signal === "released" && holdToTalkWithRelease && startInFlight) {
         pendingHoldRelease = true;
+      } else if (input.signal === "released" || input.signal === "cancelled") {
+        // The hold ended but the session it was guarding is already gone
+        // (VAD auto-stop, overlay stop button, error phase). Drop the stale
+        // watchdog so it cannot stop a later unrelated dictation session.
+        clearWatchdog();
       }
       return;
     }
