@@ -29,11 +29,23 @@ function splitShortcutTokens(shortcut: string): string[] {
     .filter(Boolean);
 }
 
+// Canonical modifier order for conflict comparison. Equivalent chords written
+// with a different modifier order (e.g. "Ctrl+Alt+D" vs "Alt+Ctrl+D") must
+// normalize to the same string, otherwise both get passed to
+// globalShortcut.register and the second silently fails.
+const NORMALIZED_MODIFIER_ORDER = ["control", "alt", "command", "shift", "fn"];
+
 export function normalizeShortcutAccelerator(shortcut: string): string {
-  return splitShortcutTokens(shortcut)
+  const tokens = splitShortcutTokens(shortcut)
     .map((part) => normalizeAcceleratorToken(part, false) ?? part)
-    .map((part) => part.toLowerCase())
-    .join("+");
+    .map((part) => part.toLowerCase());
+  const modifiers = NORMALIZED_MODIFIER_ORDER.filter((modifier) =>
+    tokens.includes(modifier),
+  );
+  const keys = tokens.filter(
+    (token) => !NORMALIZED_MODIFIER_ORDER.includes(token),
+  );
+  return [...modifiers, ...keys].join("+");
 }
 
 export function convertShortcutToAccelerator(
@@ -106,7 +118,32 @@ function normalizeAcceleratorToken(
     case "arrowright":
     case "right":
       return "Right";
-    default:
+    case "backspace":
+      return "Backspace";
+    case "delete":
+    case "del":
+      return "Delete";
+    case "home":
+      return "Home";
+    case "end":
+      return "End";
+    case "pageup":
+      return "PageUp";
+    case "pagedown":
+      return "PageDown";
+    case "tab":
+      return "Tab";
+    case "insert":
+      return "Insert";
+    case "plus":
+      return "Plus";
+    default: {
+      // F1-F24 are valid Electron accelerator key codes (and the capture UI
+      // plus the Swift helper both accept F-keys).
+      const functionKey = /^f([1-9]|1[0-9]|2[0-4])$/.exec(token.toLowerCase());
+      if (functionKey) {
+        return `F${functionKey[1]}`;
+      }
       if (token.length === 1) {
         const char = token.toUpperCase();
         if (char >= "!" && char <= "~") {
@@ -117,6 +154,7 @@ function normalizeAcceleratorToken(
         console.error("[shortcuts] invalid token in shortcut:", token);
       }
       return null;
+    }
   }
 }
 

@@ -892,6 +892,16 @@ export async function getShortcutConflicts(): Promise<ShortcutConflictStatus> {
   return await invoke("get_shortcut_conflicts");
 }
 
+/**
+ * Re-apply global shortcut registrations now. The electron main process
+ * re-runs its registration pass (including respawning the native macOS
+ * helper) when this command resolves, so a freshly granted Accessibility
+ * permission can activate hold-to-talk without an app restart.
+ */
+export async function applyGlobalShortcutsNow(): Promise<void> {
+  await invoke("apply_global_shortcuts_now");
+}
+
 // Diarization types
 interface Speaker {
   id: string;

@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  createDictationShortcutSignalRuntime,
+  DICTATION_HOLD_WATCHDOG_MS,
   resolveDictationShortcutBehavior,
   resolveDictationShortcutCapability,
   resolveDictationShortcutDecision,
@@ -168,6 +170,156 @@ describe("resolveDictationShortcutCapability", () => {
         behavior: "hands_free",
       }),
     ).toBe("press_only");
+  });
+});
+
+describe("createDictationShortcutSignalRuntime", () => {
+  const holdToTalk = {
+    behavior: "hold_to_talk",
+    capability: "press_and_release",
+  } as const;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function createHarness(options?: { failStart?: boolean }) {
+    let phase = "idle";
+    const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];
+    let resolveStart: (() => void) | null = null;
+    const invoke = vi.fn((command: string, args: Record<string, unknown>) => {
+      invocations.push({ command, args });
+      if (command === "start_dictation") {
+        return new Promise<unknown>((resolve, reject) => {
+          resolveStart = () => {
+            if (options?.failStart) {
+              reject(new Error("start failed"));
+            } else {
+              phase = "recording";
+              resolve(null);
+            }
+          };
+        });
+      }
+      if (command === "stop_dictation") {
+        phase = "stopping";
+      }
+      return Promise.resolve(null);
+    });
+    const runtime = createDictationShortcutSignalRuntime({
+      getPhase: () => phase as Parameters<typeof resolveDictationShortcutDecision>[0]["phase"],
+      invoke,
+    });
+    return {
+      runtime,
+      invocations,
+      invoke,
+      setPhase: (next: string) => {
+        phase = next;
+      },
+      finishStart: () => {
+        resolveStart?.();
+        resolveStart = null;
+      },
+    };
+  }
+
+  it("stops a rapid hold-to-talk tap whose release lands before the start resolves", async () => {
+    const harness = createHarness();
+
+    const press = harness.runtime.handleSignal({ ...holdToTalk, signal: "pressed" });
+    // The release arrives while start_dictation is still in flight and the
+    // cached phase is still "idle" — previously this resolved to "ignore" and
+    // the microphone recorded forever.
+    await harness.runtime.handleSignal({ ...holdToTalk, signal: "released" });
+    expect(harness.invocations.map((entry) => entry.command)).toEqual([
+      "start_dictation",
+    ]);
+
+    harness.finishStart();
+    await press;
+    await vi.runAllTimersAsync();
+
+    expect(harness.invocations.map((entry) => entry.command)).toEqual([
+      "start_dictation",
+      "stop_dictation",
+    ]);
+    expect(harness.invocations[1]?.args).toEqual({ stopReason: "release" });
+  });
+
+  it("does not issue a buffered stop when the start itself failed", async () => {
+    const harness = createHarness({ failStart: true });
+
+    const press = harness.runtime.handleSignal({ ...holdToTalk, signal: "pressed" });
+    await harness.runtime.handleSignal({ ...holdToTalk, signal: "released" });
+    harness.finishStart();
+    await expect(press).rejects.toThrow("start failed");
+
+    expect(harness.invocations.map((entry) => entry.command)).toEqual([
+      "start_dictation",
+    ]);
+  });
+
+  it("stops normally on a release that arrives after recording started", async () => {
+    const harness = createHarness();
+
+    const press = harness.runtime.handleSignal({ ...holdToTalk, signal: "pressed" });
+    harness.finishStart();
+    await press;
+
+    await harness.runtime.handleSignal({ ...holdToTalk, signal: "released" });
+
+    expect(harness.invocations.map((entry) => entry.command)).toEqual([
+      "start_dictation",
+      "stop_dictation",
+    ]);
+    expect(harness.invocations[1]?.args).toEqual({ stopReason: "release" });
+  });
+
+  it("stops a hold whose release never arrives via the watchdog backstop", async () => {
+    const harness = createHarness();
+
+    const press = harness.runtime.handleSignal({ ...holdToTalk, signal: "pressed" });
+    harness.finishStart();
+    await press;
+
+    await vi.advanceTimersByTimeAsync(DICTATION_HOLD_WATCHDOG_MS);
+
+    expect(harness.invocations.map((entry) => entry.command)).toEqual([
+      "start_dictation",
+      "stop_dictation",
+    ]);
+    expect(harness.invocations[1]?.args).toEqual({ stopReason: "watchdog_timeout" });
+  });
+
+  it("does not fire the watchdog after a normal release already stopped the session", async () => {
+    const harness = createHarness();
+
+    const press = harness.runtime.handleSignal({ ...holdToTalk, signal: "pressed" });
+    harness.finishStart();
+    await press;
+    await harness.runtime.handleSignal({ ...holdToTalk, signal: "released" });
+
+    await vi.advanceTimersByTimeAsync(DICTATION_HOLD_WATCHDOG_MS * 2);
+
+    expect(
+      harness.invocations.filter((entry) => entry.command === "stop_dictation"),
+    ).toHaveLength(1);
+  });
+
+  it("cancels a recording session on a cancelled signal", async () => {
+    const harness = createHarness();
+    harness.setPhase("recording");
+
+    await harness.runtime.handleSignal({ ...holdToTalk, signal: "cancelled" });
+
+    expect(harness.invocations.map((entry) => entry.command)).toEqual([
+      "force_stop_dictation",
+    ]);
   });
 });
 

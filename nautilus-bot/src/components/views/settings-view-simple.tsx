@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/dialog";
 import { useTheme } from "@/components/theme-provider";
 import {
+  applyGlobalShortcutsNow,
   clearProviderSecret,
   getDictationShortcutCapabilityStatus,
   getPermissionDiagnostics,
@@ -95,6 +96,11 @@ import type { DiarizationModelOption } from "@/lib/backend/asr";
 import type { Settings } from "@/types/settings";
 import { normalizeThemeScheme } from "@/lib/theme-schemes";
 import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
+import {
+  normalizeShortcutAccelerator,
+  SHORTCUT_FIELD_PRECEDENCE,
+} from "../../../electron/shortcut-registration";
+import { listen } from "@/lib/electron";
 import { ONBOARDING_STORAGE_KEY, requestOnboarding } from "@/lib/onboarding";
 import { requestMainView } from "@/lib/navigation";
 import {
@@ -144,13 +150,37 @@ type ShortcutFieldKey =
   | "quickExport"
   | "focusSearch";
 
-const SHORTCUT_FIELD_CONFIG: Array<{ key: ShortcutFieldKey; label: string }> = [
-  { key: "toggleDictation", label: "Dictation" },
-  { key: "toggleRecording", label: "Recording" },
-  { key: "openWindow", label: "Open window" },
-  { key: "quickExport", label: "Quick export" },
-  { key: "focusSearch", label: "Search" },
+// `wired: false` marks settings fields no registration path consumes yet
+// (neither globalShortcut.register nor the native helper, nor any renderer
+// keydown handler). They render disabled with a "coming soon" note instead of
+// promising a binding that silently does nothing.
+const SHORTCUT_FIELD_CONFIG: Array<{
+  key: ShortcutFieldKey;
+  label: string;
+  wired: boolean;
+}> = [
+  { key: "toggleDictation", label: "Dictation", wired: true },
+  { key: "toggleRecording", label: "Recording", wired: false },
+  { key: "openWindow", label: "Open window", wired: true },
+  { key: "quickExport", label: "Quick export", wired: false },
+  { key: "focusSearch", label: "Search", wired: false },
 ];
+
+// Base characters for punctuation keys, keyed by KeyboardEvent.code, so a
+// captured shortcut stores the unshifted key the OS-level matchers expect.
+const SHORTCUT_PUNCTUATION_BY_CODE: Record<string, string> = {
+  Backquote: "`",
+  Backslash: "\\",
+  BracketLeft: "[",
+  BracketRight: "]",
+  Comma: ",",
+  Equal: "=",
+  Minus: "-",
+  Period: ".",
+  Quote: "'",
+  Semicolon: ";",
+  Slash: "/",
+};
 
 const SETTINGS_SAVE_DEBOUNCE_MS = 350;
 const SETTINGS_SECONDARY_LOAD_TIMEOUT_MS = 2500;
@@ -652,6 +682,18 @@ export function SettingsView() {
     }
   }, [toast]);
 
+  // Re-run the electron shortcut registration pass (which respawns the
+  // native macOS helper) after permission diagnostics change, so a freshly
+  // granted Accessibility permission activates hold-to-talk without an app
+  // restart.
+  const reapplyGlobalShortcuts = useCallback(async () => {
+    try {
+      await applyGlobalShortcutsNow();
+    } catch (err) {
+      console.warn("applyGlobalShortcutsNow failed:", err);
+    }
+  }, []);
+
   const formatShortcutFromKeyboardEvent = useCallback(
     (event: KeyboardEvent<HTMLInputElement>) => {
       const parts: string[] = [];
@@ -668,8 +710,19 @@ export function SettingsView() {
         return null;
       }
 
+      // Prefer the layout-position `event.code` for the main key: `event.key`
+      // is the composed character, so Cmd+Alt+D would store "Cmd+Alt+∂" and
+      // Shift+2 would store "@" — tokens both the Electron accelerator
+      // conversion and the native macOS helper reject or mis-handle.
+      const code = event.code;
       let mainKey = "";
-      if (key === " ") {
+      if (/^Key[A-Z]$/.test(code)) {
+        mainKey = code.slice(3);
+      } else if (/^Digit[0-9]$/.test(code)) {
+        mainKey = code.slice(5);
+      } else if (code in SHORTCUT_PUNCTUATION_BY_CODE) {
+        mainKey = SHORTCUT_PUNCTUATION_BY_CODE[code];
+      } else if (key === " " || code === "Space") {
         mainKey = "Space";
       } else if (key.length === 1) {
         mainKey = key.toUpperCase();
@@ -862,8 +915,20 @@ export function SettingsView() {
         // simply stays hidden and the honest toggle-only copy remains in place.
         console.warn("getDictationShortcutCapabilityStatus check failed:", err);
       });
+    // Stay in sync when the helper crashes (or comes back) after mount, so
+    // the UI stops promising hold-to-talk once the behavior degraded to
+    // press-toggle.
+    const unlistenPromise = listen<DictationShortcutCapabilityStatus>(
+      "dictation-shortcut-capability-changed",
+      (event) => {
+        if (mounted) {
+          setNativeShortcutAvailable(event.payload.nativeShortcutAvailable);
+        }
+      },
+    );
     return () => {
       mounted = false;
+      void unlistenPromise.then((unlisten) => unlisten());
     };
   }, []);
 
@@ -880,8 +945,17 @@ export function SettingsView() {
         // section simply renders without the inline conflict warning.
         console.warn("getShortcutConflicts check failed:", err);
       });
+    const unlistenPromise = listen<{ conflicts: ShortcutConflict[] }>(
+      "shortcut-conflicts-changed",
+      (event) => {
+        if (mounted) {
+          setShortcutConflicts(event.payload.conflicts);
+        }
+      },
+    );
     return () => {
       mounted = false;
+      void unlistenPromise.then((unlisten) => unlisten());
     };
   }, []);
 
@@ -1476,15 +1550,17 @@ export function SettingsView() {
   }, [micTestPlaybackUrl]);
 
   // Instant, local mirror of electron/shortcut-registration.ts's
-  // partitionUniqueShortcutRegistrations precedence: the field listed first
-  // in SHORTCUT_FIELD_CONFIG keeps a clashing shortcut, later fields are
-  // reported as conflicting. Recomputed on every render so a freshly-typed
-  // shortcut is flagged immediately, without waiting on a save round-trip.
-  // The backend's get_shortcut_conflicts result (fetched once above) is
-  // merged in as a fallback so a conflict the server already knows about
-  // (e.g. detected at startup) still shows even before settings finish
-  // loading into this form. Must run before the `if (!settings)` early
-  // return below to keep hook call order stable across renders.
+  // partitionUniqueShortcutRegistrations: it iterates the shared
+  // SHORTCUT_FIELD_PRECEDENCE (imported from the electron module, so the two
+  // layers cannot drift) and uses the same accelerator normalization, so the
+  // field electron actually keeps registered is the one reported as the
+  // winner here. Recomputed on every render so a freshly-typed shortcut is
+  // flagged immediately, without waiting on a save round-trip. The backend's
+  // get_shortcut_conflicts result (fetched once above) is merged in as a
+  // fallback so a conflict the server already knows about (e.g. detected at
+  // startup) still shows even before settings finish loading into this form.
+  // Must run before the `if (!settings)` early return below to keep hook
+  // call order stable across renders.
   const localShortcutConflictsByField = useMemo(() => {
     const byField = new Map<ShortcutFieldKey, ShortcutConflict>();
     if (!settings) {
@@ -1493,12 +1569,12 @@ export function SettingsView() {
 
     const owners = new Map<string, { key: ShortcutFieldKey; label: string }>();
 
-    for (const { key, label } of SHORTCUT_FIELD_CONFIG) {
+    for (const { key, label } of SHORTCUT_FIELD_PRECEDENCE) {
       const raw = settings.shortcuts[key];
       if (!raw) {
         continue;
       }
-      const normalized = normalizeShortcut(raw);
+      const normalized = normalizeShortcutAccelerator(raw);
       if (!normalized) {
         continue;
       }
@@ -1570,7 +1646,7 @@ export function SettingsView() {
         </p>
       </div>
       <div className="mt-4 grid gap-3">
-        {SHORTCUT_FIELD_CONFIG.map(({ key, label }) => {
+        {SHORTCUT_FIELD_CONFIG.map(({ key, label, wired }) => {
           const currentVal = settings.shortcuts[key]
             ? formatShortcutForDisplay(settings.shortcuts[key])
             : "None";
@@ -1582,22 +1658,32 @@ export function SettingsView() {
               className="flex flex-col gap-2 rounded-2xl border border-border/60 bg-muted/20 px-3 py-3"
             >
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <span className="text-sm text-muted-foreground">{label}</span>
+                <span className="text-sm text-muted-foreground">
+                  {label}
+                  {!wired && (
+                    <span className="ml-2 rounded-full border border-border/60 px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground/80">
+                      Coming soon
+                    </span>
+                  )}
+                </span>
                 <div className="flex items-center gap-2">
                   <Input
                     value={isCapturing ? "Listening..." : currentVal}
                     readOnly
+                    disabled={!wired}
                     aria-invalid={conflict ? true : undefined}
                     className={`h-9 w-36 text-center font-mono text-xs ${isCapturing ? "border-primary ring-1 ring-primary" : conflict ? "border-destructive/60" : ""}`}
                     onFocus={() => {
-                      setCapturingShortcut(key);
+                      if (wired) {
+                        setCapturingShortcut(key);
+                      }
                     }}
                     onBlur={() => {
                       if (capturingShortcut === key) {
                         setCapturingShortcut(null);
                       }
                     }}
-                    onKeyDown={handleShortcutKeyDown(key)}
+                    onKeyDown={wired ? handleShortcutKeyDown(key) : undefined}
                   />
                   <Button
                     variant="ghost"
@@ -1616,6 +1702,12 @@ export function SettingsView() {
                   </Button>
                 </div>
               </div>
+              {!wired && (
+                <p className="text-xs text-muted-foreground">
+                  This shortcut is not active yet — the binding is saved but
+                  does nothing until a future update wires it up.
+                </p>
+              )}
               {conflict && (
                 <div className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                   <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -1630,8 +1722,8 @@ export function SettingsView() {
         })}
       </div>
       <p className="mt-3 text-xs text-muted-foreground">
-        Changes save immediately and new bindings apply instantly. If two
-        shortcuts share the same keys, only one is registered — the other
+        Changes to active shortcuts save immediately and apply instantly. If
+        two shortcuts share the same keys, only one is registered — the other
         is flagged above.
       </p>
     </div>
@@ -2360,6 +2452,7 @@ export function SettingsView() {
                     onClick={async () => {
                       const diagnostics = await getPermissionDiagnostics();
                       setPermissionDiagnostics(diagnostics);
+                      void reapplyGlobalShortcuts();
                     }}
                   >
                     Refresh
@@ -2370,6 +2463,7 @@ export function SettingsView() {
                     onClick={async () => {
                       const diagnostics = await requestDictationPermissions();
                       setPermissionDiagnostics(diagnostics);
+                      void reapplyGlobalShortcuts();
                     }}
                   >
                     Request now
@@ -2380,6 +2474,7 @@ export function SettingsView() {
                     onClick={async () => {
                       const diagnostics = await repairCursorInsertPermissions();
                       setPermissionDiagnostics(diagnostics);
+                      void reapplyGlobalShortcuts();
                     }}
                   >
                     Repair insert
