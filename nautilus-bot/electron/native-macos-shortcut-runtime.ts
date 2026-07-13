@@ -60,6 +60,15 @@ export function startNativeMacosShortcutController(input: {
     };
   }
 
+  // An explicitly cleared shortcut ("") means the user disabled the dictation
+  // hotkey; do not silently fall back to the default binding.
+  if (typeof input.shortcut === "string" && input.shortcut.trim() === "") {
+    return {
+      status: { available: false, reason: "shortcut_disabled" },
+      dispose: () => {},
+    };
+  }
+
   const shortcut = resolveNativeShortcutHelperShortcut(input.shortcut);
   const args = buildNativeShortcutHelperArgs(shortcut);
   const child =
@@ -71,8 +80,11 @@ export function startNativeMacosShortcutController(input: {
     platform: input.platform,
     helperReady: true,
   });
+  let disposed = false;
   const markHelperUnavailable = (): void => {
-    if (!status.available) {
+    // A crash-exit event from an already-disposed helper must not clobber the
+    // availability of a freshly spawned replacement controller.
+    if (disposed || !status.available) {
       return;
     }
     status.available = false;
@@ -117,6 +129,7 @@ export function startNativeMacosShortcutController(input: {
   return {
     status,
     dispose: () => {
+      disposed = true;
       lines?.close();
       lines = null;
       child.kill("SIGTERM");

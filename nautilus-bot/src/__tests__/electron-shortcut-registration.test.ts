@@ -78,6 +78,31 @@ describe("partitionUniqueShortcutRegistrations", () => {
       "control+alt+command+d",
     );
   });
+
+  it("normalizes equivalent chords with different modifier order to the same string", () => {
+    expect(normalizeShortcutAccelerator("Alt+Ctrl+D")).toBe(
+      normalizeShortcutAccelerator("Ctrl+Alt+D"),
+    );
+    expect(normalizeShortcutAccelerator("Shift+Cmd+Space")).toBe(
+      normalizeShortcutAccelerator("Cmd+Shift+Space"),
+    );
+  });
+
+  it("detects conflicts between chords written with a different modifier order", () => {
+    const result = partitionUniqueShortcutRegistrations([
+      { label: "dictation", shortcut: "Ctrl+Alt+D" },
+      { label: "open window", shortcut: "Alt+Ctrl+D" },
+    ]);
+
+    expect(result.unique.map((registration) => registration.label)).toEqual([
+      "dictation",
+    ]);
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]).toMatchObject({
+      label: "open window",
+      conflictsWith: "dictation",
+    });
+  });
 });
 
 describe("findConflictingShortcuts", () => {
@@ -186,9 +211,24 @@ describe("convertShortcutToAccelerator", () => {
     expect(convertShortcutToAccelerator("Ctrl+Esc")).toBe("Control+Escape");
   });
 
+  it("accepts function keys and navigation keys that the capture UI records", () => {
+    expect(convertShortcutToAccelerator("Cmd+F5")).toBe("Command+F5");
+    expect(convertShortcutToAccelerator("ctrl+f12")).toBe("Control+F12");
+    expect(convertShortcutToAccelerator("Cmd+F24")).toBe("Command+F24");
+    expect(convertShortcutToAccelerator("Ctrl+Backspace")).toBe("Control+Backspace");
+    expect(convertShortcutToAccelerator("Ctrl+Delete")).toBe("Control+Delete");
+    expect(convertShortcutToAccelerator("Cmd+Home")).toBe("Command+Home");
+    expect(convertShortcutToAccelerator("Cmd+End")).toBe("Command+End");
+    expect(convertShortcutToAccelerator("Cmd+PageUp")).toBe("Command+PageUp");
+    expect(convertShortcutToAccelerator("Cmd+PageDown")).toBe("Command+PageDown");
+    expect(convertShortcutToAccelerator("Ctrl+Tab")).toBe("Control+Tab");
+  });
+
   it("rejects empty, excessive, and unknown shortcut tokens", () => {
     expect(convertShortcutToAccelerator(" ")).toBeNull();
     expect(convertShortcutToAccelerator("Ctrl+Alt+Cmd+Shift+Fn+D")).toBeNull();
     expect(convertShortcutToAccelerator("Ctrl+NotAKey")).toBeNull();
+    expect(convertShortcutToAccelerator("Ctrl+F25")).toBeNull();
+    expect(convertShortcutToAccelerator("Ctrl+F0")).toBeNull();
   });
 });

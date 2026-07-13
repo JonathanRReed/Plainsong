@@ -16,9 +16,9 @@ import { existsSync } from "fs";
 import path from "path";
 import { autoUpdater, type AppUpdater } from "electron-updater";
 import {
+  createDictationShortcutSignalRuntime,
   resolveDictationShortcutBehavior,
   resolveDictationShortcutCapability,
-  resolveDictationShortcutDecision,
   shouldHandleDictationShortcutSource,
 } from "./dictation-shortcut-controller";
 import { IpcBridge } from "./ipc-bridge";
@@ -55,6 +55,11 @@ let minimizeToTrayEnabled = false;
 let isQuitting = false;
 let nativeShortcutController: NativeShortcutController | null = null;
 let nativeShortcutAvailable = false;
+let appliedNativeShortcutConfig: string | null = null;
+// Latest settings snapshot the shortcut handlers should act on. The native
+// helper survives settings saves that don't change its shortcut, so its
+// onEvent closure must not act on the settings captured at spawn time.
+let latestShortcutSettings: AppSettings = {};
 let shortcutConflicts: ShortcutConflictInfo[] = [];
 
 function qaLog(message: string, payload?: unknown): void {
@@ -495,6 +500,20 @@ type DictationShortcutSignal =
   | "emergency_stop"
   | "watchdog_timeout";
 
+// Stateful signal runtime: buffers a hold-to-talk release that lands while
+// start_dictation is still in flight (rapid tap) and arms a max-hold watchdog,
+// so a dropped release can never leave the microphone recording forever.
+const dictationShortcutSignalRuntime = createDictationShortcutSignalRuntime({
+  getPhase: () => dictationPhase as DictationShortcutPhase,
+  invoke: (command, args) => {
+    if (!ipcBridge) {
+      return Promise.reject(new Error("IPC bridge is not ready"));
+    }
+    return ipcBridge.invoke(command, args);
+  },
+  log: qaLog,
+});
+
 async function handleDictationShortcutSignal(
   settings: AppSettings,
   signal: DictationShortcutSignal,
@@ -508,41 +527,7 @@ async function handleDictationShortcutSignal(
     nativeShortcutAvailable,
     behavior,
   });
-  const decision = resolveDictationShortcutDecision({
-    phase: dictationPhase as DictationShortcutPhase,
-    behavior,
-    capability,
-    signal,
-  });
-
-  if (decision.action === "start") {
-    qaLog("dictation shortcut start_dictation", { phase: dictationPhase, behavior, capability });
-    await ipcBridge.invoke("start_dictation", {});
-    return;
-  }
-
-  if (decision.action === "stop") {
-    qaLog("dictation shortcut stop_dictation", {
-      phase: dictationPhase,
-      behavior,
-      capability,
-      stopReason: decision.stopReason ?? "toggle",
-    });
-    await ipcBridge.invoke("stop_dictation", {
-      stopReason: decision.stopReason ?? "toggle",
-    });
-    return;
-  }
-
-  if (decision.action === "cancel") {
-    qaLog("dictation shortcut force_stop_dictation", {
-      phase: dictationPhase,
-      behavior,
-      capability,
-      stopReason: decision.stopReason ?? "cancelled",
-    });
-    await ipcBridge.invoke("force_stop_dictation", {});
-  }
+  await dictationShortcutSignalRuntime.handleSignal({ behavior, capability, signal });
 }
 
 /**
@@ -617,13 +602,39 @@ async function handleNativeDictationShortcutEvent(
   await handleDictationShortcutSignal(settings, signal);
 }
 
+// Keeps the flag and the renderers in sync: Settings copy (e.g. the
+// hold-to-talk hint) reflects a helper crash instead of promising a
+// release-to-stop that no longer works.
+function setNativeShortcutAvailable(next: boolean): void {
+  if (nativeShortcutAvailable === next) {
+    return;
+  }
+  nativeShortcutAvailable = next;
+  broadcastRendererEvent("dictation-shortcut-capability-changed", {
+    nativeShortcutAvailable: next,
+  });
+}
+
 function disposeNativeShortcutController(): void {
   nativeShortcutController?.dispose();
   nativeShortcutController = null;
-  nativeShortcutAvailable = false;
+  appliedNativeShortcutConfig = null;
+  setNativeShortcutAvailable(false);
 }
 
 function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
+  const desiredConfig = settings.shortcuts?.toggleDictation ?? null;
+  // Only respawn the helper when its shortcut actually changed (or it died).
+  // An unconditional respawn on every settings save would reset the helper's
+  // key-down tracking, swallowing the release of a hold that is in progress.
+  if (
+    nativeShortcutController &&
+    nativeShortcutController.status.available &&
+    appliedNativeShortcutConfig === desiredConfig
+  ) {
+    return;
+  }
+
   disposeNativeShortcutController();
 
   const controller = startNativeMacosShortcutController({
@@ -631,18 +642,24 @@ function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
     helperPath: getNativeShortcutHelperPath(),
     shortcut: settings.shortcuts?.toggleDictation,
     onEvent: (event) => {
-      void handleNativeDictationShortcutEvent(settings, event).catch((error) => {
+      void handleNativeDictationShortcutEvent(latestShortcutSettings, event).catch((error) => {
         console.error("[shortcuts] native dictation shortcut failed", error);
       });
     },
     onUnavailable: (status) => {
+      // A queued crash-exit from an older, already-replaced helper must not
+      // mark the current helper unavailable.
+      if (nativeShortcutController !== controller) {
+        return;
+      }
       console.warn("[shortcuts] native shortcut helper became unavailable", status);
-      nativeShortcutAvailable = false;
+      setNativeShortcutAvailable(false);
     },
   });
 
   nativeShortcutController = controller;
-  nativeShortcutAvailable = controller.status.available;
+  appliedNativeShortcutConfig = desiredConfig;
+  setNativeShortcutAvailable(controller.status.available);
 }
 
 async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
@@ -658,6 +675,7 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
     return;
   }
 
+  latestShortcutSettings = settings;
   startNativeShortcutControllerIfNeeded(settings);
 
   const conflicts = findConflictingShortcuts(settings.shortcuts ?? {});
@@ -899,6 +917,7 @@ process.on("unhandledRejection", (reason) => {
 app.on("before-quit", () => {
   isQuitting = true;
   globalShortcut.unregisterAll();
+  dictationShortcutSignalRuntime.dispose();
   disposeNativeShortcutController();
   ipcBridge?.shutdown();
   tray?.destroy();
@@ -979,6 +998,17 @@ async function bootstrap() {
   ipcBridge = new IpcBridge(sidecarPath);
   ipcBridge.onLocalCommand(handleLocalCommand);
   configureAutoUpdater(autoUpdater);
+
+  // A sidecar crash mid-recording would otherwise leave the cached phase at
+  // "recording" forever: the restarted sidecar boots Idle, every hotkey press
+  // resolves to a failing stop_dictation, and the hotkey is wedged. Reset the
+  // mirror and tell renderers so their UI resyncs too.
+  ipcBridge.onTerminated(() => {
+    if (dictationPhase !== "idle") {
+      dictationPhase = "idle";
+      broadcastRendererEvent("dictation-state-changed", { phase: "idle" });
+    }
+  });
 
   ipcBridge.onEvent((eventName: string, payload: unknown) => {
     if (
