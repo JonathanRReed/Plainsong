@@ -20,7 +20,11 @@ export function UpdateStatusWidget() {
   // Load the initial status, then let main-process pushes drive the UI so
   // download progress, install transitions, and async errors all render.
   useEffect(() => {
-    getUpdateStatus().then(setStatus);
+    getUpdateStatus()
+      .then(setStatus)
+      .catch((error) => {
+        console.error("Failed to load update status:", error);
+      });
     const unlistenPromise = listen<UpdateStatusInfo>("update-status-changed", (event) => {
       setStatus(event.payload);
     });
@@ -29,12 +33,20 @@ export function UpdateStatusWidget() {
     };
   }, []);
 
+  // Route invoke failures into the widget's error panel so an offline check
+  // doesn't end as a spinner that stops with no explanation.
+  const showInvokeError = (error: unknown, fallback: string) => {
+    const message = error instanceof Error ? error.message : String(error ?? fallback);
+    setStatus({ status: "error", error: message || fallback });
+  };
+
   const handleCheckForUpdates = async () => {
     setIsLoading(true);
     try {
       await checkForUpdates();
     } catch (error) {
       console.error("Failed to check for updates:", error);
+      showInvokeError(error, "Couldn't check for updates. Are you offline?");
     } finally {
       setIsLoading(false);
     }
@@ -47,6 +59,7 @@ export function UpdateStatusWidget() {
       // App will restart automatically
     } catch (error) {
       console.error("Failed to install update:", error);
+      showInvokeError(error, "Couldn't install the update.");
     } finally {
       setIsLoading(false);
     }

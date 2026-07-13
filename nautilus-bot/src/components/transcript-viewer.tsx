@@ -25,7 +25,12 @@ interface TranscriptViewerProps {
   /** Provenance of the transcript; defaults to on-device when omitted. */
   provenance?: TranscriptProvenance;
   onRenameSpeaker?: (speakerId: string, newName: string) => Promise<void> | void;
-  onEditSegment?: (segmentId: string, newText: string) => Promise<void> | void;
+  /**
+   * Save an edited speaker turn. Receives every segment id in the turn: the
+   * edited text replaces the first segment and the rest must be removed by
+   * the caller, otherwise their old text would survive and duplicate.
+   */
+  onEditSegment?: (segmentIds: string[], newText: string) => Promise<void> | void;
   onDeleteSegments?: (segmentIds: string[]) => Promise<void> | void;
 }
 
@@ -135,6 +140,7 @@ export function TranscriptViewer({
   const [isEditingSpeakers, setIsEditingSpeakers] = useState(false);
   const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
+  const [isSavingSegmentEdit, setIsSavingSegmentEdit] = useState(false);
   // Session-scoped ribbon: the last segment the reader played/opened, by id.
   // State only — no persistence backend (honest about what we keep).
   const [lastReadSegmentId, setLastReadSegmentId] = useState<string | null>(null);
@@ -171,6 +177,29 @@ export function TranscriptViewer({
     setSpeakerNames(prev => ({ ...prev, [speakerId]: newName }));
     if (onRenameSpeaker) {
       await onRenameSpeaker(speakerId, newName);
+    }
+  };
+
+  const beginEditingGroup = (group: TranscriptSegment[]) => {
+    if (!onEditSegment) return;
+    setEditingSegmentId(group[0].id);
+    setEditingText(group.map((segment) => segment.text).join(" "));
+  };
+
+  // Await the save and only close the editor on success, so a failed write
+  // never silently discards the user's correction.
+  const saveSegmentEdit = async (group: TranscriptSegment[]) => {
+    if (!onEditSegment || isSavingSegmentEdit) return;
+    setIsSavingSegmentEdit(true);
+    try {
+      await onEditSegment(group.map((segment) => segment.id), editingText);
+      setEditingSegmentId(null);
+    } catch (error) {
+      // The caller surfaces the failure (toast); keep the editor open so the
+      // correction is still on screen.
+      console.error("Failed to save transcript segment edit:", error);
+    } finally {
+      setIsSavingSegmentEdit(false);
     }
   };
 
@@ -370,21 +399,20 @@ export function TranscriptViewer({
                           onKeyDown={(e) => {
                             if (e.key === "Escape") { setEditingSegmentId(null); }
                             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                              void onEditSegment?.(firstSegment.id, editingText);
-                              setEditingSegmentId(null);
+                              void saveSegmentEdit(group);
                             }
                           }}
                         />
                         <div className="flex gap-1 justify-end">
-                          <Button size="sm" variant="ghost" className="h-6 text-xs" onClick={() => setEditingSegmentId(null)}>Cancel</Button>
-                          <Button size="sm" className="h-6 text-xs" onClick={() => { void onEditSegment?.(firstSegment.id, editingText); setEditingSegmentId(null); }}><Check className="h-3 w-3 mr-1" />Save</Button>
+                          <Button size="sm" variant="ghost" className="h-6 text-xs" disabled={isSavingSegmentEdit} onClick={() => setEditingSegmentId(null)}>Cancel</Button>
+                          <Button size="sm" className="h-6 text-xs" disabled={isSavingSegmentEdit} onClick={() => { void saveSegmentEdit(group); }}><Check className="h-3 w-3 mr-1" />{isSavingSegmentEdit ? "Saving…" : "Save"}</Button>
                         </div>
                       </div>
                     ) : (
                       <div className="group/text relative">
                         <p
                           className="manuscript max-w-prose text-[0.95rem] leading-[1.85]"
-                          onClick={(e) => { if (onEditSegment) { e.stopPropagation(); setEditingSegmentId(firstSegment.id); setEditingText(group.map(s => s.text).join(" ")); } }}
+                          onClick={(e) => { if (onEditSegment) { e.stopPropagation(); beginEditingGroup(group); } }}
                         >
                           {group.map((segment, i) => {
                             const isPlaying =
@@ -425,14 +453,14 @@ export function TranscriptViewer({
                           })}
                         </p>
                         {onEditSegment && (
-                          <div className="absolute top-0 right-0 flex items-center gap-1 opacity-0 group-hover/text:opacity-100 transition-opacity">
+                          <div className="absolute top-0 right-0 flex items-center gap-1 opacity-0 group-hover/text:opacity-100 focus-within:opacity-100 transition-opacity">
                             <button
                               type="button"
-                              className="p-0.5 rounded hover:bg-muted"
+                              aria-label="Edit segment"
+                              className="p-0.5 rounded hover:bg-muted focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setEditingSegmentId(firstSegment.id);
-                                setEditingText(group.map(s => s.text).join(" "));
+                                beginEditingGroup(group);
                               }}
                             >
                               <Edit2 className="h-3 w-3 text-muted-foreground" />
@@ -440,7 +468,8 @@ export function TranscriptViewer({
                             {onDeleteSegments && (
                               <button
                                 type="button"
-                                className="p-0.5 rounded hover:bg-destructive/10"
+                                aria-label="Delete segment lines"
+                                className="p-0.5 rounded hover:bg-destructive/10 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   void onDeleteSegments(group.map((segment) => segment.id));

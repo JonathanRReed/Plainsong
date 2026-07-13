@@ -51,6 +51,19 @@ describe("update components", () => {
     });
   });
 
+  it("surfaces a failed update check in the error panel instead of failing silently", async () => {
+    updates.checkForUpdates.mockRejectedValue(new Error("network unreachable"));
+
+    render(<UpdateStatusWidget />);
+
+    expect(await screen.findByText("Up to Date")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /check for updates/i }));
+
+    expect(await screen.findByText("Error")).toBeInTheDocument();
+    expect(screen.getByText("network unreachable")).toBeInTheDocument();
+  });
+
   it("renders download progress pushed via update-status-changed events", async () => {
     let pushStatus;
     electron.listen.mockImplementation(async (event, handler) => {

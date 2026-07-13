@@ -503,6 +503,7 @@ export function SettingsView() {
   const [sileroVadAvailable, setSileroVadAvailable] = useState(false);
   const [sileroVadDownloading, setSileroVadDownloading] = useState(false);
   const [micTestActive, setMicTestActive] = useState(false);
+  const [micTestError, setMicTestError] = useState<string | null>(null);
   const [micTestLevel, setMicTestLevel] = useState(0);
   const [micTestRecording, setMicTestRecording] = useState(false);
   const [micTestPlaybackUrl, setMicTestPlaybackUrl] = useState<string | null>(
@@ -1486,6 +1487,7 @@ export function SettingsView() {
   }, []);
 
   const startMicTest = useCallback(async () => {
+    setMicTestError(null);
     try {
       const preferredDeviceId = settings?.audio.dictationInputOverrideEnabled
         ? settings.audio.dictationInputDevice?.deviceId
@@ -1518,6 +1520,12 @@ export function SettingsView() {
       setMicTestActive(true);
     } catch (err) {
       console.error("Mic test failed:", err);
+      // Mic failure is exactly what this test exists to diagnose — name it.
+      setMicTestError(
+        err instanceof DOMException && err.name === "NotAllowedError"
+          ? "Microphone access was denied. Allow it in System Settings → Privacy & Security → Microphone, then try again."
+          : "Microphone unavailable — check that the device is connected and not in use by another app.",
+      );
     }
   }, [
     settings?.audio.dictationInputDevice?.deviceId,
@@ -2355,6 +2363,12 @@ export function SettingsView() {
                   {micTestActive ? "Stop" : "Start"}
                 </Button>
               </div>
+
+              {micTestError && !micTestActive && (
+                <p className="mt-3 rounded-md bg-rust/10 p-2 text-xs text-rust">
+                  {micTestError}
+                </p>
+              )}
 
               {micTestActive && (
                 <>
@@ -5343,8 +5357,8 @@ export function SettingsView() {
                             ) : (
                               <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
                                 <p className="text-rust">
-                                  Enter your OpenAI API key in advanced settings
-                                  to fetch models.
+                                  Add your OpenAI API key in the Power user
+                                  section below to fetch models.
                                 </p>
                               </div>
                             )
@@ -5371,8 +5385,8 @@ export function SettingsView() {
                             ) : (
                               <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
                                 <p className="text-rust">
-                                  Enter your Anthropic API key in advanced
-                                  settings to fetch models.
+                                  Add your Anthropic API key in the Power user
+                                  section below to fetch models.
                                 </p>
                               </div>
                             )
@@ -5401,8 +5415,8 @@ export function SettingsView() {
                             ) : (
                               <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
                                 <p className="text-rust">
-                                  Enter your Google AI API key in advanced
-                                  settings to fetch models.
+                                  Add your Google AI API key in the Power user
+                                  section below to fetch models.
                                 </p>
                               </div>
                             )
@@ -5429,8 +5443,8 @@ export function SettingsView() {
                             ) : (
                               <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
                                 <p className="text-rust">
-                                  Enter your DeepSeek API key in advanced
-                                  settings to fetch models.
+                                  Add your DeepSeek API key in the Power user
+                                  section below to fetch models.
                                 </p>
                               </div>
                             )
@@ -5458,8 +5472,8 @@ export function SettingsView() {
                             ) : (
                               <div className="p-3 rounded border border-rust/30 bg-rust/10 text-sm">
                                 <p className="text-rust">
-                                  Enter your Ollama Cloud API key in advanced
-                                  settings to fetch models.
+                                  Add your Ollama Cloud API key in the Power
+                                  user section below to fetch models.
                                 </p>
                               </div>
                             )

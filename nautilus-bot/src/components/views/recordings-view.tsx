@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -767,6 +767,20 @@ export function RecordingsView() {
   const lastSavedMeetingActionItemsRef = useRef("[]");
   const lastSavedMeetingChatRef = useRef("[]");
   const lastSelectedMeetingIdRef = useRef<string | null>(null);
+  // Autosave failures fire on every debounced keystroke, so throttle the error
+  // toast to avoid a toast storm while still making the failure visible.
+  const lastAutosaveErrorToastAtRef = useRef(0);
+  const notifyAutosaveFailure = useCallback(
+    (what: string) => {
+      const now = Date.now();
+      if (now - lastAutosaveErrorToastAtRef.current < 15000) {
+        return;
+      }
+      lastAutosaveErrorToastAtRef.current = now;
+      toast(`${what} aren't saving — keep this meeting open and try editing again.`, "error");
+    },
+    [toast]
+  );
 
   // Live streaming transcript state
   type StreamChunk = { text: string; startTime: number; isPartial: boolean };
@@ -946,11 +960,12 @@ export function RecordingsView() {
         })
         .catch((error) => {
           console.error("Failed to update live meeting notes:", error);
+          notifyAutosaveFailure("Meeting notes");
         });
     }, 350);
 
     return () => window.clearTimeout(timeoutId);
-  }, [isRecording, liveMeetingNotes, recordingId, setSelectedRecording]);
+  }, [isRecording, liveMeetingNotes, notifyAutosaveFailure, recordingId, setSelectedRecording]);
 
   useEffect(() => {
     if (!meetingNotesTargetId) {
@@ -978,11 +993,12 @@ export function RecordingsView() {
         })
         .catch((error) => {
           console.error("Failed to update meeting notes:", error);
+          notifyAutosaveFailure("Meeting notes");
         });
     }, 350);
 
     return () => window.clearTimeout(timeoutId);
-  }, [meetingNotes, meetingNotesTargetId]);
+  }, [meetingNotes, meetingNotesTargetId, notifyAutosaveFailure]);
 
   useEffect(() => {
     if (!meetingNotesTargetId) {
@@ -1013,11 +1029,12 @@ export function RecordingsView() {
         })
         .catch((error) => {
           console.error("Failed to update meeting template:", error);
+          notifyAutosaveFailure("Template choices");
         });
     }, 250);
 
     return () => window.clearTimeout(timeoutId);
-  }, [meetingNotesTargetId, meetingTemplateId, setSelectedRecording]);
+  }, [meetingNotesTargetId, meetingTemplateId, notifyAutosaveFailure, setSelectedRecording]);
 
   useEffect(() => {
     if (!meetingNotesTargetId) {
@@ -1056,11 +1073,18 @@ export function RecordingsView() {
         })
         .catch((error) => {
           console.error("Failed to update meeting analysis:", error);
+          notifyAutosaveFailure("Summary and action items");
         });
     }, 350);
 
     return () => window.clearTimeout(timeoutId);
-  }, [meetingActionItemsText, meetingNotesTargetId, meetingSummary, setSelectedRecording]);
+  }, [
+    meetingActionItemsText,
+    meetingNotesTargetId,
+    meetingSummary,
+    notifyAutosaveFailure,
+    setSelectedRecording,
+  ]);
 
   useEffect(() => {
     if (!meetingNotesTargetId) {
@@ -1079,11 +1103,12 @@ export function RecordingsView() {
         })
         .catch((error) => {
           console.error("Failed to update meeting chat:", error);
+          notifyAutosaveFailure("Chat messages");
         });
     }, 250);
 
     return () => window.clearTimeout(timeoutId);
-  }, [meetingChatMessages, meetingNotesTargetId]);
+  }, [meetingChatMessages, meetingNotesTargetId, notifyAutosaveFailure]);
 
   useEffect(() => {
     if (!isRecording && !showRecordingDetail) {
@@ -1813,6 +1838,7 @@ export function RecordingsView() {
         await openRecordingAudio(recording.id);
       } catch (err) {
         console.error("Failed to open audio file:", err);
+        toast("Couldn't open the audio file for this meeting.", "error");
       }
     }
   };
@@ -1824,6 +1850,7 @@ export function RecordingsView() {
       refetch();
     } catch (err) {
       console.error("Failed to delete recording:", err);
+      toast("Couldn't delete that meeting — it's still in your list.", "error");
     } finally {
       setShowDeleteConfirm(null);
     }
@@ -1836,6 +1863,7 @@ export function RecordingsView() {
       refetch();
     } catch (err) {
       console.error("Failed to rename recording:", err);
+      toast("Couldn't rename that meeting — the old name is unchanged.", "error");
     } finally {
       setShowRenameDialog(null);
       setRenameValue("");
@@ -2771,13 +2799,16 @@ export function RecordingsView() {
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               className="text-destructive"
+                              // Deleting the meeting that is still recording would
+                              // pull the file out from under the capture pipeline.
+                              disabled={isLiveRow}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setShowDeleteConfirm(recording);
                               }}
                             >
                               <Trash2 className="h-4 w-4 mr-2" />
-                              Delete
+                              {isLiveRow ? "Delete (stop recording first)" : "Delete"}
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
@@ -4087,11 +4118,30 @@ export function RecordingsView() {
                       segments={filteredSegments}
                       speakerNames={speakerNames}
                       onRenameSpeaker={handleRenameSpeaker}
-                      onEditSegment={async (segmentId, newText) => {
-                        if (!selectedRecording) return;
-                        await updateTranscriptSegment(selectedRecording.id, segmentId, newText);
-                        await refreshTranscript(selectedRecording.id);
-                        await refreshTranscriptDetails(selectedRecording.id);
+                      onEditSegment={async (segmentIds, newText) => {
+                        if (!selectedRecording || segmentIds.length === 0) return;
+                        try {
+                          // The edited text covers the whole speaker turn: it
+                          // replaces the first segment, and the remaining
+                          // segments are removed so their old text can't
+                          // duplicate alongside the correction.
+                          const [firstSegmentId, ...restSegmentIds] = segmentIds;
+                          await updateTranscriptSegment(selectedRecording.id, firstSegmentId, newText);
+                          if (restSegmentIds.length > 0) {
+                            await deleteTranscriptSegments(selectedRecording.id, restSegmentIds);
+                          }
+                          await refreshTranscript(selectedRecording.id);
+                          await refreshTranscriptDetails(selectedRecording.id);
+                          toast("Transcript updated.", "success");
+                        } catch (error) {
+                          const message =
+                            error instanceof Error
+                              ? error.message
+                              : "Failed to update the transcript.";
+                          toast(message, "error");
+                          // Rethrow so the editor stays open with the correction.
+                          throw error;
+                        }
                       }}
                       onDeleteSegments={handleDeleteTranscriptSegments}
                     />
