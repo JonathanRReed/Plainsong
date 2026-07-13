@@ -26,8 +26,9 @@ can't ship. Read it before adding scope.
 1. **The moat cannot be the engine or the latency number.** Apple's
    SpeechAnalyzer (free, in macOS 26, streaming + diarization as a system API,
    ~55% faster than MacWhisper) commoditizes on-device transcription over time.
-   Our measured ~137ms is real but it's *batch* latency on `base.en` — the wrong
-   metric to lead with for the "feel" segment. The durable moat is the
+   Our measured ~593ms p50 (~74× real-time on 44s of real speech,
+   `scripts/fixtures/real-speech-44s.wav`) is real but it's *batch* latency on
+   `base.en` — the wrong metric to lead with for the "feel" segment. The durable moat is the
    **product** (the workflow, the combo done well) and the **trust posture**,
    not the millisecond count.
 2. **There is no revenue model, and that reads as eventual abandonment.** The

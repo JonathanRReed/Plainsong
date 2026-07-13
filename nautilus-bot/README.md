@@ -24,9 +24,11 @@ into searchable notes without sending a bot into the call.
 - **Bring your own keys.** Optional cloud transcription and AI cleanup use your
   own provider keys, stored in the OS keychain and sent directly to the
   provider — never through a Plainsong server.
-- **Honest about v1.** The dictation hotkey is **toggle-only** in v1 (press to
-  start, press again to stop); hold-to-talk / hands-free is a documented
-  fast-follow that needs a native key listener. macOS is **arm64-only** for v1.
+- **Honest about v1.** Three dictation activation modes ship: **toggle** (the
+  onboarding default), **hold-to-talk** (selectable in Settings; a native
+  CGEventTap helper with automatic fallback to toggle if the helper isn't
+  running), and **hands-free** (VAD auto start/stop, with an optional Silero
+  VAD model download for better accuracy). macOS is **arm64-only** for v1.
 - **MIT licensed**, no trial, no tiers, no nags.
 
 ## Layout
@@ -51,8 +53,14 @@ allowlist is checked against the sidecar's actual command handlers in CI
 
 ```bash
 bun install
+bun run sidecar:build:release   # build the Rust transcription sidecar (required once)
 bun run dev
 ```
+
+Or run `./setup.sh`, which checks prerequisites and does the equivalent.
+Without the sidecar build, the app starts but shows a "Plainsong sidecar not
+found" error. (The macOS hold-to-talk shortcut helper builds automatically
+during packaging; it is optional in dev.)
 
 Optional, for on-device AI cleanup:
 
@@ -101,8 +109,14 @@ chosen model to be downloaded):
 
 ```bash
 bun run benchmark:latency -- --provider whisper --model base.en --runs 5
-# → {"transcriptionMsP50":138,"realTimeFactor":217.4,...}
+# → {"transcriptionMsP50":593,"transcriptionMsP95":600,"realTimeFactor":74.4,...}
 ```
+
+The default fixture is `scripts/fixtures/real-speech-44s.wav` — 44 seconds of
+real spoken speech. The numbers above were measured with whisper.cpp `base.en`
+(Metal) on Apple Silicon. Earlier docs cited ~137 ms p50 / ~218× real-time;
+that was measured on a pure sine-tone fixture and is not representative of
+dictation — don't quote it.
 
 This replaces an earlier "benchmark" that multiplied fixture numbers by a CLI
 flag; the numbers here are real.
