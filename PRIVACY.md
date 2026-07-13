@@ -12,8 +12,11 @@ audio and text. The code is open — you can verify all of it.
 - **There are no Plainsong servers.** We don't host an API, an account system, or
   cloud storage. There is nothing for us to collect because there is nowhere for
   it to go.
-- **We never capture your screen.** Plainsong does not screenshot the active
-  window or read other apps' contents to "add context."
+- **We never capture your screen** — no screenshots, ever. Some dictation modes
+  can use your clipboard or currently selected text as context for formatting;
+  the global default is off, each mode shows which context source (if any) it
+  uses, the text is processed locally unless you chose a cloud provider for AI
+  cleanup, and it is never persisted.
 
 ## How we compare
 

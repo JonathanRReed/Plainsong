@@ -8,10 +8,13 @@ local-first voice-input app, and contributions of all sizes are welcome.
 ```bash
 cd nautilus-bot
 bun install
+bun run sidecar:build:release   # build the Rust transcription sidecar (required once)
 bun run dev
 ```
 
-You'll need [Bun](https://bun.sh) and a stable Rust toolchain. The Rust sidecar
+You'll need [Bun](https://bun.sh) and a stable Rust toolchain. `bun run dev`
+does not build the sidecar; skip the sidecar build and the app boots into a
+"Plainsong sidecar not found" error. The Rust sidecar
 in `nautilus-bot/rust-sidecar/` does audio capture and speech recognition; the
 Electron main process is in `nautilus-bot/electron/`; the React UI is in
 `nautilus-bot/src/`.

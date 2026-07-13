@@ -56,10 +56,13 @@ explicitly so nothing is assumed.
     and cross-checked against upstream's own reference implementation, not
     guessed — see "Must be validated on a real Mac" below for the one thing
     that genuinely can't be confirmed without real hardware.
-  - See `[[project-nautilusbot-oss-relaunch]]` memory for the full research
-    citations and per-phase engineering notes.
+  - See `nautilus-bot/docs/competitive-positioning.md` for the competitive
+    research this push was driven by.
 - **Fast default route**: whisper.cpp (Metal/CoreML) `base.en`; measured
-  ~137 ms p50 / ~218× real-time on Apple Silicon via `bun run benchmark:latency`.
+  593 ms p50 / 600 ms p95, ~74× real-time on 44 s of real spoken speech
+  (`scripts/fixtures/real-speech-44s.wav`, Apple Silicon, 5 runs) via
+  `bun run benchmark:latency`. (An earlier ~137 ms / ~218× figure was measured
+  on a sine-tone fixture and has been retired.)
 - **Hot path unblocked**: concurrent JSON-RPC dispatch, model pre-warm on start,
   in-process frontmost-app lookup (no osascript spawn), reduced insertion sleeps.
 - **Live streaming partials**: words appear as you speak; UI-only and safe by
@@ -189,8 +192,11 @@ Expect this pass to surface a couple of small fixes; that's normal.
 ## Done since the first checklist
 
 - ✅ **`oss-relaunch` branch pushed** to `github.com/JonathanRReed/Plainsong`.
-- ✅ **GitHub repo renamed** `NautilusBot → Plainsong`; local remote updated, so
-  the publish/auto-update URLs now resolve.
+- ✅ **GitHub repo renamed** `NautilusBot → Plainsong`; local remote updated.
+  The publish/auto-update URLs resolve **once the repo is public** — today the
+  repo is still private with zero releases, so every public link (README
+  downloads, auto-update feed, security-advisory link) 404s for anyone else.
+  See "Remaining" below.
 - ✅ **Site domain live**: https://plainsong.jonathanrreed.com is registered as a
   subdomain of the maker's domain and wired into the docs/config. (The optional
   `plainsong.app` apex + `@plainsong` social handles are separate and only if
@@ -198,6 +204,24 @@ Expect this pass to surface a couple of small fixes; that's normal.
 
 ## Remaining — physically require a human (no AI can do these)
 
+- **Make the GitHub repo public** (`JonathanRReed/Plainsong` is private today).
+  Until this happens the README download links, the electron-updater feed
+  (electron-builder.yml `publish`), and the security-advisory link in
+  `.github/ISSUE_TEMPLATE/config.yml` all 404 for everyone but the owner.
+  Owner's launch-day action — do not announce before this.
+- **Tag and publish the first `v1.0.0` release**: push the `v1.0.0` tag so
+  `release.yml` builds the artifacts, then review and click "Publish release"
+  on the resulting draft (releases publish as drafts — see "Release pipeline
+  notes"). Until published there is nothing to download and nothing for the
+  updater to see.
+- **Sync the live website** (https://plainsong.jonathanrreed.com — its source
+  lives outside this repo, so it drifts silently): as of 2026-07-13 it still
+  says "v0.1 preview" and "macOS 13+ and Windows 10/11". Update to v1.0.0,
+  macOS (Apple Silicon / arm64) only with Windows on the roadmap, and link the
+  GitHub repo + Releases page once public.
+- **Homebrew cask** (post-first-release): submit the prepared cask — template
+  and steps in `nautilus-bot/docs/homebrew.md`. Needs the repo public and a
+  published release asset first.
 - **One on-device validation run**: launch the app on a Mac, grant Microphone +
   Accessibility, **speak into the mic**, confirm dictation inserts into real
   apps, watch the first-run `base.en` download, feel the streaming. (Needs voice

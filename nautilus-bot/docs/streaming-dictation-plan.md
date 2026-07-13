@@ -45,8 +45,9 @@ Preview off — the inserted text is unaffected.
 Simplest, highest-quality, works with the default whisper.cpp path. Re-decoding
 the whole utterance each tick (rather than concatenating chunks) avoids the
 overlap-duplication bug noted in `streaming.rs` and keeps partials coherent. At
-the measured ~217× real-time for `base.en`, re-decoding a 10 s buffer costs
-~46 ms — cheap enough to run every ~700 ms.
+the measured ~74× real-time for `base.en` on real speech
+(`scripts/fixtures/real-speech-44s.wav`), re-decoding a 10 s buffer costs
+~135 ms — cheap enough to run every ~700 ms.
 
 ### Steps
 

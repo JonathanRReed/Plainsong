@@ -21,7 +21,7 @@ What should have happened instead.
 - OS and version (e.g. macOS 26.1):
 - Plainsong version:
 - Transcription provider/model (e.g. local Whisper base, OpenAI cloud):
-- Hotkey mode (push-to-talk / toggle):
+- Hotkey mode (hold-to-talk / toggle / hands-free):
 
 **For dictation issues**
 - Which app were you dictating into?

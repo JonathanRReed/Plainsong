@@ -12,7 +12,7 @@ Primary users are solo operators, builders, consultants, writers, and technical 
 
 ## Position
 
-Plainsong should feel like a precise desktop instrument, not a generic SaaS dashboard. It competes with polished dictation products on speed, insertion confidence, modes, snippets, and correction workflows. It competes with meeting tools on bot-free capture, consent clarity, transcript-first review, and practical follow-through. Its strongest lane is hybrid local-first dictation plus meeting memory for macOS and Windows.
+Plainsong should feel like a precise desktop instrument, not a generic SaaS dashboard. It competes with polished dictation products on speed, insertion confidence, modes, snippets, and correction workflows. It competes with meeting tools on bot-free capture, consent clarity, transcript-first review, and practical follow-through. Its strongest lane is hybrid local-first dictation plus meeting memory for macOS today, with Windows on the roadmap.
 
 ## Tone
 
