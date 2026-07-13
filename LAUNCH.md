@@ -162,7 +162,29 @@ Expect this pass to surface a couple of small fixes; that's normal.
   already correct, so a plain `bun install` reconciled `node_modules` with
   zero lockfile changes to commit. Confirmed CI's "production build" step
   only runs `bun run build:renderer`, never the full `electron-builder`
-  packaging path, so this kind of drift has no gate — worth adding one.
+  packaging path, so this kind of drift had no gate — CI now has a
+  `verify-package` job (macOS, main pushes + weekly cron) that runs
+  `bun run electron:pack`, verifies app-update.yml + stable-channel manifest
+  resolution, and asserts both bundled native binaries (arm64) and the two
+  TCC usage strings are present in the built app.
+
+## Release pipeline notes
+
+- **Releases publish as a DRAFT**: electron-builder has no `releaseType`
+  configured, so a `v*` tag push ends in an unpublished draft release. A
+  human must review the draft on GitHub and click "Publish release" —
+  electron-updater users see nothing until then.
+- **Tag must match `package.json` version**: the release workflow fails fast
+  if the pushed tag disagrees with `nautilus-bot/package.json` (electron-builder
+  derives the release tag from package.json, not the pushed tag).
+- **Unsigned builds cannot self-update**: Squirrel.Mac refuses to install into
+  an app without a valid (non-ad-hoc) code signature. The app detects this and
+  offers a "Download from GitHub" link instead of the Install button; release
+  notes for unsigned builds should say the same and include
+  `xattr -dr com.apple.quarantine /Applications/Plainsong.app`.
+- **Windows leg removed from release.yml** (v1 is macOS arm64 only; the
+  sidecar's default cargo features are Metal/CoreML and do not compile on
+  Windows) — see "Windows/Linux support" above for the tracked future work.
 
 ## Done since the first checklist
 
