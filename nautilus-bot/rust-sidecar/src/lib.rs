@@ -16371,13 +16371,30 @@ async fn run_meeting_transcription_pipeline(
     }
 
     preview_task.abort();
-    if let Ok(mut overlay) = state_clone.recording_overlay_state.lock() {
-        *overlay = RecordingOverlayState::default();
+    // Only clear the shared overlay state (and broadcast "idle") when it
+    // still belongs to this pipeline's recording: `retranscribe_recording`
+    // can run this pipeline while a *different* meeting records live (e.g.
+    // one started after the retranscribe was spawned), and unconditionally
+    // resetting here would flip that live session's UI to idle while capture
+    // keeps writing audio.
+    let owns_overlay = state_clone
+        .recording_overlay_state
+        .lock()
+        .map(|mut overlay| {
+            if overlay.recording_id.as_deref() == Some(recording_id_clone.as_str()) {
+                *overlay = RecordingOverlayState::default();
+                true
+            } else {
+                false
+            }
+        })
+        .unwrap_or(false);
+    if owns_overlay {
+        handle_clone.emit_event(
+            "meeting-recording-state-changed",
+            serde_json::json!({ "phase": "idle" }),
+        );
     }
-    handle_clone.emit_event(
-        "meeting-recording-state-changed",
-        serde_json::json!({ "phase": "idle" }),
-    );
 }
 
 /// Dispatch a JSON-RPC command by name to the appropriate handler function.
@@ -16593,6 +16610,20 @@ pub async fn dispatch_command(
                 // "processing" rows from crashes are reconciled to "error"
                 // at startup); don't spawn a second one.
                 return Err("This meeting is already being transcribed.".to_string());
+            }
+            {
+                // The shared pipeline tears down the recording-overlay state
+                // when it finishes; never run it alongside a live capture
+                // session or it would flip that session's UI to idle while
+                // audio keeps being written (see also the recording_id guard
+                // in run_meeting_transcription_pipeline's epilogue).
+                let audio = state.audio_capture.lock().await;
+                if audio.is_recording() || audio.is_dictating() {
+                    return Err(
+                        "Stop the active recording or dictation session before re-transcribing a meeting."
+                            .to_string(),
+                    );
+                }
             }
             let audio_path = recording.audio_path.trim().to_string();
             if audio_path.is_empty() || !std::path::Path::new(&audio_path).exists() {

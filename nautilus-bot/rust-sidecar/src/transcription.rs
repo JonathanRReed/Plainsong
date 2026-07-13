@@ -99,7 +99,10 @@ fn is_date_like(candidate: &str) -> bool {
     let date_like =
         Regex::new(r"^(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2}-\d{4})(?:[\sT]+\d{1,2})?$")
             .expect("valid date-like regex");
-    date_like.is_match(candidate.trim())
+    // The broad candidate pattern can absorb a leading '(' or '+' (e.g.
+    // "(2026-07-20)"), which would break the ^-anchored date match, so strip
+    // that prefix before vetting.
+    date_like.is_match(candidate.trim().trim_start_matches(['(', '+']))
 }
 
 fn redact_basic(content: &str) -> String {
@@ -113,15 +116,55 @@ fn redact_basic(content: &str) -> String {
     let without_email = email.replace_all(content, "[REDACTED_EMAIL]");
     phone
         .replace_all(&without_email, |caps: &regex::Captures<'_>| {
-            let matched = caps.get(0).expect("match 0 always present").as_str();
-            let digit_count = matched.chars().filter(char::is_ascii_digit).count();
-            if !(7..=15).contains(&digit_count) || is_date_like(matched) {
-                matched.to_string()
-            } else {
-                "[REDACTED_PHONE]".to_string()
-            }
+            redact_phone_candidate(caps.get(0).expect("match 0 always present").as_str())
         })
         .to_string()
+}
+
+/// Decide what a broad phone-candidate span becomes. Spans with a plausible
+/// phone digit count (7-15) are redacted unless they are date-like. Spans with
+/// more digits than any real phone number — the greedy pattern spanning a date
+/// next to a phone, or a card number — are re-vetted per whitespace-separated
+/// run so dates survive while every phone-sized digit run is still redacted
+/// instead of the whole span leaking unredacted.
+fn redact_phone_candidate(matched: &str) -> String {
+    if is_date_like(matched) {
+        return matched.to_string();
+    }
+    let digit_count = matched.chars().filter(char::is_ascii_digit).count();
+    if digit_count < 7 {
+        return matched.to_string();
+    }
+    if digit_count <= 15 {
+        return "[REDACTED_PHONE]".to_string();
+    }
+
+    fn flush(run: &mut Vec<&str>, pieces: &mut Vec<String>) {
+        if run.is_empty() {
+            return;
+        }
+        let joined = run.join(" ");
+        let digits = joined.chars().filter(char::is_ascii_digit).count();
+        if digits >= 7 {
+            pieces.push("[REDACTED_PHONE]".to_string());
+        } else {
+            pieces.push(joined);
+        }
+        run.clear();
+    }
+
+    let mut pieces: Vec<String> = Vec::new();
+    let mut run: Vec<&str> = Vec::new();
+    for token in matched.split_whitespace() {
+        if is_date_like(token) {
+            flush(&mut run, &mut pieces);
+            pieces.push(token.to_string());
+        } else {
+            run.push(token);
+        }
+    }
+    flush(&mut run, &mut pieces);
+    pieces.join(" ")
 }
 
 fn redact_strict(content: &str) -> String {
@@ -166,6 +209,24 @@ mod tests {
     fn redact_basic_preserves_dates_and_datetimes() {
         let input = "- **Date:** 2026-07-13 14:30\nDue on 2026-07-13 and 07-13-2026.";
         assert_eq!(apply_redaction(input, "basic"), input);
+    }
+
+    #[test]
+    fn redact_basic_preserves_parenthesized_dates() {
+        let input = "next sync (2026-07-20) works for me";
+        assert_eq!(apply_redaction(input, "basic"), input);
+    }
+
+    #[test]
+    fn redact_basic_redacts_phone_adjacent_to_date() {
+        let out = apply_redaction("on 2026-07-13 555-123-4567", "basic");
+        assert_eq!(out, "on 2026-07-13 [REDACTED_PHONE]");
+    }
+
+    #[test]
+    fn redact_basic_redacts_card_like_digit_groups() {
+        let out = apply_redaction("card 1234 5678 9012 3456 on file", "basic");
+        assert_eq!(out, "card [REDACTED_PHONE] on file");
     }
 
     #[test]
