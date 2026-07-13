@@ -924,18 +924,28 @@ pub fn dictation_app_category_to_key(category: DictationAppCategory) -> &'static
     }
 }
 
+/// Strictly parses a category key back into a `DictationAppCategory`,
+/// returning `None` for unknown values so callers can distinguish a typo'd
+/// key from an explicit "other". Used by dictionary/snippet
+/// `category_scope` matching (an unknown scope must match nothing, not the
+/// `Other` category) and by category-scope validation.
+pub fn dictation_app_category_from_key_strict(key: &str) -> Option<DictationAppCategory> {
+    match key.trim().to_ascii_lowercase().as_str() {
+        "other" => Some(DictationAppCategory::Other),
+        "messaging" => Some(DictationAppCategory::Messaging),
+        "email" => Some(DictationAppCategory::Email),
+        "notes" => Some(DictationAppCategory::Notes),
+        "worklog" => Some(DictationAppCategory::Worklog),
+        "ai_chat" => Some(DictationAppCategory::AiChat),
+        "code_editor" => Some(DictationAppCategory::CodeEditor),
+        _ => None,
+    }
+}
+
 /// Parses a category key back into a `DictationAppCategory`. Unknown/blank
 /// values fall back to `Other` (i.e. behave as if no override matched).
 pub fn dictation_app_category_from_key(key: &str) -> DictationAppCategory {
-    match key.trim().to_ascii_lowercase().as_str() {
-        "messaging" => DictationAppCategory::Messaging,
-        "email" => DictationAppCategory::Email,
-        "notes" => DictationAppCategory::Notes,
-        "worklog" => DictationAppCategory::Worklog,
-        "ai_chat" => DictationAppCategory::AiChat,
-        "code_editor" => DictationAppCategory::CodeEditor,
-        _ => DictationAppCategory::Other,
-    }
+    dictation_app_category_from_key_strict(key).unwrap_or(DictationAppCategory::Other)
 }
 
 /// Uses the same case-insensitive substring containment as
@@ -971,16 +981,53 @@ pub fn resolve_dictation_app_category_with_overrides(
     app_target: Option<&str>,
     app_bundle_id: Option<&str>,
 ) -> DictationAppCategory {
+    resolve_dictation_app_category_with_overrides_and_hint(
+        transcription,
+        app_target,
+        app_bundle_id,
+        None,
+    )
+}
+
+/// Like `resolve_dictation_app_category_with_overrides`, but additionally
+/// considers a formatting hint (e.g. the browser activation matcher domain,
+/// "mail.google.com") for both override matching and the built-in
+/// classifier fallback, so web apps dictated into through a browser resolve
+/// to the same category everywhere (local formatting, dictionary/snippet
+/// scoping, and the LLM prompt fragment) rather than falling back to the
+/// browser's own name.
+pub fn resolve_dictation_app_category_with_overrides_and_hint(
+    transcription: &TranscriptionSettings,
+    app_target: Option<&str>,
+    app_bundle_id: Option<&str>,
+    formatting_hint: Option<&str>,
+) -> DictationAppCategory {
     for override_entry in &transcription.dictation_app_category_overrides {
         if !override_entry.enabled {
             continue;
         }
-        if dictation_app_category_override_matches(&override_entry.app_matcher, app_target) {
-            return dictation_app_category_from_key(&override_entry.category);
+        if dictation_app_category_override_matches(&override_entry.app_matcher, app_target)
+            || dictation_app_category_override_matches(&override_entry.app_matcher, formatting_hint)
+            || dictation_app_category_override_matches(&override_entry.app_matcher, app_bundle_id)
+        {
+            // An override with an unknown category key must behave as if no
+            // override matched (per `dictation_app_category_from_key`'s
+            // contract) instead of short-circuiting with `Other` and
+            // suppressing the built-in classifier.
+            if let Some(category) = dictation_app_category_from_key_strict(&override_entry.category)
+            {
+                return category;
+            }
         }
     }
 
-    format::resolve_dictation_app_category(app_target, app_bundle_id)
+    let resolved = format::resolve_dictation_app_category(app_target, app_bundle_id);
+    if resolved != DictationAppCategory::Other {
+        return resolved;
+    }
+    formatting_hint
+        .map(|hint| format::resolve_dictation_app_category(Some(hint), None))
+        .unwrap_or(DictationAppCategory::Other)
 }
 
 /// Settings manager
@@ -1211,6 +1258,80 @@ mod tests {
             dictation_app_category_from_key(""),
             DictationAppCategory::Other
         );
+    }
+
+    #[test]
+    fn dictation_app_category_from_key_strict_rejects_unknown_keys() {
+        use super::dictation_app_category_from_key_strict;
+
+        assert_eq!(
+            dictation_app_category_from_key_strict("other"),
+            Some(DictationAppCategory::Other)
+        );
+        assert_eq!(
+            dictation_app_category_from_key_strict(" AI_CHAT "),
+            Some(DictationAppCategory::AiChat)
+        );
+        assert_eq!(dictation_app_category_from_key_strict("ai chat"), None);
+        assert_eq!(dictation_app_category_from_key_strict("code-editor"), None);
+        assert_eq!(dictation_app_category_from_key_strict(""), None);
+    }
+
+    #[test]
+    fn resolve_with_overrides_falls_through_when_override_category_key_is_unknown() {
+        // An enabled override that matches the app but carries an unknown
+        // category key must behave as if no override matched — falling
+        // through to the built-in classifier — instead of short-circuiting
+        // with `Other`.
+        let transcription = TranscriptionSettings {
+            dictation_app_category_overrides: vec![DictationAppCategoryOverride {
+                id: "1".to_string(),
+                app_matcher: "slack".to_string(),
+                category: "not-a-real-category".to_string(),
+                enabled: true,
+            }],
+            ..TranscriptionSettings::default()
+        };
+
+        let category =
+            resolve_dictation_app_category_with_overrides(&transcription, Some("Slack"), None);
+        assert_eq!(category, DictationAppCategory::Messaging);
+    }
+
+    #[test]
+    fn resolve_with_overrides_and_hint_uses_browser_domain_hint() {
+        use super::resolve_dictation_app_category_with_overrides_and_hint;
+
+        let transcription = TranscriptionSettings::default();
+
+        // Browser Gmail: the app name classifies as Other, but the
+        // activation-matcher hint resolves to Email so all consumers
+        // (dictionary scoping, local formatting, LLM prompt) agree.
+        let category = resolve_dictation_app_category_with_overrides_and_hint(
+            &transcription,
+            Some("Google Chrome"),
+            None,
+            Some("mail.google.com"),
+        );
+        assert_eq!(category, DictationAppCategory::Email);
+
+        // Overrides match against the hint too.
+        let with_override = TranscriptionSettings {
+            dictation_app_category_overrides: vec![DictationAppCategoryOverride {
+                id: "1".to_string(),
+                app_matcher: "mail.google.com".to_string(),
+                category: "notes".to_string(),
+                enabled: true,
+            }],
+            ..TranscriptionSettings::default()
+        };
+        let category = resolve_dictation_app_category_with_overrides_and_hint(
+            &with_override,
+            Some("Google Chrome"),
+            None,
+            Some("mail.google.com"),
+        );
+        assert_eq!(category, DictationAppCategory::Notes);
     }
 
     #[test]

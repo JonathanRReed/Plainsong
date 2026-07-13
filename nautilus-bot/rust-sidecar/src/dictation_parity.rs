@@ -219,7 +219,10 @@ fn snippet_app_scope_matches(snippet_scope: Option<&str>, app_target: Option<&st
 /// a missing/blank `category_scope` always matches (i.e. the rule is not
 /// category-scoped and applies regardless of destination-app category). When
 /// a category is set, it must match the resolved `destination_category`
-/// (via `dictation_app_category_to_key`) exactly.
+/// (via `dictation_app_category_to_key`) exactly. An unrecognized scope
+/// (e.g. a typo'd CSV value that predates import validation) matches
+/// nothing, rather than silently mapping to `Other` and firing in every
+/// unclassified app.
 fn category_scope_matches(
     category_scope: Option<&str>,
     destination_category: DictationAppCategory,
@@ -230,7 +233,63 @@ fn category_scope_matches(
     else {
         return true;
     };
-    crate::settings::dictation_app_category_from_key(scope) == destination_category
+    crate::settings::dictation_app_category_from_key_strict(scope)
+        .is_some_and(|category| category == destination_category)
+}
+
+fn is_dictionary_word_boundary(ch: char) -> bool {
+    !(ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+/// Word-boundary replacement via zero-width boundary checks around each raw
+/// needle match, instead of a regex whose boundary groups consume the
+/// separator character (which makes adjacent occurrences like "jon jon jon"
+/// skip every other match).
+fn replace_dictionary_word_bounded_all(
+    haystack: &str,
+    needle: &str,
+    replacement: &str,
+    case_insensitive: bool,
+) -> (String, usize) {
+    let trimmed = needle.trim();
+    if trimmed.is_empty() {
+        return (haystack.to_string(), 0);
+    }
+
+    let escaped = regex::escape(trimmed);
+    let Ok(re) = regex::RegexBuilder::new(&escaped)
+        .case_insensitive(case_insensitive)
+        .build()
+    else {
+        return (haystack.to_string(), 0);
+    };
+
+    let mut output = String::with_capacity(haystack.len());
+    let mut last_end = 0usize;
+    let mut applied = 0usize;
+    for found in re.find_iter(haystack) {
+        let boundary_before = haystack[..found.start()]
+            .chars()
+            .next_back()
+            .map_or(true, is_dictionary_word_boundary);
+        let boundary_after = haystack[found.end()..]
+            .chars()
+            .next()
+            .map_or(true, is_dictionary_word_boundary);
+        if !(boundary_before && boundary_after) {
+            continue;
+        }
+        output.push_str(&haystack[last_end..found.start()]);
+        output.push_str(replacement);
+        last_end = found.end();
+        applied += 1;
+    }
+
+    if applied == 0 {
+        return (haystack.to_string(), 0);
+    }
+    output.push_str(&haystack[last_end..]);
+    (output, applied)
 }
 
 fn replace_dictionary_case_sensitive_all(
@@ -238,29 +297,7 @@ fn replace_dictionary_case_sensitive_all(
     needle: &str,
     replacement: &str,
 ) -> (String, usize) {
-    let trimmed = needle.trim();
-    if trimmed.is_empty() {
-        return (haystack.to_string(), 0);
-    }
-
-    let escaped = regex::escape(trimmed);
-    let pattern = format!(r"(^|[^A-Za-z0-9_])({})([^A-Za-z0-9_]|$)", escaped);
-    let Ok(re) = regex::Regex::new(&pattern) else {
-        return (haystack.to_string(), 0);
-    };
-
-    let applied = re.find_iter(haystack).count();
-    if applied == 0 {
-        return (haystack.to_string(), 0);
-    }
-
-    (
-        re.replace_all(haystack, |captures: &regex::Captures<'_>| {
-            format!("{}{}{}", &captures[1], replacement, &captures[3])
-        })
-        .to_string(),
-        applied,
-    )
+    replace_dictionary_word_bounded_all(haystack, needle, replacement, false)
 }
 
 fn replace_dictionary_case_insensitive_all(
@@ -268,32 +305,7 @@ fn replace_dictionary_case_insensitive_all(
     needle: &str,
     replacement: &str,
 ) -> (String, usize) {
-    let trimmed = needle.trim();
-    if trimmed.is_empty() {
-        return (haystack.to_string(), 0);
-    }
-
-    let escaped = regex::escape(trimmed);
-    let pattern = format!(r"(^|[^A-Za-z0-9_])({})([^A-Za-z0-9_]|$)", escaped);
-    let Ok(re) = regex::RegexBuilder::new(&pattern)
-        .case_insensitive(true)
-        .build()
-    else {
-        return (haystack.to_string(), 0);
-    };
-
-    let applied = re.find_iter(haystack).count();
-    if applied == 0 {
-        return (haystack.to_string(), 0);
-    }
-
-    (
-        re.replace_all(haystack, |captures: &regex::Captures<'_>| {
-            format!("{}{}{}", &captures[1], replacement, &captures[3])
-        })
-        .to_string(),
-        applied,
-    )
+    replace_dictionary_word_bounded_all(haystack, needle, replacement, true)
 }
 
 pub fn apply_dictation_dictionary(
@@ -911,21 +923,16 @@ pub fn is_local_only_selected_text_command(command_key: &str) -> bool {
 /// explicit text selection could be captured, rather than surfacing a
 /// "select some text" error immediately.
 ///
-/// Every command with end-to-end support today is treated as eligible for
-/// the focused-field fallback (i.e. this is currently equivalent to "has a
-/// selected-text label"), even though the renderer's own metadata
+/// This matches the renderer's own metadata
 /// (`SELECTED_TEXT_TARGET_POLICY_LABELS` in
-/// src/lib/selected-text-actions.ts) only labels `proofread_text` (Quick
-/// Fix) as `prefer_selection`/fallback-eligible and everything else as
-/// `selection_required`. That renderer distinction is descriptive only —
-/// nothing in the renderer enforces it — so this function is the single
-/// place the real policy lives. Narrowing it to match the renderer's
-/// `selection_required` labels would be a behavior change (it would need
-/// its own test updates, e.g. `selected_text_transform_target_prefers_explicit_selection`'s
-/// fallback coverage), so it is left as-is here; a future change can
-/// narrow it deliberately without touching the capture/dispatch call sites.
+/// src/lib/selected-text-actions.ts): only `proofread_text` (Quick Fix) is
+/// `prefer_selection`/fallback-eligible; every other command is
+/// `selection_required` and must error instead of silently transforming —
+/// and overwriting — the entire focused field (e.g. summarizing a whole
+/// email draft because the caret happened to sit in it with nothing
+/// selected).
 pub fn allows_focused_field_fallback(command_key: &str) -> bool {
-    dictation_command_selected_text_label(command_key).is_some()
+    command_key == "proofread_text"
 }
 
 pub fn apply_contextual_phrase_replacement(
@@ -1081,6 +1088,49 @@ mod tests {
         );
         assert_eq!(output, "please email OpenAI today and reopen the task");
         assert_eq!(applied, 1);
+    }
+
+    #[test]
+    fn dictionary_replacements_cover_adjacent_occurrences() {
+        // Regression: the old boundary groups consumed the separating space,
+        // so "jon jon jon" only replaced the first and third occurrence.
+        let rules = vec![DictionaryRule {
+            spoken_form: "jon".to_string(),
+            replacement: "John".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+        }];
+
+        let (output, applied) = apply_dictation_dictionary("jon jon jon", &rules, None);
+        assert_eq!(output, "John John John");
+        assert_eq!(applied, 3);
+    }
+
+    #[test]
+    fn dictionary_unknown_category_scope_matches_nothing() {
+        // A typo'd scope ("ai chat" instead of "ai_chat") must never fire —
+        // previously it mapped to Other and applied in every unclassified app.
+        let rules = vec![DictionaryRule {
+            spoken_form: "brb".to_string(),
+            replacement: "be right back".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("ai chat".to_string()),
+        }];
+
+        for category in [
+            DictationAppCategory::Other,
+            DictationAppCategory::AiChat,
+            DictationAppCategory::Messaging,
+        ] {
+            let (output, applied) =
+                apply_dictation_dictionary_for_category("brb everyone", &rules, None, category);
+            assert_eq!(output, "brb everyone", "scope must not match {category:?}");
+            assert_eq!(applied, 0);
+        }
     }
 
     #[test]
