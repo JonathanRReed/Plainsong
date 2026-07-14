@@ -3548,8 +3548,8 @@ export function DictationView() {
               </div>
               <div className="space-y-3 border-t pt-4">
                 <div>
-                  <p className="text-sm font-medium">Saved modes</p>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="section-heading">Saved modes</p>
+                  <p className="text-sm text-muted-foreground">
                     Deeper presets with their own route, context, and history
                     settings — layer these on top of the quick picks above.
                   </p>
@@ -3588,10 +3588,10 @@ export function DictationView() {
               </div>
               <div className="space-y-3 border-t pt-4">
                 <div>
-                  <p className="text-sm font-medium">
+                  <p className="section-heading">
                     Recommended flow profiles
                   </p>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-sm text-muted-foreground">
                     Install ready-made auto-switch profiles for the apps you use
                     most.
                   </p>

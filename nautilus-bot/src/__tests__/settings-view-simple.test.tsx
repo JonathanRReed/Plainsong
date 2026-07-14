@@ -182,9 +182,6 @@ vi.mock("@/lib/backend", () => ({
   downloadWhisperModel: vi.fn(async () => { }),
   isDiarizationModelAvailable: vi.fn(async () => true),
   downloadDiarizationModel: vi.fn(async () => {}),
-  listDiarizationModels: vi.fn(async () => [
-    { id: "ecapa_tdnn_speaker", label: "ECAPA-TDNN 512", description: "Recommended", installed: true },
-  ]),
   isSileroVadModelDownloaded: vi.fn(async () => false),
   downloadSileroVadModel: vi.fn(async () => {}),
   migrateToEncryptedStorage: vi.fn(),
