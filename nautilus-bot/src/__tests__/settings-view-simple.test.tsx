@@ -90,6 +90,29 @@ vi.mock("@/components/theme-provider", () => ({
   }),
 }));
 
+// Captures the "settings-changed" listener the view registers, so tests can
+// simulate another writer's broadcast (see the settings-changed race test
+// below) without a real sidecar.
+const electronEventListeners = new Map<
+  string,
+  (event: { payload: unknown }) => void
+>();
+
+vi.mock("@/lib/electron", () => ({
+  invoke: vi.fn(async () => undefined),
+  listen: vi.fn(
+    async (
+      eventName: string,
+      handler: (event: { payload: unknown }) => void,
+    ) => {
+      electronEventListeners.set(eventName, handler);
+      return () => {
+        electronEventListeners.delete(eventName);
+      };
+    },
+  ),
+}));
+
 vi.mock("@/lib/backend", () => ({
   createBackupDefault: vi.fn(),
   createSettingsBackupDefault: vi.fn(),
@@ -209,6 +232,7 @@ vi.mock("@/lib/backend", () => ({
 describe("SettingsView performance behavior", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    electronEventListeners.clear();
   });
 
   afterEach(() => {
@@ -643,6 +667,110 @@ describe("SettingsView performance behavior", () => {
     const calls = vi.mocked(backend.saveSettings).mock.calls;
     const lastCall = calls[calls.length - 1];
     expect(lastCall?.[0]?.ui?.alwaysOnTop).toBe(true);
+  });
+
+  it("merges another writer's settings-changed broadcast without clobbering an unsaved local edit", async () => {
+    const backend = await import("@/lib/backend");
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    vi.useFakeTimers();
+
+    // Start an edit whose debounced save has not landed yet, so the ui
+    // section is still "dirty" (draft != last-known-persisted).
+    const alwaysOnTopRow = screen.getByText("Always on top").closest(".flex.items-center.justify-between");
+    fireEvent.click(within(alwaysOnTopRow as HTMLElement).getByRole("switch"));
+
+    // Simulate a different writer (e.g. the Key Manager) saving elsewhere
+    // and the sidecar broadcasting the resulting whole-settings snapshot.
+    // Its ui section still reflects the old on-disk value (alwaysOnTop:
+    // false) because that writer never touched ui.
+    const settingsChangedHandler = electronEventListeners.get("settings-changed");
+    expect(settingsChangedHandler).toBeDefined();
+    await act(async () => {
+      settingsChangedHandler?.({
+        payload: {
+          ...baseSettings,
+          privacy: { ...baseSettings.privacy, llmProvider: "anthropic" },
+        },
+      });
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // The pending local edit must win for the section it touched...
+    expect(backend.saveSettings).toHaveBeenCalled();
+    const calls = vi.mocked(backend.saveSettings).mock.calls;
+    const lastCall = calls[calls.length - 1];
+    expect(lastCall?.[0]?.ui?.alwaysOnTop).toBe(true);
+    // ...while the untouched section still picks up the broadcast instead
+    // of being reverted by this view's own stale whole-object save.
+    expect(lastCall?.[0]?.privacy?.llmProvider).toBe("anthropic");
+  });
+
+  it("keeps the Key Manager's credential-provider selector independent of the default analysis provider", async () => {
+    const backend = await import("@/lib/backend");
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByText("AI & Keys"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const defaultProviderSelect = screen
+      .getByText("Default analysis provider")
+      .closest("div")
+      ?.querySelector("select") as HTMLSelectElement;
+    const credentialProviderSelect = screen
+      .getByText("Credential provider")
+      .closest("div")
+      ?.querySelector("select") as HTMLSelectElement;
+    expect(defaultProviderSelect.value).toBe("ollama");
+
+    const saveCallsBeforeChange = vi.mocked(backend.saveSettings).mock.calls.length;
+    fireEvent.change(credentialProviderSelect, {
+      target: { value: "anthropic" },
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(credentialProviderSelect.value).toBe("anthropic");
+    // Picking a different provider to manage credentials for must not
+    // silently steer the app's actual default analysis provider away from
+    // ollama -- this selector no longer writes settings.privacy.llmProvider,
+    // so it must not trigger a settings save at all.
+    expect(defaultProviderSelect.value).toBe("ollama");
+    expect(vi.mocked(backend.saveSettings).mock.calls.length).toBe(
+      saveCallsBeforeChange,
+    );
+    for (const [savedSettings] of vi.mocked(backend.saveSettings).mock.calls) {
+      expect(savedSettings.privacy.llmProvider).toBe("ollama");
+    }
   });
 
   it("reopens the modular onboarding flows from guided setup", async () => {
