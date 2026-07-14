@@ -7,10 +7,6 @@ import { OPEN_MAIN_VIEW_EVENT } from "@/lib/navigation";
 
 const baseSettings = {
   audio: {
-    sampleRate: 16000,
-    channels: 1,
-    captureSystemAudio: true,
-    captureMicrophone: true,
     preferredInputDevice: null,
     dictationInputOverrideEnabled: false,
     dictationInputDevice: null,
@@ -20,19 +16,14 @@ const baseSettings = {
   transcription: {
     defaultProvider: "whisper",
     selectedModelId: "base.en",
-    autoTranscribe: true,
     enableDiarization: true,
-    intelligentPunctuation: true,
     language: null,
-    numSpeakers: 0,
-    saveRawTranscript: false,
     dictationSaveToInbox: true,
     dictationProfile: "normal_speed" as const,
     dictationProjectId: "inbox",
     // Auto-stop-on-silence is a consumer of the VAD backend, so the "VAD
     // accuracy" picker (exercised below) renders with this fixture.
     dictationSilenceTimeoutSeconds: 5,
-    speakerNamingMethod: "auto" as const,
     silenceSkipEnabled: false,
     memorySearchMode: "fts" as const,
     embeddingModel: "nomic-embed-text",
@@ -40,26 +31,12 @@ const baseSettings = {
   ui: {
     alwaysOnTop: false,
     minimizeToTray: true,
-    windowPosition: null,
-    windowSize: null,
-    fontSize: 14,
     showDictationPopup: true,
     showRecordingPopup: true,
     colorScheme: "default",
   },
-  export: {
-    defaultFormat: "markdown",
-    autoExport: false,
-    exportDirectory: null,
-    includeTimestamps: true,
-    includeSpeakers: true,
-    openAfterExport: false,
-  },
+  export: {},
   privacy: {
-    autoDeleteDays: 0,
-    requirePassword: false,
-    auditLogging: true,
-    cloudSync: false,
     remoteProcessingEnabled: false,
     llmProvider: "ollama",
     llmModelId: null,
@@ -75,7 +52,6 @@ const baseSettings = {
     quickExport: "Ctrl+Shift+E",
     focusSearch: "Ctrl+Shift+F",
   },
-  defaultTemplate: "meeting",
   theme: "system" as const,
 };
 
@@ -771,6 +747,56 @@ describe("SettingsView performance behavior", () => {
     for (const [savedSettings] of vi.mocked(backend.saveSettings).mock.calls) {
       expect(savedSettings.privacy.llmProvider).toBe("ollama");
     }
+  });
+
+  it("clears the stale 'no stored key' warning as soon as a key is saved for the default analysis provider", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      privacy: {
+        ...baseSettings.privacy,
+        remoteProcessingEnabled: true,
+        llmProvider: "anthropic",
+      },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+    vi.mocked(backend.hasProviderSecret).mockResolvedValue(false);
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("AI & Keys"));
+
+    // Key Manager auto-seeds its provider to the current default analysis
+    // provider (anthropic here), so the warning should already be visible
+    // without any manual provider selection.
+    await screen.findByText(/has no stored key/);
+    const credentialProviderSelect = screen
+      .getByText("Credential provider")
+      .closest("div")
+      ?.querySelector("select") as HTMLSelectElement;
+    expect(credentialProviderSelect.value).toBe("anthropic");
+
+    fireEvent.change(screen.getByPlaceholderText("Enter API key"), {
+      target: { value: "sk-test-123" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Key" }));
+
+    await waitFor(() => {
+      expect(backend.setProviderSecret).toHaveBeenCalledWith(
+        "anthropic",
+        "sk-test-123",
+      );
+    });
+
+    // The stale-warning bug left this visible until the user changed the
+    // default analysis provider away and back; it must clear immediately.
+    await waitFor(() => {
+      expect(screen.queryByText(/has no stored key/)).not.toBeInTheDocument();
+    });
   });
 
   it("reopens the modular onboarding flows from guided setup", async () => {

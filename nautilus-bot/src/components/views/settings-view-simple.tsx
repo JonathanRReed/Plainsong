@@ -2441,6 +2441,9 @@ export function SettingsView() {
                         await setProviderSecret(provider, apiKey.trim());
                         setApiKey("");
                         setKeyManagerHasApiKey(true);
+                        if (provider === settings.privacy.llmProvider) {
+                          setHasApiKey(true);
+                        }
                       } catch (e) {
                         toast(
                           `Failed to save key: ${e instanceof Error ? e.message : 'Unknown error'}`,
@@ -2500,6 +2503,9 @@ export function SettingsView() {
                       await setProviderSecret(provider, apiKey.trim());
                       setApiKey("");
                       setKeyManagerHasApiKey(true);
+                      if (provider === settings.privacy.llmProvider) {
+                        setHasApiKey(true);
+                      }
                       await refreshModelsForProvider(provider);
                     } catch (e) {
                       setError(
@@ -2523,6 +2529,9 @@ export function SettingsView() {
                       await setProviderSecret(provider, apiKey.trim());
                       setApiKey("");
                       setKeyManagerHasApiKey(true);
+                      if (provider === settings.privacy.llmProvider) {
+                        setHasApiKey(true);
+                      }
                       await refreshModelsForProvider(provider);
                     } catch (e) {
                       setError(
@@ -2547,6 +2556,9 @@ export function SettingsView() {
                       await clearProviderSecret(provider);
                       setApiKey("");
                       setKeyManagerHasApiKey(false);
+                      if (provider === settings.privacy.llmProvider) {
+                        setHasApiKey(false);
+                      }
                     } catch (e) {
                       setError(
                         e instanceof Error
