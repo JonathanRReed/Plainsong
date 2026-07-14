@@ -267,8 +267,6 @@ const SETTINGS_TABS = [
   {
     id: "asr" as TabId,
     label: "Transcription",
-    title: "Capture and transcription",
-    eyebrow: "Capture Stack",
     summary:
       "Choose microphones, tune dictation and meeting routes, and make capture behavior feel deterministic before you start speaking.",
     railSummary: "Microphones, ASR routes, and dictation behavior",
@@ -277,8 +275,6 @@ const SETTINGS_TABS = [
   {
     id: "general" as TabId,
     label: "General",
-    title: "Workspace",
-    eyebrow: "Desktop",
     summary:
       "Shape the Plainsong shell, keyboard shortcuts, overlays, and launch behavior without hunting through unrelated controls.",
     railSummary: "Appearance, shortcuts, and window behavior",
@@ -287,8 +283,6 @@ const SETTINGS_TABS = [
   {
     id: "security" as TabId,
     label: "Privacy & Security",
-    title: "Privacy and security",
-    eyebrow: "Trust",
     summary:
       "Keep Plainsong local-first, verify permissions, and manage vault access with clear status instead of warning-heavy clutter.",
     railSummary: "Permissions, vault access, and remote policy",
@@ -297,8 +291,6 @@ const SETTINGS_TABS = [
   {
     id: "storage" as TabId,
     label: "Storage",
-    title: "Retention and recovery",
-    eyebrow: "Archive",
     summary:
       "Control export paths, retention, profile snapshots, and recovery workflows from one calmer storage workspace.",
     railSummary: "Exports, retention, backups, and reset tools",
@@ -307,8 +299,6 @@ const SETTINGS_TABS = [
   {
     id: "ai" as TabId,
     label: "AI & Keys",
-    title: "AI and memory",
-    eyebrow: "Intelligence",
     summary:
       "Set the analysis provider, model, credentials, and transcript-backed memory tools without mixing them into system settings.",
     railSummary: "Providers, credentials, and memory search",
@@ -317,8 +307,6 @@ const SETTINGS_TABS = [
   {
     id: "updates" as TabId,
     label: "Updates",
-    title: "Release management",
-    eyebrow: "Lifecycle",
     summary:
       "Check install status, choose update channels, and keep this machine current with minimal ceremony.",
     railSummary: "Version status and update channels",
@@ -3036,83 +3024,31 @@ export function SettingsView() {
 
             <div className="min-w-0 space-y-4 sm:space-y-5">
               {!useDesktopSettingsRail && (
-                <div className="space-y-3">
-                  <div className="rounded-[20px] border border-border bg-card px-4 py-4 shadow-sm sm:px-5">
-                    <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                      <div className="min-w-0 max-w-3xl">
-                        <p className="rubric-muted mb-1.5">
-                          {activeTabConfig.eyebrow}
-                        </p>
-                        <h2 className="font-serif text-xl font-semibold tracking-tight text-foreground">
-                          {activeTabConfig.title}
-                        </h2>
-                        <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                          {activeTabConfig.summary}
-                        </p>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-xs lg:w-[280px]">
+                <div className="rounded-[20px] border border-border bg-card p-2 shadow-sm">
+                  <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+                    {SETTINGS_TABS.map((tab) => (
+                      <button
+                        key={`compact-${tab.id}`}
+                        onClick={() => setActiveTab(tab.id)}
+                        className={`group flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-all ${
+                          activeTab === tab.id
+                            ? "border-border bg-background text-foreground"
+                            : "border-transparent bg-transparent text-muted-foreground hover:border-border hover:bg-background/70 hover:text-foreground"
+                        }`}
+                      >
                         <div
-                          className={`rounded-2xl border p-3 ${readyChipTone(dictationReadinessChip.tone)}`}
+                          className={`mt-0.5 rounded-xl p-2 ${activeTab === tab.id ? "bg-muted text-foreground" : "bg-muted/40 text-muted-foreground group-hover:text-foreground"}`}
                         >
-                          <p className="text-current/70">
-                            {dictationReadinessChip.label}
-                          </p>
-                          <p className="mt-1 font-medium">
-                            {dictationReadinessChip.status}
+                          <tab.icon className="h-4 w-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium">{tab.label}</p>
+                          <p className="mt-1 text-sm leading-5 text-current/70">
+                            {tab.railSummary}
                           </p>
                         </div>
-                        <div
-                          className={`rounded-2xl border p-3 ${readyChipTone(diarizationAvailable)}`}
-                        >
-                          <p className="text-current/70">Speakers</p>
-                          <p className="mt-1 font-medium">
-                            {diarizationAvailable ? "Installed" : "Optional"}
-                          </p>
-                        </div>
-                        <div className="rounded-2xl border border-border bg-muted/30 p-3">
-                          <p className="text-muted-foreground">Routing</p>
-                          <p className="mt-1 font-medium text-foreground">
-                            {settings.transcription.useSharedAsrSelection
-                              ? "Shared"
-                              : "Split"}
-                          </p>
-                        </div>
-                        <div className="rounded-2xl border border-border bg-muted/30 p-3">
-                          <p className="text-muted-foreground">Sync</p>
-                          <p className="mt-1 font-medium text-foreground">
-                            {saveStateLabel}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-[20px] border border-border bg-card p-2 shadow-sm">
-                    <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
-                      {SETTINGS_TABS.map((tab) => (
-                        <button
-                          key={`compact-${tab.id}`}
-                          onClick={() => setActiveTab(tab.id)}
-                          className={`group flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-all ${
-                            activeTab === tab.id
-                              ? "border-border bg-background text-foreground"
-                              : "border-transparent bg-transparent text-muted-foreground hover:border-border hover:bg-background/70 hover:text-foreground"
-                          }`}
-                        >
-                          <div
-                            className={`mt-0.5 rounded-xl p-2 ${activeTab === tab.id ? "bg-muted text-foreground" : "bg-muted/40 text-muted-foreground group-hover:text-foreground"}`}
-                          >
-                            <tab.icon className="h-4 w-4" />
-                          </div>
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium">{tab.label}</p>
-                            <p className="mt-1 text-xs leading-5 text-current/70">
-                              {tab.railSummary}
-                            </p>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
+                      </button>
+                    ))}
                   </div>
                 </div>
               )}
@@ -3123,61 +3059,17 @@ export function SettingsView() {
                 </div>
               )}
 
-              <section className="overflow-hidden rounded-[24px] border border-border bg-card shadow-sm">
-                <div className="border-b border-border/60 px-4 py-5 sm:px-6 sm:py-6">
-                  <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-                    {!useDesktopSettingsRail && (
-                      <div className="max-w-3xl">
-                        <p className="rubric mb-1.5">
-                          {activeTabConfig.eyebrow}
-                        </p>
-                        <h2 className="font-serif text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
-                          {activeTabConfig.title}
-                        </h2>
-                        <p className="mt-3 text-sm leading-6 text-muted-foreground sm:text-base">
-                          {activeTabConfig.summary}
-                        </p>
-                      </div>
-                    )}
-                    {useDesktopSettingsRail && (
-                      <div className="max-w-3xl">
-                        <p className="rubric mb-1.5">
-                          {activeTabConfig.eyebrow}
-                        </p>
-                        <h2 className="font-serif text-2xl font-semibold tracking-tight text-foreground sm:text-3xl">
-                          {activeTabConfig.title}
-                        </h2>
-                        <p className="mt-3 text-sm leading-6 text-muted-foreground sm:text-base">
-                          {activeTabConfig.summary}
-                        </p>
-                      </div>
-                    )}
-                    <div className="hidden flex-wrap gap-2 text-xs xl:flex">
-                      <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
-                        Primary mic{" "}
-                        <span className="ml-1 font-medium text-foreground">
-                          {settings.audio.preferredInputDevice?.deviceName ??
-                            "System default"}
-                        </span>
-                      </div>
-                      <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
-                        Dictation mode{" "}
-                        <span className="ml-1 font-medium text-foreground">
-                          {dictationShortcutBehavior.replace(/_/g, " ")}
-                        </span>
-                      </div>
-                      <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
-                        Routes{" "}
-                        <span className="ml-1 font-medium text-foreground">
-                          {settings.transcription.useSharedAsrSelection
-                            ? "Shared"
-                            : "Split"}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+              <div className="flex flex-wrap items-center gap-2 px-1">
+                <span
+                  className={`flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium ${readyChipTone(dictationReadinessChip.tone)}`}
+                >
+                  <span>{dictationReadinessChip.label}</span>
+                  <span aria-hidden="true">·</span>
+                  <span>{dictationReadinessChip.status}</span>
+                </span>
+              </div>
 
+              <section className="overflow-hidden rounded-[24px] border border-border bg-card shadow-sm">
                 <div className="space-y-6 px-4 py-5 sm:px-6 sm:py-6">
                   {activeTab === "asr" && (
                     <div className="space-y-5">

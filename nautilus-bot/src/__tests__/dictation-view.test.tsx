@@ -314,19 +314,19 @@ describe("DictationView modes", () => {
   it("renders the new mode presets", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Flow Profiles");
+    await screen.findByText("Profiles");
     expect(screen.getByRole("button", { name: /flow profile: general/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /flow profile: slack & chat/i })).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /flow profile: meeting follow-up/i })
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /solo lane: follow-up/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /profile: follow-up/i })).toBeInTheDocument();
   });
 
   it("applies Messages mode defaults and persists them", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Flow Profiles");
+    await screen.findByText("Profiles");
     fireEvent.click(screen.getByRole("button", { name: /flow profile: slack & chat/i }));
 
     await waitFor(() => {
@@ -349,7 +349,7 @@ describe("DictationView modes", () => {
   it("saves the current setup as a reusable custom mode", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Flow Profiles");
+    await screen.findByText("Profiles");
     fireEvent.click(screen.getByRole("button", { name: /flow profile: slack & chat/i }));
     fireEvent.click(screen.getByRole("button", { name: /flow profile: custom/i }));
 
@@ -404,7 +404,7 @@ describe("DictationView modes", () => {
   it("refreshes dictation history when a dictation result event arrives", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Flow Profiles");
+    await screen.findByText("Profiles");
     const handler = backendMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
@@ -425,7 +425,7 @@ describe("DictationView modes", () => {
   it("can read the latest result aloud from the dictation hero surface", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Flow Profiles");
+    await screen.findByText("Profiles");
     const handler = backendMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
@@ -463,7 +463,7 @@ describe("DictationView modes", () => {
   it("surfaces dictation lifecycle state in the capture card", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Flow Profiles");
+    await screen.findByText("Profiles");
     const handler = backendMocks.eventListeners.get("dictation-state-changed");
     expect(handler).toBeTruthy();
 
@@ -486,7 +486,7 @@ describe("DictationView modes", () => {
   it("surfaces auto-activated app matcher details in the latest result", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Flow Profiles");
+    await screen.findByText("Profiles");
     const handler = backendMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
@@ -509,7 +509,7 @@ describe("DictationView modes", () => {
     const backend = await import("@/lib/backend/dictation");
     render(<DictationView />);
 
-    await screen.findByText("Flow Profiles");
+    await screen.findByText("Profiles");
     const handler = backendMocks.eventListeners.get("dictation-text-ready");
 
     await act(async () => {
@@ -872,7 +872,7 @@ describe("DictationView modes", () => {
   it("shows Fix capitalization only for a case-only diff of the latest result", async () => {
     render(<DictationView />);
 
-    await screen.findByText("Flow Profiles");
+    await screen.findByText("Profiles");
     const handler = backendMocks.eventListeners.get("dictation-text-ready");
     expect(handler).toBeTruthy();
 
@@ -949,7 +949,7 @@ describe("DictationView modes", () => {
       dictionarySection as HTMLElement,
     ).getByRole("combobox");
     fireEvent.click(categoryTrigger);
-    fireEvent.click(await screen.findByRole("option", { name: "Worklog" }));
+    fireEvent.click(await screen.findByRole("option", { name: "Project tools" }));
 
     fireEvent.click(
       within(dictionarySection as HTMLElement).getAllByRole("button", {

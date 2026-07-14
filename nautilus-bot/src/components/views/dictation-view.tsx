@@ -81,7 +81,6 @@ import {
   Download,
   Upload,
   Copy,
-  Brain,
   Sparkles,
   Terminal,
   Volume2,
@@ -364,7 +363,7 @@ const DICTATION_APP_CATEGORY_REFERENCE: {
   },
   {
     key: "worklog",
-    label: "Worklog",
+    label: "Project tools",
     description:
       "Keeps status, blockers, and next-steps explicit and concise.",
   },
@@ -1838,14 +1837,14 @@ export function DictationView() {
       tone,
       title:
         tone === "ready"
-          ? "Delivery doctor: ready baseline"
+          ? "Last dictation: inserted cleanly"
           : tone === "warning"
-            ? "Delivery doctor: route needs review"
-            : "Delivery doctor: insertion needs review",
+            ? "Last dictation: route needs a look"
+            : "Last dictation: insertion needs a look",
       detail:
         paste ||
         fallback ||
-        "Latest dictation has the route, delivery path, and timing needed for launch evidence.",
+        "Route, insertion path, and timing for your most recent dictation.",
       nextAction,
       items,
     };
@@ -3476,23 +3475,15 @@ export function DictationView() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Flow Profiles</CardTitle>
+              <CardTitle>Profiles</CardTitle>
               <CardDescription>
-                Start with a profile tuned for your workflow, then save private
-                app-aware flows when you want Plainsong to switch styles for you.
+                Pick the profile that matches what you're doing right now. Save
+                private, app-aware profiles when you want Plainsong to switch
+                styles for you automatically.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <Brain className="h-4 w-4 text-muted-foreground" />
-                  <p className="rubric">SOLO LANES</p>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Pick the lane that matches what you are doing right now.
-                  Plainsong keeps the deep controls below, but these presets are
-                  the fastest way to feel dialed in.
-                </p>
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                   {SOLO_LANES.map((lane) => {
                     const Icon = lane.icon;
@@ -3501,7 +3492,7 @@ export function DictationView() {
                       <button
                         key={lane.id}
                         type="button"
-                        aria-label={`Solo lane: ${lane.title}`}
+                        aria-label={`Profile: ${lane.title}`}
                         onClick={() => {
                           if (lane.styleId) {
                             const style = RECOMMENDED_APP_STYLES.find(
