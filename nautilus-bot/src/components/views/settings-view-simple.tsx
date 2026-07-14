@@ -8,7 +8,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
-import { invoke } from "@/lib/electron";
+import { invoke, listen } from "@/lib/electron";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -73,7 +73,6 @@ import {
   downloadSileroVadModel,
   isDiarizationModelAvailable,
   isSileroVadModelDownloaded,
-  listDiarizationModels,
 } from "@/lib/backend/asr";
 import {
   listAudioInputDevices,
@@ -91,7 +90,6 @@ import type {
   SecurityStatus,
   ShortcutConflict,
 } from "@/lib/backend/settings";
-import type { DiarizationModelOption } from "@/lib/backend/asr";
 import type { Settings } from "@/types/settings";
 import { normalizeThemeScheme } from "@/lib/theme-schemes";
 import { formatShortcutForDisplay, normalizeShortcut } from "@/lib/shortcuts";
@@ -446,6 +444,11 @@ export function SettingsView() {
   const [provider, setProvider] = useState("openai");
   const [apiKey, setApiKey] = useState("");
   const [hasApiKey, setHasApiKey] = useState(false);
+  // Whether the Key Manager's currently-selected credential provider (`provider`,
+  // independent of settings.privacy.llmProvider) has a stored secret. Kept separate
+  // from `hasApiKey` (which tracks the actual default analysis provider) so browsing
+  // Key Manager never has to rewrite the analysis provider just to stay accurate.
+  const [keyManagerHasApiKey, setKeyManagerHasApiKey] = useState(false);
   const [savingApiKey, setSavingApiKey] = useState(false);
   const [backupConfig, setBackupConfig] = useState<BackupConfig | null>(null);
   const [backupConfigLoading, setBackupConfigLoading] = useState(false);
@@ -473,11 +476,6 @@ export function SettingsView() {
   const [ollamaCloudModels, setOllamaCloudModels] = useState<string[]>([]);
   const [diarizationAvailable, setDiarizationAvailable] = useState(false);
   const [diarizationDownloading, setDiarizationDownloading] = useState(false);
-  const [diarizationModels, setDiarizationModels] = useState<
-    DiarizationModelOption[]
-  >([]);
-  const [selectedDiarizationModel, setSelectedDiarizationModel] =
-    useState("ecapa_tdnn_speaker");
   const [sileroVadAvailable, setSileroVadAvailable] = useState(false);
   const [sileroVadDownloading, setSileroVadDownloading] = useState(false);
   const [micTestActive, setMicTestActive] = useState(false);
@@ -514,6 +512,11 @@ export function SettingsView() {
     timer: null,
     flushing: false,
   });
+  // Tracks the last settings snapshot known to be on disk, so the
+  // settings-changed listener below can tell which draft sections still
+  // have unsaved local edits (and must not be clobbered by another writer's
+  // broadcast) versus which sections are safe to refresh from it.
+  const persistedSettingsRef = useRef<Settings | null>(null);
 
   const settings = draftSettings;
   const { toast } = useToast();
@@ -767,6 +770,81 @@ export function SettingsView() {
   }, [flushPendingSettingsSave]);
 
   useEffect(() => {
+    persistedSettingsRef.current = persistedSettings;
+  }, [persistedSettings]);
+
+  // Other writers (theme toggle, beta-channel switch, ASR route picker,
+  // dictation view, first-run wizard) each save a whole Settings object of
+  // their own. Without this, this view's debounced whole-object save could
+  // silently revert whatever they just changed (and vice versa). The sidecar
+  // broadcasts the full settings after every save; refresh any section that
+  // has no unsaved local edit (i.e. still matches the last snapshot we knew
+  // was on disk) rather than clobbering it.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+
+    void listen<Settings>("settings-changed", (event) => {
+      if (!mountedRef.current) {
+        return;
+      }
+      const incoming = event.payload;
+      const lastKnownPersisted = persistedSettingsRef.current;
+
+      const mergeKeepingPendingEdits = (prev: Settings): Settings => {
+        if (!lastKnownPersisted) {
+          // No baseline to diff pending edits against yet -- leave the draft
+          // alone rather than risk discarding an in-progress edit.
+          return prev;
+        }
+        const merged = { ...prev } as Record<string, unknown>;
+        const prevRecord = prev as unknown as Record<string, unknown>;
+        const lastPersistedRecord = lastKnownPersisted as unknown as Record<
+          string,
+          unknown
+        >;
+        const incomingRecord = incoming as unknown as Record<string, unknown>;
+        for (const key of Object.keys(incomingRecord)) {
+          const hasNoPendingEdit =
+            JSON.stringify(prevRecord[key]) ===
+            JSON.stringify(lastPersistedRecord[key]);
+          if (hasNoPendingEdit) {
+            merged[key] = incomingRecord[key];
+          }
+        }
+        return merged as unknown as Settings;
+      };
+
+      setDraftSettings((prevDraft) =>
+        prevDraft ? mergeKeepingPendingEdits(prevDraft) : incoming,
+      );
+      // A save may already be queued (debounced) with a snapshot taken
+      // before this broadcast arrived; merge it the same way so the flush
+      // that eventually fires doesn't re-clobber the sections we just
+      // refreshed with stale data from that snapshot.
+      const scheduler = saveSchedulerRef.current;
+      if (scheduler.pending) {
+        scheduler.pending = {
+          version: scheduler.pending.version,
+          settings: mergeKeepingPendingEdits(scheduler.pending.settings),
+        };
+      }
+      setPersistedSettings(incoming);
+    }).then((fn) => {
+      if (cancelled) {
+        fn();
+      } else {
+        unlisten = fn;
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!settings || backupConfig || backupConfigLoadInFlightRef.current) {
       return;
     }
@@ -826,6 +904,25 @@ export function SettingsView() {
       mounted = false;
     };
   }, [settings?.privacy.llmProvider]);
+
+  useEffect(() => {
+    let mounted = true;
+    withSettingsSectionTimeout(
+      "Key Manager provider secret status",
+      hasProviderSecret(provider),
+    )
+      .then((value) => {
+        if (mounted) {
+          setKeyManagerHasApiKey(value);
+        }
+      })
+      .catch((err) => {
+        console.warn("hasProviderSecret check failed:", err);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [provider]);
 
   useEffect(() => {
     markSettingsPerf(`settings-tab-open:${activeTab}`);
@@ -1027,19 +1124,12 @@ export function SettingsView() {
   useEffect(() => {
     let mounted = true;
     const load = async () => {
-      const [avail, models] = await Promise.all([
-        withSettingsSectionTimeout(
-          "Diarization availability",
-          isDiarizationModelAvailable(),
-        ),
-        withSettingsSectionTimeout(
-          "Diarization models",
-          listDiarizationModels().catch(() => [] as DiarizationModelOption[]),
-        ).catch(() => [] as DiarizationModelOption[]),
-      ]);
+      const avail = await withSettingsSectionTimeout(
+        "Diarization availability",
+        isDiarizationModelAvailable(),
+      );
       if (!mounted) return;
       setDiarizationAvailable(avail);
-      setDiarizationModels(models);
     };
     load();
     return () => {
@@ -1670,7 +1760,6 @@ export function SettingsView() {
     includeMeetingAutoName?: boolean;
     includeAudioTuning?: boolean;
     includePermissions?: boolean;
-    includeCloudSync?: boolean;
     includeKeyManager?: boolean;
     includeMemory?: boolean;
   }) => {
@@ -1680,7 +1769,6 @@ export function SettingsView() {
       includeMeetingAutoName = false,
       includeAudioTuning = false,
       includePermissions = false,
-      includeCloudSync = false,
       includeKeyManager = false,
       includeMemory = false,
     } = options ?? {};
@@ -2318,26 +2406,6 @@ export function SettingsView() {
           </>
         )}
 
-        {includeCloudSync && (
-          <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
-            <div className="space-y-0.5">
-              <Label>Cloud sync</Label>
-              <p className="text-sm text-muted-foreground">
-                Enable external backup sync integrations.
-              </p>
-            </div>
-            <Switch
-              checked={settings.privacy.cloudSync}
-              onCheckedChange={(checked) =>
-                void updateSettings({
-                  ...settings,
-                  privacy: { ...settings.privacy, cloudSync: checked },
-                })
-              }
-            />
-          </div>
-        )}
-
         {includeKeyManager && (
           <>
             <div className="space-y-2 rounded-2xl border border-border/60 bg-background/75 p-4">
@@ -2346,12 +2414,12 @@ export function SettingsView() {
                 <select
                   value={provider}
                   onChange={(e: ChangeEvent<HTMLSelectElement>) => {
+                    // This only chooses which provider's credential is being
+                    // viewed/edited below -- it must not rewrite the default
+                    // analysis provider (settings.privacy.llmProvider), which
+                    // has its own selector on the AI tab.
                     const next = e.target.value;
                     setProvider(next);
-                    updateSettings({
-                      ...settings,
-                      privacy: { ...settings.privacy, llmProvider: next },
-                    });
                     void refreshModelsForProvider(next);
                   }}
                   className="flex-1 rounded-md border bg-background p-2"
@@ -2372,7 +2440,7 @@ export function SettingsView() {
                       try {
                         await setProviderSecret(provider, apiKey.trim());
                         setApiKey("");
-                        setHasApiKey(true);
+                        setKeyManagerHasApiKey(true);
                       } catch (e) {
                         toast(
                           `Failed to save key: ${e instanceof Error ? e.message : 'Unknown error'}`,
@@ -2382,7 +2450,7 @@ export function SettingsView() {
                         setSavingApiKey(false);
                       }
                     }
-                    void refreshModelsForProvider(settings.privacy.llmProvider);
+                    void refreshModelsForProvider(provider);
                   }}
                   disabled={modelsLoading || savingApiKey}
                 >
@@ -2401,8 +2469,9 @@ export function SettingsView() {
               ) : null}
               {settings.privacy.remoteProcessingEnabled && !hasApiKey ? (
                 <p className="text-xs text-rust">
-                  Selected analysis provider has no stored key. Analysis
-                  requests will fail with a credential error.
+                  The default analysis provider ({settings.privacy.llmProvider})
+                  has no stored key. Analysis requests will fail with a
+                  credential error.
                 </p>
               ) : null}
             </div>
@@ -2412,7 +2481,7 @@ export function SettingsView() {
               <Input
                 type="password"
                 placeholder={
-                  hasApiKey
+                  keyManagerHasApiKey
                     ? "Key already stored (enter to replace)"
                     : "Enter API key"
                 }
@@ -2430,7 +2499,7 @@ export function SettingsView() {
                     try {
                       await setProviderSecret(provider, apiKey.trim());
                       setApiKey("");
-                      setHasApiKey(true);
+                      setKeyManagerHasApiKey(true);
                       await refreshModelsForProvider(provider);
                     } catch (e) {
                       setError(
@@ -2453,7 +2522,7 @@ export function SettingsView() {
                     try {
                       await setProviderSecret(provider, apiKey.trim());
                       setApiKey("");
-                      setHasApiKey(true);
+                      setKeyManagerHasApiKey(true);
                       await refreshModelsForProvider(provider);
                     } catch (e) {
                       setError(
@@ -2477,7 +2546,7 @@ export function SettingsView() {
                     try {
                       await clearProviderSecret(provider);
                       setApiKey("");
-                      setHasApiKey(false);
+                      setKeyManagerHasApiKey(false);
                     } catch (e) {
                       setError(
                         e instanceof Error
@@ -2492,7 +2561,7 @@ export function SettingsView() {
                 >
                   Clear Key
                 </Button>
-                {hasApiKey && (
+                {keyManagerHasApiKey && (
                   <span className="text-sm text-muted-foreground">
                     Stored securely
                   </span>
@@ -3334,149 +3403,6 @@ export function SettingsView() {
                           )}
                         </div>
 
-                        {settings.transcription.enableDiarization && (
-                          <div className="space-y-2">
-                            <Label>Diarization model</Label>
-                            {diarizationModels.length > 0 ? (
-                              <div className="space-y-2">
-                                {diarizationModels.map((model) => (
-                                  <div
-                                    key={model.id}
-                                    className={`rounded-md border p-3 cursor-pointer transition-colors ${selectedDiarizationModel === model.id ? "border-rust/40 bg-rust/8" : "border-border bg-muted/20 hover:bg-muted/40"}`}
-                                    onClick={() =>
-                                      setSelectedDiarizationModel(model.id)
-                                    }
-                                  >
-                                    <div className="flex items-center justify-between">
-                                      <div className="flex items-center gap-2">
-                                        <input
-                                          type="radio"
-                                          name="diarization-model"
-                                          value={model.id}
-                                          checked={
-                                            selectedDiarizationModel ===
-                                            model.id
-                                          }
-                                          onChange={() =>
-                                            setSelectedDiarizationModel(
-                                              model.id,
-                                            )
-                                          }
-                                          className="accent-rust"
-                                        />
-                                        <div>
-                                          <p className="text-sm font-medium">
-                                            {model.label}
-                                          </p>
-                                          <p className="text-xs text-muted-foreground">
-                                            {model.description}
-                                          </p>
-                                        </div>
-                                      </div>
-                                      {model.installed ? (
-                                        <span className="inline-flex items-center gap-1 rounded-full bg-gold/10 px-2 py-0.5 text-[10px] font-medium text-gold-text shrink-0">
-                                          <CheckCircle2 className="h-3 w-3" />{" "}
-                                          Installed
-                                        </span>
-                                      ) : (
-                                        <Button
-                                          variant="outline"
-                                          size="sm"
-                                          className="shrink-0 text-xs h-7"
-                                          disabled={diarizationDownloading}
-                                          onClick={async (e) => {
-                                            e.stopPropagation();
-                                            setDiarizationDownloading(true);
-                                            try {
-                                              await downloadDiarizationModel(
-                                                model.id,
-                                              );
-                                              setDiarizationModels((prev) =>
-                                                prev.map((m) =>
-                                                  m.id === model.id
-                                                    ? { ...m, installed: true }
-                                                    : m,
-                                                ),
-                                              );
-                                              if (
-                                                model.id ===
-                                                "ecapa_tdnn_speaker"
-                                              )
-                                                setDiarizationAvailable(true);
-                                            } catch (e) {
-                                              const msg =
-                                                e instanceof Error
-                                                  ? e.message
-                                                  : String(e);
-                                              setError(
-                                                `Download failed: ${msg}`,
-                                              );
-                                            } finally {
-                                              setDiarizationDownloading(false);
-                                            }
-                                          }}
-                                        >
-                                          <Download className="h-3 w-3 mr-1" />
-                                          Download
-                                        </Button>
-                                      )}
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            ) : diarizationAvailable ? (
-                              <div className="rounded-md border border-border bg-muted/30 p-3">
-                                <div className="flex items-center justify-between">
-                                  <div>
-                                    <p className="text-sm font-medium">
-                                      ECAPA-TDNN 512
-                                    </p>
-                                    <p className="text-xs text-muted-foreground">
-                                      Wespeaker ECAPA-TDNN (speaker embedding)
-                                    </p>
-                                  </div>
-                                  <span className="inline-flex items-center gap-1 rounded-full bg-gold/10 px-2 py-0.5 text-[10px] font-medium text-gold-text">
-                                    <CheckCircle2 className="h-3 w-3" />{" "}
-                                    Installed
-                                  </span>
-                                </div>
-                              </div>
-                            ) : null}
-                          </div>
-                        )}
-
-                        {settings.transcription.enableDiarization && (
-                          <div className="space-y-2">
-                            <Label>Speaker naming method</Label>
-                            <select
-                              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                              value={settings.transcription.speakerNamingMethod}
-                              onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-                                void updateSettings({
-                                  ...settings,
-                                  transcription: {
-                                    ...settings.transcription,
-                                    speakerNamingMethod: e.target.value as
-                                      | "auto"
-                                      | "numbered"
-                                      | "manual",
-                                  },
-                                })
-                              }
-                            >
-                              <option value="auto">
-                                Auto-detect from speech (recommended)
-                              </option>
-                              <option value="numbered">
-                                Numbered (Speaker 1, Speaker 2, ...)
-                              </option>
-                              <option value="manual">
-                                Manual only (set names yourself)
-                              </option>
-                            </select>
-                          </div>
-                        )}
-
                         <div className="space-y-2">
                           <Label>Transcription language</Label>
                           <select
@@ -3966,7 +3892,6 @@ export function SettingsView() {
 
                             {renderSharedDictationControls({
                               includeCoreControls: false,
-                              includeCloudSync: true,
                             })}
                           </div>
                       </CardContent>
@@ -3982,55 +3907,6 @@ export function SettingsView() {
                         </CardDescription>
                       </CardHeader>
                       <CardContent className="space-y-5">
-                        <div className="space-y-3">
-                          <Label>Export defaults</Label>
-                          <div className="grid grid-cols-2 gap-4">
-                            <div className="space-y-2">
-                              <Label className="text-sm text-muted-foreground">
-                                Default format
-                              </Label>
-                              <select
-                                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                                value={settings.export.defaultFormat}
-                                onChange={(e: ChangeEvent<HTMLSelectElement>) =>
-                                  void updateSettings({
-                                    ...settings,
-                                    export: {
-                                      ...settings.export,
-                                      defaultFormat: e.target.value,
-                                    },
-                                  })
-                                }
-                              >
-                                <option value="markdown">Markdown</option>
-                                <option value="json">JSON</option>
-                                <option value="text">Plain Text</option>
-                              </select>
-                            </div>
-                            <div className="space-y-2">
-                              <Label className="text-sm text-muted-foreground">
-                                Export directory
-                              </Label>
-                              <Input
-                                placeholder="Same as recording location"
-                                value={settings.export.exportDirectory ?? ""}
-                                onBlur={handleSettingsTextBlur}
-                                onKeyDown={handleSettingsTextKeyDown}
-                                onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                                  void updateSettings({
-                                    ...settings,
-                                    export: {
-                                      ...settings.export,
-                                      exportDirectory:
-                                        e.target.value.trim() || null,
-                                    },
-                                  })
-                                }
-                              />
-                            </div>
-                          </div>
-                        </div>
-
                         <div className="space-y-2">
                           <Label>Export root limit (absolute path)</Label>
                           <Input
@@ -4056,97 +3932,7 @@ export function SettingsView() {
                           </p>
                         </div>
 
-                        <div className="flex items-center justify-between">
-                          <div className="space-y-0.5">
-                            <Label>Include timestamps in exports</Label>
-                            <p className="text-sm text-muted-foreground">
-                              Add time markers to exported transcripts
-                            </p>
-                          </div>
-                          <Switch
-                            checked={settings.export.includeTimestamps}
-                            onCheckedChange={(checked) =>
-                              void updateSettings({
-                                ...settings,
-                                export: {
-                                  ...settings.export,
-                                  includeTimestamps: checked,
-                                },
-                              })
-                            }
-                          />
-                        </div>
-
-                        <div className="flex items-center justify-between">
-                          <div className="space-y-0.5">
-                            <Label>Include speaker names</Label>
-                            <p className="text-sm text-muted-foreground">
-                              Label speakers in exported transcripts
-                            </p>
-                          </div>
-                          <Switch
-                            checked={settings.export.includeSpeakers}
-                            onCheckedChange={(checked) =>
-                              void updateSettings({
-                                ...settings,
-                                export: {
-                                  ...settings.export,
-                                  includeSpeakers: checked,
-                                },
-                              })
-                            }
-                          />
-                        </div>
-
-                        <div className="flex items-center justify-between">
-                          <div className="space-y-0.5">
-                            <Label>Open file after export</Label>
-                            <p className="text-sm text-muted-foreground">
-                              Automatically open exported files
-                            </p>
-                          </div>
-                          <Switch
-                            checked={settings.export.openAfterExport}
-                            onCheckedChange={(checked) =>
-                              void updateSettings({
-                                ...settings,
-                                export: {
-                                  ...settings.export,
-                                  openAfterExport: checked,
-                                },
-                              })
-                            }
-                          />
-                        </div>
-
                         <div className="h-px bg-border" />
-
-                        <div className="space-y-2">
-                          <Label>Auto-delete recordings after days</Label>
-                          <Input
-                            type="number"
-                            min={0}
-                            value={settings.privacy.autoDeleteDays}
-                            onBlur={handleSettingsTextBlur}
-                            onKeyDown={handleSettingsTextKeyDown}
-                            onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                              const nextDays = Math.max(
-                                0,
-                                Number(e.target.value) || 0,
-                              );
-                              void updateSettings({
-                                ...settings,
-                                privacy: {
-                                  ...settings.privacy,
-                                  autoDeleteDays: nextDays,
-                                },
-                              });
-                            }}
-                          />
-                          <p className="text-xs text-muted-foreground">
-                            Set to 0 to keep all recordings indefinitely.
-                          </p>
-                        </div>
 
                         <div className="space-y-2">
                           <Label>Auto-delete dictation recordings</Label>

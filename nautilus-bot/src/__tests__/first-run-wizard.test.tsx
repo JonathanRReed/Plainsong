@@ -50,12 +50,7 @@ const providers: AsrProviderInfo[] = [
 ];
 
 const createSettings = () => ({
-  audio: {
-    sampleRate: 16000,
-    channels: 1,
-    captureSystemAudio: true,
-    captureMicrophone: true,
-  },
+  audio: {},
   transcription: {
     defaultProvider: "macos_apple_speech",
     selectedModelId: "apple-default",
@@ -65,13 +60,8 @@ const createSettings = () => ({
     meetingProvider: "macos_apple_speech",
     meetingModelId: "apple-default",
     providerModelIds: {},
-    autoTranscribe: true,
     enableDiarization: true,
-    intelligentPunctuation: true,
     language: null,
-    numSpeakers: 0,
-    speakerNamingMethod: "auto" as const,
-    diarizationModelId: "ecapa_tdnn_speaker",
     silenceSkipEnabled: false,
     dictationCopyToClipboard: true,
     dictationAutoRequestPermissions: true,
@@ -82,7 +72,6 @@ const createSettings = () => ({
     meetingCustomPrompt: null,
     meetingAutoNameEnabled: true,
     meetingAutoNameModel: null,
-    saveRawTranscript: false,
     dictationSaveToInbox: true,
     dictationProfile: "normal_speed" as const,
     dictationProjectId: "inbox",
@@ -100,26 +89,12 @@ const createSettings = () => ({
   ui: {
     alwaysOnTop: false,
     minimizeToTray: true,
-    windowPosition: null,
-    windowSize: null,
-    fontSize: 14,
     showDictationPopup: true,
     showRecordingPopup: true,
     colorScheme: "default",
   },
-  export: {
-    defaultFormat: "markdown",
-    autoExport: false,
-    exportDirectory: null,
-    includeTimestamps: true,
-    includeSpeakers: true,
-    openAfterExport: false,
-  },
+  export: {},
   privacy: {
-    autoDeleteDays: 0,
-    requirePassword: false,
-    auditLogging: true,
-    cloudSync: false,
     remoteProcessingEnabled: false,
     llmProvider: "ollama",
     llmModelId: null,
@@ -141,7 +116,6 @@ const createSettings = () => ({
     lastCheckAt: null,
     lastSeenVersion: null,
   },
-  defaultTemplate: "meeting",
   theme: "system" as const,
 });
 

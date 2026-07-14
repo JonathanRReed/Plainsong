@@ -13,7 +13,6 @@ export interface Settings {
   privacy: PrivacySettings;
   shortcuts: KeyboardShortcuts;
   updates: UpdateSettings;
-  defaultTemplate: string;
   theme: "light" | "dark" | "system";
 }
 
@@ -57,10 +56,6 @@ export interface DictationCustomMode {
 }
 
 interface AudioSettings {
-  sampleRate: number;
-  channels: number;
-  captureSystemAudio: boolean;
-  captureMicrophone: boolean;
   preferredInputDevice?: AudioInputDevicePreference | null;
   dictationInputOverrideEnabled?: boolean;
   dictationInputDevice?: AudioInputDevicePreference | null;
@@ -90,13 +85,8 @@ export interface TranscriptionSettings {
   dictationMlxEnabled?: boolean;
   /** MLX acceleration for the meeting route slot only */
   meetingMlxEnabled?: boolean;
-  autoTranscribe: boolean;
   enableDiarization: boolean;
-  intelligentPunctuation: boolean;
   language: string | null;
-  numSpeakers: number;
-  speakerNamingMethod: "auto" | "numbered" | "manual";
-  diarizationModelId?: string;
   silenceSkipEnabled: boolean;
   dictationCopyToClipboard?: boolean;
   dictationAutoRequestPermissions?: boolean;
@@ -127,7 +117,6 @@ export interface TranscriptionSettings {
   meetingCustomPrompt: string | null;
   meetingAutoNameEnabled?: boolean;
   meetingAutoNameModel?: string | null;
-  saveRawTranscript: boolean;
   dictationSaveToInbox: boolean;
   dictationProfile: "normal_speed" | "power_rewrite";
   dictationProjectId: string;
@@ -164,28 +153,17 @@ export interface PlatformOptimizationSettings {
 interface UiSettings {
   alwaysOnTop: boolean;
   minimizeToTray: boolean;
-  windowPosition: [number, number] | null;
-  windowSize: [number, number] | null;
-  fontSize: number;
   showDictationPopup: boolean;
   showRecordingPopup: boolean;
   colorScheme: string;
 }
 
-interface ExportSettings {
-  defaultFormat: string;
-  autoExport: boolean;
-  exportDirectory: string | null;
-  includeTimestamps: boolean;
-  includeSpeakers: boolean;
-  openAfterExport: boolean;
-}
+// Transitional empty container -- kept because Settings.export is a required
+// key on the wire; every field that used to live here had no runtime reader
+// and was removed (see rust-sidecar/src/settings.rs's REMOVED_SETTINGS_KEYS).
+type ExportSettings = Record<string, never>;
 
 interface PrivacySettings {
-  autoDeleteDays: number;
-  requirePassword: boolean;
-  auditLogging: boolean;
-  cloudSync: boolean;
   remoteProcessingEnabled: boolean;
   llmProvider: string;
   llmModelId: string | null;

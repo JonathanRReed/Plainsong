@@ -31,8 +31,11 @@ type RouteSelectableInventory = RouteSelectableProvider | AsrProviderInventory;
 
 type AsrRouteSelectionUpdate = Partial<AsrRouteSelectionState>;
 
-const DEFAULT_PROVIDER: AsrProviderType = "distil_whisper";
-const DEFAULT_MODEL_ID = "distil-large-v3.5";
+// Matches settings.rs's Settings::default() -- whisper.cpp base.en is the
+// deliberately fast documented default; this is only the fallback-of-last-
+// resort when settings carry no parseable provider/model at all.
+const DEFAULT_PROVIDER: AsrProviderType = "whisper";
+const DEFAULT_MODEL_ID = "base.en";
 function normalizeMeetingRoutePolicy(
   policy: string | null | undefined
 ): "prefer_local" | "best_available" {

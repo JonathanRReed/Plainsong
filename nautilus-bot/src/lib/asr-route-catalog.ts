@@ -53,12 +53,16 @@ export interface AsrRouteCatalogEntry {
   recommendedRank: Record<AsrRouteLane, number | null>;
 }
 
+// Ordered so the recommended dictation route lands on whisper.cpp base.en --
+// the deliberately fast default (see settings.rs's default_provider doc) --
+// rather than the heavier distil_whisper route. Platform-native engines still
+// rank first where available.
 const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "moonshine",
   "macos_apple_speech",
-  "distil_whisper",
-  "whisper",
   "windows_sdk_dictation",
+  "whisper",
+  "distil_whisper",
   "whisper_candle",
   "openai_cloud",
   "elevenlabs_scribe",

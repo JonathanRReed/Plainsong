@@ -121,6 +121,43 @@ describe("asr-route-catalog", () => {
     expect(recommended?.modelId).toBe("moonshine-base");
   });
 
+  it("recommends whisper.cpp base.en over distil_whisper for dictation when no platform-native engine is ready", () => {
+    // Regression test: distil_whisper used to outrank whisper in
+    // DICTATION_PROVIDER_ORDER, steering the "Recommended" badge onto the
+    // slower route even though settings.rs's documented default is
+    // whisper.cpp base.en.
+    const whisperAndDistilProviders: AsrProviderInfo[] = [
+      {
+        providerType: "whisper",
+        name: "Whisper",
+        description: "Flexible local route",
+        isAvailable: true,
+        inferenceEnabled: true,
+        modelInfo: {
+          name: "Whisper",
+          version: "base.en",
+          sizeMb: 150,
+          parameters: "74M",
+          languages: ["en"],
+          license: "MIT",
+          sourceUrl: "https://example.com/whisper",
+        },
+        selectedModelId: "base.en",
+        modelOptions: [{ id: "base.en", label: "base.en" }],
+        downloadStatus: "Downloaded",
+        runtimeStatus: "ready",
+        runtimeDetails: {},
+      },
+      providers[1], // distil_whisper, also ready
+    ];
+
+    const routes = buildAsrRouteCatalog(whisperAndDistilProviders, "prefer_local");
+    const recommended = getRecommendedLaneRoute(routes, "dictation", "prefer_local");
+
+    expect(recommended?.providerType).toBe("whisper");
+    expect(recommended?.modelId).toBe("base.en");
+  });
+
   it("marks missing cloud credentials as BYOK-required instead of generic failure", () => {
     const routes = buildAsrRouteCatalog(providers, "prefer_local");
     const openAiRoute = routes.find(
