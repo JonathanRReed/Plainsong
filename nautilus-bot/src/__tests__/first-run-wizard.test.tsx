@@ -55,11 +55,6 @@ const createSettings = () => ({
     channels: 1,
     captureSystemAudio: true,
     captureMicrophone: true,
-    noiseSuppression: true,
-    voiceActivityDetection: true,
-    silenceTimeoutSeconds: 3,
-    autoGainControl: true,
-    manualGainDb: 0,
   },
   transcription: {
     defaultProvider: "macos_apple_speech",
@@ -121,7 +116,6 @@ const createSettings = () => ({
     openAfterExport: false,
   },
   privacy: {
-    encryptRecordings: false,
     autoDeleteDays: 0,
     requirePassword: false,
     auditLogging: true,
