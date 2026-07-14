@@ -3546,36 +3546,45 @@ export function DictationView() {
                   })}
                 </div>
               </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {DICTATION_MODE_DEFINITIONS.map((mode) => {
-                  const isActive = dictationModePreset === mode.id;
-                  return (
-                    <button
-                      key={mode.id}
-                      type="button"
-                      aria-label={`Flow profile: ${mode.label}`}
-                      onClick={() => applyDictationMode(mode.id)}
-                      className={cn(
-                        "rounded-xl border p-4 text-left transition-colors",
-                        isActive
-                          ? "border-rust/40 bg-rust/8 shadow-sm"
-                          : "border-border hover:border-rust/50 hover:bg-muted/40",
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="font-medium">{mode.label}</p>
-                        {isActive && (
-                          <span className="rounded-full bg-rust px-2 py-0.5 text-[11px] font-semibold text-destructive-foreground">
-                            Active
-                          </span>
+              <div className="space-y-3 border-t pt-4">
+                <div>
+                  <p className="text-sm font-medium">Saved modes</p>
+                  <p className="text-xs text-muted-foreground">
+                    Deeper presets with their own route, context, and history
+                    settings — layer these on top of the quick picks above.
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {DICTATION_MODE_DEFINITIONS.map((mode) => {
+                    const isActive = dictationModePreset === mode.id;
+                    return (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        aria-label={`Flow profile: ${mode.label}`}
+                        onClick={() => applyDictationMode(mode.id)}
+                        className={cn(
+                          "rounded-xl border p-4 text-left transition-colors",
+                          isActive
+                            ? "border-rust/40 bg-rust/8 shadow-sm"
+                            : "border-border hover:border-rust/50 hover:bg-muted/40",
                         )}
-                      </div>
-                      <p className="mt-2 text-sm text-muted-foreground">
-                        {mode.description}
-                      </p>
-                    </button>
-                  );
-                })}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="font-medium">{mode.label}</p>
+                          {isActive && (
+                            <span className="rounded-full bg-rust px-2 py-0.5 text-[11px] font-semibold text-destructive-foreground">
+                              Active
+                            </span>
+                          )}
+                        </div>
+                        <p className="mt-2 text-sm text-muted-foreground">
+                          {mode.description}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
               <div className="space-y-3 border-t pt-4">
                 <div>

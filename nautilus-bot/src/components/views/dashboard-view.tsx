@@ -362,16 +362,15 @@ export function DashboardView() {
             </Card>
           </section>
 
-          {/* Second Brain - Memory */}
+          {/* Ask your meetings - Memory chat */}
           <Card className="hover-lift">
             <CardHeader>
-              <p className="rubric mb-1.5">MEMORY</p>
               <div className="flex items-center justify-between">
                 <CardTitle className="flex items-center gap-2 font-serif">
                   <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/30">
                     <Brain className="h-4 w-4 text-muted-foreground" />
                   </div>
-                  Second Brain
+                  Ask your meetings
                 </CardTitle>
                 {memoryMessages.length > 0 && (
                   <Button
@@ -441,7 +440,6 @@ export function DashboardView() {
 
           <Card className="hover-lift">
             <CardHeader>
-              <p className="rubric mb-1.5">PEOPLE & COMPANIES</p>
               <CardTitle className="flex items-center gap-2 font-serif">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/30">
                   <Users className="h-4 w-4 text-muted-foreground" />
@@ -562,13 +560,15 @@ export function DashboardView() {
 
           <Card>
             <CardHeader>
-              <p className="rubric mb-1.5">SEARCH</p>
               <CardTitle className="flex items-center gap-2 font-serif">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-muted/20">
                   <Search className="h-4 w-4 text-muted-foreground" />
                 </div>
-                Ask Across Meetings
+                Search across meetings
               </CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Keyword search over every transcript, ranked by match.
+              </p>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex gap-2">

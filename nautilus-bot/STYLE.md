@@ -65,9 +65,19 @@ One coherent OKLCH system. **Dark (the candle-lit folio) is the default; light i
 
 **Rubric convention** — eyebrows & section labels are mono, UPPERCASE, wide tracking (~0.14–0.18em), usually rust. Use the `.rubric` (rust) / `.rubric-muted` (neutral) utilities. (`.quiet-label` is the legacy shim — migrate to `.rubric-muted`.)
 
+**Rubric budget: one rust `.rubric` eyebrow per page.** It belongs to the page header (`ui/page-header.tsx`) only. A card or section inside that page does **not** get its own eyebrow restating what its heading/icon already say — that reads as a wall of alarmed telegrams, not hierarchy. Use `.section-heading` (below) or nothing instead. `.rubric-muted` (bronze, not rust) is still fine as a genuine secondary label — e.g. a compact status line in a sidebar rail — because it isn't competing with the page's one rust rubric for attention.
+
+**Section heading** — the default label for a card/section inside a view: sentence case, `font-sans font-semibold`, no tracking, no uppercase (`.section-heading` utility). Reach for a `.rubric`-style eyebrow only at the true page level; everywhere else, a plain bold sentence-case label plus a one-line muted description does the job without shouting.
+
+**Type-scale floor** — `text-xs` (12px) is for keycaps, timestamps, and true metadata only. Control labels, descriptions, and body copy inside a card use `text-sm` (14px) minimum; that includes the small print under a toggle or the caption line in a status chip. If you're tempted to reach for `text-xs` for anything a user reads as a sentence, use `text-sm`.
+
 **Versals/drop-caps** — a Newsreader letter gilded via `.gilt-text`. It is the **real first letter of real text** — never `aria-hidden`, never content-replacement — so screen readers still read the whole word.
 
-Radius is small (`--radius: 0.3rem`). This is paper, not a SaaS card.
+Radius is `0.375rem` (`--radius`). Small and restrained — this is paper, not a SaaS card.
+
+**Surface law (flatten one level)** — a page is header → flat sections separated by whitespace and a hairline, not card-in-card. Before nesting a bordered box inside another bordered box, ask whether the inner box could be a plain row or a `border-t pt-4` group instead. Reserve real `<Card>` chrome for choice tiles (profile/mode pickers), list rows, and the one earned signature surface per view — not for every subsection of a settings page. **Never render the same title+description pair twice on one screen** (a section's own heading is enough; don't repeat it in a hero card above it) — this was a real, found-in-production bug (a triple-duplicated Settings header), not a hypothetical.
+
+**Two or more selector grids on one view need their own headings.** If a view offers more than one "pick one of these" grid (e.g. quick style presets vs. deeper saved modes), each needs a distinct sentence-case heading and a one-line description explaining how it differs from the other — never stack two unlabeled grids back-to-back. A user seeing two tiles both called "General" and both marked "Active" with no heading between them cannot tell whether that's one system or two.
 
 ---
 
@@ -121,9 +131,9 @@ App-only vs website-only: the app uses **neume, rubric, staff, gilt, versal, man
 
 ## 7. Do / Don't
 
-**Do** — lead with one true thing · one gold accent + one rust rubric · reserve burnished gold for the earned moment · plain scribe voice · neumes/rubrics for state · give one idea room per view · `text-gold-text` for gold text on light.
+**Do** — lead with one true thing · one gold accent + one rust rubric per page · reserve burnished gold for the earned moment · plain scribe voice · neumes/rubrics for state · give one idea room per view · `text-gold-text` for gold text on light · `text-sm` as the body/label floor · flatten nested cards to one level · head every selector grid so two "General, Active" tiles never sit unexplained back-to-back.
 
-**Don't** — add a green/blue/amber status hue · use the stoplight convention · flood the page with gold · `text-gold` as text on a light surface · `aria-hidden` a real versal letter · animate a filter on scroll · ship a near-duplicate of a window/section that already exists · introduce new `success/warning/info` semantic-class uses.
+**Don't** — add a green/blue/amber status hue · use the stoplight convention · flood the page with gold · give every card its own rust eyebrow · `text-xs` for anything read as a sentence · `text-gold` as text on a light surface · `aria-hidden` a real versal letter · animate a filter on scroll · ship a near-duplicate of a window/section that already exists (check for a repeated title+description before you're done, not after a user reports it) · introduce new `success/warning/info` semantic-class uses.
 
 ---
 
