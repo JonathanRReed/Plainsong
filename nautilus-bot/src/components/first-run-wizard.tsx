@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   Brain,
   CheckCircle2,
@@ -18,6 +18,7 @@ import {
   downloadAsrModels,
   getAsrProviders,
 } from "@/lib/backend/asr";
+import { listen } from "@/lib/electron";
 import {
   getPermissionDiagnostics,
   getSettings,
@@ -56,24 +57,45 @@ type Props = {
 
 type Step = "welcome" | "permissions" | "dictation-model" | "hotkey" | "meeting-setup";
 
-const POWER_MODEL_OPTIONS = [
+// Ordered so the fast, shipped default (whisper.cpp base.en -- see
+// settings.rs's default_provider/default_model_id) is first and pre-selected.
+// The rest are clearly-labeled accuracy upgrades, not alternate defaults.
+const POWER_MODEL_OPTIONS: Array<{
+  id: string;
+  providerType: AsrProviderType;
+  label: string;
+  size: string;
+  desc: string;
+  recommended?: boolean;
+}> = [
+  {
+    id: "base.en",
+    providerType: "whisper",
+    label: "Whisper base.en",
+    size: "142 MB",
+    desc: "Fast default -- this is what Plainsong already ships with",
+    recommended: true,
+  },
   {
     id: "distil-large-v3.5",
+    providerType: "distil_whisper",
     label: "Distil Whisper",
-    size: "Managed",
-    desc: "Best default solo route for fast local dictation",
+    size: "1.5 GB",
+    desc: "Accuracy upgrade for demanding solo dictation",
   },
   {
     id: "moonshine-base",
+    providerType: "moonshine",
     label: "Moonshine Base",
-    size: "Managed",
-    desc: "Lightweight local fallback for lower-end machines",
+    size: "246 MB",
+    desc: "Lightweight alternative for lower-end machines",
   },
   {
     id: "parakeet-tdt-0.6b-v3",
+    providerType: "parakeet",
     label: "Parakeet TDT 0.6B v3",
-    size: "Managed",
-    desc: "Higher-accuracy local route when meeting quality matters more",
+    size: "2.3 GB",
+    desc: "Higher-accuracy upgrade when meeting quality matters more",
   },
 ];
 
@@ -83,6 +105,10 @@ type PermissionGate = {
   purpose: string;
   section: "microphone" | "speech" | "accessibility" | "automation";
   settingsLabel: string;
+  // Optional gates are shown with a neutral (not red/urgent) indicator and
+  // don't imply setup is broken when ungranted -- the app's default route
+  // doesn't need them.
+  optional?: boolean;
   ready(perms: PermissionDiagnostics | null): boolean | undefined;
 };
 
@@ -101,9 +127,11 @@ const PERMISSION_GATES: PermissionGate[] = [
   {
     key: "speech",
     label: "Speech recognition",
-    purpose: "So the native speech engine can turn your voice into text.",
+    purpose:
+      "Optional -- only needed if Plainsong falls back to Apple's native speech engine. The fast local default below doesn't use it.",
     section: "speech",
     settingsLabel: "Speech Recognition",
+    optional: true,
     ready: (perms) => perms?.speechRecognitionReady,
   },
   {
@@ -118,9 +146,13 @@ const PERMISSION_GATES: PermissionGate[] = [
     key: "automation",
     label: "Keyboard fallback",
     purpose: "So Plainsong can type words in when direct insertion is unavailable.",
-    section: "automation",
-    settingsLabel: "Automation",
-    ready: (perms) => perms?.automationReady,
+    // The capability this row describes is actually tracked by postEventReady
+    // (CGPreflightPostEventAccess), which is granted from the same macOS
+    // Accessibility pane as the row above -- not a separate "Automation"
+    // pane, which governs unrelated inter-app scripting permissions.
+    section: "accessibility",
+    settingsLabel: "Accessibility",
+    ready: (perms) => perms?.postEventReady,
   },
 ];
 
@@ -137,6 +169,16 @@ const STEP_LABELS: Record<Step, string> = {
   "dictation-model": "Dictation model",
   hotkey: "Hotkey",
   "meeting-setup": "Meeting setup",
+};
+
+// Mirrors settings-view-simple.tsx's dictationShortcutBehaviorHint copy, so
+// the wizard describes whichever mode is actually configured (hold-to-talk
+// and hands-free are real, working modes, not stubs) instead of assuming
+// everyone is on toggle.
+const HOTKEY_MODE_LABELS: Record<"hold_to_talk" | "toggle" | "hands_free", { name: string; hint: string }> = {
+  toggle: { name: "Toggle", hint: "press to start, press again to stop" },
+  hold_to_talk: { name: "Hold to talk", hint: "hold the shortcut to record, release to stop" },
+  hands_free: { name: "Hands-free", hint: "starts automatically when you speak, stops on silence" },
 };
 
 function formatShortcutFromKeyboardEvent(event: KeyboardEvent<HTMLInputElement>) {
@@ -196,6 +238,51 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [includeMeetings, setIncludeMeetings] = useState(false);
   const [step, setStep] = useState<Step>(mode === "full" ? "welcome" : mode === "meetings" ? "meeting-setup" : "permissions");
 
+  // This wizard is a real modal: give it dialog semantics and trap focus
+  // inside it so keyboard users can't Tab into the obscured app behind it.
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const titleId = useId();
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const node = dialogRef.current;
+    const firstFocusable = node?.querySelector<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    );
+    (firstFocusable ?? node)?.focus();
+
+    return () => {
+      previouslyFocused?.focus();
+    };
+  }, []);
+
+  const trapDialogFocus = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") {
+      return;
+    }
+    const node = dialogRef.current;
+    if (!node) {
+      return;
+    }
+    const focusables = Array.from(
+      node.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )
+    );
+    if (focusables.length === 0) {
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, []);
+
   const [perms, setPerms] = useState<PermissionDiagnostics | null>(null);
   const [permsLoading, setPermsLoading] = useState(false);
   const [permissionRequestBusy, setPermissionRequestBusy] = useState(false);
@@ -208,12 +295,15 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [modelState, setModelState] = useState<"idle" | "downloading" | "done" | "error">("idle");
   const [modelError, setModelError] = useState<string | null>(null);
   const [selectedModelId, setSelectedModelId] = useState("base.en");
+  const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
+  const downloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
 
   const [shortcutValue, setShortcutValue] = useState(defaultDictationShortcut());
-  // v1 ships toggle-only: press to start, press again to stop. Hold-to-talk and
-  // hands-free need a native key listener that isn't wired yet, so the wizard
-  // shows a static behavior row and always persists toggle.
-  const hotkeyMode = "toggle" as const;
+  // Hold-to-talk and hands-free are real, working modes configured from
+  // Settings (see settings-view-simple.tsx's resolveDictationHotkeyBehavior);
+  // this wizard step only manages the key combo, so it reads the existing
+  // mode to describe it accurately instead of assuming toggle.
+  const [hotkeyMode, setHotkeyMode] = useState<"hold_to_talk" | "toggle" | "hands_free">("toggle");
   const [hotkeyDemoActive, setHotkeyDemoActive] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -284,9 +374,21 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
           setSelectedModelId("moonshine-base");
         } else if (settings.transcription.dictationProvider === "parakeet") {
           setSelectedModelId("parakeet-tdt-0.6b-v3");
-        } else {
+        } else if (settings.transcription.dictationProvider === "distil_whisper") {
           setSelectedModelId("distil-large-v3.5");
+        } else {
+          // whisper (the shipped default) and any unrecognized/legacy value
+          // fall back to the fast local default, which is the only whisper
+          // option this step offers.
+          setSelectedModelId("base.en");
         }
+        setHotkeyMode(
+          settings.transcription.dictationHandsFreeEnabled
+            ? "hands_free"
+            : settings.transcription.dictationPushToTalk
+              ? "hold_to_talk"
+              : "toggle"
+        );
       })
       .catch(() => {
         // Keep defaults if onboarding loads before settings are ready.
@@ -336,7 +438,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       return true;
     }
     const revoked = PERMISSION_GATES.find(
-      (gate) => gate.ready(previous) === true && gate.ready(fresh) !== true
+      (gate) => !gate.optional && gate.ready(previous) === true && gate.ready(fresh) !== true
     );
     if (!revoked) {
       setPermissionRevocation(null);
@@ -438,31 +540,66 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     }
   }, []);
 
+  // The sidecar reports real download progress as ["providerType", percent]
+  // (see download_asr_models in rust-sidecar/src/lib.rs); wire it up instead
+  // of showing only an indeterminate spinner for the whole download.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listen<[AsrProviderType, number]>("asr-download-progress", (event) => {
+      const [providerType, percent] = event.payload;
+      if (providerType !== downloadingProviderTypeRef.current) {
+        return;
+      }
+      setDownloadPercent(percent);
+    }).then((fn) => {
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   const startModelDownload = useCallback(async (modelId?: string) => {
+    const option =
+      POWER_MODEL_OPTIONS.find((candidate) => candidate.id === modelId) ?? POWER_MODEL_OPTIONS[0];
     setModelState("downloading");
     setModelError(null);
+    setDownloadPercent(0);
+    downloadingProviderTypeRef.current = option.providerType;
     try {
-      const selected = modelId ?? "distil-large-v3.5";
       const settings = await getSettings();
-      const providerType: AsrProviderType =
-        selected === "moonshine-base"
-          ? "moonshine"
-          : selected === "parakeet-tdt-0.6b-v3"
-            ? "parakeet"
-            : "distil_whisper";
-      await downloadAsrModels(providerType);
+      await downloadAsrModels(option.providerType);
       settings.transcription.useSharedAsrSelection = false;
-      settings.transcription.defaultProvider = providerType;
-      settings.transcription.selectedModelId = selected;
-      settings.transcription.dictationProvider = providerType;
-      settings.transcription.dictationModelId = selected;
+      settings.transcription.defaultProvider = option.providerType;
+      settings.transcription.selectedModelId = option.id;
+      settings.transcription.dictationProvider = option.providerType;
+      settings.transcription.dictationModelId = option.id;
       await saveSettings(settings);
       setModelState("done");
     } catch (error) {
       setModelState("error");
       setModelError(error instanceof Error ? error.message : String(error));
+    } finally {
+      downloadingProviderTypeRef.current = null;
     }
   }, []);
+
+  // Skipping this step (Continue or "Skip for now" without ever downloading)
+  // would otherwise leave the persisted default route (whisper/base.en)
+  // permanently un-fetched, since nothing else in the app auto-downloads it.
+  // Kick off the fast default in the background so dictation has something
+  // ready even for users who skip past this step entirely.
+  const ensureDefaultModelDownloading = useCallback(() => {
+    if (modelState === "idle" || modelState === "error") {
+      void startModelDownload("base.en");
+    }
+  }, [modelState, startModelDownload]);
 
   const persistDictationStep = useCallback(async () => {
     setSaveBusy(true);
@@ -471,9 +608,6 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       const settings = await getSettings();
       settings.shortcuts.toggleDictation = normalizeShortcut(shortcutValue);
       settings.shortcuts.toggleDictationAlternates = [];
-      // v1 is toggle-only, so both push-to-talk and hands-free stay off.
-      settings.transcription.dictationPushToTalk = false;
-      settings.transcription.dictationHandsFreeEnabled = false;
       settings.transcription.dictationAutoRequestPermissions = autoRequestPermissions;
       await saveSettings(settings);
       return true;
@@ -561,6 +695,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       }
     }
 
+    if (step === "dictation-model") {
+      ensureDefaultModelDownloading();
+    }
+
     if (step === "hotkey") {
       const saved = await persistDictationStep();
       if (!saved) {
@@ -617,13 +755,21 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
-      <div className="relative flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col gap-6 overflow-y-auto rounded-2xl border border-border bg-card/95 p-8 text-card-foreground shadow-2xl">
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onKeyDown={trapDialogFocus}
+        className="relative flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col gap-6 overflow-y-auto rounded-2xl border border-border bg-card/95 p-8 text-card-foreground shadow-2xl"
+      >
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0 space-y-1">
             <p className="rubric">
               {mode === "meetings" ? "MEETINGS" : mode === "dictation" ? "DICTATION" : "ONBOARDING"}
             </p>
-            <h2 className="font-serif text-xl font-semibold text-card-foreground">
+            <h2 id={titleId} className="font-serif text-xl font-semibold text-card-foreground">
               {mode === "meetings" ? "Set Up Meetings" : mode === "dictation" ? "Fix Dictation Setup" : "Getting Started"}
             </h2>
             <p className="text-sm text-muted-foreground">{subtitle}</p>
@@ -674,6 +820,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
           <DictationModelStep
             state={modelState}
             error={modelError}
+            percent={downloadPercent}
             selectedId={selectedModelId}
             onSelect={setSelectedModelId}
             onDownload={() => void startModelDownload(selectedModelId)}
@@ -730,7 +877,12 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             {mode === "full" && step !== "welcome" ? (
               <Button
                 variant="ghost"
-                onClick={() => completeWizard({ markOnboardingComplete: true, meetingsCompleted: false })}
+                onClick={() => {
+                  if (step === "dictation-model") {
+                    ensureDefaultModelDownloading();
+                  }
+                  completeWizard({ markOnboardingComplete: true, meetingsCompleted: false });
+                }}
                 className="text-muted-foreground"
               >
                 Skip for now
@@ -870,7 +1022,8 @@ function PermissionsStep({
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
         Grant these in order. Microphone first so Plainsong can hear you, then the
-        cursor-control grant so it can insert your spoken words into other apps.
+        cursor-control grant so it can insert your spoken words into other apps. Speech
+        recognition is optional -- it's only used by Apple's native fallback route.
       </p>
 
       {revocationNotice ? (
@@ -911,6 +1064,7 @@ function PermissionsStep({
               purpose={gate.purpose}
               icon={PERMISSION_GATE_ICONS[gate.key]}
               ready={gate.ready(perms)}
+              optional={gate.optional}
               loading={gate.key === "microphone" ? loading : loading || requestBusy}
               onFix={() => onOpenPermissionSettings(gate.section, gate.settingsLabel)}
               registerRef={(node) => registerCardRef(gate.key, node)}
@@ -969,6 +1123,7 @@ function PermRow({
   purpose,
   icon,
   ready,
+  optional,
   loading,
   onFix,
   registerRef,
@@ -978,6 +1133,7 @@ function PermRow({
   purpose: string;
   icon: ReactNode;
   ready: boolean | undefined;
+  optional?: boolean;
   loading: boolean;
   onFix(): void;
   registerRef(node: HTMLDivElement | null): void;
@@ -994,7 +1150,14 @@ function PermRow({
         </span>
         <span className="mt-0.5 shrink-0 text-muted-foreground">{icon}</span>
         <div className="min-w-0">
-          <span className="text-sm font-medium">{label}</span>
+          <span className="text-sm font-medium">
+            {label}
+            {optional ? (
+              <span className="ml-1.5 rounded-full bg-muted px-1.5 py-0.5 text-[0.65rem] font-normal text-muted-foreground">
+                Optional
+              </span>
+            ) : null}
+          </span>
           <p className="text-xs text-muted-foreground">{purpose}</p>
         </div>
       </div>
@@ -1005,7 +1168,7 @@ function PermRow({
           <span className="neume neume-lit" aria-hidden="true" />
         ) : (
           <>
-            <span className="neume neume-rust" aria-hidden="true" />
+            <span className={optional ? "neume neume-hollow" : "neume neume-rust"} aria-hidden="true" />
             <Button
               variant="outline"
               size="sm"
@@ -1025,20 +1188,24 @@ function PermRow({
 function DictationModelStep({
   state,
   error,
+  percent,
   selectedId,
   onSelect,
   onDownload,
 }: {
   state: "idle" | "downloading" | "done" | "error";
   error: string | null;
+  percent: number | null;
   selectedId: string;
   onSelect(id: string): void;
   onDownload(): void;
 }) {
+  const selectedOption = POWER_MODEL_OPTIONS.find((option) => option.id === selectedId);
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Set up the actual local dictation route Plainsong will use for solo work. Distil Whisper is the recommended default.
+        Set up the local dictation route Plainsong will use for solo work. Whisper base.en is the
+        fast default already shipped with the app; the others below are accuracy upgrades.
       </p>
 
       <div className="space-y-2">
@@ -1058,7 +1225,15 @@ function DictationModelStep({
             }`}
           >
             <div>
-              <p className="text-sm font-medium">{option.label}</p>
+              <p className="text-sm font-medium">
+                {option.label}
+                {option.recommended ? (
+                  <span className="ml-1.5 inline-flex items-center gap-1 text-xs font-medium text-foreground">
+                    <span className="neume neume-lit" aria-hidden="true" />
+                    Fast default
+                  </span>
+                ) : null}
+              </p>
               <p className="text-xs text-muted-foreground">{option.desc}</p>
             </div>
             <span className="text-xs text-muted-foreground">{option.size}</span>
@@ -1069,14 +1244,18 @@ function DictationModelStep({
       {state === "idle" ? (
         <Button id="download-model-btn" onClick={onDownload} className="gap-2">
           <Download className="h-4 w-4" />
-          Download {POWER_MODEL_OPTIONS.find((option) => option.id === selectedId)?.label}
+          Download {selectedOption?.label}
         </Button>
       ) : null}
 
       {state === "downloading" ? (
-        <div className="flex items-center gap-3 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          Downloading local model…
+        <div className="space-y-2">
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Downloading {selectedOption?.label}
+            {percent !== null ? ` — ${Math.round(percent)}%` : "…"}
+          </div>
+          <Progress value={percent} className="h-2" />
         </div>
       ) : null}
 
@@ -1100,7 +1279,9 @@ function DictationModelStep({
       ) : null}
 
       <p className="text-xs text-muted-foreground">
-        You can keep moving even if you want to configure models later in Setup or Settings → ASR / Providers.
+        You can keep moving without downloading here -- Plainsong will fetch the fast default
+        (Whisper base.en) in the background so dictation still works. Change models later in
+        Setup or Settings → ASR / Providers.
       </p>
     </div>
   );
@@ -1160,10 +1341,11 @@ function HotkeyStep({
       <div className="space-y-2 rounded-lg border border-border p-3">
         <p className="rubric-muted text-[0.65rem]">Hotkey behavior</p>
         <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-foreground">
-          Toggle{" "}
-          <span className="text-muted-foreground">
-            — press to start, press again to stop
-          </span>
+          {HOTKEY_MODE_LABELS[hotkeyMode].name}{" "}
+          <span className="text-muted-foreground">— {HOTKEY_MODE_LABELS[hotkeyMode].hint}</span>
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Change this in Settings → Dictation if you want a different behavior.
         </p>
       </div>
 
