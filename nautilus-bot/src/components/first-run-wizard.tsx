@@ -297,6 +297,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [selectedModelId, setSelectedModelId] = useState("base.en");
   const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
   const downloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
+  // Captures whatever dictation provider was already persisted at mount, so
+  // ensureDefaultModelDownloading can tell "nothing configured yet" apart
+  // from "user already has a different, working route" -- see its comment.
+  const initialDictationProviderRef = useRef<string | null>(null);
 
   const [shortcutValue, setShortcutValue] = useState(defaultDictationShortcut());
   // Hold-to-talk and hands-free are real, working modes configured from
@@ -370,6 +374,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             ? "audio_and_transcript"
             : "audio_only"
         );
+        initialDictationProviderRef.current = settings.transcription.dictationProvider ?? null;
         if (settings.transcription.dictationProvider === "moonshine") {
           setSelectedModelId("moonshine-base");
         } else if (settings.transcription.dictationProvider === "parakeet") {
@@ -595,7 +600,22 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   // permanently un-fetched, since nothing else in the app auto-downloads it.
   // Kick off the fast default in the background so dictation has something
   // ready even for users who skip past this step entirely.
+  //
+  // But only do this when the user doesn't already have a different,
+  // previously-configured dictation route (e.g. parakeet, distil_whisper,
+  // macos_apple_speech). Someone who opens "Fix dictation setup" for an
+  // unrelated reason (a hotkey conflict, say) and just clicks through this
+  // step must not have their working provider silently downgraded/overwritten
+  // to whisper/base.en. If nothing but the shipped default was ever
+  // configured, downloading base.en in the background is a safe no-op for
+  // provider selection and is the only way dictation ends up with a
+  // downloaded model at all.
   const ensureDefaultModelDownloading = useCallback(() => {
+    const existingProvider = initialDictationProviderRef.current;
+    const hasExistingNonDefaultRoute = Boolean(existingProvider) && existingProvider !== "whisper";
+    if (hasExistingNonDefaultRoute) {
+      return;
+    }
     if (modelState === "idle" || modelState === "error") {
       void startModelDownload("base.en");
     }
@@ -902,7 +922,23 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             ) : null}
           </div>
           {step !== "welcome" || mode !== "full" ? (
-            <Button onClick={() => void nextStep()} disabled={saveBusy || permissionRequestBusy || modelState === "downloading" || meetingSetupLoading}>
+            <Button
+              onClick={() => void nextStep()}
+              disabled={
+                saveBusy ||
+                permissionRequestBusy ||
+                // Only block Continue for a download in progress while the
+                // user is still on the model step itself (the visible,
+                // foreground download). Once ensureDefaultModelDownloading
+                // kicks off the background base.en fetch on advancing past
+                // this step, later steps (hotkey, meeting-setup) must stay
+                // usable -- this copy promises "you can keep moving without
+                // downloading here", and dictation-repair mode has no "Skip
+                // for now" escape hatch to fall back on.
+                (modelState === "downloading" && step === "dictation-model") ||
+                meetingSetupLoading
+              }
+            >
               {saveBusy || meetingSetupLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               {nextLabel}
               <ChevronRight className="ml-1 h-4 w-4" />
