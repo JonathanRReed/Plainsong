@@ -313,7 +313,7 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findAllByText("Capture and transcription");
+    await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
 
     // AudioSettings.autoGainControl / manualGainDb (and the other audio-tuning
     // fields) were removed from the backend schema; the paired controls must
@@ -422,7 +422,7 @@ describe("SettingsView performance behavior", () => {
     });
 
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findAllByText("Capture and transcription");
+    await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
 
     const hotkeySelect = await screen.findByLabelText("Hotkey behavior");
     expect(hotkeySelect.tagName).toBe("SELECT");
@@ -463,7 +463,7 @@ describe("SettingsView performance behavior", () => {
     });
 
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findAllByText("Capture and transcription");
+    await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
 
     const hotkeySelect = await screen.findByLabelText("Hotkey behavior");
     expect(hotkeySelect.tagName).toBe("SELECT");
@@ -501,7 +501,7 @@ describe("SettingsView performance behavior", () => {
     });
 
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findAllByText("Capture and transcription");
+    await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
 
     const hotkeySelect = await screen.findByLabelText("Hotkey behavior");
     fireEvent.change(hotkeySelect, { target: { value: "hands_free" } });
@@ -530,7 +530,7 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findAllByText("Capture and transcription");
+    await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
 
     await waitFor(() => {
       expect(backend.isSileroVadModelDownloaded).toHaveBeenCalled();
@@ -571,7 +571,7 @@ describe("SettingsView performance behavior", () => {
 
     await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
     fireEvent.click(screen.getByText("Transcription"));
-    await screen.findAllByText("Capture and transcription");
+    await screen.findByText(/Choose how Plainsong transcribes dictation and meetings/);
 
     const energyOption = await screen.findByText("Energy-threshold");
     expect(energyOption.className).toContain("border-rust/40");
