@@ -14,6 +14,7 @@ export {
   listAudioInputDevices,
   openRecordingAudio,
   renameRecording,
+  retranscribeRecording,
   retryMeetingAutoName,
   setRecordingSourceType,
   startRecording,

@@ -30,6 +30,7 @@ import {
   getRecording,
   openRecordingAudio,
   renameRecording,
+  retranscribeRecording,
   retryMeetingAutoName,
   setRecordingSourceType,
   updateMeetingChatMessages,
@@ -905,6 +906,7 @@ export function RecordingsView() {
     meetingProcessingStartedAt?: string | null;
     transcriptFirstAvailableAt?: string | null;
     consentPromptShown?: boolean | null;
+    degraded?: boolean | null;
   };
 
   useEffect(() => {
@@ -1250,6 +1252,17 @@ export function RecordingsView() {
 
       if (payload.status === "completed" || payload.status === "error") {
         void refetch();
+      }
+
+      // A completed meeting can still carry a degraded-transcript note (a
+      // chunk or an entire audio source failed but the rest of the meeting
+      // was kept) — without this, that note never reaches the user and the
+      // meeting looks like every other "completed" row.
+      if (payload.status === "completed" && (payload.degraded || payload.message)) {
+        toast(
+          payload.message ?? "This meeting's transcript may be incomplete.",
+          "info"
+        );
       }
     }).then((fn) => {
       unlisten = fn;
@@ -2247,6 +2260,20 @@ export function RecordingsView() {
     );
   };
 
+  const handleRetranscribeRecording = async (recordingIdToRetry: string) => {
+    try {
+      await retranscribeRecording(recordingIdToRetry);
+      setRecordingStatusOverrides((current) => ({
+        ...current,
+        [recordingIdToRetry]: "processing",
+      }));
+      toast("Re-transcribing meeting.", "success");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to re-transcribe meeting.";
+      toast(message, "error");
+    }
+  };
+
   const handleMarkAsDictation = async (recordingIdToUpdate: string) => {
     try {
       await setRecordingSourceType(recordingIdToUpdate, "dictation");
@@ -2758,6 +2785,17 @@ export function RecordingsView() {
                               <FileOutput className="h-4 w-4 mr-2" />
                               View Details
                             </DropdownMenuItem>
+                            {recording.status === "error" && (
+                              <DropdownMenuItem
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  await handleRetranscribeRecording(recording.id);
+                                }}
+                              >
+                                <RefreshCw className="h-4 w-4 mr-2" />
+                                Retry Transcription
+                              </DropdownMenuItem>
+                            )}
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               onClick={async (e) => {
@@ -4138,6 +4176,29 @@ export function RecordingsView() {
                             Share the notice before distributing this capture.
                           </span>
                         ) : null}
+                      </div>
+                    </div>
+                  ) : selectedRecording?.status === "error" ? (
+                    <div className="max-w-md rounded-lg border bg-muted/20 p-4 text-sm text-muted-foreground">
+                      <p className="font-medium text-foreground">
+                        Transcription failed
+                      </p>
+                      <p className="mt-2 leading-relaxed">
+                        This meeting's transcript could not be produced. The audio is still on
+                        disk, so you can retry transcription from scratch.
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            selectedRecording && void handleRetranscribeRecording(selectedRecording.id)
+                          }
+                        >
+                          <RefreshCw className="mr-2 h-4 w-4" />
+                          Retry transcription
+                        </Button>
                       </div>
                     </div>
                   ) : (
