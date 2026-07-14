@@ -98,7 +98,6 @@ import {
   normalizeShortcutAccelerator,
   SHORTCUT_FIELD_PRECEDENCE,
 } from "../../../electron/shortcut-registration";
-import { listen } from "@/lib/electron";
 import { ONBOARDING_STORAGE_KEY, requestOnboarding } from "@/lib/onboarding";
 import { requestMainView } from "@/lib/navigation";
 import {
