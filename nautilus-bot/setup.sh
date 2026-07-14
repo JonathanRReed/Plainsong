@@ -1,7 +1,7 @@
 #!/bin/bash
 
 echo "====================================="
-echo "Nautilus Bot Setup"
+echo "Plainsong Setup"
 echo "====================================="
 echo ""
 
@@ -34,7 +34,7 @@ fi
 echo ""
 echo "Compiling Electron and sidecar entry points..."
 bun run electron:compile
-cargo build --manifest-path rust-sidecar/Cargo.toml --bin nautilus-sidecar
+cargo build --manifest-path rust-sidecar/Cargo.toml --bin plainsong-sidecar
 
 echo ""
 echo "====================================="

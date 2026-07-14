@@ -18,6 +18,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { FirstRunWizard } from "@/components/first-run-wizard";
 import { ToastProvider, useToast } from "@/components/toast";
 import { AppCommandPalette } from "@/components/app-command-palette";
+import { matchNavShortcut } from "@/lib/nav-shortcuts";
 import {
   MEETING_ONBOARDING_STORAGE_KEY,
   ONBOARDING_STORAGE_KEY,
@@ -264,19 +265,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const SHORTCUT_VIEWS: Record<string, ViewId> = {
-      h: "dashboard",
-      d: "dictation",
-      m: "recordings",
-      p: "projects",
-      ",": "settings",
-    };
-
     const handleShortcut = (event: KeyboardEvent) => {
-      if (!event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
-        return;
-      }
-
       const target = event.target as HTMLElement | null;
       if (
         target &&
@@ -288,13 +277,13 @@ function App() {
         return;
       }
 
-      const view = SHORTCUT_VIEWS[event.key.toLowerCase()];
+      const view = matchNavShortcut(event);
       if (!view) {
         return;
       }
 
       event.preventDefault();
-      setActiveView(view);
+      setActiveView(view as ViewId);
     };
 
     window.addEventListener("keydown", handleShortcut);

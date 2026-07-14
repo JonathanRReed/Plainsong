@@ -62,6 +62,25 @@ describe("startNativeMacosShortcutController", () => {
     expect(spawnHelper).not.toHaveBeenCalled();
   });
 
+  it("does not spawn the helper when the dictation shortcut was explicitly cleared", () => {
+    const spawnHelper = vi.fn();
+
+    const controller = startNativeMacosShortcutController({
+      platform: "darwin",
+      helperPath: "/tmp/plainsong-native-shortcut-helper",
+      shortcut: "",
+      helperExists: () => true,
+      spawnHelper,
+      onEvent: vi.fn(),
+    });
+
+    expect(controller.status).toEqual({
+      available: false,
+      reason: "shortcut_disabled",
+    });
+    expect(spawnHelper).not.toHaveBeenCalled();
+  });
+
   it("reports helper unavailable when the macOS helper is missing", () => {
     const spawnHelper = vi.fn();
 
@@ -196,6 +215,27 @@ describe("startNativeMacosShortcutController", () => {
       reason: "helper_unavailable",
     });
     expect(onUnavailable).toHaveBeenCalledWith(controller.status);
+  });
+
+  it("ignores a stale crash-exit that fires after the controller was disposed", () => {
+    const child = createNativeShortcutTestChild();
+    const onUnavailable = vi.fn();
+
+    const controller = startNativeMacosShortcutController({
+      platform: "darwin",
+      helperPath: "/tmp/plainsong-native-shortcut-helper",
+      helperExists: () => true,
+      spawnHelper: () => child,
+      onEvent: vi.fn(),
+      onUnavailable,
+    });
+
+    controller.dispose();
+    // A queued crash-exit from the old helper must not report unavailability
+    // (which would clobber the state of a freshly spawned replacement).
+    child.emitExit(1, null);
+
+    expect(onUnavailable).not.toHaveBeenCalled();
   });
 
   it("reports helper unavailability once when error and exit both fire", () => {

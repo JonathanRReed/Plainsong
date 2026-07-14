@@ -32,6 +32,7 @@ let relevantFlags: CGEventFlags = [
 
 var configuredShortcut: Shortcut?
 var shortcutIsDown = false
+var activeEventTap: CFMachPort?
 
 func emit(type: String, key: String) {
   let payload: [String: String] = ["type": type, "key": key]
@@ -108,7 +109,14 @@ func shortcutMatches(event: CGEvent, shortcut: Shortcut) -> Bool {
   if keyCode != shortcut.keyCode {
     return false
   }
-  return event.flags.intersection(relevantFlags) == shortcut.flags
+  var eventFlags = event.flags.intersection(relevantFlags)
+  // Arrow, Home/End/PageUp, and fn-row keys always carry the SecondaryFn flag
+  // on Apple keyboards. Ignore it unless the configured shortcut explicitly
+  // requires the fn modifier, so e.g. Cmd+Shift+Up can still match.
+  if !shortcut.flags.contains(.maskSecondaryFn) {
+    eventFlags.remove(.maskSecondaryFn)
+  }
+  return eventFlags == shortcut.flags
 }
 
 func callback(
@@ -117,12 +125,33 @@ func callback(
   event: CGEvent,
   refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
+  // macOS disables the tap (and stops delivering key events) after a timeout
+  // or on user input under load, e.g. across sleep/wake. Re-enable it so the
+  // hotkey does not silently die while this helper process stays alive.
+  if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+    if shortcutIsDown {
+      // Any key-up during the outage was lost; release the hold so a
+      // hold-to-talk recording does not run forever.
+      shortcutIsDown = false
+      if let shortcut = configuredShortcut {
+        emit(type: "up", key: shortcut.keyLabel)
+      }
+    }
+    if let tap = activeEventTap {
+      CGEvent.tapEnable(tap: tap, enable: true)
+      fputs("Event tap was disabled by macOS; re-enabled.\n", stderr)
+    }
+    return Unmanaged.passUnretained(event)
+  }
+
   guard let shortcut = configuredShortcut else {
     return Unmanaged.passUnretained(event)
   }
 
   let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-  if type == .keyDown && keyCode == keyCodes["ESCAPE"] {
+  if type == .keyDown && keyCode == keyCodes["ESCAPE"]
+    && event.flags.intersection(relevantFlags).isEmpty
+    && event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
     emit(type: "down", key: "Escape")
     return Unmanaged.passUnretained(event)
   }
@@ -152,13 +181,15 @@ func argumentValue(_ name: String) -> String? {
   return args[index + 1]
 }
 
-let shortcutValue = argumentValue("--shortcut") ?? "Ctrl+Alt+Cmd+D"
+let shortcutValue = argumentValue("--shortcut") ?? "Cmd+Shift+Space"
 guard let parsedShortcut = parseShortcut(shortcutValue) else {
   fputs("Invalid shortcut: \(shortcutValue)\n", stderr)
   exit(1)
 }
 configuredShortcut = parsedShortcut
 
+// tapDisabledByTimeout/tapDisabledByUserInput are delivered to the callback
+// regardless of this mask, so it only needs the key events.
 let mask = CGEventMask(1 << CGEventType.keyDown.rawValue) |
   CGEventMask(1 << CGEventType.keyUp.rawValue)
 
@@ -174,6 +205,7 @@ guard let eventTap = CGEvent.tapCreate(
   exit(2)
 }
 
+activeEventTap = eventTap
 let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
 CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
 CGEvent.tapEnable(tap: eventTap, enable: true)

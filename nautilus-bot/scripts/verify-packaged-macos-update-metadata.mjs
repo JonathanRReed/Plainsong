@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const args = process.argv.slice(2);
+
+// --pack-only: verify a `--dir` (electron:pack) build, which has app-update.yml
+// but no latest-mac.yml / zip / blockmap artifacts. Used by the CI package gate.
+const packOnly = args.includes("--pack-only");
 
 function valueFor(name, fallback = null) {
   const index = args.indexOf(name);
@@ -63,6 +68,7 @@ function renderMarkdown(artifact) {
 
 Status: ${artifact.pass ? "PASS" : "FAIL"}
 Owner: qa-macos
+Mode: ${artifact.mode}
 Generated: ${artifact.generatedAt}
 
 ## Command
@@ -76,9 +82,11 @@ Generated: ${artifact.generatedAt}
 - Update provider: ${artifact.updateConfig.provider ?? "missing"}
 - GitHub owner: ${artifact.updateConfig.owner ?? "missing"}
 - GitHub repo: ${artifact.updateConfig.repo ?? "missing"}
-- Manifest version: ${artifact.latest.version ?? "missing"}
+- Stable channel requests: ${artifact.stableChannel?.requestedManifest ?? "missing"}
+- Published channel file: ${artifact.stableChannel?.publishedManifest ?? "missing"}
+- Manifest version: ${artifact.latest?.version ?? "missing"}
 - Package version: ${artifact.packageVersion ?? "missing"}
-- ZIP artifact: ${artifact.latest.zipPath ?? "missing"}
+- ZIP artifact: ${artifact.latest?.zipPath ?? "missing"}
 - ZIP SHA-512 matches manifest: ${artifact.checks.zipSha512MatchesManifest ? "yes" : "no"}
 - ZIP size matches manifest: ${artifact.checks.zipSizeMatchesManifest ? "yes" : "no"}
 - Blockmap exists: ${artifact.checks.blockmapExists ? "yes" : "no"}
@@ -102,18 +110,43 @@ function writeArtifact(artifact) {
 try {
   const packageJson = JSON.parse(readRequired(packageJsonPath, "package.json"));
   const appUpdate = readRequired(appUpdatePath, "packaged app-update.yml");
-  const latest = readRequired(latestPath, "latest mac manifest");
-  const zipName = scalarValue(latest, "path") ?? firstFileUrl(latest);
+
+  // The manifest filename the shipped app requests for the default (stable)
+  // channel, resolved through the same compiled module the packaged main
+  // process uses. electron-builder publishes `latest-mac.yml` for stable
+  // releases, so any drift here is the stable-channel
+  // ERR_UPDATER_CHANNEL_FILE_NOT_FOUND bug this check exists to catch.
+  const require = createRequire(import.meta.url);
+  let requestedStableManifest = null;
+  try {
+    const { updaterChannelManifestFilename } = require(
+      path.join(repoRoot, "dist-electron", "updater-channel.js")
+    );
+    requestedStableManifest = updaterChannelManifestFilename("stable", "darwin");
+  } catch {
+    // Left null: stableChannelResolverLoaded fails below. Run
+    // `bun run build:electron` first so dist-electron/updater-channel.js exists.
+  }
+  const publishedChannel = scalarValue(appUpdate, "channel") ?? "latest";
+  const publishedStableManifest = `${publishedChannel}-mac.yml`;
+
+  const latest = packOnly ? null : readRequired(latestPath, "latest mac manifest");
+  const zipName = latest ? (scalarValue(latest, "path") ?? firstFileUrl(latest)) : null;
   const zipPath = zipName ? path.join(path.dirname(latestPath), zipName) : null;
   const blockmapPath = zipPath ? `${zipPath}.blockmap` : null;
-  const expectedSha512 = scalarValue(latest, "sha512") ?? firstIndentedScalarValue(latest, "sha512");
-  const expectedSizeRaw = scalarValue(latest, "size") ?? firstIndentedScalarValue(latest, "size");
+  const expectedSha512 = latest
+    ? (scalarValue(latest, "sha512") ?? firstIndentedScalarValue(latest, "sha512"))
+    : null;
+  const expectedSizeRaw = latest
+    ? (scalarValue(latest, "size") ?? firstIndentedScalarValue(latest, "size"))
+    : null;
   const expectedSize = Number(expectedSizeRaw);
   const actualSize = zipPath && fs.existsSync(zipPath) ? fs.statSync(zipPath).size : null;
   const actualSha512 = zipPath && fs.existsSync(zipPath) ? sha512Base64(zipPath) : null;
 
   const artifact = {
     generatedAt: new Date().toISOString(),
+    mode: packOnly ? "pack-only" : "full",
     pass: false,
     paths: {
       app: appPath,
@@ -127,37 +160,54 @@ try {
       repo: scalarValue(appUpdate, "repo"),
       updaterCacheDirName: scalarValue(appUpdate, "updaterCacheDirName"),
     },
-    latest: {
-      version: scalarValue(latest, "version"),
-      releaseDate: scalarValue(latest, "releaseDate"),
-      zipName,
-      zipPath,
-      expectedSha512,
-      actualSha512,
-      expectedSize: expectedSizeRaw && Number.isFinite(expectedSize) ? expectedSize : null,
-      actualSize,
-      blockmapPath,
+    stableChannel: {
+      requestedManifest: requestedStableManifest,
+      publishedManifest: publishedStableManifest,
     },
+    latest: latest
+      ? {
+          version: scalarValue(latest, "version"),
+          releaseDate: scalarValue(latest, "releaseDate"),
+          zipName,
+          zipPath,
+          expectedSha512,
+          actualSha512,
+          expectedSize: expectedSizeRaw && Number.isFinite(expectedSize) ? expectedSize : null,
+          actualSize,
+          blockmapPath,
+        }
+      : null,
     checks: {},
   };
 
   artifact.checks = {
     appUpdateMetadataExists: fs.existsSync(appUpdatePath),
-    latestManifestExists: fs.existsSync(latestPath),
     providerIsGithub: artifact.updateConfig.provider === "github",
     ownerConfigured: Boolean(artifact.updateConfig.owner),
     repoConfigured: Boolean(artifact.updateConfig.repo),
-    versionMatchesPackage: artifact.latest.version === artifact.packageVersion,
-    zipPathPresent: Boolean(zipPath),
-    zipArtifactExists: Boolean(zipPath && fs.existsSync(zipPath)),
-    zipSha512Present: Boolean(expectedSha512),
-    zipSha512MatchesManifest: Boolean(expectedSha512 && actualSha512 === expectedSha512),
-    zipSizePresent: Boolean(expectedSizeRaw && Number.isFinite(expectedSize)),
-    zipSizeMatchesManifest: Boolean(
-      expectedSizeRaw && Number.isFinite(expectedSize) && actualSize === expectedSize
-    ),
-    blockmapExists: Boolean(blockmapPath && fs.existsSync(blockmapPath)),
+    stableChannelResolverLoaded: Boolean(requestedStableManifest),
+    stableChannelRequestsPublishedManifest:
+      requestedStableManifest === publishedStableManifest,
   };
+  if (!packOnly) {
+    Object.assign(artifact.checks, {
+      latestManifestExists: fs.existsSync(latestPath),
+      stableChannelManifestEmitted:
+        Boolean(requestedStableManifest) &&
+        path.basename(latestPath) === requestedStableManifest &&
+        fs.existsSync(latestPath),
+      versionMatchesPackage: artifact.latest.version === artifact.packageVersion,
+      zipPathPresent: Boolean(zipPath),
+      zipArtifactExists: Boolean(zipPath && fs.existsSync(zipPath)),
+      zipSha512Present: Boolean(expectedSha512),
+      zipSha512MatchesManifest: Boolean(expectedSha512 && actualSha512 === expectedSha512),
+      zipSizePresent: Boolean(expectedSizeRaw && Number.isFinite(expectedSize)),
+      zipSizeMatchesManifest: Boolean(
+        expectedSizeRaw && Number.isFinite(expectedSize) && actualSize === expectedSize
+      ),
+      blockmapExists: Boolean(blockmapPath && fs.existsSync(blockmapPath)),
+    });
+  }
   artifact.pass = Object.values(artifact.checks).every(Boolean);
 
   writeArtifact(artifact);
@@ -165,6 +215,7 @@ try {
 } catch (error) {
   const artifact = {
     generatedAt: new Date().toISOString(),
+    mode: packOnly ? "pack-only" : "full",
     pass: false,
     error: error instanceof Error ? error.message : String(error),
     paths: {

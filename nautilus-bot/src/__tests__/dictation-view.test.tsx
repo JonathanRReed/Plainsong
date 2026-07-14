@@ -7,6 +7,14 @@ const speechSynthesisMock = {
   cancel: vi.fn(),
 };
 
+const toast = vi.fn();
+
+vi.mock("@/components/toast", () => ({
+  useToast: () => ({
+    toast,
+  }),
+}));
+
 const backendMocks = vi.hoisted(() => ({
   eventListeners: new Map<string, (event: { payload: any }) => void>(),
   saveSettings: vi.fn(async () => {}),

@@ -377,18 +377,10 @@ export function RecordingPopup() {
     }
   }, []);
 
-  // The HUD persists until explicit dismissal (it never vanishes on click-away);
-  // Escape is the canonical dismissal for a floating panel (Apple HIG).
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        void hidePopup();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [hidePopup]);
+  // Note: no in-window Escape handler — the overlay window is created with
+  // focusable: false and shown via showInactive() (electron/windows.ts), so
+  // it never receives keyboard focus and a document-level keydown listener
+  // could never fire. Dismissal is via the close button.
 
   const openMainApp = async (
     view?: "recordings" | "settings",

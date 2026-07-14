@@ -39,10 +39,11 @@ describe("Sidebar collapsed layout", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Dictation.*⌘\+D/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Meetings.*⌘\+M/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Projects.*⌘\+P/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Settings.*⌘\+,/ }));
+    // jsdom reports a non-mac platform, so labels use Ctrl.
+    fireEvent.click(screen.getByRole("button", { name: /Dictation.*Ctrl\+D/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Meetings.*Ctrl\+Shift\+M/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Projects.*Ctrl\+P/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Settings.*Ctrl\+,/ }));
 
     const more = screen.getByRole("button", { name: "More" });
     expect(more).toHaveAttribute("aria-expanded", "false");

@@ -12,7 +12,7 @@ type NativeShortcutEvent = {
 
 export type NativeShortcutStatus = {
   available: boolean;
-  reason: "unsupported_platform" | "helper_unavailable" | null;
+  reason: "unsupported_platform" | "helper_unavailable" | "shortcut_disabled" | null;
 };
 
 export type NativeShortcutController = {
@@ -20,7 +20,11 @@ export type NativeShortcutController = {
   dispose: () => void;
 };
 
-export const DEFAULT_NATIVE_MACOS_DICTATION_SHORTCUT = "Ctrl+Alt+Cmd+D";
+// Matches the product default the sidecar's normalize_keyboard_shortcuts
+// applies (Cmd+Shift+Space on macOS). Used only when settings carry no
+// dictation shortcut at all; an explicitly cleared ("") shortcut disables the
+// helper instead of silently falling back to this.
+export const DEFAULT_NATIVE_MACOS_DICTATION_SHORTCUT = "Cmd+Shift+Space";
 
 const MACOS_SYMBOL_SHORTCUT_TOKENS = /[⌘⌃⌥⇧]/g;
 
