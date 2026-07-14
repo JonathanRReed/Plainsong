@@ -936,17 +936,6 @@ export async function runDiarization(recordingId: string): Promise<DiarizationRe
   return await invoke("run_diarization", { recordingId });
 }
 
-export interface DiarizationModelOption {
-  id: string;
-  label: string;
-  description: string;
-  installed: boolean;
-}
-
-export async function listDiarizationModels(): Promise<DiarizationModelOption[]> {
-  return await invoke("list_diarization_models");
-}
-
 export async function isDiarizationModelAvailable(modelId?: string): Promise<boolean> {
   return await invoke("is_diarization_model_available", { modelId });
 }
