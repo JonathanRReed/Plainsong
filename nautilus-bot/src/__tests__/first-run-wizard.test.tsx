@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FirstRunWizard } from "@/components/first-run-wizard";
 import { MEETING_ONBOARDING_STORAGE_KEY } from "@/lib/onboarding";
+import { listen } from "@/lib/electron";
 import type { AsrProviderInfo } from "@/types";
 
 const providers: AsrProviderInfo[] = [
@@ -208,8 +209,6 @@ describe("FirstRunWizard", () => {
 
   it("completes the full onboarding in dictation-only mode", async () => {
     const onComplete = vi.fn();
-    const backend = await import("@/lib/backend/settings");
-    const saveSettings = vi.mocked(backend.saveSettings);
 
     render(<FirstRunWizard onComplete={onComplete} />);
 
@@ -225,28 +224,34 @@ describe("FirstRunWizard", () => {
       });
     });
 
-    expect(saveSettings).toHaveBeenCalledTimes(1);
     expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+Space");
-    // v1 ships toggle-only, so onboarding always persists toggle (push-to-talk
-    // and hands-free off) regardless of any stale persisted preference.
-    expect(currentSettings.transcription.dictationPushToTalk).toBe(false);
+    // Continuing past the model step without clicking "Download" still fetches
+    // the fast shipped default (whisper/base.en) in the background, so the
+    // persisted dictation route isn't left permanently un-downloaded.
+    await waitFor(() => {
+      expect(currentSettings.transcription.dictationProvider).toBe("whisper");
+    });
+    expect(currentSettings.transcription.dictationModelId).toBe("base.en");
+    // The wizard's hotkey step only manages the shortcut key, not the
+    // interaction mode -- any existing hold-to-talk/hands-free preference
+    // (set from Settings) is left untouched, not silently reset to toggle.
+    expect(currentSettings.transcription.dictationPushToTalk).toBe(true);
     expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
   });
 
-  it("persists toggle hotkey mode from onboarding", async () => {
+  it("reflects the existing hotkey mode instead of resetting it to toggle", async () => {
     const onComplete = vi.fn();
 
     render(<FirstRunWizard mode="dictation" onComplete={onComplete} />);
 
     await clickPrimary(/continue/i);
     await clickPrimary(/continue/i);
-    // v1 ships toggle-only (the single honest mode; hold-to-talk/hands-free need
-    // a native key listener that isn't wired yet), so the hotkey behavior is
-    // shown as a calm static row rather than a one-option dropdown, and
-    // onboarding persists toggle.
+    // Hold-to-talk is a real, working mode configured from Settings (see
+    // settings-view-simple.tsx); the wizard must describe it accurately
+    // instead of assuming everyone is on toggle.
     expect(screen.getByText("Hotkey behavior")).toBeInTheDocument();
     expect(
-      screen.getByText(/press to start, press again to stop/i)
+      screen.getByText(/hold the shortcut to record, release to stop/i)
     ).toBeInTheDocument();
     await clickPrimary(/finish/i);
 
@@ -257,7 +262,8 @@ describe("FirstRunWizard", () => {
       });
     });
 
-    expect(currentSettings.transcription.dictationPushToTalk).toBe(false);
+    // Re-running onboarding must not silently clobber the existing preference.
+    expect(currentSettings.transcription.dictationPushToTalk).toBe(true);
     expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
   });
 
@@ -359,5 +365,119 @@ describe("FirstRunWizard", () => {
     expect(
       screen.getByText("Opened the installed Plainsong app from /Applications.")
     ).toBeInTheDocument();
+  });
+
+  it("reads the Keyboard fallback gate from postEventReady and fixes it via the Accessibility pane", async () => {
+    // collect_permission_diagnostics hardcodes automationReady=false on macOS
+    // forever, so the gate must key off postEventReady (the field that is
+    // actually populated by CGPreflightPostEventAccess) instead.
+    const backend = await import("@/lib/backend/settings");
+    const getPermissionDiagnostics = vi.mocked(backend.getPermissionDiagnostics);
+    const openPermissionSettings = vi.mocked(backend.openPermissionSettings);
+
+    getPermissionDiagnostics.mockResolvedValueOnce({
+      microphoneReady: true,
+      microphonePermissionReady: true,
+      speechRecognitionReady: true,
+      accessibilityReady: true,
+      automationReady: false,
+      postEventReady: true,
+      notes: [],
+      runningFromDiskImage: false,
+    });
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await screen.findByText("Keyboard fallback");
+    // Ready via postEventReady even though the always-false automationReady
+    // would otherwise show a permanent, unfixable red gate.
+    expect(screen.queryByRole("button", { name: "Fix Keyboard fallback" })).not.toBeInTheDocument();
+
+    getPermissionDiagnostics.mockResolvedValueOnce({
+      microphoneReady: true,
+      microphonePermissionReady: true,
+      speechRecognitionReady: true,
+      accessibilityReady: true,
+      automationReady: false,
+      postEventReady: false,
+      notes: [],
+      runningFromDiskImage: false,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Re-check permissions" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Fix Keyboard fallback" }));
+
+    await waitFor(() => {
+      expect(openPermissionSettings).toHaveBeenCalledWith("accessibility");
+    });
+  });
+
+  it("labels Speech recognition as optional instead of a required blocking gate", async () => {
+    const backend = await import("@/lib/backend/settings");
+    const getPermissionDiagnostics = vi.mocked(backend.getPermissionDiagnostics);
+
+    getPermissionDiagnostics.mockResolvedValueOnce({
+      microphoneReady: true,
+      microphonePermissionReady: true,
+      speechRecognitionReady: false,
+      accessibilityReady: true,
+      automationReady: true,
+      postEventReady: true,
+      notes: [],
+      runningFromDiskImage: false,
+    });
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await screen.findByText("Speech recognition");
+    expect(screen.getByText("Optional")).toBeInTheDocument();
+    expect(
+      screen.getByText(/only needed if plainsong falls back to apple's native speech engine/i)
+    ).toBeInTheDocument();
+  });
+
+  it("offers whisper base.en as the pre-selected fast default with real progress", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    let resolveDownload: (() => void) | undefined;
+    downloadAsrModels.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveDownload = resolve; })
+    );
+
+    let progressHandler: ((event: { payload: [string, number] }) => void) | undefined;
+    vi.mocked(listen).mockImplementationOnce(((_event: string, handler: (event: { payload: [string, number] }) => void) => {
+      progressHandler = handler;
+      return Promise.resolve(() => {});
+    }) as typeof listen);
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await clickPrimary(/continue/i);
+
+    const downloadButton = await screen.findByRole("button", { name: /download whisper base\.en/i });
+    await act(async () => {
+      fireEvent.click(downloadButton);
+    });
+
+    expect(progressHandler).toBeDefined();
+    act(() => {
+      progressHandler?.({ payload: ["whisper", 42] });
+    });
+
+    expect(await screen.findByText(/42%/)).toBeInTheDocument();
+
+    // Let the still-open download promise resolve so it doesn't leak into
+    // later tests/act warnings.
+    await act(async () => {
+      resolveDownload?.();
+    });
+  });
+
+  it("renders as an accessible modal dialog", async () => {
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toHaveAttribute("aria-labelledby");
   });
 });
