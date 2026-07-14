@@ -180,6 +180,7 @@ vi.mock("@/lib/backend", () => ({
   renameSpeaker: vi.fn() as any,
   deleteRecording: vi.fn() as any,
   renameRecording: vi.fn() as any,
+  retranscribeRecording: vi.fn() as any,
   retryMeetingAutoName: vi.fn() as any,
   setRecordingSourceType: vi.fn() as any,
   isDiarizationModelAvailable: vi.fn(async () => false) as any,
@@ -353,6 +354,31 @@ describe("RecordingsView", () => {
     });
   });
 
+  it("surfaces a degraded-transcript note when a completed meeting had a failed chunk or source", async () => {
+    render(<RecordingsView />);
+
+    const handler = eventListeners.get("recording-status-changed");
+    expect(handler).toBeTruthy();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          recordingId: "r1",
+          status: "completed",
+          degraded: true,
+          message: "2 of 10 transcription chunk(s) failed; transcript may be incomplete",
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith(
+        "2 of 10 transcription chunk(s) failed; transcript may be incomplete",
+        "info"
+      );
+    });
+  });
+
   it("refreshes the selected meeting from canonical recording data when analysis completes", async () => {
     render(<RecordingsView />);
 
@@ -393,6 +419,49 @@ describe("RecordingsView", () => {
     await waitFor(() => {
       expect(backend.getMeetingTranscriptDetails).toHaveBeenCalledWith("r1");
     });
+  });
+
+  it("offers a retry-transcription entry point in the row menu for meetings stuck in error", async () => {
+    recordings[0] = { ...recordings[0], status: "error" as const };
+    backend.retranscribeRecording.mockResolvedValue(undefined);
+
+    render(<RecordingsView />);
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Recording options" }), {
+      button: 0,
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Retry Transcription" }));
+
+    await waitFor(() => {
+      expect(backend.retranscribeRecording).toHaveBeenCalledWith("r1");
+    });
+  });
+
+  it("offers a retry-transcription entry point in the meeting detail panel when errored", async () => {
+    recordings[0] = { ...recordings[0], status: "error" as const };
+    backend.getRecording.mockResolvedValue({ ...recordings[0] });
+    backend.getTranscript.mockResolvedValueOnce(null);
+    backend.retranscribeRecording.mockResolvedValue(undefined);
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    fireEvent.mouseDown(await screen.findByRole("tab", { name: "Transcript" }), { button: 0 });
+    fireEvent.click(await screen.findByRole("button", { name: "Retry transcription" }));
+
+    await waitFor(() => {
+      expect(backend.retranscribeRecording).toHaveBeenCalledWith("r1");
+    });
+  });
+
+  it("does not offer retry-transcription for a completed meeting", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Recording options" }), {
+      button: 0,
+    });
+    await screen.findByRole("menuitem", { name: "Rename" });
+    expect(screen.queryByRole("menuitem", { name: "Retry Transcription" })).not.toBeInTheDocument();
   });
 
   it("persists edited summary and action item blocks from the notes tab", async () => {

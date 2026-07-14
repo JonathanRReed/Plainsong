@@ -8132,6 +8132,102 @@ mod tests {
     }
 
     #[test]
+    fn dual_source_degradation_note_is_none_when_both_sides_transcribe_cleanly() {
+        let clean = |text: &str| asr::TranscriptionResult {
+            text: text.to_string(),
+            segments: Vec::new(),
+            language: "en".to_string(),
+            confidence: 0.9,
+            processing_time_ms: 10,
+            model_name: "Parakeet".to_string(),
+            model_id: "parakeet-ctc-0.6b".to_string(),
+            requested_provider: asr::AsrProviderType::Parakeet,
+            actual_provider: asr::AsrProviderType::Parakeet,
+            requested_engine: None,
+            actual_engine: None,
+            optimization_applied: false,
+            fallback_reason: None,
+        };
+
+        let reason = describe_dual_source_transcription_degradation(
+            &Ok(clean("mic side")),
+            &Ok(clean("system side")),
+        );
+
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn dual_source_degradation_note_reports_a_fully_failed_side() {
+        let ok_result = asr::TranscriptionResult {
+            text: "mic side".to_string(),
+            segments: Vec::new(),
+            language: "en".to_string(),
+            confidence: 0.9,
+            processing_time_ms: 10,
+            model_name: "Parakeet".to_string(),
+            model_id: "parakeet-ctc-0.6b".to_string(),
+            requested_provider: asr::AsrProviderType::Parakeet,
+            actual_provider: asr::AsrProviderType::Parakeet,
+            requested_engine: None,
+            actual_engine: None,
+            optimization_applied: false,
+            fallback_reason: None,
+        };
+
+        let reason = describe_dual_source_transcription_degradation(
+            &Ok(ok_result),
+            &Err("provider timed out".to_string()),
+        );
+
+        let reason = reason.expect("a failed side should produce a note");
+        assert!(reason.contains("system audio failed to transcribe: provider timed out"));
+    }
+
+    #[test]
+    fn dual_source_degradation_note_reports_a_chunk_level_fallback_on_a_successful_side() {
+        let degraded = asr::TranscriptionResult {
+            text: "mic side".to_string(),
+            segments: Vec::new(),
+            language: "en".to_string(),
+            confidence: 0.9,
+            processing_time_ms: 10,
+            model_name: "Parakeet".to_string(),
+            model_id: "parakeet-ctc-0.6b".to_string(),
+            requested_provider: asr::AsrProviderType::Parakeet,
+            actual_provider: asr::AsrProviderType::Parakeet,
+            requested_engine: None,
+            actual_engine: None,
+            optimization_applied: false,
+            fallback_reason: Some(
+                "2 of 10 transcription chunk(s) failed; transcript may be incomplete".to_string(),
+            ),
+        };
+        let clean = asr::TranscriptionResult {
+            text: "system side".to_string(),
+            segments: Vec::new(),
+            language: "en".to_string(),
+            confidence: 0.9,
+            processing_time_ms: 10,
+            model_name: "Parakeet".to_string(),
+            model_id: "parakeet-ctc-0.6b".to_string(),
+            requested_provider: asr::AsrProviderType::Parakeet,
+            actual_provider: asr::AsrProviderType::Parakeet,
+            requested_engine: None,
+            actual_engine: None,
+            optimization_applied: false,
+            fallback_reason: None,
+        };
+
+        let reason = describe_dual_source_transcription_degradation(&Ok(degraded), &Ok(clean))
+            .expect("a chunk-level fallback_reason should produce a note");
+
+        assert!(reason.contains(
+            "microphone audio: 2 of 10 transcription chunk(s) failed; transcript may be incomplete"
+        ));
+    }
+
+    #[test]
     fn meeting_policy_prefer_local_orders_local_routes_before_cloud_routes() {
         let candidates = preferred_meeting_provider_candidates(
             MeetingRoutePolicy::PreferLocal,
@@ -10714,6 +10810,38 @@ fn build_source_aware_models_transcript(
     }
 }
 
+/// Builds a single human-readable note describing every way a dual-source
+/// (mic + system audio) meeting transcription pass came out degraded: a
+/// whole side failing outright, or a side succeeding but still carrying its
+/// own chunk-level `fallback_reason` from `transcribe_recording_in_chunks`.
+/// Returns `None` when both sides transcribed cleanly.
+fn describe_dual_source_transcription_degradation(
+    mic_result: &Result<asr::TranscriptionResult, String>,
+    system_result: &Result<asr::TranscriptionResult, String>,
+) -> Option<String> {
+    let mut notes: Vec<String> = Vec::new();
+    for (label, result) in [("microphone", mic_result), ("system", system_result)] {
+        match result {
+            Ok(result) => {
+                if let Some(reason) = result
+                    .fallback_reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty())
+                {
+                    notes.push(format!("{} audio: {}", label, reason));
+                }
+            }
+            Err(error) => notes.push(format!("{} audio failed to transcribe: {}", label, error)),
+        }
+    }
+    if notes.is_empty() {
+        None
+    } else {
+        Some(notes.join("; "))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn transcribe_meeting_recording(
     app: &impl crate::sidecar_handle::AppEmitter,
@@ -10778,6 +10906,15 @@ async fn transcribe_meeting_recording(
     )
     .await;
 
+    // Capture a human-readable degradation note before consuming the results
+    // below: an entire side failing outright, or a side succeeding but still
+    // carrying its own chunk-level fallback_reason from
+    // transcribe_recording_in_chunks. Unlike the single-file path below,
+    // nothing else threads this through, so it must be captured here or it's
+    // lost for good.
+    let fallback_reason =
+        describe_dual_source_transcription_degradation(&mic_result, &system_result);
+
     let mut source_results = Vec::new();
     match mic_result {
         Ok(result) => source_results.push(("me", result)),
@@ -10833,7 +10970,7 @@ async fn transcribe_meeting_recording(
         requested_engine: None,
         actual_engine: None,
         optimization_applied: false,
-        fallback_reason: None,
+        fallback_reason,
     })
 }
 
@@ -16217,6 +16354,18 @@ async fn run_meeting_transcription_pipeline(
     .await
     {
         Ok(output) => {
+            // Captured before `output.transcript` is moved out below: this is
+            // the only place a chunk/source transcription failure that was
+            // survived (rather than aborting the whole meeting) is visible.
+            // Without threading it through here it would reach neither the
+            // DB nor an emitted event, and the meeting would be marked
+            // "completed" with no signal that it may be incomplete.
+            let degraded_reason = output
+                .fallback_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
+                .map(str::to_string);
             let mut transcript = output.transcript;
             enrich_meeting_transcript(&mut transcript);
 
@@ -16238,6 +16387,21 @@ async fn run_meeting_transcription_pipeline(
                 let mut db = state_clone.db.lock().await;
                 let _ = db.save_transcript(&transcript);
                 let _ = db.update_recording_status(&recording_id_clone, "completed");
+                if let Some(reason) = degraded_reason.as_deref() {
+                    tracing::warn!(
+                        "Meeting {} completed with a degraded transcript: {}",
+                        recording_id_clone,
+                        reason
+                    );
+                    let _ = db.log_audit_event(
+                        "meeting_transcript_degraded",
+                        Some(serde_json::json!({
+                            "recording_id": &recording_id_clone,
+                            "reason": reason,
+                        })),
+                        "warning",
+                    );
+                }
             }
 
             let _ = apply_meeting_transcript_only_storage_policy(
@@ -16254,6 +16418,8 @@ async fn run_meeting_transcription_pipeline(
                     "recordingId": &recording_id_clone, "status": "completed",
                     "progress": 1.0, "updatedAt": chrono::Utc::now().to_rfc3339(),
                     "transcriptFirstAvailableAt": chrono::Utc::now().to_rfc3339(),
+                    "message": degraded_reason,
+                    "degraded": degraded_reason.is_some(),
                 }),
             );
 
