@@ -23,7 +23,10 @@ function platformTargetArgs(currentMode) {
   }
 
   if (process.platform === "darwin") {
-    return ["--mac", "zip"];
+    // No target override: build the full dmg+zip target list from
+    // electron-builder.yml so gate:release:local exercises the same dmg path
+    // the release workflow (`electron-builder --mac`) ships.
+    return ["--mac"];
   }
   if (process.platform === "win32") {
     return ["--win", "nsis"];

@@ -20,6 +20,7 @@ import {
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { useToast } from "@/components/toast";
 import { requestMainView, type MainViewId } from "@/lib/navigation";
+import { formatNavShortcut } from "@/lib/nav-shortcuts";
 import { transformSelectedText } from "@/lib/backend";
 import {
   formatSelectedTextActionStatusMessage,
@@ -39,16 +40,22 @@ interface NavigationPaletteEntry {
 
 // Mirrors the nav items/labels/icons in src/components/sidebar.tsx so the
 // palette stays a thin trigger over the same navigation surface rather than
-// a parallel source of truth.
-const NAVIGATION_ENTRIES: NavigationPaletteEntry[] = [
-  { view: "dashboard", label: "Home", icon: FileText, shortcut: "⌘H" },
-  { view: "dictation", label: "Dictation", icon: Mic, shortcut: "⌘D" },
-  { view: "recordings", label: "Meetings", icon: AudioWaveform, shortcut: "⌘M" },
-  { view: "projects", label: "Projects", icon: Folder, shortcut: "⌘P" },
-  { view: "settings", label: "Settings", icon: Settings, shortcut: "⌘," },
+// a parallel source of truth. Shortcut labels come from the shared
+// nav-shortcuts module so all surfaces advertise the same keys.
+const NAVIGATION_BASE: Omit<NavigationPaletteEntry, "shortcut">[] = [
+  { view: "dashboard", label: "Home", icon: FileText },
+  { view: "dictation", label: "Dictation", icon: Mic },
+  { view: "recordings", label: "Meetings", icon: AudioWaveform },
+  { view: "projects", label: "Projects", icon: Folder },
+  { view: "settings", label: "Settings", icon: Settings },
   { view: "setup", label: "Setup", icon: Sparkles },
   { view: "exports", label: "Exports", icon: FileOutput },
 ];
+
+const NAVIGATION_ENTRIES: NavigationPaletteEntry[] = NAVIGATION_BASE.map((entry) => ({
+  ...entry,
+  shortcut: formatNavShortcut(entry.view) ?? undefined,
+}));
 
 interface AppCommandPaletteProps {
   open: boolean;

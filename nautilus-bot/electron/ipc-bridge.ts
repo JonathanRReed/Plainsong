@@ -32,6 +32,7 @@ type PendingRequest = {
 type EventCallback = (eventName: string, payload: unknown) => void;
 type WindowCommandCallback = (command: string, payload: unknown) => void;
 type CommandResolvedCallback = (command: string, args: unknown, result: unknown) => void;
+type TerminatedCallback = (reason: string) => void;
 type LocalCommandResult = { handled: boolean; result?: unknown };
 type LocalCommandCallback = (
   event: IpcMainInvokeEvent,
@@ -209,6 +210,7 @@ export class IpcBridge {
   private windowCommandCallback: WindowCommandCallback | null = null;
   private commandResolvedCallback: CommandResolvedCallback | null = null;
   private localCommandCallback: LocalCommandCallback | null = null;
+  private terminatedCallback: TerminatedCallback | null = null;
   private shuttingDown = false;
   private restartAttempts = 0;
   private readonly maxRestarts = 5;
@@ -231,6 +233,16 @@ export class IpcBridge {
 
   onLocalCommand(cb: LocalCommandCallback): void {
     this.localCommandCallback = cb;
+  }
+
+  /**
+   * Invoked whenever the sidecar process terminates (crash or failed start),
+   * before any backoff restart completes. The restarted sidecar boots Idle, so
+   * callers must reset any state mirrored from sidecar events (e.g. the cached
+   * dictation phase) or they will act on a phase the sidecar no longer has.
+   */
+  onTerminated(cb: TerminatedCallback): void {
+    this.terminatedCallback = cb;
   }
 
   start(): void {
@@ -301,6 +313,7 @@ export class IpcBridge {
     if (pendingCount > 0) {
       console.warn(`[sidecar] rejected ${pendingCount} pending request(s): ${reason}`);
     }
+    this.terminatedCallback?.(reason);
   }
 
   private handleSidecarMessage(msg: JsonRpcResponse): void {

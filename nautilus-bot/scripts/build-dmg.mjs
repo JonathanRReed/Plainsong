@@ -1,3 +1,7 @@
+// NOTE: this hand-rolled dmg is NOT what releases ship. The release workflow
+// runs `electron-builder --mac`, which builds the dmg target declared in
+// electron-builder.yml. This script only supports local ad-hoc dmg packaging
+// around an already-built zip-mode app (`electron:build:dmg`).
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";

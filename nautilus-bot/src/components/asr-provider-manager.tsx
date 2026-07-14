@@ -111,6 +111,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     null,
   );
   const [isBenchmarking, setIsBenchmarking] = useState(false);
+  const [benchmarkError, setBenchmarkError] = useState<string | null>(null);
   const [providerErrors, setProviderErrors] = useState<Record<string, string>>(
     {},
   );
@@ -712,15 +713,16 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   const runBenchmark = async () => {
     const selectedFile = benchmarkFileInputRef.current?.files?.[0];
     if (!selectedFile) {
-      console.warn("No benchmark audio file selected");
+      setBenchmarkError("Choose a WAV file before running the benchmark.");
       return;
     }
     const isWav = selectedFile.name.toLowerCase().endsWith(".wav");
     if (!isWav) {
-      console.warn("Benchmark requires WAV audio");
+      setBenchmarkError("Benchmark requires a WAV audio file.");
       return;
     }
 
+    setBenchmarkError(null);
     setIsBenchmarking(true);
     try {
       const fileBytes = new Uint8Array(await selectedFile.arrayBuffer());
@@ -734,6 +736,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       await loadBenchmarkHistory();
     } catch (error) {
       console.error("Benchmark failed:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      setBenchmarkError(message || "Benchmark failed.");
     } finally {
       setIsBenchmarking(false);
     }
@@ -2709,6 +2713,11 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                     <Clock className="h-4 w-4 mr-2" />
                     {isBenchmarking ? "Running..." : "Run Benchmark"}
                   </Button>
+                  {benchmarkError && (
+                    <p className="mt-3 rounded-md bg-rust/10 p-2 text-xs text-rust">
+                      {benchmarkError}
+                    </p>
+                  )}
                 </div>
               </div>
 

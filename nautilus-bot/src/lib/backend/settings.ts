@@ -1,4 +1,5 @@
 export {
+  applyGlobalShortcutsNow,
   clearProviderSecret,
   getDictationShortcutCapabilityStatus,
   getPermissionDiagnostics,

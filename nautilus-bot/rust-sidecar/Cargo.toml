@@ -106,7 +106,9 @@ asr-parakeet = ["ort", "ndarray", "download-manager", "audio-processing"]
 asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager", "audio-processing"]
 asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization"]
 
-# Whisper GPU acceleration (Metal/CoreML on macOS, CUDA on Linux/Windows)
+# Whisper GPU acceleration (Metal + CoreML — macOS only). No CUDA feature is
+# wired; non-macOS builds must use --no-default-features and re-enable
+# asr-all/sqlcipher explicitly, or the whisper.cpp CMake build fails.
 whisper-gpu = ["whisper-rs?/metal", "whisper-rs?/coreml"]
 
 # SQLCipher for encrypted SQLite (optional, requires OpenSSL)

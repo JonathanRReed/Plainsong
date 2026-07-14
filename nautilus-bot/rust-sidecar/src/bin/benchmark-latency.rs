@@ -52,8 +52,11 @@ fn percentile(mut values: Vec<u64>, p: f64) -> u64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Default to the real spoken-speech fixture: numbers measured on a sine
+    // tone (scripts/fixtures/local-perf-30s.wav) are not honest dictation
+    // latency. Pass --wav explicitly if a synthetic signal is really wanted.
     let wav = arg_value(&args, "--wav")
-        .unwrap_or_else(|| "scripts/fixtures/local-perf-30s.wav".to_string());
+        .unwrap_or_else(|| "scripts/fixtures/real-speech-44s.wav".to_string());
     let provider_name = arg_value(&args, "--provider").unwrap_or_else(|| "whisper".to_string());
     let model = arg_value(&args, "--model").unwrap_or_else(|| "base.en".to_string());
     let runs: usize = arg_value(&args, "--runs")
