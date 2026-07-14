@@ -66,11 +66,6 @@ interface AudioSettings {
   dictationInputDevice?: AudioInputDevicePreference | null;
   meetingInputOverrideEnabled?: boolean;
   meetingInputDevice?: AudioInputDevicePreference | null;
-  noiseSuppression: boolean;
-  voiceActivityDetection: boolean;
-  silenceTimeoutSeconds: number;
-  autoGainControl: boolean;
-  manualGainDb: number;
 }
 
 interface AudioInputDevicePreference {
@@ -187,7 +182,6 @@ interface ExportSettings {
 }
 
 interface PrivacySettings {
-  encryptRecordings: boolean;
   autoDeleteDays: number;
   requirePassword: boolean;
   auditLogging: boolean;

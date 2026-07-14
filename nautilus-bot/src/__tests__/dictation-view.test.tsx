@@ -19,11 +19,6 @@ const backendMocks = vi.hoisted(() => ({
     channels: 1,
     captureSystemAudio: true,
     captureMicrophone: true,
-    noiseSuppression: true,
-    voiceActivityDetection: true,
-    silenceTimeoutSeconds: 3,
-    autoGainControl: true,
-    manualGainDb: 0,
   },
   transcription: {
     defaultProvider: "distil_whisper",
@@ -76,7 +71,6 @@ const backendMocks = vi.hoisted(() => ({
     openAfterExport: false,
   },
   privacy: {
-    encryptRecordings: false,
     autoDeleteDays: 0,
     requirePassword: false,
     auditLogging: true,

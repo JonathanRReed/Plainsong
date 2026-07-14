@@ -549,7 +549,11 @@ export function SettingsView() {
         ? {
             ...current,
             vaultInitialized: next.privacy.vaultInitialized,
-            recordingsEncrypted: next.privacy.encryptRecordings,
+            // recordings_encrypted mirrors vault_initialized on the backend
+            // (lib.rs get_security_status) now that the flippable
+            // privacy.encryptRecordings flag has been removed from the
+            // schema -- there is no separate "encrypted" state to read here.
+            recordingsEncrypted: next.privacy.vaultInitialized,
             llmProvider: next.privacy.llmProvider,
             remoteProcessingEnabled: next.privacy.remoteProcessingEnabled,
             exportRoot: next.privacy.exportRoot ?? null,
@@ -1996,113 +2000,6 @@ export function SettingsView() {
               />
             </div>
 
-            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
-              <div className="space-y-0.5">
-                <Label>Voice activity detection</Label>
-                <p className="text-sm text-muted-foreground">
-                  Auto-stop after silence timeout.
-                </p>
-              </div>
-              <Switch
-                checked={settings.audio.voiceActivityDetection}
-                onCheckedChange={(checked) =>
-                  void updateSettings({
-                    ...settings,
-                    audio: {
-                      ...settings.audio,
-                      voiceActivityDetection: checked,
-                    },
-                  })
-                }
-              />
-            </div>
-
-            {settings.audio.voiceActivityDetection && (
-              <div className="space-y-3 rounded-2xl border border-border/60 bg-background/75 p-4">
-                <div className="flex items-center justify-between">
-                  <Label>Silence timeout</Label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      min={1}
-                      max={30}
-                      step={1}
-                      className="w-16 rounded-md border bg-background px-2 py-1 text-center text-sm"
-                      value={Math.round(
-                        settings.audio.silenceTimeoutSeconds / 60,
-                      )}
-                      onBlur={handleSettingsTextBlur}
-                      onKeyDown={handleSettingsTextKeyDown}
-                      onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                        const minutes = Math.max(
-                          1,
-                          Math.min(30, parseInt(e.target.value, 10) || 5),
-                        );
-                        void updateSettings({
-                          ...settings,
-                          audio: {
-                            ...settings.audio,
-                            silenceTimeoutSeconds: minutes * 60,
-                          },
-                        });
-                      }}
-                    />
-                    <span className="text-sm text-muted-foreground">min</span>
-                  </div>
-                </div>
-                <input
-                  type="range"
-                  min={1}
-                  max={30}
-                  step={1}
-                  className="w-full"
-                  value={Math.round(settings.audio.silenceTimeoutSeconds / 60)}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                    const minutes = parseInt(e.target.value, 10);
-                    void updateSettings({
-                      ...settings,
-                      audio: {
-                        ...settings.audio,
-                        silenceTimeoutSeconds: minutes * 60,
-                      },
-                    });
-                  }}
-                />
-                <div className="flex justify-between text-xs text-muted-foreground">
-                  <span>1 min</span>
-                  <span>5 min</span>
-                  <span>15 min</span>
-                  <span>30 min</span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {[1, 2, 5, 10, 15, 30].map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
-                        Math.round(
-                          settings.audio.silenceTimeoutSeconds / 60,
-                        ) === preset
-                          ? "border-rust/40 bg-rust/8 text-rust"
-                          : "border-border bg-muted hover:bg-muted/80"
-                      }`}
-                      onClick={() =>
-                        void updateSettings({
-                          ...settings,
-                          audio: {
-                            ...settings.audio,
-                            silenceTimeoutSeconds: preset * 60,
-                          },
-                        })
-                      }
-                    >
-                      {preset}m
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
             {/* The VAD backend drives dictation auto-stop-on-silence and
                 hands-free auto-start (not the recording silence-timeout
                 toggle above), so show the picker whenever either of those
@@ -2206,79 +2103,12 @@ export function SettingsView() {
               </div>
             )}
 
-            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
-              <div className="space-y-0.5">
-                <Label>Noise suppression</Label>
-                <p className="text-sm text-muted-foreground">
-                  Reduce background noise.
-                </p>
-              </div>
-              <Switch
-                checked={settings.audio.noiseSuppression}
-                onCheckedChange={(checked) =>
-                  void updateSettings({
-                    ...settings,
-                    audio: { ...settings.audio, noiseSuppression: checked },
-                  })
-                }
-              />
-            </div>
-
-            <div className="flex items-center justify-between gap-4 rounded-2xl border border-border/60 bg-background/75 p-4">
-              <div className="space-y-0.5">
-                <Label>Auto gain control</Label>
-                <p className="text-sm text-muted-foreground">
-                  Automatically adjust microphone levels.
-                </p>
-              </div>
-              <Switch
-                checked={settings.audio.autoGainControl}
-                onCheckedChange={(checked) =>
-                  void updateSettings({
-                    ...settings,
-                    audio: { ...settings.audio, autoGainControl: checked },
-                  })
-                }
-              />
-            </div>
-
-            {!settings.audio.autoGainControl && (
-              <div className="space-y-2 rounded-2xl border border-border/60 bg-background/75 p-4">
-                <Label>
-                  Manual gain ({settings.audio.manualGainDb > 0 ? "+" : ""}
-                  {settings.audio.manualGainDb.toFixed(1)} dB)
-                </Label>
-                <input
-                  type="range"
-                  min={-20}
-                  max={20}
-                  step={0.5}
-                  value={settings.audio.manualGainDb}
-                  className="w-full"
-                  onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                    void updateSettings({
-                      ...settings,
-                      audio: {
-                        ...settings.audio,
-                        manualGainDb: Number(e.target.value),
-                      },
-                    })
-                  }
-                />
-                <div className="flex justify-between text-xs text-muted-foreground">
-                  <span>-20 dB</span>
-                  <span>0 dB</span>
-                  <span>+20 dB</span>
-                </div>
-              </div>
-            )}
-
             <div className="rounded-2xl border border-border/60 bg-background/75 p-4">
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm font-medium">Microphone test</p>
                   <p className="text-xs text-muted-foreground">
-                    Check your mic level and hear the gain effect.
+                    Check your mic input level.
                   </p>
                 </div>
                 <Button
@@ -3976,21 +3806,22 @@ export function SettingsView() {
                               Encrypt recordings at rest
                             </Label>
                             <p className="text-sm text-muted-foreground">
-                              Enable encrypted storage policy
+                              {securityStatus?.recordingsEncrypted
+                                ? "Recordings are stored in the encrypted vault."
+                                : "Recordings are not yet encrypted. Use “Migrate to Encrypted Storage” below to enable it."}
                             </p>
                           </div>
-                          <Switch
-                            checked={settings.privacy.encryptRecordings}
-                            onCheckedChange={(checked) =>
-                              void updateSettings({
-                                ...settings,
-                                privacy: {
-                                  ...settings.privacy,
-                                  encryptRecordings: checked,
-                                },
-                              })
-                            }
-                          />
+                          <span
+                            className={`rounded-full border px-2.5 py-1 text-xs ${
+                              securityStatus?.recordingsEncrypted
+                                ? "border-rust/40 bg-rust/8 text-rust"
+                                : "border-border bg-muted text-muted-foreground"
+                            }`}
+                          >
+                            {securityStatus?.recordingsEncrypted
+                              ? "Encrypted"
+                              : "Not encrypted"}
+                          </span>
                         </div>
 
                         <div className="flex items-center justify-between">

@@ -16,11 +16,6 @@ const baseSettings = {
     dictationInputDevice: null,
     meetingInputOverrideEnabled: false,
     meetingInputDevice: null,
-    noiseSuppression: true,
-    voiceActivityDetection: true,
-    silenceTimeoutSeconds: 3,
-    autoGainControl: true,
-    manualGainDb: 0,
   },
   transcription: {
     defaultProvider: "whisper",
@@ -61,7 +56,6 @@ const baseSettings = {
     openAfterExport: false,
   },
   privacy: {
-    encryptRecordings: false,
     autoDeleteDays: 0,
     requirePassword: false,
     auditLogging: true,
@@ -312,6 +306,67 @@ describe("SettingsView performance behavior", () => {
     expect(screen.getAllByText(/^Dictation$/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/^Ready$/).length).toBeGreaterThan(0);
     expect(screen.queryByText(/^Mic$/)).not.toBeInTheDocument();
+  });
+
+  it("renders the Transcription tab without the removed audio-tuning placebo controls", async () => {
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Transcription"));
+    await screen.findAllByText("Capture and transcription");
+
+    // AudioSettings.autoGainControl / manualGainDb (and the other audio-tuning
+    // fields) were removed from the backend schema; the paired controls must
+    // be gone too, not reading `undefined` off settings.audio.
+    expect(screen.queryByText("Auto gain control")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Manual gain/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Noise suppression")).not.toBeInTheDocument();
+    expect(screen.queryByText("Voice activity detection")).not.toBeInTheDocument();
+  });
+
+  it("derives the Security tab's encrypted-recordings status from vault state, not from a settings save", async () => {
+    const backend = await import("@/lib/backend");
+    // Vault-initialized in both the loaded settings and the fetched security
+    // status, matching the backend invariant that recordings_encrypted ==
+    // privacy.vault_initialized (lib.rs get_security_status).
+    vi.mocked(backend.getSettings).mockResolvedValue({
+      ...baseSettings,
+      privacy: { ...baseSettings.privacy, vaultInitialized: true },
+    } as unknown as Awaited<ReturnType<typeof backend.getSettings>>);
+    vi.mocked(backend.getSecurityStatus).mockResolvedValue({
+      vaultInitialized: true,
+      vaultUnlocked: true,
+      databaseEncrypted: true,
+      recordingsEncrypted: true,
+      llmProvider: "ollama",
+      remoteProcessingEnabled: false,
+      exportRoot: null,
+    });
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("Tune transcription, AI, privacy, storage, and app behavior");
+    fireEvent.click(screen.getByText("Privacy & Security"));
+    await screen.findByText("Encrypted");
+
+    // Toggling an unrelated setting on the same page triggers the debounced
+    // whole-object save; the encrypted-status readout must not flip to
+    // "not encrypted" just because privacy.encryptRecordings no longer exists
+    // on the saved Settings object.
+    const remoteProcessingRow = screen
+      .getByText("Remote processing")
+      .closest(".flex.items-center.justify-between");
+    const remoteProcessingSwitch = within(
+      remoteProcessingRow as HTMLElement,
+    ).getByRole("switch");
+    fireEvent.click(remoteProcessingSwitch);
+
+    await waitFor(() => {
+      expect(backend.saveSettings).toHaveBeenCalled();
+    });
+
+    expect(screen.getByText("Encrypted")).toBeInTheDocument();
+    expect(screen.queryByText("Not encrypted")).not.toBeInTheDocument();
   });
 
   it("debounces rapid settings changes into a single save", async () => {
