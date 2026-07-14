@@ -1742,21 +1742,6 @@ export function SettingsView() {
             : "None";
           const isCapturing = capturingShortcut === key;
           const conflict = shortcutConflictsByField.get(key);
-          if (!wired) {
-            return (
-              <div
-                key={key}
-                className="flex flex-col gap-2 rounded-2xl border border-border/60 bg-muted/20 px-3 py-3 opacity-60"
-              >
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                  <span className="text-sm text-muted-foreground">{label}</span>
-                  <span className="text-xs text-muted-foreground">
-                    Not yet available
-                  </span>
-                </div>
-              </div>
-            );
-          }
           return (
             <div
               key={key}
