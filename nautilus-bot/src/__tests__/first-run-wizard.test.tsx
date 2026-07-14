@@ -207,8 +207,13 @@ describe("FirstRunWizard", () => {
     vi.clearAllMocks();
   });
 
-  it("completes the full onboarding in dictation-only mode", async () => {
+  it("completes the full onboarding in dictation-only mode, downloading the fast default when nothing was configured", async () => {
     const onComplete = vi.fn();
+
+    // Start from an unconfigured dictation route (the shipped default) so
+    // the background base.en fetch is expected to actually run.
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = "base.en";
 
     render(<FirstRunWizard onComplete={onComplete} />);
 
@@ -237,6 +242,61 @@ describe("FirstRunWizard", () => {
     // (set from Settings) is left untouched, not silently reset to toggle.
     expect(currentSettings.transcription.dictationPushToTalk).toBe(true);
     expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
+  });
+
+  it("does not overwrite an already-configured, different dictation provider when just passing through the model step", async () => {
+    const onComplete = vi.fn();
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+
+    // The default test fixture already has "macos_apple_speech" configured
+    // as the dictation provider -- simulating a user who already has a
+    // working, non-default route set up (e.g. from Settings).
+    expect(currentSettings.transcription.dictationProvider).toBe("macos_apple_speech");
+
+    render(<FirstRunWizard mode="dictation" onComplete={onComplete} />);
+
+    await clickPrimary(/continue/i); // permissions -> dictation-model
+    await clickPrimary(/continue/i); // dictation-model -> hotkey (no download clicked)
+    await clickPrimary(/finish/i);
+
+    await waitFor(() => {
+      expect(onComplete).toHaveBeenCalled();
+    });
+
+    // The user's existing route must survive untouched -- no silent
+    // downgrade to whisper/base.en, and no redundant download kicked off.
+    expect(currentSettings.transcription.dictationProvider).toBe("macos_apple_speech");
+    expect(currentSettings.transcription.dictationModelId).toBe("apple-default");
+    expect(downloadAsrModels).not.toHaveBeenCalled();
+  });
+
+  it("does not disable Continue/Finish on later steps while the background default download is still running", async () => {
+    const onComplete = vi.fn();
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = "base.en";
+
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    let resolveDownload: (() => void) | undefined;
+    downloadAsrModels.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { resolveDownload = resolve; })
+    );
+
+    // mode="dictation" has no "Skip for now" escape hatch, so if the
+    // background download blocked Continue/Finish here the user would be
+    // stuck until it finished or errored.
+    render(<FirstRunWizard mode="dictation" onComplete={onComplete} />);
+
+    await clickPrimary(/continue/i); // permissions -> dictation-model
+    await clickPrimary(/continue/i); // dictation-model -> hotkey, kicks off background download
+
+    const finishButton = await screen.findByRole("button", { name: /finish/i });
+    expect(finishButton).not.toBeDisabled();
+
+    await act(async () => {
+      resolveDownload?.();
+    });
   });
 
   it("reflects the existing hotkey mode instead of resetting it to toggle", async () => {
