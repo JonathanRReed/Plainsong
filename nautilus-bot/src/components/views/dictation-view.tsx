@@ -50,6 +50,13 @@ import {
   type DictationRoutePreference,
 } from "@/lib/asr-capabilities";
 import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labels";
+import {
+  INSERTION_MODE_LABELS,
+  formatInsertionModeLabel,
+  historyModeLabel,
+  historyPipelineStageLabel,
+  historyPromptSourceLabel,
+} from "@/lib/dictation-history-labels";
 import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import { useToast } from "@/components/toast";
@@ -251,14 +258,6 @@ function formatDurationMetric(value: number | null): string | null {
     return null;
   }
   return value < 1000 ? `${value}ms` : `${(value / 1000).toFixed(1)}s`;
-}
-
-function formatInsertionModeLabel(value: string | null): string | null {
-  if (!value) {
-    return null;
-  }
-  const normalized = value as DictationInsertionMode;
-  return INSERTION_MODE_LABELS[normalized] ?? value.replace(/_/g, " ");
 }
 
 // Mirrors the case-only-match check inside `infer_learned_correction` in
@@ -652,13 +651,6 @@ const COMMAND_PRESET_FIELDS: Array<{
 const DEFAULT_DICTATION_MODE: DictationModePreset = "voice";
 const DEFAULT_BASE_MODE: DictationBaseModePreset = "voice";
 
-const INSERTION_MODE_LABELS: Record<DictationInsertionMode, string> = {
-  auto: "Recommended",
-  paste: "Paste at cursor",
-  inline: "Insert on release",
-  clipboard_only: "Clipboard only",
-};
-
 const CONTEXT_SOURCE_LABELS: Record<DictationContextSource, string> = {
   none: "No context",
   clipboard: "Clipboard",
@@ -930,68 +922,6 @@ function coerceBaseModePreset(
       return modePreset;
     default:
       return "voice";
-  }
-}
-
-function historyModeLabel(details: DictationHistoryDetails | null): string {
-  if (!details) {
-    return "Unavailable";
-  }
-  if (details.modeLabel) {
-    return details.modeLabel;
-  }
-  if (details.modePreset) {
-    return (
-      modeDefinitionByIdStatic[details.modePreset as DictationModePreset]
-        ?.label ?? details.modePreset
-    );
-  }
-  return "Unavailable";
-}
-
-const modeDefinitionByIdStatic = DICTATION_MODE_DEFINITIONS.reduce<
-  Record<DictationModePreset, DictationModeDefinition>
->(
-  (accumulator, definition) => {
-    accumulator[definition.id] = definition;
-    return accumulator;
-  },
-  {} as Record<DictationModePreset, DictationModeDefinition>,
-);
-
-function historyPromptSourceLabel(
-  promptSource: string | null | undefined,
-): string {
-  if (!promptSource) {
-    return "Direct transcript";
-  }
-  if (promptSource.startsWith("command:")) {
-    return `Command: ${promptSource.slice("command:".length)}`;
-  }
-  if (promptSource.startsWith("custom_mode_format:")) {
-    return "Custom mode prompt";
-  }
-  if (promptSource === "custom_dictation_format") {
-    return "Custom dictation prompt";
-  }
-  if (promptSource === "default_dictation_format") {
-    return "Standard dictation prompt";
-  }
-  return promptSource;
-}
-
-function historyPipelineStageLabel(stageKey: string): string {
-  switch (stageKey) {
-    case "dictionary":
-      return "Dictionary";
-    case "backtrack":
-      return "Backtrack";
-    case "snippets":
-      return "Snippets";
-    case "smart_formatting":
-      return "Smart formatting";
-    default:
-      return stageKey;
   }
 }
 

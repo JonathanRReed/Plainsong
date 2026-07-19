@@ -3476,13 +3476,7 @@ fn take_recent_external_target(state: &AppState) -> Option<PendingDictationTarge
         .ok()
         .and_then(|slot| slot.clone());
 
-    cached.and_then(|target| {
-        if is_recent_external_target_fresh(target.captured_at_ms, now_ms) {
-            Some(target)
-        } else {
-            None
-        }
-    })
+    cached.filter(|target| is_recent_external_target_fresh(target.captured_at_ms, now_ms))
 }
 
 #[cfg(target_os = "macos")]
