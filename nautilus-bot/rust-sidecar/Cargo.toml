@@ -31,7 +31,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "6"
-cpal = "0.17"
+cpal = "0.18"
 hound = "3.5"
 crossbeam = "0.8"
 ringbuf = "0.5"
@@ -46,15 +46,15 @@ ort = { version = "2.0.0-rc.12", optional = true }
 ndarray = { version = "0.17", optional = true }
 
 # Candle for HuggingFace models (Canary, etc.)
-candle-core = { version = "0.10", optional = true }
-candle-nn = { version = "0.10", optional = true }
-candle-transformers = { version = "0.10", optional = true }
+candle-core = { version = "0.11", optional = true }
+candle-nn = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
 
 # Tokenizers for HuggingFace models
 tokenizers = { version = "0.23", optional = true }
 
 # Audio preprocessing
-rubato = { version = "3.0", optional = true }
+rubato = { version = "4.0", optional = true }
 
 # FFT for FBank feature extraction in diarization
 rustfft = { version = "6.2", optional = true }
@@ -69,7 +69,7 @@ rand = "0.10"
 async-trait = "0.1"
 hex = "0.4"
 argon2 = "0.5"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 zeroize = "1.8"
 keyring = "3.6"
 regex = "1.11"
