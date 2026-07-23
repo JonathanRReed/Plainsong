@@ -64,6 +64,41 @@ describe("Sidebar collapsed layout", () => {
     expect(onViewChange).toHaveBeenNthCalledWith(6, "exports");
   });
 
+  it("uses a plain navigation surface and moves the semantic current state", async () => {
+    const { container, rerender } = render(
+      <Sidebar
+        activeView="dictation"
+        onToggleCollapse={vi.fn()}
+        onViewChange={vi.fn()}
+      />,
+    );
+
+    const dictation = screen.getByRole("button", { name: "Dictation" });
+    const settings = screen.getByRole("button", { name: /Settings.*Ctrl\+,/ });
+
+    expect(dictation).toHaveAttribute("aria-current", "page");
+    expect(settings).not.toHaveAttribute("aria-current");
+    expect(container.querySelector(".staff-bg")).not.toBeInTheDocument();
+
+    rerender(
+      <Sidebar
+        activeView="settings"
+        onToggleCollapse={vi.fn()}
+        onViewChange={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /Dictation.*Ctrl\+D/ }),
+      ).not.toHaveAttribute("aria-current");
+      expect(screen.getByRole("button", { name: "Settings" })).toHaveAttribute(
+        "aria-current",
+        "page",
+      );
+    });
+  });
+
   it("renders a stable icon rail with accessible controls", async () => {
     render(
       <Sidebar

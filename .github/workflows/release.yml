@@ -1,24 +1,20 @@
 name: Release
 
 # Cut a release by pushing a tag like v1.2.3, or trigger manually.
-# Builds the Rust sidecar + Electron app and publishes the artifacts to a
-# GitHub Release.
+# Builds the Rust sidecar + Electron app, requires Developer ID signing and
+# Apple notarization, verifies the stapled app with Gatekeeper, then stages the
+# verified assets in a draft GitHub Release.
 #
 # v1 ships macOS arm64 only. The Windows leg was removed: the sidecar's
 # default cargo features (whisper-gpu = Metal/CoreML) do not compile on
 # Windows, and Windows support is tracked as future platform work in
 # LAUNCH.md ("Windows/Linux support").
 #
-# macOS builds are signed + notarized only when the signing secrets are
-# present; otherwise an unsigned build is published (users run
-# `xattr -dr com.apple.quarantine /Applications/Plainsong.app` once).
-# Note: the in-app updater cannot install updates into an unsigned build —
-# unsigned users re-download from GitHub Releases (the app tells them so).
-#
-# electron-builder publishes the release as a DRAFT (no releaseType is set in
-# electron-builder.yml). After the workflow succeeds, review the draft on
-# GitHub and click "Publish release" — electron-updater users see nothing
-# until the draft is published.
+# Official releases fail closed if signing or notarization credentials are
+# missing. electron-builder never publishes directly. After every source,
+# package, updater, signing, stapling, and Gatekeeper check succeeds, the final
+# step creates or refreshes a draft release for human review. Updater users see
+# nothing until that draft is deliberately published.
 
 on:
   push:
@@ -28,13 +24,13 @@ on:
     inputs:
       tag:
         description: "Existing tag to build (e.g. v1.2.3)"
-        required: false
+        required: true
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -42,7 +38,7 @@ env:
 
 jobs:
   release:
-    name: Build and publish (macOS arm64)
+    name: Build, verify, and stage draft (macOS arm64)
     runs-on: macos-latest
     timeout-minutes: 90
     defaults:
@@ -50,21 +46,71 @@ jobs:
         shell: bash
         working-directory: nautilus-bot
     steps:
+      - name: Validate and resolve release tag
+        id: release-ref
+        working-directory: ${{ github.workspace }}
+        env:
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            RELEASE_TAG="$DISPATCH_TAG"
+          elif [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            RELEASE_TAG="$GITHUB_REF_NAME"
+          else
+            echo "Unsupported release event: $GITHUB_EVENT_NAME" >&2
+            exit 1
+          fi
+
+          TAG_PATTERN='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [[ ! "$RELEASE_TAG" =~ $TAG_PATTERN ]]; then
+            echo "Release tag must be a valid v-prefixed semantic version" >&2
+            exit 1
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            RELEASE_REF="refs/tags/$RELEASE_TAG"
+          else
+            RELEASE_REF="$GITHUB_REF"
+          fi
+          if [ "$RELEASE_REF" != "refs/tags/$RELEASE_TAG" ]; then
+            echo "Release ref must be the exact tag ref refs/tags/$RELEASE_TAG" >&2
+            exit 1
+          fi
+          if ! git check-ref-format "$RELEASE_REF"; then
+            echo "Invalid release tag ref: $RELEASE_REF" >&2
+            exit 1
+          fi
+
+          printf 'RELEASE_TAG=%s\n' "$RELEASE_TAG" >> "$GITHUB_ENV"
+          printf 'RELEASE_REF=%s\n' "$RELEASE_REF" >> "$GITHUB_ENV"
+          printf 'ref=%s\n' "$RELEASE_REF" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ steps.release-ref.outputs.ref }}
+          fetch-tags: true
 
-      # electron-builder derives the GitHub release tag from package.json, not
-      # from the pushed tag — a mismatch would silently publish assets under
-      # the wrong release tag with a disagreeing latest-mac.yml version.
-      - name: Verify tag matches package.json version
-        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.tag != ''
+      - name: Verify checkout matches release tag
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
-          TAG="${TAG#v}"
+          if ! git show-ref --verify --quiet "$RELEASE_REF"; then
+            echo "Checked-out tag ref is missing: $RELEASE_REF" >&2
+            exit 1
+          fi
+          HEAD_COMMIT="$(git rev-parse --verify HEAD)"
+          TAG_COMMIT="$(git rev-parse --verify "${RELEASE_REF}^{commit}")"
+          if [ "$HEAD_COMMIT" != "$TAG_COMMIT" ]; then
+            echo "HEAD $HEAD_COMMIT does not match $RELEASE_REF at $TAG_COMMIT" >&2
+            exit 1
+          fi
+
+      # The release tag, package version, and updater manifest must describe
+      # one exact build. The tag must already exist on GitHub.
+      - name: Verify tag matches package.json version
+        run: |
           PKG="$(node -p "require('./package.json').version")"
-          if [ "$TAG" != "$PKG" ]; then
-            echo "Tag v$TAG does not match package.json version $PKG" >&2
+          EXPECTED_TAG="v$PKG"
+          if [ "$RELEASE_TAG" != "$EXPECTED_TAG" ]; then
+            echo "Tag $RELEASE_TAG does not match package.json version $PKG" >&2
             exit 1
           fi
 
@@ -84,21 +130,104 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # Sign + notarize only when the Developer ID secrets exist.
-      # Forks and unsigned builds skip this and publish an unsigned app.
-      - name: Configure macOS signing
-        if: env.CSC_LINK != ''
-        run: echo "Code signing enabled for this build."
-        env:
-          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+      - name: Verify source
+        run: |
+          bun run lint
+          bun run test
+          bun run test:rust
+          bun run gate:ipc-contract
 
-      - name: Build and publish
-        run: bun run release:mac
+      - name: Require signing and notarization credentials
+        run: bun run gate:release-credentials:preflight
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS Developer ID signing + notarization (optional).
           CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Build signed and notarized release
+        run: bun run release:mac
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Verify packaged updater metadata
+        run: bun run qa:packaged:macos:update-metadata
+
+      - name: Verify signed, stapled, Gatekeeper-approved app
+        run: bun run gate:release:macos:trust
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Verify TCC usage strings
+        run: |
+          PLIST="release/mac-arm64/Plainsong.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Print :NSSpeechRecognitionUsageDescription" "$PLIST"
+
+      - name: Verify package size
+        run: bun run gate:size
+
+      - name: Verify release assets and write checksums
+        run: |
+          shopt -s nullglob
+          DMGS=(release/*.dmg)
+          ZIPS=(release/*-mac.zip)
+          BLOCKMAPS=(release/*.blockmap)
+          if [ "${#DMGS[@]}" -ne 1 ]; then
+            echo "Expected exactly one DMG, found ${#DMGS[@]}" >&2
+            exit 1
+          fi
+          if [ "${#ZIPS[@]}" -ne 1 ]; then
+            echo "Expected exactly one macOS ZIP, found ${#ZIPS[@]}" >&2
+            exit 1
+          fi
+          if [ "${#BLOCKMAPS[@]}" -lt 1 ]; then
+            echo "Expected at least one updater blockmap" >&2
+            exit 1
+          fi
+          test -s release/latest-mac.yml
+          shasum -a 256 "${DMGS[@]}" "${ZIPS[@]}" \
+            | sed 's#  release/#  #' > release/SHA256SUMS.txt
+          test -s release/SHA256SUMS.txt
+
+      # Only verified artifacts reach GitHub. Existing public releases are
+      # never modified; a rerun may refresh assets on an existing draft.
+      - name: Stage verified draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          ASSETS=(
+            release/*.dmg
+            release/*-mac.zip
+            release/*.blockmap
+            release/latest-mac.yml
+            release/SHA256SUMS.txt
+          )
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            IS_DRAFT="$(
+              gh release view "$RELEASE_TAG" \
+                --repo "$GITHUB_REPOSITORY" \
+                --json isDraft \
+                --jq '.isDraft'
+            )"
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "Refusing to modify published release $RELEASE_TAG" >&2
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" "${ASSETS[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --verify-tag \
+              --generate-notes \
+              --title "Plainsong $RELEASE_TAG"
+          fi

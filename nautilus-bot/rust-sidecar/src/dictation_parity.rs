@@ -271,11 +271,11 @@ fn replace_dictionary_word_bounded_all(
         let boundary_before = haystack[..found.start()]
             .chars()
             .next_back()
-            .map_or(true, is_dictionary_word_boundary);
+            .is_none_or(is_dictionary_word_boundary);
         let boundary_after = haystack[found.end()..]
             .chars()
             .next()
-            .map_or(true, is_dictionary_word_boundary);
+            .is_none_or(is_dictionary_word_boundary);
         if !(boundary_before && boundary_after) {
             continue;
         }

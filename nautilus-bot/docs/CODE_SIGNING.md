@@ -1,106 +1,162 @@
-# Code Signing and Distribution
+# Code signing, notarization, and distribution
 
 App bundle identifier: `com.plainsong.app`
 
-Plainsong ships as an Electron app packaged with `electron-builder`, with the Rust backend distributed as the `rust-sidecar` binary.
+Plainsong v1 is an Apple Silicon macOS application packaged with
+`electron-builder`. The package includes the Electron application, Rust
+sidecar, and native macOS shortcut helper.
 
-## Release Inputs
+## Current candidate
+
+The fresh v1.0.0 candidate built on July 23, 2026 includes:
+
+- `release/Plainsong-1.0.0-arm64.dmg`
+- `release/Plainsong-1.0.0-arm64-mac.zip`
+- `release/Plainsong-1.0.0-arm64-mac.zip.blockmap`
+- `release/latest-mac.yml`
+- `release/mac-arm64/Plainsong.app`
+
+Developer ID signing, hardened runtime, secure timestamps, embedded executable
+signatures, arm64 architecture, update metadata, TCC usage strings, and the
+package size gate all pass. The app, sidecar, and shortcut helper are signed by
+`Developer ID Application: Jonathan Reed (AJ9VWBRNZN)`.
+
+This candidate is not notarized. The local environment did not contain the
+required Apple ID credential variables, so it has no stapled notarization
+ticket. The trust report correctly records:
+
+```text
+Plainsong.app does not have a ticket stapled to it.
+source=Unnotarized Developer ID
+```
+
+Do not distribute this candidate. Rebuild it through the official release
+workflow after the required credentials are configured.
+
+## Release inputs
 
 - Packaging config: `electron-builder.yml`
 - macOS entitlements: `build-resources/entitlements.mac.plist`
-- macOS inherited entitlements: `build-resources/entitlements.mac.inherit.plist`
-- Packaged sidecar source: `rust-sidecar/target/release/plainsong-sidecar`
-- Packaged native shortcut helper source (macOS only): `dist-native/plainsong-native-shortcut-helper`
-- Release output directory: `release/`
+- Inherited entitlements: `build-resources/entitlements.mac.inherit.plist`
+- Rust sidecar: `rust-sidecar/target/release/plainsong-sidecar`
+- Shortcut helper: `dist-native/plainsong-native-shortcut-helper`
+- Output directory: `release/`
 
-## macOS
+The release environment must provide:
 
-You need an Apple Developer membership, a Developer ID Application certificate, and notarization credentials.
+- `CSC_LINK`
+- `CSC_KEY_PASSWORD`
+- `APPLE_ID`
+- `APPLE_APP_SPECIFIC_PASSWORD`
+- `APPLE_TEAM_ID`
 
-### Secret-safe release credential preflight
+The GitHub Actions workflow maps those values from:
 
-Run this before attempting release signing:
+- `MAC_CSC_LINK`
+- `MAC_CSC_KEY_PASSWORD`
+- `APPLE_ID`
+- `APPLE_APP_SPECIFIC_PASSWORD`
+- `APPLE_TEAM_ID`
+
+Keep credentials in the local environment or GitHub Actions secrets. Never add
+certificate files, passwords, tokens, or generated credential reports
+containing secret values to source control.
+
+## Credential preflight
+
+Run the fail-closed credential check before an official build:
 
 ```bash
 bun run gate:release-credentials:preflight
 ```
 
-The preflight writes `artifacts/release-credential-preflight.json` and `artifacts/release-credential-preflight.md`. It records only environment variable names, boolean presence, and Developer ID identity counts. It never records certificate contents, passwords, tokens, or license values.
+It writes:
 
-Expected macOS release inputs:
+- `artifacts/release-credential-preflight.json`
+- `artifacts/release-credential-preflight.md`
 
-- `CSC_LINK` or `CSC_NAME`
-- `CSC_KEY_PASSWORD` when signing from a certificate file
-- `APPLE_ID`
-- `APPLE_APP_SPECIFIC_PASSWORD`
-- `APPLE_TEAM_ID`
+Those reports contain only boolean presence checks and signing identity counts.
+The command exits nonzero when the complete signing and notarization credential
+set is unavailable.
 
-### Local package build
-
-```bash
-bun install
-bun run electron:build:dmg
-```
-
-### Verify a packaged app
+## Build without publishing
 
 ```bash
-codesign --verify --deep --strict --verbose=2 "release/mac-arm64/Plainsong.app"
-spctl --assess --verbose=4 "release/mac-arm64/Plainsong.app"
+bun install --frozen-lockfile
+bun run release:mac
 ```
 
-Expected `spctl` result for a release-signed build: `accepted`.
+`release:mac` builds the arm64 DMG, ZIP, blockmap, and updater manifest with
+publication disabled. `electron-builder.yml` explicitly enables notarization.
+An official build must stop if notarization cannot complete.
 
-### Entitlements in source control
+## Verify the package
 
-Plainsong currently requests:
-
-- microphone access
-- speech recognition access
-- Apple Events automation for setup flows
-- runtime allowances required by the packaged Electron app
-
-If you need to change those capabilities, update the plist files in `build-resources/` and keep `electron-builder.yml` aligned.
-
-### Second executable: native shortcut helper
-
-The packaged app bundle contains a second executable, not just the main Electron binary and the `rust-sidecar`: a small Swift CLI helper (built from `scripts/native-macos-shortcut-helper.swift` via `bun run shortcut-helper:build`, output at `dist-native/plainsong-native-shortcut-helper`) that watches the dictation hotkey with a listen-only `CGEventTap` so press-and-hold works. It is copied into the app bundle's `Contents/Resources/shortcut-helper/` directory by the `mac.extraResources` entry in `electron-builder.yml`, the same way `rust-sidecar/target/release/plainsong-sidecar` is copied into `Contents/Resources/sidecar/`.
-
-Because it is a separate Mach-O binary inside the bundle, `codesign --deep` (or an equivalent explicit signing step for each embedded binary) must sign it with the **same Developer ID Application identity and entitlements** used for the main app and the Rust sidecar. It needs the Accessibility permission entitlement already required for text insertion — it does not require Input Monitoring, since it only observes events (`CGEvent.tapCreate(... options: .listenOnly ...)`) rather than intercepting them. It does not need any additional entitlement beyond what the app already declares.
-
-When verifying a packaged build (see "Verify a packaged app" above), confirm both embedded binaries pass:
+Run the repository gates:
 
 ```bash
-codesign --verify --deep --strict --verbose=2 "release/mac-arm64/Plainsong.app/Contents/Resources/sidecar/plainsong-sidecar"
-codesign --verify --deep --strict --verbose=2 "release/mac-arm64/Plainsong.app/Contents/Resources/shortcut-helper/plainsong-native-shortcut-helper"
+bun run qa:packaged:macos:update-metadata
+APPLE_TEAM_ID="<team-id>" bun run gate:release:macos:trust
+bun run gate:size
 ```
 
-This is purely a packaging/signing-scope note — it does not change notarization credentials, the Apple Developer ID, or the existing sign/notarize pipeline gating.
+The trust gate verifies:
+
+- the app, sidecar, and shortcut helper are present and executable
+- all three signatures are valid Developer ID signatures
+- hardened runtime and secure timestamps are present
+- all embedded executables use the expected Apple team
+- all shipped executables are arm64
+- a notarization ticket is stapled
+- Gatekeeper accepts the app as `Notarized Developer ID`
+
+Useful direct checks are:
+
+```bash
+codesign --verify --deep --strict --verbose=2 \
+  "release/mac-arm64/Plainsong.app"
+xcrun stapler validate "release/mac-arm64/Plainsong.app"
+spctl --assess --type execute --verbose=4 \
+  "release/mac-arm64/Plainsong.app"
+```
+
+For a launchable build, stapler must validate successfully and `spctl` must
+report `accepted` with `source=Notarized Developer ID`.
+
+## Embedded executable scope
+
+The packaged application contains two important native executables under
+`Contents/Resources`:
+
+```text
+sidecar/plainsong-sidecar
+shortcut-helper/plainsong-native-shortcut-helper
+```
+
+Both must use the same Developer ID identity and Apple team as the main
+application. The release trust gate checks them independently, in addition to
+the deep application signature.
+
+## Official release behavior
+
+`.github/workflows/release.yml` is the only official publication path. It:
+
+1. verifies the tag matches `package.json`
+2. runs source tests and contract gates
+3. requires the full signing and notarization credential set
+4. builds with direct publication disabled
+5. verifies updater metadata, signatures, stapling, Gatekeeper, TCC strings,
+   size, and release assets
+6. creates or refreshes a draft GitHub release only after every gate passes
+
+A rerun may replace assets on an existing draft. It refuses to modify a
+published release. A human must review the draft before publishing it.
+
+The repository is currently private, and no public release or deployment has
+occurred.
 
 ## Windows
 
-Windows distribution uses Authenticode signing on the installer generated by `electron-builder`.
-
-Expected Windows release inputs:
-
-- `WIN_CSC_LINK` or `WINDOWS_CERTIFICATE`
-- `WIN_CSC_KEY_PASSWORD` or `WINDOWS_CERTIFICATE_PASSWORD`
-- `WIN_PUBLISHER_NAME` or `WINDOWS_PUBLISHER_NAME`
-
-SmartScreen can still show first-download reputation warnings for a newly signed publisher or file. Treat Authenticode validity and SmartScreen observation as separate release evidence.
-
-### Verify a signed installer
-
-```powershell
-Get-AuthenticodeSignature ".\\release\\Plainsong Setup 1.0.0.exe" | Format-List
-```
-
-Status should be `Valid` for a properly signed installer.
-
-## CI Notes
-
-- Keep release credentials in CI, not in the repo.
-- Keep packaging rules in `electron-builder.yml`.
-- Keep macOS entitlements in `build-resources/`.
-- Publish a draft GitHub release first, validate update metadata and signed update install, then promote.
-- Do not reintroduce retired shell config files, updater key injection scripts, or legacy packaging commands.
+Windows is not a v1 release target. Do not add a Windows leg to the official
+workflow until the sidecar, packaging, signing, and platform QA have their own
+complete release path.

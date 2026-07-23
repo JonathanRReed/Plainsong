@@ -87,7 +87,7 @@ A small, disciplined vocabulary. Use these names — they are the brand lexicon.
 
 - **The versal "P"** — the gilded illuminated capital; the canonical mark (tab icon, masthead, OG). In-app: the sidebar wordmark's "P" may be gilded with `.gilt-text`.
 - **Neumes** — gold diamonds (a rotated square). They are *notation* and the app's **state glyphs**. Utilities: `.neume` (ambient bronze), `.neume-lit` (filled `--gold-leaf` = set down / local / on), `.neume-hollow` (outline = optional / not-yet / cloud), `.neume-rust` (rust). **Replace stoplight dots and pass/fail check/cross icon pairs with neumes** where a small state glyph is wanted.
-- **The chant staff** — four faint gold rules. `.staff-bg` backs the sidebar spine and the waveform; the live waveform sweeps it and resolves into gold neumes (`voice → notation → written record`).
+- **The chant staff** — faint gold rules reserved for bounded waveform and signature surfaces; the live waveform resolves into gold neumes (`voice → notation → written record`). Do not repeat staff rules across navigation or general application chrome.
 - **Rubrication** — rust opening labels & numerals (`.rubric`).
 - **Gilt as a material** — `.gilt-text` (gold-leaf clipped to text + bole under-edge), `.gilt-edge` (seated gold ring/halo). Reserve for earned marks.
 - **Manuscript text** — `.manuscript` sets words in the display serif like inked text (transcripts, the "set down" line).
@@ -111,7 +111,7 @@ App-only vs website-only: the app uses **neume, rubric, staff, gilt, versal, man
 
 - **Button** (`ui/button.tsx`) — `default` = the gilded gold CTA (`bg-primary`, ink text) — *one earned CTA per surface*. `destructive` = rust. `outline`/`secondary`/`ghost` = neutral. `active` = gold-tinted selected state.
 - **Badge** (`ui/badge.tsx`) — keep variant names; the `success`→gold, `warning`→rust, `info`→neutral internals are fixed once centrally. Prefer a leading neume for state.
-- **Sidebar** (`sidebar.tsx`) — the **spine**: optional faint `.staff-bg`, section labels as `.rubric`, the active item carries a gold mark/neume (not a violet pill). Recording chip = rust pulse. Local/cloud status = `neume-lit` (local) / `neume-hollow` (cloud).
+- **Sidebar** (`sidebar.tsx`) — the **spine**: a clean neutral surface with section labels as `.rubric`. Do not use continuous staff lines or an active side stripe. Expanded active items use a quiet neutral tint and trailing gold neume; collapsed active items use a restrained full-border gold tint. Recording chip = rust pulse. Local/cloud status = `neume-lit` (local) / `neume-hollow` (cloud).
 - **Page header** (`ui/page-header.tsx`) — Newsreader title; a mono UPPERCASE rust eyebrow (`.rubric`) above it.
 - **Signature surfaces** (`dictation-view`, `recording-overlay`, `*-popup`, `waveform-visualizer`) — the earned gilt moments. The **active recording/dictation state** is where burnished gold belongs. But **mode/template/capture SELECTORS are rubric controls → rust**, not gold (gold there would cheapen the earned moment). Consent/ready ticks → gold + `neume-lit`.
 - **Transcript** (`transcript-viewer.tsx`) — set in `.manuscript` (Newsreader); low-confidence words keep a **dotted-gold** underline (never red); active speaker → gold, others neutral.

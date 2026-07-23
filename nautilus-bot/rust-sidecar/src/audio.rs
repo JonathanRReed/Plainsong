@@ -15,6 +15,7 @@ use crate::settings;
 use crate::sidecar_handle::SidecarHandle;
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{FromSample, Sample};
 use crossbeam::channel::{bounded, Receiver, TrySendError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -36,6 +37,51 @@ const DICTATION_AUTO_STOP_FRAME_MS: f32 = 30.0;
 /// Minimum sustained speech before auto-stop-on-silence is allowed to arm, so a
 /// stray cough or click can't immediately end the session once it goes quiet.
 const DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS: f32 = 0.5;
+
+fn to_f32_sample<T>(sample: T) -> f32
+where
+    T: Sample,
+    f32: FromSample<T>,
+{
+    f32::from_sample(sample)
+}
+
+fn for_each_mono_sample<T>(data: &[T], num_channels: usize, mut visit: impl FnMut(f32))
+where
+    T: Sample,
+    f32: FromSample<T>,
+{
+    if num_channels <= 1 {
+        for &sample in data {
+            visit(to_f32_sample(sample));
+        }
+        return;
+    }
+
+    for frame in data.chunks_exact(num_channels) {
+        let mono = frame
+            .iter()
+            .map(|&sample| to_f32_sample(sample))
+            .sum::<f32>()
+            / num_channels as f32;
+        visit(mono);
+    }
+}
+
+fn downmix_to_mono<T>(data: &[T], num_channels: usize) -> Vec<f32>
+where
+    T: Sample,
+    f32: FromSample<T>,
+{
+    let capacity = if num_channels <= 1 {
+        data.len()
+    } else {
+        data.len() / num_channels
+    };
+    let mut mono = Vec::with_capacity(capacity);
+    for_each_mono_sample(data, num_channels, |sample| mono.push(sample));
+    mono
+}
 
 /// Per-session configuration for "auto-stop dictation after sustained silence",
 /// resolved once from settings when a dictation session starts.
@@ -311,7 +357,7 @@ fn bluetooth_advisory_for_device(
     }
 }
 
-fn device_name(device: &cpal::Device) -> Result<String, cpal::DeviceNameError> {
+fn device_name(device: &cpal::Device) -> Result<String, cpal::Error> {
     Ok(device.description()?.name().to_string())
 }
 
@@ -671,78 +717,58 @@ impl AudioCapture {
             // Trim lazily (only past 2x the window) so the front-drain memmove is
             // amortized to roughly once per window rather than every callback.
             let max_partial_samples = (config.sample_rate() as usize).saturating_mul(30);
-            let err_fn = |err| tracing::error!("Dictation stream error: {}", err);
-            let capture_stop_f32 = Arc::clone(&capture_stop);
-            let capture_stop_i16 = Arc::clone(&capture_stop);
-            let capture_stop_u8 = Arc::clone(&capture_stop);
-            let audio_level_f32 = Arc::clone(&audio_level);
-            let audio_level_i16 = Arc::clone(&audio_level);
-            let audio_level_u8 = Arc::clone(&audio_level);
-            let partial_buffer_f32 = Arc::clone(&partial_buffer);
-            let partial_buffer_i16 = Arc::clone(&partial_buffer);
-            let partial_buffer_u8 = Arc::clone(&partial_buffer);
-            let streaming_active_f32 = Arc::clone(&streaming_active);
-            let streaming_active_i16 = Arc::clone(&streaming_active);
-            let streaming_active_u8 = Arc::clone(&streaming_active);
-            let vad_gate_f32 = Arc::clone(&vad_gate);
-            let vad_gate_i16 = Arc::clone(&vad_gate);
-            let vad_gate_u8 = Arc::clone(&vad_gate);
-            let vad_session_id_f32 = Arc::clone(&vad_session_id);
-            let vad_session_id_i16 = Arc::clone(&vad_session_id);
-            let vad_session_id_u8 = Arc::clone(&vad_session_id);
-            let vad_gate_active_f32 = Arc::clone(&vad_gate_active);
-            let vad_gate_active_i16 = Arc::clone(&vad_gate_active);
-            let vad_gate_active_u8 = Arc::clone(&vad_gate_active);
-            let vad_event_handle_f32 = vad_event_handle.clone();
-            let vad_event_handle_i16 = vad_event_handle.clone();
-            let vad_event_handle_u8 = vad_event_handle;
+            let sample_format = config.sample_format();
+            let stream_config = config.config();
 
-            let stream_result = match config.sample_format() {
-                cpal::SampleFormat::F32 => device.build_input_stream(
-                    &config.into(),
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        if capture_stop_f32.load(Ordering::SeqCst) {
+            macro_rules! build_dictation_stream {
+                ($sample_type:ty) => {{
+                    let capture_stop = Arc::clone(&capture_stop);
+                    let callback_count = Arc::clone(&callback_count);
+                    let buffer = Arc::clone(&buffer);
+                    let audio_level = Arc::clone(&audio_level);
+                    let partial_buffer = Arc::clone(&partial_buffer);
+                    let streaming_active = Arc::clone(&streaming_active);
+                    let vad_gate = Arc::clone(&vad_gate);
+                    let vad_session_id = Arc::clone(&vad_session_id);
+                    let vad_gate_active = Arc::clone(&vad_gate_active);
+                    let vad_event_handle = vad_event_handle.clone();
+
+                    device.build_input_stream(
+                        stream_config.clone(),
+                        move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
+                            if !capture_stop.load(Ordering::SeqCst) {
+                                return;
+                            }
+
                             callback_count.fetch_add(1, Ordering::Relaxed);
-                            let streaming = streaming_active_f32.load(Ordering::Relaxed);
-                            // Cheap relaxed check first: skips the (SeqCst) session-id
-                            // load, `mono_scratch` allocation, and the gate mutex entirely
-                            // for the common case of auto-stop-on-silence being disabled.
-                            let vad_active = vad_gate_active_f32.load(Ordering::Relaxed)
-                                && vad_session_id_f32.load(Ordering::SeqCst) == session_id;
-                            // `mono_scratch` is filled whenever streaming partials or the
-                            // auto-stop VAD gate need a contiguous mono view of this tick;
-                            // otherwise left empty (no allocation) same as before.
+                            let streaming = streaming_active.load(Ordering::Relaxed);
+                            let vad_active = vad_gate_active.load(Ordering::Relaxed)
+                                && vad_session_id.load(Ordering::SeqCst) == session_id;
                             let need_mono_scratch = streaming || vad_active;
-                            let mut mono_scratch: Vec<f32> = if need_mono_scratch {
-                                Vec::with_capacity(if num_channels == 1 {
-                                    data.len()
-                                } else {
-                                    data.len() / num_channels
-                                })
+                            let capacity = if num_channels <= 1 {
+                                data.len()
+                            } else {
+                                data.len() / num_channels
+                            };
+                            let mut mono_scratch = if need_mono_scratch {
+                                Vec::with_capacity(capacity)
                             } else {
                                 Vec::new()
                             };
-                            let mut sum_sq: f64 = 0.0;
-                            if num_channels == 1 {
-                                for &sample in data {
-                                    buffer.push(sample);
-                                    if need_mono_scratch {
-                                        mono_scratch.push(sample);
-                                    }
-                                    sum_sq += (sample as f64) * (sample as f64);
+                            let mut sum_sq = 0.0_f64;
+                            let mut mono_len = 0_usize;
+
+                            for_each_mono_sample(data, num_channels, |sample| {
+                                buffer.push(sample);
+                                if need_mono_scratch {
+                                    mono_scratch.push(sample);
                                 }
-                            } else {
-                                for chunk in data.chunks_exact(num_channels) {
-                                    let mono: f32 = chunk.iter().sum::<f32>() / num_channels as f32;
-                                    buffer.push(mono);
-                                    if need_mono_scratch {
-                                        mono_scratch.push(mono);
-                                    }
-                                    sum_sq += (mono as f64) * (mono as f64);
-                                }
-                            }
+                                sum_sq += (sample as f64) * (sample as f64);
+                                mono_len += 1;
+                            });
+
                             if streaming {
-                                if let Ok(mut shared) = partial_buffer_f32.lock() {
+                                if let Ok(mut shared) = partial_buffer.lock() {
                                     shared.extend_from_slice(&mono_scratch);
                                     if shared.len() > max_partial_samples * 2 {
                                         let overflow = shared.len() - max_partial_samples;
@@ -750,168 +776,40 @@ impl AudioCapture {
                                     }
                                 }
                             }
-                            // RMS over *mono* samples: `sum_sq` accumulates one entry
-                            // per mono frame, so divide by the frame count, not the
-                            // raw interleaved length (which understated multi-channel
-                            // levels by sqrt(num_channels)).
-                            let mono_len = (data.len() / num_channels).max(1);
-                            let rms = (sum_sq / mono_len as f64).sqrt() as f32;
+
+                            let rms = (sum_sq / mono_len.max(1) as f64).sqrt() as f32;
                             let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
-                            audio_level_f32.store(level, Ordering::SeqCst);
+                            audio_level.store(level, Ordering::SeqCst);
+
                             if vad_active {
                                 drive_dictation_auto_stop_gate(
                                     &mono_scratch,
                                     session_id,
-                                    &vad_gate_f32,
-                                    &vad_session_id_f32,
-                                    vad_event_handle_f32.as_ref(),
+                                    &vad_gate,
+                                    &vad_session_id,
+                                    vad_event_handle.as_ref(),
                                 );
                             }
-                        }
-                    },
-                    err_fn,
-                    None,
-                ),
-                cpal::SampleFormat::I16 => device.build_input_stream(
-                    &config.into(),
-                    move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        if capture_stop_i16.load(Ordering::SeqCst) {
-                            callback_count.fetch_add(1, Ordering::Relaxed);
-                            let streaming = streaming_active_i16.load(Ordering::Relaxed);
-                            let vad_active = vad_gate_active_i16.load(Ordering::Relaxed)
-                                && vad_session_id_i16.load(Ordering::SeqCst) == session_id;
-                            let need_mono_scratch = streaming || vad_active;
-                            let mut mono_scratch: Vec<f32> = if need_mono_scratch {
-                                Vec::with_capacity(if num_channels == 1 {
-                                    data.len()
-                                } else {
-                                    data.len() / num_channels
-                                })
-                            } else {
-                                Vec::new()
-                            };
-                            let mut sum_sq: f64 = 0.0;
-                            if num_channels == 1 {
-                                for &sample in data {
-                                    let f = sample as f32 / i16::MAX as f32;
-                                    buffer.push(f);
-                                    if need_mono_scratch {
-                                        mono_scratch.push(f);
-                                    }
-                                    sum_sq += (f as f64) * (f as f64);
-                                }
-                            } else {
-                                for chunk in data.chunks_exact(num_channels) {
-                                    let mono: f32 = chunk
-                                        .iter()
-                                        .map(|&s| s as f32 / i16::MAX as f32)
-                                        .sum::<f32>()
-                                        / num_channels as f32;
-                                    buffer.push(mono);
-                                    if need_mono_scratch {
-                                        mono_scratch.push(mono);
-                                    }
-                                    sum_sq += (mono as f64) * (mono as f64);
-                                }
-                            }
-                            if streaming {
-                                if let Ok(mut shared) = partial_buffer_i16.lock() {
-                                    shared.extend_from_slice(&mono_scratch);
-                                    if shared.len() > max_partial_samples * 2 {
-                                        let overflow = shared.len() - max_partial_samples;
-                                        shared.drain(0..overflow);
-                                    }
-                                }
-                            }
-                            // See the F32 callback: RMS is over mono frames.
-                            let mono_len = (data.len() / num_channels).max(1);
-                            let rms = (sum_sq / mono_len as f64).sqrt() as f32;
-                            let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
-                            audio_level_i16.store(level, Ordering::SeqCst);
-                            if vad_active {
-                                drive_dictation_auto_stop_gate(
-                                    &mono_scratch,
-                                    session_id,
-                                    &vad_gate_i16,
-                                    &vad_session_id_i16,
-                                    vad_event_handle_i16.as_ref(),
-                                );
-                            }
-                        }
-                    },
-                    err_fn,
-                    None,
-                ),
-                cpal::SampleFormat::U8 => device.build_input_stream(
-                    &config.into(),
-                    move |data: &[u8], _: &cpal::InputCallbackInfo| {
-                        if capture_stop_u8.load(Ordering::SeqCst) {
-                            callback_count.fetch_add(1, Ordering::Relaxed);
-                            let streaming = streaming_active_u8.load(Ordering::Relaxed);
-                            let vad_active = vad_gate_active_u8.load(Ordering::Relaxed)
-                                && vad_session_id_u8.load(Ordering::SeqCst) == session_id;
-                            let need_mono_scratch = streaming || vad_active;
-                            let mut mono_scratch: Vec<f32> = if need_mono_scratch {
-                                Vec::with_capacity(if num_channels == 1 {
-                                    data.len()
-                                } else {
-                                    data.len() / num_channels
-                                })
-                            } else {
-                                Vec::new()
-                            };
-                            let mut sum_sq: f64 = 0.0;
-                            if num_channels == 1 {
-                                for &sample in data {
-                                    let f = (sample as f32 - 128.0) / 128.0;
-                                    buffer.push(f);
-                                    if need_mono_scratch {
-                                        mono_scratch.push(f);
-                                    }
-                                    sum_sq += (f as f64) * (f as f64);
-                                }
-                            } else {
-                                for chunk in data.chunks_exact(num_channels) {
-                                    let mono: f32 = chunk
-                                        .iter()
-                                        .map(|&s| (s as f32 - 128.0) / 128.0)
-                                        .sum::<f32>()
-                                        / num_channels as f32;
-                                    buffer.push(mono);
-                                    if need_mono_scratch {
-                                        mono_scratch.push(mono);
-                                    }
-                                    sum_sq += (mono as f64) * (mono as f64);
-                                }
-                            }
-                            if streaming {
-                                if let Ok(mut shared) = partial_buffer_u8.lock() {
-                                    shared.extend_from_slice(&mono_scratch);
-                                    if shared.len() > max_partial_samples * 2 {
-                                        let overflow = shared.len() - max_partial_samples;
-                                        shared.drain(0..overflow);
-                                    }
-                                }
-                            }
-                            // See the F32 callback: RMS is over mono frames.
-                            let mono_len = (data.len() / num_channels).max(1);
-                            let rms = (sum_sq / mono_len as f64).sqrt() as f32;
-                            let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
-                            audio_level_u8.store(level, Ordering::SeqCst);
-                            if vad_active {
-                                drive_dictation_auto_stop_gate(
-                                    &mono_scratch,
-                                    session_id,
-                                    &vad_gate_u8,
-                                    &vad_session_id_u8,
-                                    vad_event_handle_u8.as_ref(),
-                                );
-                            }
-                        }
-                    },
-                    err_fn,
-                    None,
-                ),
+                        },
+                        |err| tracing::error!("Dictation stream error: {}", err),
+                        None,
+                    )
+                }};
+            }
+
+            let stream_result = match sample_format {
+                cpal::SampleFormat::I8 => build_dictation_stream!(i8),
+                cpal::SampleFormat::I16 => build_dictation_stream!(i16),
+                cpal::SampleFormat::I24 => build_dictation_stream!(cpal::I24),
+                cpal::SampleFormat::I32 => build_dictation_stream!(i32),
+                cpal::SampleFormat::I64 => build_dictation_stream!(i64),
+                cpal::SampleFormat::U8 => build_dictation_stream!(u8),
+                cpal::SampleFormat::U16 => build_dictation_stream!(u16),
+                cpal::SampleFormat::U24 => build_dictation_stream!(cpal::U24),
+                cpal::SampleFormat::U32 => build_dictation_stream!(u32),
+                cpal::SampleFormat::U64 => build_dictation_stream!(u64),
+                cpal::SampleFormat::F32 => build_dictation_stream!(f32),
+                cpal::SampleFormat::F64 => build_dictation_stream!(f64),
                 format => {
                     let _ = startup_tx.send(Err(format!(
                         "Unsupported sample format for dictation: {:?}",
@@ -1281,101 +1179,72 @@ impl AudioCapture {
                     return;
                 };
 
-                let sq_f32 = Arc::clone(&stream_queue_clone);
-                let sq_i16 = Arc::clone(&stream_queue_clone);
-                let dropped_stream_f32 = Arc::clone(&dropped_stream_chunks);
-                let dropped_stream_i16 = Arc::clone(&dropped_stream_chunks);
-                let dropped_writer_f32 = Arc::clone(&dropped_writer_chunks);
-                let dropped_writer_i16 = Arc::clone(&dropped_writer_chunks);
                 // The recording is written as a 1-channel WAV, so interleaved
                 // multi-channel input must be downmixed to mono; otherwise a
                 // stereo device produces a double-length, half-speed recording.
                 let num_channels = config.channels() as usize;
-                let err_fn = |err| tracing::error!("Stream error: {}", err);
-                let stream_result = match config.sample_format() {
-                    cpal::SampleFormat::F32 => device.build_input_stream(
-                        &config.into(),
-                        move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                            let chunk: Vec<f32> = if num_channels <= 1 {
-                                data.to_vec()
-                            } else {
-                                data.chunks_exact(num_channels)
-                                    .map(|frame| frame.iter().sum::<f32>() / num_channels as f32)
-                                    .collect()
-                            };
+                let sample_format = config.sample_format();
+                let stream_config = config.config();
 
-                            if let Ok(mut waveform) = wf_buffer.lock() {
-                                for &sample in data.iter().step_by(data.len() / 100 + 1).take(100) {
-                                    waveform.push(sample);
-                                }
-                                if waveform.len() > 4410 {
-                                    let drop_count = waveform.len() - 4410;
-                                    waveform.drain(0..drop_count);
-                                }
-                            }
+                macro_rules! build_recording_stream {
+                    ($sample_type:ty) => {{
+                        let stream_queue = Arc::clone(&stream_queue_clone);
+                        let waveform_buffer = Arc::clone(&wf_buffer);
+                        let samples_sender = samples_sender.clone();
+                        let dropped_stream_chunks = Arc::clone(&dropped_stream_chunks);
+                        let dropped_writer_chunks = Arc::clone(&dropped_writer_chunks);
 
-                            if sq_f32.push(chunk.clone()).is_err() {
-                                let _ = sq_f32.pop();
-                                let _ = sq_f32.push(chunk.clone());
-                                dropped_stream_f32.fetch_add(1, Ordering::Relaxed);
-                            }
+                        device.build_input_stream(
+                            stream_config.clone(),
+                            move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
+                                let chunk = downmix_to_mono(data, num_channels);
 
-                            match samples_sender.try_send(chunk) {
-                                Ok(()) => {}
-                                Err(TrySendError::Full(_)) => {
-                                    dropped_writer_f32.fetch_add(1, Ordering::Relaxed);
+                                if let Ok(mut waveform) = waveform_buffer.lock() {
+                                    for &sample in
+                                        chunk.iter().step_by(chunk.len() / 100 + 1).take(100)
+                                    {
+                                        waveform.push(sample);
+                                    }
+                                    if waveform.len() > 4410 {
+                                        let drop_count = waveform.len() - 4410;
+                                        waveform.drain(0..drop_count);
+                                    }
                                 }
-                                Err(TrySendError::Disconnected(_)) => {}
-                            }
-                        },
-                        err_fn,
-                        None,
-                    ),
-                    cpal::SampleFormat::I16 => device.build_input_stream(
-                        &config.into(),
-                        move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                            let chunk: Vec<f32> = if num_channels <= 1 {
-                                data.iter().map(|&s| s as f32 / i16::MAX as f32).collect()
-                            } else {
-                                data.chunks_exact(num_channels)
-                                    .map(|frame| {
-                                        frame
-                                            .iter()
-                                            .map(|&s| s as f32 / i16::MAX as f32)
-                                            .sum::<f32>()
-                                            / num_channels as f32
-                                    })
-                                    .collect()
-                            };
 
-                            if let Ok(mut waveform) = wf_buffer.lock() {
-                                for &sample in chunk.iter().step_by(chunk.len() / 100 + 1).take(100)
-                                {
-                                    waveform.push(sample);
+                                if stream_queue.push(chunk.clone()).is_err() {
+                                    let _ = stream_queue.pop();
+                                    let _ = stream_queue.push(chunk.clone());
+                                    dropped_stream_chunks.fetch_add(1, Ordering::Relaxed);
                                 }
-                                if waveform.len() > 4410 {
-                                    let drop_count = waveform.len() - 4410;
-                                    waveform.drain(0..drop_count);
-                                }
-                            }
 
-                            if sq_i16.push(chunk.clone()).is_err() {
-                                let _ = sq_i16.pop();
-                                let _ = sq_i16.push(chunk.clone());
-                                dropped_stream_i16.fetch_add(1, Ordering::Relaxed);
-                            }
-                            match samples_sender.try_send(chunk) {
-                                Ok(()) => {}
-                                Err(TrySendError::Full(_)) => {
-                                    dropped_writer_i16.fetch_add(1, Ordering::Relaxed);
+                                match samples_sender.try_send(chunk) {
+                                    Ok(()) => {}
+                                    Err(TrySendError::Full(_)) => {
+                                        dropped_writer_chunks.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(TrySendError::Disconnected(_)) => {}
                                 }
-                                Err(TrySendError::Disconnected(_)) => {}
-                            }
-                        },
-                        err_fn,
-                        None,
-                    ),
-                    _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+                            },
+                            |err| tracing::error!("Stream error: {}", err),
+                            None,
+                        )
+                    }};
+                }
+
+                let stream_result = match sample_format {
+                    cpal::SampleFormat::I8 => build_recording_stream!(i8),
+                    cpal::SampleFormat::I16 => build_recording_stream!(i16),
+                    cpal::SampleFormat::I24 => build_recording_stream!(cpal::I24),
+                    cpal::SampleFormat::I32 => build_recording_stream!(i32),
+                    cpal::SampleFormat::I64 => build_recording_stream!(i64),
+                    cpal::SampleFormat::U8 => build_recording_stream!(u8),
+                    cpal::SampleFormat::U16 => build_recording_stream!(u16),
+                    cpal::SampleFormat::U24 => build_recording_stream!(cpal::U24),
+                    cpal::SampleFormat::U32 => build_recording_stream!(u32),
+                    cpal::SampleFormat::U64 => build_recording_stream!(u64),
+                    cpal::SampleFormat::F32 => build_recording_stream!(f32),
+                    cpal::SampleFormat::F64 => build_recording_stream!(f64),
+                    _ => Err(cpal::ErrorKind::UnsupportedConfig.into()),
                 };
 
                 let Ok(stream) = stream_result else {
@@ -1749,26 +1618,12 @@ impl AudioCapture {
                 min_silence_duration: 0.3,
                 padding_seconds: 0.0,
             };
-            let gate: std::sync::Mutex<Box<dyn VadGate + Send>> = std::sync::Mutex::new(
-                build_vad_gate(vad_backend, &vad_config, silero_model_path.as_deref()),
-            );
-            let running = Arc::clone(&monitor_active);
-            let running_f32 = Arc::clone(&running);
-            let running_i16 = Arc::clone(&running);
-            let running_u8 = Arc::clone(&running);
-            let handle_f32 = event_handle.clone();
-            let handle_i16 = event_handle.clone();
-            let handle_u8 = event_handle;
-            // A cpal stream error is fatal for this stream: mark the monitor
-            // inactive so the parking loop below exits (dropping the dead
-            // stream) and the next reconcile can restart the monitor, instead
-            // of a dead stream reporting "active" forever and blocking every
-            // future reconcile from ever bringing hands-free back.
-            let err_active = Arc::clone(&monitor_active);
-            let err_fn = move |err| {
-                tracing::error!("Hands-free monitor stream error: {}", err);
-                err_active.store(false, Ordering::SeqCst);
-            };
+            let gate: Arc<std::sync::Mutex<Box<dyn VadGate + Send>>> =
+                Arc::new(std::sync::Mutex::new(build_vad_gate(
+                    vad_backend,
+                    &vad_config,
+                    silero_model_path.as_deref(),
+                )));
 
             fn handle_frame(
                 mono: &[f32],
@@ -1790,73 +1645,47 @@ impl AudioCapture {
                 }
             }
 
-            let stream_result = match config.sample_format() {
-                cpal::SampleFormat::F32 => device.build_input_stream(
-                    &config.into(),
-                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        if !running_f32.load(Ordering::SeqCst) {
-                            return;
-                        }
-                        let mono: Vec<f32> = if num_channels == 1 {
-                            data.to_vec()
-                        } else {
-                            data.chunks_exact(num_channels)
-                                .map(|chunk| chunk.iter().sum::<f32>() / num_channels as f32)
-                                .collect()
-                        };
-                        handle_frame(&mono, &gate, &running_f32, &handle_f32);
-                    },
-                    err_fn,
-                    None,
-                ),
-                cpal::SampleFormat::I16 => device.build_input_stream(
-                    &config.into(),
-                    move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        if !running_i16.load(Ordering::SeqCst) {
-                            return;
-                        }
-                        let mono: Vec<f32> = if num_channels == 1 {
-                            data.iter().map(|&s| s as f32 / i16::MAX as f32).collect()
-                        } else {
-                            data.chunks_exact(num_channels)
-                                .map(|chunk| {
-                                    chunk
-                                        .iter()
-                                        .map(|&s| s as f32 / i16::MAX as f32)
-                                        .sum::<f32>()
-                                        / num_channels as f32
-                                })
-                                .collect()
-                        };
-                        handle_frame(&mono, &gate, &running_i16, &handle_i16);
-                    },
-                    err_fn,
-                    None,
-                ),
-                cpal::SampleFormat::U8 => device.build_input_stream(
-                    &config.into(),
-                    move |data: &[u8], _: &cpal::InputCallbackInfo| {
-                        if !running_u8.load(Ordering::SeqCst) {
-                            return;
-                        }
-                        let mono: Vec<f32> = if num_channels == 1 {
-                            data.iter().map(|&s| (s as f32 - 128.0) / 128.0).collect()
-                        } else {
-                            data.chunks_exact(num_channels)
-                                .map(|chunk| {
-                                    chunk
-                                        .iter()
-                                        .map(|&s| (s as f32 - 128.0) / 128.0)
-                                        .sum::<f32>()
-                                        / num_channels as f32
-                                })
-                                .collect()
-                        };
-                        handle_frame(&mono, &gate, &running_u8, &handle_u8);
-                    },
-                    err_fn,
-                    None,
-                ),
+            let sample_format = config.sample_format();
+            let stream_config = config.config();
+
+            macro_rules! build_hands_free_stream {
+                ($sample_type:ty) => {{
+                    let running = Arc::clone(&monitor_active);
+                    let gate = Arc::clone(&gate);
+                    let handle = event_handle.clone();
+                    let err_active = Arc::clone(&monitor_active);
+
+                    device.build_input_stream(
+                        stream_config.clone(),
+                        move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
+                            if !running.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            let mono = downmix_to_mono(data, num_channels);
+                            handle_frame(&mono, &gate, &running, &handle);
+                        },
+                        move |err| {
+                            tracing::error!("Hands-free monitor stream error: {}", err);
+                            err_active.store(false, Ordering::SeqCst);
+                        },
+                        None,
+                    )
+                }};
+            }
+
+            let stream_result = match sample_format {
+                cpal::SampleFormat::I8 => build_hands_free_stream!(i8),
+                cpal::SampleFormat::I16 => build_hands_free_stream!(i16),
+                cpal::SampleFormat::I24 => build_hands_free_stream!(cpal::I24),
+                cpal::SampleFormat::I32 => build_hands_free_stream!(i32),
+                cpal::SampleFormat::I64 => build_hands_free_stream!(i64),
+                cpal::SampleFormat::U8 => build_hands_free_stream!(u8),
+                cpal::SampleFormat::U16 => build_hands_free_stream!(u16),
+                cpal::SampleFormat::U24 => build_hands_free_stream!(cpal::U24),
+                cpal::SampleFormat::U32 => build_hands_free_stream!(u32),
+                cpal::SampleFormat::U64 => build_hands_free_stream!(u64),
+                cpal::SampleFormat::F32 => build_hands_free_stream!(f32),
+                cpal::SampleFormat::F64 => build_hands_free_stream!(f64),
                 format => {
                     let _ = startup_tx.send(Err(format!(
                         "Unsupported sample format for hands-free monitor: {:?}",
@@ -2066,6 +1895,53 @@ fn ensure_min_duration(samples: &mut Vec<f32>, sample_rate: u32, min_seconds: f3
     }
 
     samples.resize(min_samples, 0.0);
+}
+
+#[cfg(test)]
+mod sample_conversion_tests {
+    use super::{downmix_to_mono, to_f32_sample};
+
+    fn assert_approx_eq(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1.0e-6,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn normalizes_coreaudio_integer_pcm_formats() {
+        assert_approx_eq(to_f32_sample(i8::MIN), -1.0);
+        assert_approx_eq(to_f32_sample(i8::MAX), 127.0 / 128.0);
+
+        assert_approx_eq(to_f32_sample(i16::MIN), -1.0);
+        assert_approx_eq(to_f32_sample(i16::MAX), 32_767.0 / 32_768.0);
+
+        let i24_min = cpal::I24::new(-8_388_608).expect("valid I24 minimum");
+        let i24_max = cpal::I24::new(8_388_607).expect("valid I24 maximum");
+        assert_approx_eq(to_f32_sample(i24_min), -1.0);
+        assert_approx_eq(to_f32_sample(i24_max), 8_388_607.0 / 8_388_608.0);
+
+        assert_approx_eq(to_f32_sample(i32::MIN), -1.0);
+        assert_approx_eq(to_f32_sample(i32::MAX), 2_147_483_647.0 / 2_147_483_648.0);
+        assert_approx_eq(to_f32_sample(128_u8), 0.0);
+    }
+
+    #[test]
+    fn downmixes_interleaved_pcm_frames_after_normalization() {
+        let stereo = [i16::MIN, i16::MIN, i16::MAX, i16::MAX];
+        let mono = downmix_to_mono(&stereo, 2);
+
+        assert_eq!(mono.len(), 2);
+        assert_approx_eq(mono[0], -1.0);
+        assert_approx_eq(mono[1], 32_767.0 / 32_768.0);
+    }
+
+    #[test]
+    fn downmix_ignores_incomplete_trailing_frames() {
+        let mono = downmix_to_mono(&[i8::MIN, i8::MAX, 0], 2);
+        assert_eq!(mono.len(), 1);
+        assert_approx_eq(mono[0], -1.0 / 256.0);
+    }
 }
 
 #[cfg(test)]

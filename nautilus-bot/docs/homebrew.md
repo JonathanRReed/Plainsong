@@ -2,7 +2,12 @@
 
 Status: **prepared, not submitted.** Submitting a cask requires the GitHub repo
 to be public and a published (non-draft) release with a downloadable arm64
-artifact — both are launch-day human actions tracked in `../../LAUNCH.md`.
+artifact. The release must also be notarized and accepted by Gatekeeper.
+Those launch gates are tracked in `../../LAUNCH.md`.
+
+The July 23, 2026 v1.0.0 candidate is Developer ID signed but not notarized.
+Do not use its DMG or checksum for a cask submission. The final notarized
+release rebuild will produce a different artifact and checksum.
 
 ## Cask template
 
@@ -33,30 +38,28 @@ cask "plainsong" do
 end
 ```
 
-Note: while releases are unsigned (no Apple Developer ID yet), homebrew/cask
-will generally not accept the submission — unsigned apps trip Gatekeeper and
-casks are expected to install cleanly. Two options:
-
-1. **Wait for signing + notarization** (the release pipeline already signs when
-   the Developer ID secrets are present), then submit to homebrew/cask.
-2. **Self-host a tap** in the meantime (`JonathanRReed/homebrew-plainsong`),
-   which has no signing requirement:
-   `brew install --cask JonathanRReed/plainsong/plainsong`.
+Submit only after the official release workflow passes Developer ID signing,
+notarization, stapling, and Gatekeeper checks. The workflow fails closed when
+credentials or trust evidence are missing.
 
 ## Submission steps (homebrew/cask)
 
-1. Publish the release (not a draft) with the arm64 DMG attached.
-2. Compute the checksum: `shasum -a 256 Plainsong-<version>-arm64.dmg`.
-3. Fill in `version` and `sha256` in the template above.
-4. Audit locally:
+1. Confirm `xcrun stapler validate` and `spctl --assess` pass for the exact
+   arm64 app distributed in the DMG.
+2. Publish the release (not a draft) with the arm64 DMG attached.
+3. Download the published DMG again from its public URL.
+4. Compute the checksum:
+   `shasum -a 256 Plainsong-<version>-arm64.dmg`.
+5. Fill in `version` and `sha256` in the template above.
+6. Audit locally:
    ```bash
    brew audit --cask --new ./plainsong.rb
-   brew install --cask ./plainsong.rb   # smoke-test the install
+   brew install --cask ./plainsong.rb
    ```
-5. Open a PR against https://github.com/Homebrew/homebrew-cask adding
-   `Casks/p/plainsong.rb` (one cask per PR; follow their CONTRIBUTING guide).
-6. After acceptance, update the root README's Install section from
-   "Homebrew: planned" to the real `brew install --cask plainsong` command.
+7. Open a PR against https://github.com/Homebrew/homebrew-cask adding
+   `Casks/p/plainsong.rb`, following the current contribution guide.
+8. After acceptance, update the root README Install section with the real
+   `brew install --cask plainsong` command.
 
-For subsequent releases, bump `version`/`sha256` — or let Homebrew's
+For subsequent releases, bump `version` and `sha256`, or let Homebrew's
 `brew bump-cask-pr` do it.

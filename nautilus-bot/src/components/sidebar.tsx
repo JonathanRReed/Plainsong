@@ -252,10 +252,10 @@ export function Sidebar({
 
         <Separator />
 
-        <ScrollArea className={cn("staff-bg flex-1 py-5", isCollapsed ? "px-2" : "px-3")}>
+        <ScrollArea className={cn("flex-1 py-5", isCollapsed ? "px-2" : "px-3")}>
           <nav className="flex flex-col gap-6">
             {/* Primary Navigation */}
-              <div className="flex flex-col gap-1.5">
+            <div className="flex flex-col gap-1.5">
               {!isCollapsed && (
                 <p className="rubric mb-2 px-3">
                   Primary
@@ -270,13 +270,16 @@ export function Sidebar({
                       <Button
                         variant="ghost"
                         className={cn(
-                          "h-10 w-full justify-start rounded-xl border border-l-2 border-transparent px-3.5 text-muted-foreground transition-all duration-200 hover:border-border/70 hover:bg-muted/55 hover:text-foreground",
+                          "h-10 w-full justify-start rounded-xl border border-transparent px-3.5 text-muted-foreground transition-all duration-200 hover:border-border/70 hover:bg-muted/55 hover:text-foreground",
                           isActive &&
-                            "border-l-gold bg-muted/50 text-foreground shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset]",
-                          isCollapsed && "justify-center border-l-0 px-2"
+                            (isCollapsed
+                              ? "border-gold/30 bg-gold/10 text-foreground shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset]"
+                              : "border-border/70 bg-muted/50 text-foreground shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset]"),
+                          isCollapsed && "justify-center px-2"
                         )}
                         onClick={() => onViewChange(item.id as ViewId)}
                         aria-label={isCollapsed ? item.label : undefined}
+                        aria-current={isActive ? "page" : undefined}
                       >
                         <Icon className="h-4 w-4 shrink-0" />
                         {!isCollapsed && (
@@ -305,7 +308,7 @@ export function Sidebar({
             </div>
 
             {/* Secondary Navigation */}
-              <div className="flex flex-col gap-1.5">
+            <div className="flex flex-col gap-1.5">
               {!isCollapsed && (
                 <p className="rubric mb-2 px-3">
                   Secondary
@@ -320,13 +323,16 @@ export function Sidebar({
                       <Button
                         variant="ghost"
                         className={cn(
-                          "h-10 w-full justify-start rounded-xl border border-l-2 border-transparent px-3.5 text-muted-foreground transition-all duration-200 hover:border-border/70 hover:bg-muted/55 hover:text-foreground",
+                          "h-10 w-full justify-start rounded-xl border border-transparent px-3.5 text-muted-foreground transition-all duration-200 hover:border-border/70 hover:bg-muted/55 hover:text-foreground",
                           isActive &&
-                            "border-l-gold bg-muted/50 text-foreground shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset]",
-                          isCollapsed && "justify-center border-l-0 px-2"
+                            (isCollapsed
+                              ? "border-gold/30 bg-gold/10 text-foreground shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset]"
+                              : "border-border/70 bg-muted/50 text-foreground shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset]"),
+                          isCollapsed && "justify-center px-2"
                         )}
                         onClick={() => onViewChange(item.id as ViewId)}
                         aria-label={isCollapsed ? item.label : undefined}
+                        aria-current={isActive ? "page" : undefined}
                       >
                         <Icon className="h-4 w-4 shrink-0" />
                         {!isCollapsed && (
@@ -386,11 +392,12 @@ export function Sidebar({
                         key={item.id}
                         variant="ghost"
                         className={cn(
-                          "h-10 w-full justify-start rounded-xl border border-l-2 border-transparent px-3.5 text-muted-foreground transition-all duration-200 hover:border-border/70 hover:bg-muted/55 hover:text-foreground",
+                          "h-10 w-full justify-start rounded-xl border border-transparent px-3.5 text-muted-foreground transition-all duration-200 hover:border-border/70 hover:bg-muted/55 hover:text-foreground",
                           isActive &&
-                            "border-l-gold bg-muted/50 text-foreground shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset]"
+                            "border-border/70 bg-muted/50 text-foreground shadow-[0_1px_0_hsl(var(--foreground)/0.04)_inset]"
                         )}
                         onClick={() => onViewChange(item.id as ViewId)}
+                        aria-current={isActive ? "page" : undefined}
                       >
                         <Icon className="h-4 w-4 shrink-0" />
                         <span className="ml-3 min-w-0 flex-1 text-left">{item.label}</span>
@@ -418,6 +425,7 @@ export function Sidebar({
                           )}
                           onClick={() => onViewChange(item.id as ViewId)}
                           aria-label={item.label}
+                          aria-current={isActive ? "page" : undefined}
                         >
                           <Icon className="h-4 w-4 shrink-0" />
                         </Button>

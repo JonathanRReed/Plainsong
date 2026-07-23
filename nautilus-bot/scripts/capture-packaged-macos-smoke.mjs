@@ -37,6 +37,12 @@ const commands = [
   { key: "settings", method: "get_settings", params: {} },
 ];
 
+// This is a component-level smoke test. It launches the sidecar binary from
+// inside the packaged app, but it does not launch the Electron app itself.
+// On macOS, TCC can attribute Accessibility access to the responsible parent
+// process, so direct sidecar results must not be used as proof that the
+// packaged app has its own user-granted Accessibility permission.
+
 function fail(message) {
   console.error(message);
   process.exit(1);
@@ -127,7 +133,7 @@ child.on("exit", (code) => {
   const permissions = results.permissions ?? {};
   const dictationSetup = results.dictationSetup ?? {};
   const meetingSetup = results.meetingSetup ?? {};
-  const pass = Boolean(
+  const componentPass = Boolean(
     code === 0 &&
       !didTimeOut &&
       permissions.microphoneReady &&
@@ -140,9 +146,21 @@ child.on("exit", (code) => {
 
   const artifact = {
     generatedAt: new Date().toISOString(),
+    scope: "bundled-sidecar-direct",
+    evidenceLevel: "component",
     appPath,
     sidecarPath,
-    pass,
+    pass: componentPass,
+    componentPass,
+    launchReady: false,
+    launchReadyReason:
+      "Direct sidecar diagnostics do not prove the packaged Electron app's user-granted TCC permissions or a real cursor insertion.",
+    excludedClaims: [
+      "packaged app Accessibility permission",
+      "packaged app cursor insertion",
+      "first-run permission flow",
+      "launch readiness",
+    ],
     timedOut: didTimeOut,
     pendingCommands: [...pending.values()].map((command) => command.method),
     checks: {
@@ -168,7 +186,7 @@ child.on("exit", (code) => {
     console.error("Timed out waiting for packaged sidecar smoke responses.");
   }
 
-  process.exit(pass ? 0 : 1);
+  process.exit(componentPass ? 0 : 1);
 });
 
 for (const command of commands) {

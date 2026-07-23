@@ -1,5 +1,6 @@
 //! System audio capture for macOS and Windows loopback devices.
 
+use super::to_f32_sample;
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam::channel::TrySendError;
@@ -8,8 +9,63 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-fn device_name(device: &cpal::Device) -> Result<String, cpal::DeviceNameError> {
+fn device_name(device: &cpal::Device) -> Result<String, cpal::Error> {
     Ok(device.description()?.name().to_string())
+}
+
+fn push_normalized_samples<T>(
+    data: &[T],
+    buffer: &crossbeam::queue::ArrayQueue<f32>,
+    dropped_samples: &AtomicU64,
+) where
+    T: cpal::Sample,
+    f32: cpal::FromSample<T>,
+{
+    for &sample in data {
+        let normalized = to_f32_sample(sample);
+        if buffer.push(normalized).is_err() {
+            let _ = buffer.pop();
+            let _ = buffer.push(normalized);
+            dropped_samples.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+struct LoopbackDeviceSelection {
+    device: cpal::Device,
+    display_name: String,
+    stream_config: cpal::StreamConfig,
+    sample_format: cpal::SampleFormat,
+}
+
+const LOOPBACK_KEYWORDS: [&str; 7] = [
+    "blackhole",
+    "loopback",
+    "vb-cable",
+    "vb-audio",
+    "virtual audio cable",
+    "soundflower",
+    "stereo mix",
+];
+
+fn normalized_audio_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_loopback_identifier(value: &str) -> bool {
+    let normalized = normalized_audio_label(value);
+    LOOPBACK_KEYWORDS.iter().any(|keyword| {
+        let normalized_keyword = normalized_audio_label(keyword);
+        normalized.contains(&normalized_keyword)
+    })
+}
+
+fn device_lookup_label(device: &cpal::Device) -> Option<String> {
+    device_name(device).ok()
 }
 
 /// System audio capture session helper
@@ -45,29 +101,52 @@ impl SystemAudioCapture {
         self.find_loopback_device().ok().flatten().is_some()
     }
 
-    fn find_loopback_device(&self) -> Result<Option<cpal::Device>> {
+    fn find_loopback_device(&self) -> Result<Option<LoopbackDeviceSelection>> {
+        // CPAL's macOS `input_devices()` filter probes every device's supported
+        // input formats. Some CoreAudio devices can block indefinitely during
+        // that probe. Enumerate names without filtering, then validate only a
+        // matched virtual loopback device with the direct default-config query.
+        #[cfg(target_os = "macos")]
+        let devices = self
+            .host
+            .devices()
+            .context("Failed to enumerate audio devices")?;
+
+        #[cfg(not(target_os = "macos"))]
         let devices = self
             .host
             .input_devices()
             .context("Failed to enumerate input devices")?;
 
-        let loopback_keywords = [
-            "blackhole",
-            "loopback",
-            "vb-cable",
-            "virtual",
-            "soundflower",
-            "stereo mix",
-        ];
-
         for device in devices {
-            if let Ok(name) = device_name(&device) {
-                let name_lower = name.to_lowercase();
-                if loopback_keywords.iter().any(|&kw| name_lower.contains(kw)) {
-                    tracing::info!("Found loopback device: {}", name);
-                    return Ok(Some(device));
-                }
+            let Some(label) = device_lookup_label(&device) else {
+                continue;
+            };
+            if !is_loopback_identifier(&label) {
+                continue;
             }
+
+            let supported_config = match device.default_input_config() {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::warn!(
+                        "Ignoring loopback device without a usable input configuration: {} ({})",
+                        label,
+                        error
+                    );
+                    continue;
+                }
+            };
+            let sample_format = supported_config.sample_format();
+            let stream_config = supported_config.config();
+
+            tracing::info!("Found loopback device: {}", label);
+            return Ok(Some(LoopbackDeviceSelection {
+                device,
+                display_name: label,
+                stream_config,
+                sample_format,
+            }));
         }
 
         Ok(None)
@@ -75,7 +154,7 @@ impl SystemAudioCapture {
 
     pub fn get_loopback_device_name(&self) -> Result<Option<String>> {
         match self.find_loopback_device()? {
-            Some(device) => Ok(Some(device_name(&device)?)),
+            Some(selection) => Ok(Some(selection.display_name)),
             None => Ok(None),
         }
     }
@@ -155,46 +234,45 @@ impl MixedAudioCapture {
                         .context("No microphone available")?;
                     let config = device.default_input_config()?;
                     mic_sample_rate = Some(config.sample_rate());
-                    let mic_buf = Arc::clone(&mic_buffer);
-                    let is_cap = Arc::clone(&is_capturing);
-                    let dropped_samples_f32 = Arc::clone(&dropped_mic_samples);
-                    let dropped_samples_i16 = Arc::clone(&dropped_mic_samples);
+                    let sample_format = config.sample_format();
+                    let stream_config = config.config();
+                    macro_rules! build_mic_stream {
+                        ($sample_type:ty) => {{
+                            let mic_buffer = Arc::clone(&mic_buffer);
+                            let is_capturing = Arc::clone(&is_capturing);
+                            let dropped_samples = Arc::clone(&dropped_mic_samples);
 
-                    let stream = match config.sample_format() {
-                        cpal::SampleFormat::F32 => device.build_input_stream(
-                            &config.into(),
-                            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                                if is_cap.load(Ordering::SeqCst) {
-                                    for &sample in data {
-                                        if mic_buf.push(sample).is_err() {
-                                            let _ = mic_buf.pop();
-                                            let _ = mic_buf.push(sample);
-                                            dropped_samples_f32.fetch_add(1, Ordering::Relaxed);
-                                        }
+                            device.build_input_stream(
+                                stream_config.clone(),
+                                move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
+                                    if is_capturing.load(Ordering::SeqCst) {
+                                        push_normalized_samples(
+                                            data,
+                                            &mic_buffer,
+                                            &dropped_samples,
+                                        );
                                     }
-                                }
-                            },
-                            |err| tracing::error!("Mic stream error: {}", err),
-                            None,
-                        ),
-                        cpal::SampleFormat::I16 => device.build_input_stream(
-                            &config.into(),
-                            move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                                if is_cap.load(Ordering::SeqCst) {
-                                    for &sample in data {
-                                        let normalized = sample as f32 / i16::MAX as f32;
-                                        if mic_buf.push(normalized).is_err() {
-                                            let _ = mic_buf.pop();
-                                            let _ = mic_buf.push(normalized);
-                                            dropped_samples_i16.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                    }
-                                }
-                            },
-                            |err| tracing::error!("Mic stream error: {}", err),
-                            None,
-                        ),
-                        _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+                                },
+                                |err| tracing::error!("Mic stream error: {}", err),
+                                None,
+                            )
+                        }};
+                    }
+
+                    let stream = match sample_format {
+                        cpal::SampleFormat::I8 => build_mic_stream!(i8),
+                        cpal::SampleFormat::I16 => build_mic_stream!(i16),
+                        cpal::SampleFormat::I24 => build_mic_stream!(cpal::I24),
+                        cpal::SampleFormat::I32 => build_mic_stream!(i32),
+                        cpal::SampleFormat::I64 => build_mic_stream!(i64),
+                        cpal::SampleFormat::U8 => build_mic_stream!(u8),
+                        cpal::SampleFormat::U16 => build_mic_stream!(u16),
+                        cpal::SampleFormat::U24 => build_mic_stream!(cpal::U24),
+                        cpal::SampleFormat::U32 => build_mic_stream!(u32),
+                        cpal::SampleFormat::U64 => build_mic_stream!(u64),
+                        cpal::SampleFormat::F32 => build_mic_stream!(f32),
+                        cpal::SampleFormat::F64 => build_mic_stream!(f64),
+                        _ => Err(cpal::ErrorKind::UnsupportedConfig.into()),
                     }?;
 
                     stream.play()?;
@@ -216,52 +294,50 @@ impl MixedAudioCapture {
             if capture_system {
                 let mut setup = || -> Result<cpal::Stream> {
                     let sys_capture = SystemAudioCapture::new();
-                    let loopback_device = sys_capture
+                    let loopback = sys_capture
                         .find_loopback_device()?
                         .ok_or_else(|| anyhow::anyhow!("Loopback device not found"))?;
 
-                    let config = loopback_device.default_input_config()?;
-                    system_sample_rate = Some(config.sample_rate());
-                    let sys_buf = Arc::clone(&system_buffer);
-                    let is_cap = Arc::clone(&is_capturing);
-                    let dropped_samples_f32 = Arc::clone(&dropped_system_samples);
-                    let dropped_samples_i16 = Arc::clone(&dropped_system_samples);
+                    let config = loopback.stream_config;
+                    let sample_format = loopback.sample_format;
+                    system_sample_rate = Some(config.sample_rate);
+                    macro_rules! build_system_stream {
+                        ($sample_type:ty) => {{
+                            let system_buffer = Arc::clone(&system_buffer);
+                            let is_capturing = Arc::clone(&is_capturing);
+                            let dropped_samples = Arc::clone(&dropped_system_samples);
 
-                    let stream = match config.sample_format() {
-                        cpal::SampleFormat::F32 => loopback_device.build_input_stream(
-                            &config.into(),
-                            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                                if is_cap.load(Ordering::SeqCst) {
-                                    for &sample in data {
-                                        if sys_buf.push(sample).is_err() {
-                                            let _ = sys_buf.pop();
-                                            let _ = sys_buf.push(sample);
-                                            dropped_samples_f32.fetch_add(1, Ordering::Relaxed);
-                                        }
+                            loopback.device.build_input_stream(
+                                config.clone(),
+                                move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
+                                    if is_capturing.load(Ordering::SeqCst) {
+                                        push_normalized_samples(
+                                            data,
+                                            &system_buffer,
+                                            &dropped_samples,
+                                        );
                                     }
-                                }
-                            },
-                            |err| tracing::error!("System stream error: {}", err),
-                            None,
-                        ),
-                        cpal::SampleFormat::I16 => loopback_device.build_input_stream(
-                            &config.into(),
-                            move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                                if is_cap.load(Ordering::SeqCst) {
-                                    for &sample in data {
-                                        let normalized = sample as f32 / i16::MAX as f32;
-                                        if sys_buf.push(normalized).is_err() {
-                                            let _ = sys_buf.pop();
-                                            let _ = sys_buf.push(normalized);
-                                            dropped_samples_i16.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                    }
-                                }
-                            },
-                            |err| tracing::error!("System stream error: {}", err),
-                            None,
-                        ),
-                        _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+                                },
+                                |err| tracing::error!("System stream error: {}", err),
+                                None,
+                            )
+                        }};
+                    }
+
+                    let stream = match sample_format {
+                        cpal::SampleFormat::I8 => build_system_stream!(i8),
+                        cpal::SampleFormat::I16 => build_system_stream!(i16),
+                        cpal::SampleFormat::I24 => build_system_stream!(cpal::I24),
+                        cpal::SampleFormat::I32 => build_system_stream!(i32),
+                        cpal::SampleFormat::I64 => build_system_stream!(i64),
+                        cpal::SampleFormat::U8 => build_system_stream!(u8),
+                        cpal::SampleFormat::U16 => build_system_stream!(u16),
+                        cpal::SampleFormat::U24 => build_system_stream!(cpal::U24),
+                        cpal::SampleFormat::U32 => build_system_stream!(u32),
+                        cpal::SampleFormat::U64 => build_system_stream!(u64),
+                        cpal::SampleFormat::F32 => build_system_stream!(f32),
+                        cpal::SampleFormat::F64 => build_system_stream!(f64),
+                        _ => Err(cpal::ErrorKind::UnsupportedConfig.into()),
                     }?;
 
                     stream.play()?;
@@ -523,10 +599,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_system_audio_available() {
-        let capture = SystemAudioCapture::new();
-        let available = capture.is_available();
+    #[ignore = "requires live CoreAudio device enumeration; covered by the packaged macOS smoke gate"]
+    fn live_system_audio_availability_smoke() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let capture = SystemAudioCapture::new();
+            let result = capture
+                .find_loopback_device()
+                .map(|selection| selection.is_some())
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+
+        let available = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("system audio availability must not block setup verification")
+            .expect("system audio availability inspection must complete successfully");
         tracing::info!("System audio available: {}", available);
+    }
+
+    #[test]
+    fn loopback_identifier_matching_covers_supported_virtual_devices() {
+        for identifier in [
+            "BlackHole2ch_UID",
+            "Rogue Amoeba Loopback",
+            "VB-CABLE Input",
+            "CABLE Output (VB-Audio Virtual Cable)",
+            "Soundflower (2ch)",
+            "Stereo Mix",
+        ] {
+            assert!(is_loopback_identifier(identifier), "{identifier}");
+        }
+        assert!(!is_loopback_identifier("MacBook Pro Microphone"));
+        assert!(!is_loopback_identifier("Virtual Microphone"));
+    }
+
+    #[test]
+    fn normalized_queue_path_keeps_latest_sample_and_counts_overflow() {
+        let buffer = crossbeam::queue::ArrayQueue::new(1);
+        let dropped_samples = AtomicU64::new(0);
+
+        push_normalized_samples(&[i8::MIN, i8::MAX], &buffer, &dropped_samples);
+
+        assert_eq!(dropped_samples.load(Ordering::Relaxed), 1);
+        let latest = buffer.pop().expect("latest normalized sample");
+        assert!((latest - 127.0 / 128.0).abs() <= 1.0e-6);
     }
 
     #[test]

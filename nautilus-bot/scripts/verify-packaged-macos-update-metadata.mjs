@@ -79,9 +79,10 @@ Generated: ${artifact.generatedAt}
 
 - App update metadata: ${artifact.paths.appUpdate}
 - Latest manifest: ${artifact.paths.latest}
-- Update provider: ${artifact.updateConfig.provider ?? "missing"}
-- GitHub owner: ${artifact.updateConfig.owner ?? "missing"}
-- GitHub repo: ${artifact.updateConfig.repo ?? "missing"}
+- Error: ${artifact.error ?? "none"}
+- Update provider: ${artifact.updateConfig?.provider ?? "missing"}
+- GitHub owner: ${artifact.updateConfig?.owner ?? "missing"}
+- GitHub repo: ${artifact.updateConfig?.repo ?? "missing"}
 - Stable channel requests: ${artifact.stableChannel?.requestedManifest ?? "missing"}
 - Published channel file: ${artifact.stableChannel?.publishedManifest ?? "missing"}
 - Manifest version: ${artifact.latest?.version ?? "missing"}

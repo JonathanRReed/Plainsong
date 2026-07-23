@@ -1,235 +1,199 @@
-# Launch checklist
+# Plainsong launch checklist
 
-Honest state of launch readiness for Plainsong. Everything that can be verified
-without a physical machine + microphone is done and green; the rest is listed
-explicitly so nothing is assumed.
+Current release state as of July 23, 2026.
 
-## Done (verified in-repo)
+Plainsong v1.0.0 is locally built and verified for macOS 13 or later on Apple
+Silicon. The candidate is Developer ID signed, but it is not notarized,
+stapled, Gatekeeper-approved, published, or deployed. The repository is still
+private and no public release exists.
 
-- **Free & open-source**: all commercial licensing/trial/nag/entitlement code
-  removed; MIT LICENSE present.
-- **Compiles & passes CI gates**: `cargo clippy -D warnings` clean, 312 Rust
-  unit tests, 275 vitest, typecheck (both tsconfigs), IPC contract, knip,
-  rustfmt — all green. CI runs the shipped default feature set + a production
-  build.
-- **Competitive-parity push (2026-07-06)**: a research-driven pass closing the
-  gaps found against Wispr Flow, Willow Voice, Aqua Voice, Superwhisper,
-  MacWhisper, Talon, Handy, and Anarlog/Hyprnote:
-  - **Destination-app-aware AI formatting**: dictation cleanup now adapts to
-    the app you're dictating into (email/messaging/AI-chat/code-editor/notes/
-    worklog), matching Wispr Flow's headline differentiator — bundle-id +
-    name based, with per-app overrides, fully local/BYOK, degrades to prior
-    behavior when disabled.
-  - **Real hold-to-talk**: a native `.listenOnly` CGEventTap Swift helper
-    (rides the existing Accessibility grant, no new permission prompt) gives
-    true press-and-hold, with Electron's toggle-only path kept as an automatic
-    fallback if the helper is unavailable or crashes.
-  - **Hands-free / VAD activation**: auto-stop dictation after sustained
-    silence (any activation mode) and auto-start on sustained speech when
-    hands-free is enabled — a streaming energy-threshold gate, no ONNX
-    inference in the hot path.
-  - **ASR provider naming/copy fixed**: the module that was internally named
-    as if it implemented NVIDIA's Canary model (it's actually a second
-    Whisper backend via Candle) was renamed; route-picker copy now states the
-    real tradeoff instead of vague "experimental" language.
-  - **Dictionary/snippets gained category scoping**, a "recently learned"
-    list, and a capitalization-only quick action.
-  - **Voice/palette editing of selected text**: select text in any app,
-    invoke a Cmd+K command (shorten/expand/proofread/tone-rewrite/translate/
-    bulletize/case-transforms/etc.), have it replaced in place — mined from
-    an abandoned branch, adapted and hardened rather than merged wholesale.
-  - **Shortcut-conflict detection wired end-to-end**: colliding shortcuts
-    (e.g. dictation toggle vs. open-window) are now detected before
-    registration, with a clear precedence rule and an inline warning in
-    Settings — the utility for this existed but was dormant until now.
-  - **Category-scope/AI-formatting coupling fixed**: category-scoped
-    dictionary/snippet entries now apply correctly regardless of the
-    separate "AI formatting" toggle (a real bug, not just a sharp edge —
-    found a second, previously-unnoticed call site with the same coupling
-    while fixing the first).
-  - **Silero VAD v2 shipped**: a real ONNX-based voice-activity model
-    (MIT-licensed, ~2.3MB) is now selectable as a more-accurate alternative
-    to the energy-threshold hands-free gate — opt-in via an explicit
-    download in Settings, falls back to the energy-threshold gate at every
-    failure point, inference runs off the real-time audio thread. The exact
-    tensor contract was verified against the real downloaded model binary
-    and cross-checked against upstream's own reference implementation, not
-    guessed — see "Must be validated on a real Mac" below for the one thing
-    that genuinely can't be confirmed without real hardware.
-  - See `nautilus-bot/docs/competitive-positioning.md` for the competitive
-    research this push was driven by.
-- **Fast default route**: whisper.cpp (Metal/CoreML) `base.en`; measured
-  593 ms p50 / 600 ms p95, ~74× real-time on 44 s of real spoken speech
-  (`scripts/fixtures/real-speech-44s.wav`, Apple Silicon, 5 runs) via
-  `bun run benchmark:latency`. (An earlier ~137 ms / ~218× figure was measured
-  on a sine-tone fixture and has been retired.)
-- **Hot path unblocked**: concurrent JSON-RPC dispatch, model pre-warm on start,
-  in-process frontmost-app lookup (no osascript spawn), reduced insertion sleeps.
-- **Live streaming partials**: words appear as you speak; UI-only and safe by
-  construction (never changes the inserted text); hardened by a 4-reviewer pass.
-- **Honest UI**: no fabricated stats, no dead shortcuts, dictation-first default.
-- **Privacy by architecture**: no telemetry, keys in OS Keychain, dictation
-  audio never persisted; documented vs competitors in PRIVACY.md.
-- **macOS TCC**: `NSMicrophoneUsageDescription` + `NSSpeechRecognitionUsageDescription`
-  added to the packaged Info.plist (without these macOS kills the app on mic use).
-- **Renamed to Plainsong** end-to-end (bundle id `com.plainsong.app`, data dir,
-  binary `plainsong-sidecar`, all brand text); pre-launch so no data migration.
-- **Release pipeline**: electron-builder workflow that signs/notarizes when the
-  secrets are present and otherwise publishes an unsigned build. macOS is
-  **arm64-only for v1** (the Rust sidecar is host-arch; Intel needs per-arch
-  cross-compiles — tracked).
-- **Packaged build re-verified 2026-07-06**: `electron:pack` produces
-  `Plainsong.app` (342MB, under the 450MB size-gate cap) with bundle id
-  `com.plainsong.app`, both TCC usage strings in the Info.plist, and both
-  native binaries bundled — `plainsong-sidecar` in `Resources/sidecar/` and
-  the new hold-to-talk `plainsong-native-shortcut-helper` in
-  `Resources/shortcut-helper/`.
-- **Honest hotkey UI**: onboarding still defaults to **toggle**; hold-to-talk
-  is now a real, selectable option in Settings, gated on a runtime check that
-  the native helper is actually running (never offered as a dead choice), and
-  hands-free is a real, independent option (no native-helper dependency).
-- **App icon**: a real designed Plainsong mark — a gilt-gradient versal “P” on a
-  candle-lit ink folio (Baskerville), regenerated at every size into
-  `build-resources/icon.icns` / `.ico` / `.png`, plus a black-on-transparent
-  menu-bar template icon.
-- **Manuscript UI**: the entire renderer was restyled to the Plainsong brand —
-  vellum/ink grounds, one gold accent, one rust rubric, Newsreader / IBM Plex
-  faces, neume state glyphs (see `nautilus-bot/STYLE.md`). Zero off-palette
-  colours; all UI gates green; both themes verified.
-- **Multi-monitor + notch HUD**: the dictation/recording overlays now open on the
-  display under the cursor, inside its notch-safe work area — not always the
-  primary display.
-- **Menu-bar tray**: a template-icon `Tray` with an Open / Quit menu (a menu, not
-  a popover, per Apple HIG), wired to the `minimizeToTray` setting so the window
-  hides to the tray instead of quitting when enabled.
-- **HUD dismissal**: the floating HUD persists until explicit dismissal and is
-  closed with `Escape` (it never vanishes on click-away).
+## Verified locally
 
-## Must be validated on a real Mac (cannot be done headlessly)
+### Source and build
 
-These are not known-broken — they are simply unproven without a machine + mic.
-Expect this pass to surface a couple of small fixes; that's normal.
+- [x] Bun install and source build complete.
+- [x] TypeScript lint and typecheck pass.
+- [x] Rust formatting, clippy, and tests pass.
+- [x] Renderer and Electron tests pass.
+- [x] IPC contract and dead-code gates pass.
+- [x] Production renderer, Electron main process, Rust sidecar, and native
+      shortcut helper build successfully.
 
-1. **Produce the packaged build and launch it**: confirm it opens, the bundled
-   `plainsong-sidecar` spawns, and a dictation round-trips end to end.
-2. **Permissions flow**: grant Microphone + Accessibility on first run and
-   confirm dictation captures and inserts into other apps.
-3. **First-run model download**: confirm `base.en` downloads and transcribes on
-   a clean machine.
-4. **Streaming-partials feel**: tune the 700 ms tick / 0.5 s min / 30 s window /
-   greedy decode on real speech; it's on by default via Live Preview.
-5. **Real-app insertion** across the apps you care about (Slack, browser, IDE,
-   Notes).
-6. **Menu-bar tray + close-to-tray**: confirm the Tray icon appears, its menu
-   opens, "Open Plainsong" reshows the window, and enabling "Minimize to tray"
-   hides (not quits) the window on close. (Native — built and typechecked, but
-   the runtime behaviour needs a real launch.)
-7. **HUD on an external monitor / notched Mac**: confirm the dictation and
-   recording overlays appear on the *active* display, not the built-in one, and
-   clear of the notch.
-8. **Native hold-to-talk feel**: the CGEventTap helper is built, typechecked,
-   and unit-tested via its dependency-injected TS facade — but real
-   press-and-hold timing/reliability (including the automatic fallback to
-   toggle if the helper crashes mid-session) needs a real keyboard.
-9. **Hands-free/VAD tuning**: the auto-stop silence threshold (default ~1.8s)
-   and auto-start energy threshold are reasonable defaults derived from the
-   existing batch VAD's config, but need validation against a real mic in a
-   real room (background noise, pause length while composing a sentence).
-10. **Destination-app formatting bundle-id list**: the built-in ChatGPT/
-    Claude/Cursor/VS Code/etc. bundle-id matches were written from public
-    knowledge, not spot-checked against real installed apps on this machine.
-11. **Silero VAD real-model smoke test**: the ONNX tensor contract (input/
-    state/sr names and shapes) was verified against the actual downloaded
-    model binary and cross-checked against upstream's reference
-    implementation, but the `ort` runtime's real behavior against that
-    binary — exact output ordering, real inference latency under load —
-    has not been exercised end-to-end (needs a real download + real mic).
+### v1.0.0 package
 
-## Known gaps (not hard blockers)
+- [x] `release/Plainsong-1.0.0-arm64.dmg` exists.
+- [x] `release/Plainsong-1.0.0-arm64-mac.zip` exists.
+- [x] ZIP and DMG blockmaps exist.
+- [x] `release/latest-mac.yml` exists.
+- [x] `release/mac-arm64/Plainsong.app` exists and launches for rendered QA.
+- [x] The package is arm64-only, matching the v1 support statement.
+- [x] The app is below the 450 MB size gate.
+- [x] The packaged Info.plist contains microphone and speech recognition usage
+      descriptions.
+- [x] The app contains executable arm64 copies of `plainsong-sidecar` and
+      `plainsong-native-shortcut-helper`.
 
-- **`nautilus-bot/` directory name** retained (CI working-directory depends on
-  it); repo-flatten is a separate cleanup.
-- **Windows/Linux support** deliberately out of scope for this push (macOS-only
-  focus); Willow Voice, Talon, and Handy already ship Windows — tracked as a
-  future multi-week platform investment, not attempted here.
-- **SenseVoice as a first-class ASR route**: investigated, not done — it has
-  no native `AsrProviderType` counterpart the existing MLX-route-mapping
-  pattern requires, so doing it properly is a separate, larger provider
-  addition, not a quick win.
-- **Packaged-build environment drift, found + fixed 2026-07-06**: `bun run
-  electron:pack` briefly failed with "production dependency not found:
-  @radix-ui/react-dialog" — the on-disk `node_modules/@radix-ui/react-dialog`
-  was stale at `1.1.15` while `package.json`/`bun.lock` require `^1.1.16`
-  (and electron-builder itself was stale at `26.8.1` vs. the lockfile's
-  `26.15.3`). A local dev-environment issue, not a repo bug: `bun.lock` was
-  already correct, so a plain `bun install` reconciled `node_modules` with
-  zero lockfile changes to commit. Confirmed CI's "production build" step
-  only runs `bun run build:renderer`, never the full `electron-builder`
-  packaging path, so this kind of drift had no gate — CI now has a
-  `verify-package` job (macOS, main pushes + weekly cron) that runs
-  `bun run electron:pack`, verifies app-update.yml + stable-channel manifest
-  resolution, and asserts both bundled native binaries (arm64) and the two
-  TCC usage strings are present in the built app.
+### Signing and updater evidence
 
-## Release pipeline notes
+- [x] The app, sidecar, and shortcut helper have valid Developer ID
+      Application signatures.
+- [x] All shipped executables use Apple team `AJ9VWBRNZN`.
+- [x] Hardened runtime and secure timestamps are present.
+- [x] Packaged update metadata points to
+      `JonathanRReed/Plainsong`.
+- [x] `latest-mac.yml` reports v1.0.0 and resolves the arm64 ZIP.
+- [x] The ZIP size and SHA-512 digest match the updater manifest.
+- [x] The updater blockmap is present.
 
-- **Releases publish as a DRAFT**: electron-builder has no `releaseType`
-  configured, so a `v*` tag push ends in an unpublished draft release. A
-  human must review the draft on GitHub and click "Publish release" —
-  electron-updater users see nothing until then.
-- **Tag must match `package.json` version**: the release workflow fails fast
-  if the pushed tag disagrees with `nautilus-bot/package.json` (electron-builder
-  derives the release tag from package.json, not the pushed tag).
-- **Unsigned builds cannot self-update**: Squirrel.Mac refuses to install into
-  an app without a valid (non-ad-hoc) code signature. The app detects this and
-  offers a "Download from GitHub" link instead of the Install button; release
-  notes for unsigned builds should say the same and include
-  `xattr -dr com.apple.quarantine /Applications/Plainsong.app`.
-- **Windows leg removed from release.yml** (v1 is macOS arm64 only; the
-  sidecar's default cargo features are Metal/CoreML and do not compile on
-  Windows) — see "Windows/Linux support" above for the tracked future work.
+Evidence:
 
-## Done since the first checklist
+- `nautilus-bot/artifacts/qa/macos/update-metadata.json`
+- `nautilus-bot/artifacts/qa/macos/update-metadata.md`
+- `nautilus-bot/artifacts/release/macos-trust.json`
+- `nautilus-bot/artifacts/release/macos-trust.md`
 
-- ✅ **`oss-relaunch` branch pushed** to `github.com/JonathanRReed/Plainsong`.
-- ✅ **GitHub repo renamed** `NautilusBot → Plainsong`; local remote updated.
-  The publish/auto-update URLs resolve **once the repo is public** — today the
-  repo is still private with zero releases, so every public link (README
-  downloads, auto-update feed, security-advisory link) 404s for anyone else.
-  See "Remaining" below.
-- ✅ **Site domain live**: https://plainsong.jonathanrreed.com is registered as a
-  subdomain of the maker's domain and wired into the docs/config. (The optional
-  `plainsong.app` apex + `@plainsong` social handles are separate and only if
-  still wanted.)
+### Packaged sidecar smoke and rendered application
 
-## Remaining — physically require a human (no AI can do these)
+- [x] The packaged sidecar starts and completes the smoke protocol.
+- [x] The direct sidecar smoke reports microphone, Accessibility, post-event,
+      cursor insertion, dictation setup, meeting setup, and system-audio
+      readiness.
+- [x] The packaged app was rendered and inspected in its real UI.
+- [x] The live packaged app reports microphone, system audio, local routes,
+      and installed models available.
+- [x] Authentic Dictation, Meetings, and Settings captures are available under
+      `docs/images/`.
 
-- **Make the GitHub repo public** (`JonathanRReed/Plainsong` is private today).
-  Until this happens the README download links, the electron-updater feed
-  (electron-builder.yml `publish`), and the security-advisory link in
-  `.github/ISSUE_TEMPLATE/config.yml` all 404 for everyone but the owner.
-  Owner's launch-day action — do not announce before this.
-- **Tag and publish the first `v1.0.0` release**: push the `v1.0.0` tag so
-  `release.yml` builds the artifacts, then review and click "Publish release"
-  on the resulting draft (releases publish as drafts — see "Release pipeline
-  notes"). Until published there is nothing to download and nothing for the
-  updater to see.
-- **Sync the live website** (https://plainsong.jonathanrreed.com — its source
-  lives outside this repo, so it drifts silently): as of 2026-07-13 it still
-  says "v0.1 preview" and "macOS 13+ and Windows 10/11". Update to v1.0.0,
-  macOS (Apple Silicon / arm64) only with Windows on the roadmap, and link the
-  GitHub repo + Releases page once public.
-- **Homebrew cask** (post-first-release): submit the prepared cask — template
-  and steps in `nautilus-bot/docs/homebrew.md`. Needs the repo public and a
-  published release asset first.
-- **One on-device validation run**: launch the app on a Mac, grant Microphone +
-  Accessibility, **speak into the mic**, confirm dictation inserts into real
-  apps, watch the first-run `base.en` download, feel the streaming. (Needs voice
-  + GUI permission grants — cannot be automated.)
-- **(Optional) Register `plainsong.app` apex + grab `@plainsong` handles** (needs
-  payment/accounts). Not a blocker: the live site already runs at
-  https://plainsong.jonathanrreed.com.
-- **Attorney USPTO TSDR clearance** (Classes 9 + 42) — confirmation, not
-  investigation; the name vetted clean in-category. (Needs a lawyer.)
-- **$99 Apple Developer ID** → signed + notarized releases (the pipeline already
-  uses the secrets when present).
+Evidence:
+
+- `nautilus-bot/artifacts/qa/macos/packaged-smoke.json`
+- `docs/images/plainsong-dictation.png`
+- `docs/images/plainsong-meetings.png`
+- `docs/images/plainsong-settings.png`
+
+The packaged smoke launches the bundled sidecar directly. Its Accessibility
+and cursor-insertion flags do not prove those permissions for the signed
+application identity. In the live packaged application, Accessibility and
+cursor insertion are not currently granted. An audible speech round trip,
+observed insertion into another application, and a recorded meeting also
+remain unproven. These are blocking manual checks below.
+
+## Release workflow now fails closed
+
+The official `.github/workflows/release.yml` path:
+
+1. verifies the tag matches `nautilus-bot/package.json`
+2. runs source tests and the IPC contract
+3. requires the complete Developer ID and Apple notarization credential set
+4. builds the DMG, ZIP, blockmaps, and updater manifest without publishing
+5. verifies updater metadata, signatures, notarization ticket, Gatekeeper,
+   TCC strings, package size, and release assets
+6. creates or refreshes a draft GitHub release only after every gate passes
+
+The workflow refuses to modify a published release. Updater users cannot see a
+draft release. A human must review and publish the draft.
+
+There is no supported unsigned official-release path and no Gatekeeper bypass
+in the launch instructions.
+
+## Blocking gate: notarization credentials
+
+The local credential preflight currently reports:
+
+- `CSC_LINK`: missing
+- `CSC_NAME`: missing
+- `CSC_KEY_PASSWORD`: missing
+- `APPLE_ID`: missing
+- `APPLE_APP_SPECIFIC_PASSWORD`: missing
+- `APPLE_TEAM_ID`: missing
+- local Developer ID identities: present
+
+Because notarization credentials were unavailable, the current signed
+candidate has no stapled ticket. The release trust gate correctly fails:
+
+```text
+Plainsong.app does not have a ticket stapled to it.
+source=Unnotarized Developer ID
+```
+
+Required actions:
+
+- [ ] Add the password-protected Developer ID `.p12` and password to GitHub
+      Actions secrets `MAC_CSC_LINK` and `MAC_CSC_KEY_PASSWORD`.
+- [ ] Add `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`.
+- [ ] Run `bun run gate:release-credentials:preflight` in the credentialed
+      release environment.
+- [ ] Rebuild through the official release workflow.
+- [ ] Require `bun run gate:release:macos:trust` to pass with a stapled ticket
+      and `source=Notarized Developer ID`.
+
+See:
+
+- `nautilus-bot/docs/APPLE_DEVELOPER_SETUP.md`
+- `nautilus-bot/docs/CODE_SIGNING.md`
+
+## Manual release-candidate checks
+
+Run these against the notarized artifact that the workflow places in the draft,
+not against the current unnotarized local candidate.
+
+- [ ] Install from the DMG on a clean Apple Silicon Mac.
+- [ ] Confirm Gatekeeper opens the app without a bypass.
+- [ ] Complete first-run setup and the `base.en` model download.
+- [ ] Grant Accessibility to the real packaged application identity and
+      confirm the live app reports Accessibility and cursor insertion ready.
+- [ ] Confirm Microphone remains granted to the packaged application.
+- [ ] Speak a dictation and confirm the final text inserts at the cursor in
+      Notes, a browser text field, and a code editor.
+- [ ] Confirm toggle, hold-to-talk, and hands-free activation behave correctly
+      with a real keyboard and microphone.
+- [ ] Record and stop a microphone-only meeting.
+- [ ] Record and stop a meeting with system audio.
+- [ ] Review the resulting transcript, summary, and export.
+- [ ] Confirm tray open, close-to-tray, overlays, and multi-display placement.
+- [ ] Publish a prerequisite build to a private test channel, then verify an
+      update install using the signed ZIP and `latest-mac.yml`.
+- [ ] Re-run the remaining packaged QA matrix for onboarding, dictation
+      hotkey, cross-app insertion, backups, exports, idle CPU, retention, and
+      meeting capture.
+
+## Publication and deployment gates
+
+- [ ] Merge the reviewed release changes.
+- [ ] Create and push the intended `v1.0.0` tag.
+- [ ] Let the official workflow produce a fully verified draft release.
+- [ ] Review the draft assets, checksums, release notes, and clean-Mac results.
+- [ ] Make `JonathanRReed/Plainsong` public before announcing source or
+      download links.
+- [ ] Publish the reviewed GitHub draft.
+- [ ] Verify the public DMG, ZIP, blockmap, `latest-mac.yml`, and updater URLs.
+- [ ] Deploy the prepared website update only after its public links resolve.
+- [ ] Verify the rendered production website on desktop and mobile.
+- [ ] Submit the Homebrew cask only after the notarized public DMG exists.
+
+No commit, tag, GitHub release publication, repository visibility change,
+website deployment, or Homebrew submission has been performed in this
+readiness pass.
+
+## Launch-day public truth
+
+Public copy must state:
+
+- Plainsong v1 supports macOS 13 or later on Apple Silicon
+- Windows and Linux are future work
+- transcription is local by default
+- cloud providers are optional and use the user's own credentials
+- no public download exists until the notarized GitHub release is published
+
+Before announcement, verify the repository README, live website, GitHub
+release, update manifest, and actual downloadable assets agree on version,
+platform, and availability.
+
+## Post-release
+
+- [ ] Submit the prepared Homebrew cask.
+- [ ] Monitor update checks and install reports.
+- [ ] Track Windows and Linux as separate platform projects.
+- [ ] Complete any desired legal trademark clearance, domain purchase, or
+      social handle registration separately. These are not represented as
+      completed in this checklist.
