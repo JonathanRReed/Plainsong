@@ -112,10 +112,9 @@ jobs:
 
   verify-package:
     name: Package and verify (macOS)
-    # electron-builder packaging, the Swift shortcut-helper compile, and
-    # app-update.yml metadata were previously first exercised on a tag push.
-    # Runs on main pushes and a weekly cron (not on PRs) to keep macOS runner
-    # cost in check.
+    # Build the ZIP target so electron-builder emits the same app-update.yml,
+    # latest-mac.yml, ZIP, and blockmap used by the updater. Runs on main
+    # pushes and a weekly cron (not on PRs) to keep macOS runner cost in check.
     if: github.event_name == 'push' || github.event_name == 'schedule'
     runs-on: macos-latest
     timeout-minutes: 60
@@ -142,11 +141,11 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Package app (electron-builder --dir)
-        run: bun run electron:pack
+      - name: Build macOS ZIP without publishing
+        run: bun run electron:build:mac
 
       - name: Verify update metadata
-        run: node scripts/verify-packaged-macos-update-metadata.mjs --pack-only
+        run: bun run qa:packaged:macos:update-metadata
 
       # The sidecar and shortcut helper are compiled for the host arch; the mac
       # artifact is declared arm64-only, so both bundled binaries must be arm64.

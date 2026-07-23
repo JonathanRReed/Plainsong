@@ -208,7 +208,7 @@ impl IntelligentPunctuator {
                         && result[index + ch.len_utf8()..]
                             .chars()
                             .next()
-                            .map_or(true, char::is_whitespace);
+                            .is_none_or(char::is_whitespace);
                     ends_sentence.then_some(index)
                 });
                 if let Some(end_pos) = end_pos {
@@ -491,11 +491,11 @@ fn replace_spoken_token(input: &str, phrase: &str, replacement: &str) -> String 
         let boundary_before = input[..found.start()]
             .chars()
             .next_back()
-            .map_or(true, char::is_whitespace);
+            .is_none_or(char::is_whitespace);
         let boundary_after = input[found.end()..]
             .chars()
             .next()
-            .map_or(true, char::is_whitespace);
+            .is_none_or(char::is_whitespace);
         if !(boundary_before && boundary_after) {
             continue;
         }
@@ -637,7 +637,7 @@ fn capitalize_standalone_i(text: &str) -> String {
                 && (index == 0 || !chars[index - 1].is_ascii_alphabetic())
                 && chars
                     .get(index + 1)
-                    .map_or(true, |next| !next.is_ascii_alphabetic());
+                    .is_none_or(|next| !next.is_ascii_alphabetic());
             if standalone {
                 'I'
             } else {

@@ -3,8 +3,8 @@
 **Free, open-source, local-first dictation and meeting capture for macOS.**
 
 - **Website:** https://plainsong.jonathanrreed.com
-- **Source & releases:** https://github.com/JonathanRReed/Plainsong
-  ([download a build](https://github.com/JonathanRReed/Plainsong/releases))
+- **Project repository:** https://github.com/JonathanRReed/Plainsong (currently private)
+- **Public release:** Pending notarization and launch; no public build is available yet.
 
 This directory contains the Plainsong desktop app: the Electron main process,
 the React/TypeScript renderer, and the Rust transcription sidecar.
@@ -15,7 +15,7 @@ For the product overview, privacy posture, and contribution guide, see the
 
 ## What it is
 
-Press a hotkey, speak, and your words appear at the cursor in any app —
+Press a hotkey, speak, and your words appear at the cursor in any app,
 transcribed on your own machine. Meetings are recorded, transcribed, and turned
 into searchable notes without sending a bot into the call.
 
@@ -23,12 +23,13 @@ into searchable notes without sending a bot into the call.
   (`base.en`); no account and no audio leaves your machine unless you opt in.
 - **Bring your own keys.** Optional cloud transcription and AI cleanup use your
   own provider keys, stored in the OS keychain and sent directly to the
-  provider — never through a Plainsong server.
+  provider, never through a Plainsong server.
 - **Honest about v1.** Three dictation activation modes ship: **toggle** (the
   onboarding default), **hold-to-talk** (selectable in Settings; a native
   CGEventTap helper with automatic fallback to toggle if the helper isn't
   running), and **hands-free** (VAD auto start/stop, with an optional Silero
-  VAD model download for better accuracy). macOS is **arm64-only** for v1.
+  VAD model download for better accuracy). v1 requires **macOS 13 or later**
+  and is **arm64-only**.
 - **MIT licensed**, no trial, no tiers, no nags.
 
 ## Layout
@@ -74,18 +75,25 @@ ollama pull llama3.2
 ```bash
 bun run electron:build          # current platform
 bun run electron:build:mac      # macOS (run on macOS)
-bun run electron:build:win      # Windows (run on Windows)
-bun run release:mac             # build + publish a macOS release (CI)
-bun run release:win             # build + publish a Windows release (future work, not in the v1 pipeline)
+bun run release:mac             # build the macOS DMG, ZIP, and updater metadata
 ```
 
-macOS releases are signed and notarized when Developer ID secrets are present in
-CI; otherwise an unsigned build is produced. Unsigned builds have two caveats:
-users clear the quarantine attribute once
-(`xattr -dr com.apple.quarantine /Applications/Plainsong.app`), and the in-app
-updater cannot install updates into an unsigned app — download new versions from
-[GitHub Releases](https://github.com/JonathanRReed/Plainsong/releases) instead
-(the in-app updater says so and links there). See
+`release:mac` never publishes. The official release workflow requires
+Developer ID signing and Apple notarization credentials, builds without direct
+publication, verifies signatures, stapling, Gatekeeper, updater metadata, TCC
+usage strings, and size, then creates or refreshes a draft GitHub release. A
+missing credential or failed trust check stops the workflow before any release
+asset reaches GitHub.
+
+The local v1.0.0 arm64 candidate produced on July 23, 2026 passes Developer ID
+signing, update metadata, TCC, size, direct sidecar smoke, and rendered-app
+checks. The live packaged app reports microphone, system audio, local routes,
+and installed models available, but Accessibility and cursor insertion are not
+yet granted for the packaged app identity. The candidate is not launchable
+because Apple notarization credentials were not available in the local
+environment. It has no stapled ticket and Gatekeeper correctly reports
+`source=Unnotarized Developer ID`. The repository is private and no public
+release has been published. See
 [docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) and
 [docs/APPLE_DEVELOPER_SETUP.md](docs/APPLE_DEVELOPER_SETUP.md).
 
@@ -96,7 +104,9 @@ bun run lint        # typecheck + cargo fmt --check + clippy -D warnings
 bun run test        # Vitest (renderer + Electron)
 bun run test:rust   # Rust sidecar unit tests
 bun run gate:ipc-contract
-bun run gate:release:local   # full local pre-release pass
+bun run gate:release:local   # source checks + local package build
+bun run qa:packaged:macos:update-metadata
+bun run gate:release:macos:trust
 ```
 
 Use `bun run test` (Vitest), not `bun test`.
@@ -112,11 +122,11 @@ bun run benchmark:latency -- --provider whisper --model base.en --runs 5
 # → {"transcriptionMsP50":593,"transcriptionMsP95":600,"realTimeFactor":74.4,...}
 ```
 
-The default fixture is `scripts/fixtures/real-speech-44s.wav` — 44 seconds of
+The default fixture is `scripts/fixtures/real-speech-44s.wav`, which contains 44 seconds of
 real spoken speech. The numbers above were measured with whisper.cpp `base.en`
 (Metal) on Apple Silicon. Earlier docs cited ~137 ms p50 / ~218× real-time;
 that was measured on a pure sine-tone fixture and is not representative of
-dictation — don't quote it.
+dictation, so do not quote it.
 
 This replaces an earlier "benchmark" that multiplied fixture numbers by a CLI
 flag; the numbers here are real.
@@ -125,6 +135,6 @@ flag; the numbers here are real.
 
 Speech recognition runs locally by default (Whisper via whisper.cpp, plus other
 native engines). Optional bring-your-own-key cloud providers (OpenAI,
-ElevenLabs, Mistral, Groq, Cohere) and local Ollama are supported — keys are
+ElevenLabs, Mistral, Groq, Cohere) and local Ollama are supported. Keys are
 stored in the OS keychain and requests go directly to the provider, never
 through a Plainsong server.
