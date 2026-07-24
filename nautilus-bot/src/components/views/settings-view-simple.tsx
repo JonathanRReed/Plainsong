@@ -144,6 +144,8 @@ type ShortcutFieldKey =
   | "toggleRecording"
   | "toggleDictation"
   | "openWindow"
+  | "repasteLastDictation"
+  | "recopyLastDictation"
   | "quickExport"
   | "focusSearch";
 
@@ -158,6 +160,8 @@ const SHORTCUT_FIELD_CONFIG: Array<{
   wired: boolean;
 }> = [
   { key: "toggleDictation", label: "Dictation", wired: true },
+  { key: "repasteLastDictation", label: "Paste last result", wired: true },
+  { key: "recopyLastDictation", label: "Copy last result", wired: true },
   { key: "toggleRecording", label: "Recording", wired: false },
   { key: "openWindow", label: "Open window", wired: true },
   { key: "quickExport", label: "Quick export", wired: false },

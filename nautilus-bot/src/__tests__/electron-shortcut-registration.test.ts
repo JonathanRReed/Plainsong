@@ -129,6 +129,49 @@ describe("findConflictingShortcuts", () => {
     expect(openWindowRank).toBeLessThan(toggleRecordingRank);
   });
 
+  it("ranks the dictation recovery bindings with the other registered fields", () => {
+    // repaste/recopy ARE registered with globalShortcut (electron/main.ts), so
+    // a collision must never hand the OS registration to a field that can
+    // never fire (toggleRecording/quickExport/focusSearch are unwired).
+    const rank = (key: string) =>
+      SHORTCUT_FIELD_PRECEDENCE.findIndex((entry) => entry.key === key);
+
+    expect(rank("repasteLastDictation")).toBeGreaterThanOrEqual(0);
+    expect(rank("recopyLastDictation")).toBeGreaterThanOrEqual(0);
+    expect(rank("toggleDictation")).toBeLessThan(rank("repasteLastDictation"));
+    expect(rank("repasteLastDictation")).toBeLessThan(rank("toggleRecording"));
+    expect(rank("recopyLastDictation")).toBeLessThan(rank("toggleRecording"));
+  });
+
+  it("reports a recovery binding that collides with dictation instead of double-registering it", () => {
+    const conflicts = findConflictingShortcuts({
+      toggleDictation: "Cmd+Ctrl+V",
+      repasteLastDictation: "Command+Control+V",
+    });
+
+    expect(conflicts).toEqual([
+      {
+        field: "repasteLastDictation",
+        label: "Paste last result",
+        shortcut: "Command+Control+V",
+        conflictsWith: "Dictation",
+        conflictsWithField: "toggleDictation",
+      },
+    ]);
+  });
+
+  it("registers both default recovery bindings when they do not collide", () => {
+    expect(
+      findConflictingShortcuts({
+        toggleDictation: "Cmd+Shift+Space",
+        repasteLastDictation: "Cmd+Ctrl+V",
+        recopyLastDictation: "Cmd+Ctrl+C",
+      }),
+    ).toEqual([]);
+    expect(convertShortcutToAccelerator("Cmd+Ctrl+V")).toBe("Command+Control+V");
+    expect(convertShortcutToAccelerator("Cmd+Ctrl+C")).toBe("Command+Control+C");
+  });
+
   it("keeps openWindow as the winner when it collides with toggleRecording", () => {
     const conflicts = findConflictingShortcuts({
       openWindow: "Control+Alt+O",

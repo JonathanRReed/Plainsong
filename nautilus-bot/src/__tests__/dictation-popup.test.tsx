@@ -474,8 +474,87 @@ describe("DictationPopup", () => {
       render(<DictationPopup />);
     });
 
-    expect(await screen.findByText("Ready")).toBeInTheDocument();
+    expect(await screen.findByText("Getting ready")).toBeInTheDocument();
     expect(screen.getByText("00:00")).toBeInTheDocument();
+  });
+
+  it("labels priming, recording and processing distinctly", async () => {
+    // "Ready" used to mean both "the microphone is warming up" and "your text
+    // is done", which is exactly the ambiguity that makes people keep talking
+    // into a closed mic. The three live states must never share a label.
+    popupMocks.invoke.mockResolvedValueOnce({
+      phase: "primed",
+      startedAtMs: Date.now(),
+      sessionId: 40,
+      resolvedModePreset: "voice",
+      resolvedModeLabel: "Voice",
+      contextSource: "none",
+      insertionMode: "paste",
+      appTarget: "Codex",
+      dictationProvider: "distil_whisper",
+      dictationModelId: "distil-large-v3.5",
+    });
+
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    expect(await screen.findByText("Getting ready")).toBeInTheDocument();
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+    expect(handler).toBeDefined();
+
+    await act(async () => {
+      handler?.({ payload: { phase: "recording", sessionId: 40 } });
+    });
+    expect(await screen.findByText("Listening")).toBeInTheDocument();
+    expect(screen.queryByText("Getting ready")).toBeNull();
+
+    await act(async () => {
+      handler?.({ payload: { phase: "transcribing", sessionId: 40 } });
+    });
+    expect(await screen.findAllByText("Transcribing")).not.toHaveLength(0);
+    expect(screen.queryByText("Listening")).toBeNull();
+  });
+
+  it("tells the user how to stop and cancel while capture is live", async () => {
+    // Escape-cancel has always worked (the native shortcut helper handles it)
+    // and no surface in the app said so.
+    popupMocks.getSettings.mockResolvedValueOnce({
+      shortcuts: { toggleDictation: "Cmd+Shift+Space" },
+      transcription: {
+        dictationPushToTalk: false,
+        dictationHandsFreeEnabled: false,
+        dictationModePreset: "voice",
+        dictationSelectedCustomModeId: null,
+        dictationCustomModes: [],
+        dictationContextSource: "none",
+        dictationInsertionMode: "auto",
+      },
+    } as any);
+
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    expect(
+      await screen.findByText("Cmd + Shift + Space to stop · Esc to cancel"),
+    ).toBeInTheDocument();
+  });
+
+  it("persists the display mode the user picked", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Compact" }));
+
+    await waitFor(() => {
+      expect(popupMocks.invoke).toHaveBeenCalledWith(
+        "__overlay_set_display_mode__",
+        { displayMode: "compact" },
+      );
+    });
   });
 
   it("dismisses the overlay instead of only hiding the webview locally", async () => {
@@ -585,6 +664,90 @@ describe("DictationPopup", () => {
     expect(
       await screen.findByText("The result was inserted into Slack."),
     ).toBeInTheDocument();
+  });
+
+  it("does not dress a failed delivery up as a success", async () => {
+    // Insertion failing outright still reaches phase "done" — the transcript
+    // exists and is saved — so the done surface itself has to carry the bad
+    // news. It used to render a check icon over "Transcription ready".
+    let container!: HTMLElement;
+    await act(async () => {
+      ({ container } = render(<DictationPopup />));
+    });
+
+    const stateHandler = popupMocks.listeners.get("dictation-state-changed");
+    const textReadyHandler = popupMocks.listeners.get("dictation-text-ready");
+    expect(stateHandler).toBeDefined();
+
+    await act(async () => {
+      textReadyHandler?.({
+        payload: {
+          text: "Ship the launch update tomorrow morning.",
+          pasted: false,
+          copied: false,
+          error: "Accessibility permission denied",
+          appTarget: "Slack",
+        },
+      });
+      stateHandler?.({
+        payload: {
+          phase: "done",
+          sessionId: 9,
+          outcome: "error",
+          message:
+            "Could not deliver the text. It is saved in your dictation history.",
+          appTarget: "Slack",
+        },
+      });
+    });
+
+    expect(
+      await screen.findByText("Not delivered — saved to history"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Transcription ready")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Inserted into/)).not.toBeInTheDocument();
+
+    expect(container.querySelector(".lucide-circle-check-big")).toBeNull();
+    expect(
+      container.querySelector(".lucide-triangle-alert"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports a failed delivery even when a command was applied", async () => {
+    // The commandApplied arms used to run before the outcome check, so a
+    // command applied to text nobody received claimed success twice over.
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    const stateHandler = popupMocks.listeners.get("dictation-state-changed");
+    const textReadyHandler = popupMocks.listeners.get("dictation-text-ready");
+
+    await act(async () => {
+      textReadyHandler?.({
+        payload: {
+          text: "SHIP THE LAUNCH UPDATE.",
+          pasted: false,
+          copied: false,
+          commandApplied: "backtrack_replace_last_insert",
+          error: "Accessibility permission denied",
+          appTarget: "Slack",
+        },
+      });
+      stateHandler?.({
+        payload: {
+          phase: "done",
+          sessionId: 9,
+          outcome: "error",
+          appTarget: "Slack",
+        },
+      });
+    });
+
+    expect(
+      await screen.findByText("Not delivered — saved to history"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Backtrack applied")).not.toBeInTheDocument();
   });
 
   it("turns done state into a real review surface with command metadata and quick actions", async () => {

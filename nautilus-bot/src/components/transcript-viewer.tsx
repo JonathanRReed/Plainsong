@@ -1,20 +1,27 @@
-import { useEffect, useState, useMemo, memo } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo, memo } from "react";
 import { cn } from "@/lib/utils";
 import { formatTimeWithMs } from "@/lib/format-time";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Edit2, Check, Trash2, User } from "lucide-react";
+import { Edit2, Check, ChevronDown, ChevronUp, Trash2, User, X } from "lucide-react";
 import type { TranscriptSegment } from "@/types";
 
 /**
- * Where this transcript was set down. Local-first by default; cloud must be
- * named explicitly by the caller (honesty contract — never claim local when a
- * named provider did the work). Absent the prop, we assume on-device.
+ * Where this transcript was set down. A local claim has to be earned: the
+ * caller names the provider it actually got back from the backend. Absent the
+ * prop we say the provider is unknown rather than inventing an on-device claim.
  */
-type TranscriptProvenance =
+export type TranscriptProvenance =
   | { source: "local" }
-  | { source: "cloud"; provider: string };
+  | { source: "cloud"; provider: string }
+  | { source: "unknown" };
+
+/** One highlighted hit inside the rendered transcript, in reading order. */
+export interface TranscriptMatch {
+  segmentId: string;
+  startTime: number;
+}
 
 interface TranscriptViewerProps {
   segments: TranscriptSegment[];
@@ -22,8 +29,17 @@ interface TranscriptViewerProps {
   onSegmentClick?: (segment: TranscriptSegment) => void;
   currentTime?: number;
   speakerNames?: Record<string, string>;
-  /** Provenance of the transcript; defaults to on-device when omitted. */
+  /** Provenance of the transcript; reported as unknown when omitted. */
   provenance?: TranscriptProvenance;
+  /**
+   * Search term highlighted in place. Segments are never filtered out — a
+   * search with no hits must not read as a transcript that lost its text.
+   */
+  highlightQuery?: string;
+  /** Which highlighted hit is the current one, as an index into the matches. */
+  activeMatchIndex?: number;
+  /** Reports the hits found for `highlightQuery`, in reading order. */
+  onMatchesChange?: (matches: TranscriptMatch[]) => void;
   onRenameSpeaker?: (speakerId: string, newName: string) => Promise<void> | void;
   /**
    * Save an edited speaker turn. Receives every segment id in the turn: the
@@ -125,6 +141,38 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
   );
 });
 
+/** Split `text` into plain runs and case-insensitive hits on `query`. */
+function splitOnQuery(
+  text: string,
+  query: string
+): Array<{ text: string; isMatch: boolean }> {
+  if (!query) {
+    return [{ text, isMatch: false }];
+  }
+
+  const parts: Array<{ text: string; isMatch: boolean }> = [];
+  const haystack = text.toLowerCase();
+  const needle = query.toLowerCase();
+  let cursor = 0;
+
+  for (;;) {
+    const found = haystack.indexOf(needle, cursor);
+    if (found === -1) {
+      break;
+    }
+    if (found > cursor) {
+      parts.push({ text: text.slice(cursor, found), isMatch: false });
+    }
+    parts.push({ text: text.slice(found, found + needle.length), isMatch: true });
+    cursor = found + needle.length;
+  }
+
+  if (cursor < text.length) {
+    parts.push({ text: text.slice(cursor), isMatch: false });
+  }
+  return parts;
+}
+
 export function TranscriptViewer({
   segments,
   className,
@@ -132,6 +180,9 @@ export function TranscriptViewer({
   currentTime,
   speakerNames: externalSpeakerNames,
   provenance,
+  highlightQuery,
+  activeMatchIndex = 0,
+  onMatchesChange,
   onRenameSpeaker,
   onEditSegment,
   onDeleteSegments,
@@ -145,10 +196,25 @@ export function TranscriptViewer({
   // State only — no persistence backend (honest about what we keep).
   const [lastReadSegmentId, setLastReadSegmentId] = useState<string | null>(null);
 
-  // Provenance defaults to on-device. Cloud is only ever shown when the caller
-  // names a provider — we never fabricate a "Local" claim.
-  const isLocal = provenance?.source !== "cloud";
+  // Provenance is only ever what the caller could actually establish. With no
+  // prop we say so; we never fabricate a "Local" claim for an unnamed provider.
+  const isLocal = provenance?.source === "local";
   const cloudProvider = provenance?.source === "cloud" ? provenance.provider : null;
+  const provenanceLabel = isLocal
+    ? "Local transcript"
+    : cloudProvider
+      ? `Cloud (${cloudProvider})`
+      : "Provider unknown";
+  const provenanceShortLabel = isLocal
+    ? "Local"
+    : cloudProvider
+      ? `Cloud (${cloudProvider})`
+      : "Provider unknown";
+  const provenanceTitle = isLocal
+    ? "Transcribed on this device."
+    : cloudProvider
+      ? `Transcribed by ${cloudProvider}, a named cloud provider.`
+      : "This meeting did not record which transcription provider produced it.";
 
   // Info-strip figures, all defensible from the actual transcript data.
   const stats = useMemo(() => {
@@ -240,6 +306,87 @@ export function TranscriptViewer({
     return firsts;
   }, [groupedSegments]);
 
+  // Every hit for the current search term, in reading order. Highlighting is
+  // additive: nothing is removed from the transcript, so an empty result set
+  // reads as "0 of 0" rather than as a transcript that lost its text.
+  const normalizedHighlightQuery = highlightQuery?.trim().toLowerCase() ?? "";
+  const matches = useMemo(() => {
+    if (!normalizedHighlightQuery) {
+      return [] as TranscriptMatch[];
+    }
+    const found: TranscriptMatch[] = [];
+    for (const segment of segments) {
+      const haystack = segment.text.toLowerCase();
+      let cursor = haystack.indexOf(normalizedHighlightQuery);
+      while (cursor !== -1) {
+        found.push({ segmentId: segment.id, startTime: segment.startTime });
+        cursor = haystack.indexOf(normalizedHighlightQuery, cursor + normalizedHighlightQuery.length);
+      }
+    }
+    return found;
+  }, [normalizedHighlightQuery, segments]);
+
+  useEffect(() => {
+    onMatchesChange?.(matches);
+  }, [matches, onMatchesChange]);
+
+  // Which turn the reading position sits in. Resolved here rather than per
+  // group so the scroll effect can depend on it: a deep link cues a time before
+  // the transcript has loaded, and the group only exists on a later render.
+  const activeGroupIndex = useMemo(() => {
+    if (currentTime === undefined) {
+      return -1;
+    }
+    return groupedSegments.findIndex(
+      (group) =>
+        currentTime >= group[0].startTime &&
+        currentTime <= group[group.length - 1].endTime
+    );
+  }, [currentTime, groupedSegments]);
+
+  // Scroll targets: the current search hit, and the group the reading position
+  // sits in. `block: "nearest"` so a target already on screen never jumps.
+  const activeMatchRef = useRef<HTMLElement | null>(null);
+  const activeGroupRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    activeMatchRef.current?.scrollIntoView({ block: "nearest" });
+  }, [activeMatchIndex, matches]);
+
+  useEffect(() => {
+    if (matches.length > 0) {
+      return;
+    }
+    activeGroupRef.current?.scrollIntoView({ block: "nearest" });
+  }, [activeGroupIndex, currentTime, matches.length]);
+
+  // Reading position moves turn by turn from the keyboard, so a transcript can
+  // be walked without a mouse. Callers use it to jump other surfaces in step.
+  const moveReadingPosition = useCallback(
+    (direction: 1 | -1) => {
+      if (groupedSegments.length === 0) {
+        return;
+      }
+      const currentIndex = groupedSegments.findIndex(
+        (group) => group[0].id === lastReadSegmentId
+      );
+      const nextIndex =
+        currentIndex === -1
+          ? direction === 1
+            ? 0
+            : groupedSegments.length - 1
+          : Math.min(Math.max(currentIndex + direction, 0), groupedSegments.length - 1);
+      const nextSegment = groupedSegments[nextIndex][0];
+      setLastReadSegmentId(nextSegment.id);
+      onSegmentClick?.(nextSegment);
+    },
+    [groupedSegments, lastReadSegmentId, onSegmentClick]
+  );
+
+  // Running index across groups so each rendered hit knows whether it is the
+  // active one. Reset per render pass, walked in the same order as `matches`.
+  let renderedMatchCount = 0;
+
   return (
     <div className={cn("flex h-full min-h-0 flex-col overflow-hidden", className)}>
       {/* Toolbar */}
@@ -263,17 +410,13 @@ export function TranscriptViewer({
                 "rubric-muted inline-flex items-center gap-1.5 rounded-md border px-2 py-1",
                 isLocal ? "border-gold/30 text-gold-text" : "border-border text-muted-foreground"
               )}
-              title={
-                isLocal
-                  ? "Transcribed on this device."
-                  : `Transcribed by ${cloudProvider}, a named cloud provider.`
-              }
+              title={provenanceTitle}
             >
               <span
                 className={cn("neume", isLocal ? "neume-lit" : "neume-hollow")}
                 aria-hidden="true"
               />
-              {isLocal ? "Local transcript" : `Cloud (${cloudProvider})`}
+              {provenanceLabel}
             </span>
             <Button
               variant="ghost"
@@ -305,7 +448,7 @@ export function TranscriptViewer({
                 className={cn("neume", isLocal ? "neume-lit" : "neume-hollow")}
                 aria-hidden="true"
               />
-              {isLocal ? "Local" : `Cloud (${cloudProvider})`}
+              {provenanceShortLabel}
             </span>
           </div>
         )}
@@ -313,7 +456,25 @@ export function TranscriptViewer({
 
       {/* Transcript */}
       <ScrollArea className="h-full min-h-0 flex-1">
-        <div className="p-4 space-y-4">
+        <div
+          className="p-4 space-y-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          role="group"
+          aria-label="Transcript turns"
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (editingSegmentId) {
+              return;
+            }
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              moveReadingPosition(1);
+            }
+            if (event.key === "ArrowUp") {
+              event.preventDefault();
+              moveReadingPosition(-1);
+            }
+          }}
+        >
           {groupedSegments.length === 0 ? (
             <div className="flex flex-col items-center gap-3 py-16 text-center">
               <span className="neume neume-hollow" aria-hidden="true" />
@@ -333,9 +494,7 @@ export function TranscriptViewer({
               const isFirstSpeakerMention = firstSpeakerGroupIndices.has(groupIndex);
 
               // Check if this group is currently playing
-              const isActive = currentTime !== undefined &&
-                currentTime >= firstSegment.startTime &&
-                currentTime <= group[group.length - 1].endTime;
+              const isActive = groupIndex === activeGroupIndex;
 
               // The very first group opens the leaf with a gilded versal.
               const isLeafOpening = groupIndex === 0;
@@ -345,6 +504,7 @@ export function TranscriptViewer({
               return (
                 <div
                   key={groupIndex}
+                  ref={isActive ? activeGroupRef : undefined}
                   className={cn(
                     "group relative flex gap-3 rounded-lg p-3 transition-colors",
                     // Faint gold-ambient hairline separating speaker turns.
@@ -357,7 +517,7 @@ export function TranscriptViewer({
                     onSegmentClick?.(firstSegment);
                   }}
                 >
-                  {/* Playhead neume — the moment being spoken, settling in */}
+                  {/* Reading-position neume — the turn in focus, settling in */}
                   {isActive && (
                     <span
                       className="neume neume-lit settle-in absolute left-0 top-1/2 -translate-y-1/2"
@@ -410,9 +570,13 @@ export function TranscriptViewer({
                       </div>
                     ) : (
                       <div className="group/text relative">
+                        {/* A single click sets the reading ribbon and leaves the
+                            words selectable and copyable. Editing is the hover
+                            Edit button or a double-click — never a stray click,
+                            which used to swallow the whole paragraph mid-quote. */}
                         <p
-                          className="manuscript max-w-prose text-[0.95rem] leading-[1.85]"
-                          onClick={(e) => { if (onEditSegment) { e.stopPropagation(); beginEditingGroup(group); } }}
+                          className="manuscript max-w-prose select-text text-[0.95rem] leading-[1.85]"
+                          onDoubleClick={(e) => { if (onEditSegment) { e.stopPropagation(); beginEditingGroup(group); } }}
                         >
                           {group.map((segment, i) => {
                             const isPlaying =
@@ -422,6 +586,35 @@ export function TranscriptViewer({
                             const underline = isPlaying
                               ? "underline decoration-dotted decoration-gold underline-offset-2"
                               : "";
+                            const trailingSpace = i < group.length - 1 ? " " : "";
+                            // With no search running the words stay one text node,
+                            // exactly as they were; only a live query splits them
+                            // so hits can be marked without removing anything.
+                            const body = normalizedHighlightQuery
+                              ? splitOnQuery(segment.text, normalizedHighlightQuery).map(
+                                  (part, partIndex) => {
+                                    if (!part.isMatch) {
+                                      return <span key={partIndex}>{part.text}</span>;
+                                    }
+                                    const isActiveMatch = renderedMatchCount === activeMatchIndex;
+                                    renderedMatchCount += 1;
+                                    return (
+                                      <mark
+                                        key={partIndex}
+                                        ref={isActiveMatch ? activeMatchRef : undefined}
+                                        className={cn(
+                                          "rounded-sm text-foreground",
+                                          isActiveMatch
+                                            ? "bg-gold/25"
+                                            : "bg-gold-ambient/20"
+                                        )}
+                                      >
+                                        {part.text}
+                                      </mark>
+                                    );
+                                  }
+                                )
+                              : segment.text;
                             // Open the whole leaf with a gilded versal. The entire
                             // first word stays a single text node — the real letter
                             // is never pulled out of the DOM (screen readers read
@@ -441,13 +634,13 @@ export function TranscriptViewer({
                                     underline
                                   )}
                                 >
-                                  {segment.text}{i < group.length - 1 ? " " : ""}
+                                  {body}{trailingSpace}
                                 </span>
                               );
                             }
                             return (
                               <span key={segment.id} className={cn("transition-colors", underline)}>
-                                {segment.text}{i < group.length - 1 ? " " : ""}
+                                {body}{trailingSpace}
                               </span>
                             );
                           })}
@@ -500,29 +693,88 @@ export function TranscriptViewer({
 }
 
 interface TranscriptSearchProps {
-  onSearch: (query: string) => void;
+  query: string;
+  onQueryChange: (query: string) => void;
+  /** How many hits the transcript found for the current query. */
+  matchCount: number;
+  /** Zero-based index of the hit currently in view. */
+  activeMatchIndex: number;
+  onStepMatch: (direction: 1 | -1) => void;
   className?: string;
 }
 
-export function TranscriptSearch({ onSearch, className }: TranscriptSearchProps) {
-  const [query, setQuery] = useState("");
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    onSearch(query);
-  };
+/**
+ * Find-in-transcript. It steps through hits; it never filters the transcript,
+ * so a query with no hits reads as "0 of 0" instead of an emptied record.
+ */
+export function TranscriptSearch({
+  query,
+  onQueryChange,
+  matchCount,
+  activeMatchIndex,
+  onStepMatch,
+  className,
+}: TranscriptSearchProps) {
+  const hasQuery = query.trim().length > 0;
 
   return (
-    <form onSubmit={handleSubmit} className={cn("flex gap-2", className)}>
+    <div className={cn("flex items-center gap-2", className)}>
       <Input
-        placeholder="Search transcript..."
+        placeholder="Find in transcript..."
+        aria-label="Find in transcript"
         value={query}
-        onChange={(e: React.ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)}
+        onChange={(e: React.ChangeEvent<HTMLInputElement>) => onQueryChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            onStepMatch(e.shiftKey ? -1 : 1);
+          }
+        }}
         className="flex-1"
       />
-      <Button type="submit" size="sm">
-        Search
-      </Button>
-    </form>
+      {hasQuery && (
+        <>
+          <span
+            className="rubric-muted time-spec whitespace-nowrap"
+            role="status"
+            aria-live="polite"
+          >
+            {matchCount === 0 ? "0 of 0" : `${activeMatchIndex + 1} of ${matchCount}`}
+          </span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            aria-label="Previous match"
+            disabled={matchCount === 0}
+            onClick={() => onStepMatch(-1)}
+          >
+            <ChevronUp className="h-4 w-4" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            aria-label="Next match"
+            disabled={matchCount === 0}
+            onClick={() => onStepMatch(1)}
+          >
+            <ChevronDown className="h-4 w-4" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            aria-label="Clear transcript search"
+            onClick={() => onQueryChange("")}
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </>
+      )}
+    </div>
   );
 }

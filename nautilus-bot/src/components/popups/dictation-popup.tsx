@@ -45,13 +45,26 @@ import {
   stopSpeakingText,
 } from "@/lib/text-to-speech";
 import { playDictationEarcon } from "@/lib/dictation-earcons";
+import {
+  getPopupSize,
+  type DictationPopupDisplayMode,
+} from "@/lib/dictation-popup-layout";
+import { formatShortcutForDisplay } from "@/lib/shortcuts";
 import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
 import { cn } from "@/lib/utils";
 import { AudioWaveform } from "@/components/ui/audio-waveform";
 import { WaveformVisualizer } from "@/components/waveform-visualizer";
 import type { DictationCustomMode } from "@/types/settings";
 
-type DisplayMode = "full" | "compact" | "minimal";
+type DisplayMode = DictationPopupDisplayMode;
+const DISPLAY_MODES: DisplayMode[] = ["full", "compact", "minimal"];
+
+function isDisplayMode(value: unknown): value is DisplayMode {
+  return (
+    typeof value === "string" && DISPLAY_MODES.includes(value as DisplayMode)
+  );
+}
+
 const MODE_META: Record<
   DictationModePreset,
   { label: string; icon: typeof Mic; accent: string }
@@ -160,86 +173,19 @@ function normalizePopupModeLabel(label: string | null): string | null {
   }
 }
 
-function estimatePopupTextLines(value: string | null, charsPerLine: number) {
-  if (!value) {
-    return 0;
-  }
-
-  return value
-    .split("\n")
-    .reduce(
-      (total, line) =>
-        total + Math.max(1, Math.ceil(line.length / charsPerLine)),
-      0,
-    );
-}
-
-function getPopupSize(
-  displayMode: DisplayMode,
-  phase: DictationPhase,
-  message: string | null,
-  preview: string | null,
-) {
-  if (displayMode === "minimal") {
-    return { width: 196, height: 52 };
-  }
-
-  if (displayMode === "compact") {
-    const compactMessageLines = estimatePopupTextLines(message, 32);
-    const compactPreviewLines = estimatePopupTextLines(preview, 32);
-    return {
-      width: 336,
-      height:
-        phase === "idle"
-          ? 204
-          : phase === "error"
-            ? Math.max(188, 144 + compactMessageLines * 18)
-            : phase === "done"
-              ? Math.max(
-                  188,
-                  146 + Math.max(compactMessageLines, compactPreviewLines) * 16,
-                )
-              : phase === "recording"
-                ? Math.max(164, 136 + compactPreviewLines * 15)
-                : 152,
-    };
-  }
-
-  if (phase === "idle") {
-    return { width: 432, height: 308 };
-  }
-
-  if (phase === "error") {
-    const messageLines = estimatePopupTextLines(message, 48);
-    return { width: 432, height: Math.max(252, 212 + messageLines * 18) };
-  }
-
-  if (phase === "recording") {
-    const previewLines = estimatePopupTextLines(preview, 48);
-    return { width: 432, height: Math.max(232, 184 + previewLines * 16) };
-  }
-
-  if (phase === "done") {
-    const contentLines = Math.max(
-      estimatePopupTextLines(message, 48),
-      estimatePopupTextLines(preview, 48),
-    );
-    return { width: 432, height: Math.max(248, 198 + contentLines * 18) };
-  }
-
-  const previewLines = estimatePopupTextLines(preview, 48);
-  const messageLines = estimatePopupTextLines(message, 48);
-  return {
-    width: 432,
-    height: Math.max(220, 182 + Math.max(previewLines, messageLines) * 16),
-  };
-}
-
 function formatDoneTitle(
   outcome: string | null,
   commandApplied: string | null,
   appTarget: string | null,
 ) {
+  // A delivery failure still lands on phase "done" — the transcript exists and
+  // is in history, only the insertion failed. This has to win over the command
+  // arms below: a command applied to text the user never received is not
+  // something to report as applied.
+  if (outcome === "error") {
+    return "Not delivered — saved to history";
+  }
+
   if (isBacktrackDictationCommand(commandApplied)) {
     return "Backtrack applied";
   }
@@ -321,6 +267,61 @@ function formatLatencyMetric(ms: number | null): string | null {
   if (ms === null) return null;
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
+}
+
+// Three capture states have to be distinguishable at a glance, not two: a user
+// who cannot tell "still recording" from "already thinking" keeps talking into
+// a closed microphone. State is carried by the neume glyph (hollow = not yet,
+// lit + live = the earned recording moment, ambient bronze = settling) plus the
+// label — never by hue temperature.
+type HudState =
+  | "idle"
+  | "priming"
+  | "recording"
+  | "processing"
+  | "done"
+  | "error";
+
+const HUD_STATE_NEUME: Record<HudState, string> = {
+  idle: "neume neume-hollow",
+  priming: "neume neume-hollow",
+  recording: "neume neume-lit neume-live",
+  processing: "neume",
+  done: "neume neume-lit",
+  error: "neume neume-rust",
+};
+
+function resolveHudState(phase: DictationPhase): HudState {
+  switch (phase) {
+    case "primed":
+      return "priming";
+    case "recording":
+      return "recording";
+    case "stopping":
+    case "transcribing":
+    case "delivering":
+      return "processing";
+    case "done":
+      return "done";
+    case "error":
+      return "error";
+    default:
+      return "idle";
+  }
+}
+
+function formatCaptureControlHint(
+  hudState: HudState,
+  shortcut: string | null,
+): string | null {
+  if (hudState !== "priming" && hudState !== "recording") {
+    return null;
+  }
+
+  const stopHint = shortcut
+    ? `${formatShortcutForDisplay(shortcut)} to stop`
+    : "Press the dictation shortcut to stop";
+  return `${stopHint} · Esc to cancel`;
 }
 
 function formatHandsFreeRuntimeHint(
@@ -417,6 +418,9 @@ export function DictationPopup() {
     useState<DictationInsertionMode>("paste");
   const [dictationCommandPrefix, setDictationCommandPrefix] =
     useState("command");
+  const [dictationShortcut, setDictationShortcut] = useState<string | null>(
+    null,
+  );
   const [resolvedModeLabel, setResolvedModeLabel] = useState<string | null>(
     null,
   );
@@ -472,6 +476,7 @@ export function DictationPopup() {
     setHandsFreeSilenceTimeoutSeconds(
       settings.transcription.dictationSilenceTimeoutSeconds ?? 0,
     );
+    setDictationShortcut(settings.shortcuts?.toggleDictation ?? null);
   };
 
   const resetCompletionState = () => {
@@ -626,10 +631,68 @@ export function DictationPopup() {
       // Keep default mode if settings are temporarily unavailable.
     });
 
+    // Restore the display mode the user last chose. The overlay window is
+    // created at bootstrap and reloaded on app restart, so this lives in the
+    // main process alongside the dragged position rather than in the renderer.
+    void invoke<{ displayMode?: string } | null>("__overlay_placement__")
+      .then((placement) => {
+        if (isDisplayMode(placement?.displayMode)) {
+          setDisplayMode(placement.displayMode);
+        }
+      })
+      .catch(() => {
+        // A missing placement just means the default full HUD.
+      });
+
     return () => {
       stopSpeakingText();
     };
   }, []);
+
+  // The overlay is a small card inside a full-screen transparent window. Left
+  // hit-testable, that transparent band swallows every click aimed at the app
+  // underneath, so the window ignores mouse events by default and only
+  // re-enables hit testing while the pointer is genuinely over the card. The
+  // window is created once at bootstrap and never remounts, so the current
+  // mode lives in a ref rather than effect-local state.
+  const ignoringMouseRef = useRef(true);
+  const applyIgnoreMouse = useCallback((nextIgnore: boolean) => {
+    if (nextIgnore === ignoringMouseRef.current) {
+      return;
+    }
+    ignoringMouseRef.current = nextIgnore;
+    void invoke("__window_set_ignore_mouse_events__", {
+      ignore: nextIgnore,
+    }).catch(() => {
+      // Non-fatal: the window just keeps its previous hit-test mode.
+    });
+  }, []);
+
+  useEffect(() => {
+    const handlePointerMove = (event: MouseEvent) => {
+      const element = document.elementFromPoint(event.clientX, event.clientY);
+      applyIgnoreMouse(!element?.closest("[data-hud-card]"));
+    };
+    const handlePointerLeave = () => applyIgnoreMouse(true);
+
+    // `window` is shadowed by the Electron window handle above, so these bind
+    // to `document` (mousemove bubbles there anyway).
+    document.addEventListener("mousemove", handlePointerMove);
+    document.addEventListener("mouseleave", handlePointerLeave);
+    return () => {
+      document.removeEventListener("mousemove", handlePointerMove);
+      document.removeEventListener("mouseleave", handlePointerLeave);
+    };
+  }, [applyIgnoreMouse]);
+
+  useEffect(() => {
+    // Nothing to click once the HUD is down, and the window outlives the
+    // session: leaving it hit-testable would have it swallow clicks meant for
+    // whatever the user goes back to.
+    if (phase === "idle") {
+      applyIgnoreMouse(true);
+    }
+  }, [phase, applyIgnoreMouse]);
 
   useEffect(() => {
     if (stateEvent) {
@@ -820,6 +883,11 @@ export function DictationPopup() {
   ]);
 
   const { selectedModeLabel, contextMeta, insertionMeta, routeLabel, targetDetail, autoActivationDetail, isCapturePhase } = computedMeta;
+  const hudState = resolveHudState(phase);
+  const captureControlHint = formatCaptureControlHint(
+    hudState,
+    dictationShortcut,
+  );
 
   const cycleDisplayMode = async () => {
     const next: DisplayMode =
@@ -829,6 +897,11 @@ export function DictationPopup() {
           ? "minimal"
           : "full";
     setDisplayMode(next);
+    try {
+      await invoke("__overlay_set_display_mode__", { displayMode: next });
+    } catch (error) {
+      console.error("Failed to persist dictation popup display mode:", error);
+    }
   };
 
   useEffect(() => {
@@ -956,28 +1029,37 @@ export function DictationPopup() {
   // ── Minimal pill mode ────────────────────────────────────────────────────
   if (displayMode === "minimal") {
     const statusLabel =
-      phase === "recording"
-        ? "Listening"
-        : phase === "done"
-          ? "Ready"
-          : phase === "error"
-            ? "Problem"
-            : "Working";
+      hudState === "priming"
+        ? "Getting ready"
+        : hudState === "recording"
+          ? "Listening"
+          : hudState === "processing"
+            ? "Thinking"
+            : hudState === "done"
+              ? "Ready"
+              : hudState === "error"
+                ? "Problem"
+                : "Working";
 
     return (
-      <div
-        data-drag-region
-        className="h-screen w-screen bg-transparent flex items-center justify-center"
-        onDoubleClick={() => void cycleDisplayMode()}
-        title="Double-click to expand"
-      >
-        <div className="flex items-center gap-2 rounded-full border border-foreground/10 bg-popover/95 px-3 py-2 shadow-[0_10px_30px_hsl(34_26%_4%/0.4)] backdrop-blur-xl">
+      <div className="h-screen w-screen bg-transparent flex items-center justify-center">
+        <div
+          data-hud-card
+          data-drag-region
+          onDoubleClick={() => void cycleDisplayMode()}
+          title="Double-click to expand"
+          className="flex items-center gap-2 rounded-full border border-foreground/10 bg-popover/95 px-3 py-2 shadow-[0_10px_30px_hsl(34_26%_4%/0.4)] backdrop-blur-xl"
+        >
           <div className={cn(
             "inline-flex h-6 w-6 items-center justify-center rounded-full transition-smooth",
             phase === "recording" ? "bg-gold/12 text-gold-text" : "bg-foreground/6 text-foreground"
           )}>
             <Mic className="h-3 w-3" />
           </div>
+          <span
+            aria-hidden="true"
+            className={cn(HUD_STATE_NEUME[hudState], "shrink-0")}
+          />
           <AudioWaveform
             levels={displayAudioLevel}
             active={phase === "recording"}
@@ -985,7 +1067,7 @@ export function DictationPopup() {
             barCount={11}
             barColor={phase === "recording" ? "var(--brand-warm)" : "var(--muted-foreground)"}
           />
-          <span className="text-[11px] font-medium tracking-[0.08em] text-foreground">
+          <span className="whitespace-nowrap text-xs font-medium tracking-[0.08em] text-foreground">
             {statusLabel}
           </span>
           {/* The pill has no room for a separate Stop, so while capture is
@@ -1015,7 +1097,7 @@ export function DictationPopup() {
   const compact = displayMode === "compact";
   const phaseLabel =
     phase === "primed"
-      ? "Ready"
+      ? "Getting ready"
       : phase === "recording"
         ? "Listening"
         : phase === "transcribing"
@@ -1041,16 +1123,18 @@ export function DictationPopup() {
 
   return (
     <div className="h-screen w-screen bg-transparent p-3">
-      <div className="overflow-hidden rounded-[20px] border border-foreground/10 bg-popover/95 px-4 py-3.5 backdrop-blur-xl shadow-[0_20px_60px_hsl(34_26%_4%/0.5)]">
-        {/* Header - Minimal */}
-        <div className="mb-3 flex items-center justify-between">
+      <div
+        data-hud-card
+        className="overflow-hidden rounded-[20px] border border-foreground/10 bg-popover/95 px-4 py-3.5 backdrop-blur-xl shadow-[0_20px_60px_hsl(34_26%_4%/0.5)]"
+      >
+        {/* Header - Minimal. Also the drag handle: the HUD is a floating pill
+            the user is expected to move out of the way of their own writing. */}
+        <div data-drag-region className="mb-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            {isCapturePhase && (
-              <span
-                aria-hidden="true"
-                className="neume neume-lit neume-live shrink-0"
-              />
-            )}
+            <span
+              aria-hidden="true"
+              className={cn(HUD_STATE_NEUME[hudState], "shrink-0")}
+            />
             <span className="text-xs font-medium text-muted-foreground">{phaseLabel}</span>
             <span className="text-muted-foreground">·</span>
             <span className="text-xs text-muted-foreground">{selectedModeLabel}</span>
@@ -1126,7 +1210,7 @@ export function DictationPopup() {
             </div>
             
             {/* Subtle Status Line */}
-            <p className="text-[11px] text-muted-foreground text-center">
+            <p className="text-sm text-muted-foreground text-center">
               {formatHandsFreeRuntimeHint(
                 _handsFreeEnabled,
                 handsFreeSilenceTimeoutSeconds,
@@ -1134,6 +1218,13 @@ export function DictationPopup() {
                 contextMeta.detail,
               )}
             </p>
+            {/* Escape-cancel is real (the native macOS shortcut helper handles
+                it) but nothing in the UI said so until now. */}
+            {captureControlHint && (
+              <p className="text-center font-mono text-xs tracking-[0.08em] text-muted-foreground">
+                {captureControlHint}
+              </p>
+            )}
             {!compact && preview && (
               <div className="settle-in rounded-[20px] border border-foreground/10 bg-foreground/3 px-4 py-3">
                 <p className="font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
@@ -1175,12 +1266,14 @@ export function DictationPopup() {
                 />
               </div>
               <p className="text-sm font-semibold">Transcribing</p>
-              <p className="text-xs text-muted-foreground">
+              {/* Clamped so `getPopupSize` can bound the window it sizes to
+                  this card; an unclamped paragraph would grow past it. */}
+              <p className="text-xs text-muted-foreground line-clamp-6">
                 {message ??
                   `${selectedModeLabel} is shaping the result for ${insertionMeta.label.toLowerCase()}${targetDetail}.`}
               </p>
               {autoActivationDetail && (
-                <p className="mt-1 text-xs text-muted-foreground">
+                <p className="mt-1 text-xs text-muted-foreground line-clamp-2">
                   {autoActivationDetail}
                 </p>
               )}
@@ -1206,7 +1299,7 @@ export function DictationPopup() {
             <Loader2 className="h-5 w-5 animate-spin text-foreground" />
             <div>
               <p className="text-sm font-semibold">Inserting</p>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-xs text-muted-foreground line-clamp-6">
                 {message ??
                   `Finishing ${insertionMeta.label.toLowerCase()}${targetDetail} with ${routeLabel}.`}
               </p>
@@ -1226,11 +1319,15 @@ export function DictationPopup() {
 
         {phase === "done" && (
           <div className="flex items-center gap-3 text-foreground">
-            <CheckCircle2 className="h-5 w-5 text-foreground" />
+            {outcome === "error" ? (
+              <TriangleAlert className="h-5 w-5 text-destructive" />
+            ) : (
+              <CheckCircle2 className="h-5 w-5 text-foreground" />
+            )}
             <div className="min-w-0 flex-1">
               <p className="manuscript text-base font-serif text-foreground">{doneTitle}</p>
               {!compact && (
-                <p className="max-w-[330px] text-xs leading-relaxed text-muted-foreground">
+                <p className="max-w-[330px] text-sm leading-relaxed text-muted-foreground line-clamp-6">
                   {doneMessage}
                 </p>
               )}
@@ -1351,12 +1448,12 @@ export function DictationPopup() {
             <div>
               <p className="text-sm font-semibold">Problem</p>
               {!compact && message && (
-                <p className="max-w-[330px] text-xs leading-relaxed text-muted-foreground">
+                <p className="max-w-[330px] text-sm leading-relaxed text-muted-foreground line-clamp-6">
                   {message}
                 </p>
               )}
               {!compact && (
-                <p className="text-xs text-muted-foreground">
+                <p className="text-sm text-muted-foreground">
                   Check microphone access, {routeLabel.toLowerCase()}, and
                   shortcut permissions.
                 </p>

@@ -876,10 +876,14 @@ export async function getDictationShortcutCapabilityStatus(): Promise<DictationS
   return await invoke("get_dictation_shortcut_capability_status");
 }
 
+// Must stay in sync with electron/shortcut-registration.ts's own
+// ShortcutFieldKey: conflicts are reported by field from there.
 export type ShortcutFieldKey =
   | "toggleDictation"
   | "toggleRecording"
   | "openWindow"
+  | "repasteLastDictation"
+  | "recopyLastDictation"
   | "quickExport"
   | "focusSearch";
 

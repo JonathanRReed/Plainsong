@@ -191,6 +191,9 @@ interface KeyboardShortcuts {
   toggleDictation: string;
   toggleDictationAlternates?: string[];
   openWindow: string;
+  // Recovery bindings for the last dictation result. Empty string = unbound.
+  repasteLastDictation?: string;
+  recopyLastDictation?: string;
   quickExport?: string;
   focusSearch?: string;
 }

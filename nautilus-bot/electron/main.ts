@@ -13,7 +13,7 @@ import {
   type IpcMainInvokeEvent,
 } from "electron";
 import { execFile } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 import { autoUpdater, type AppUpdater } from "electron-updater";
 import {
@@ -34,6 +34,15 @@ import {
   findConflictingShortcuts,
   type ShortcutConflictInfo,
 } from "./shortcut-registration";
+import {
+  resolveInitialOverlayAnchor,
+  resolveOverlayBounds,
+  resolveSavedOverlayAnchor,
+  withOverlayDisplayMode,
+  type OverlayKind,
+  type OverlayPlacement,
+  type OverlayWorkArea,
+} from "./overlay-placement";
 import { resolveUpdaterChannel, type UpdateChannel } from "./updater-channel";
 import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
 
@@ -66,6 +75,10 @@ let appliedNativeShortcutConfig: string | null = null;
 // onEvent closure must not act on the settings captured at spawn time.
 let latestShortcutSettings: AppSettings = {};
 let shortcutConflicts: ShortcutConflictInfo[] = [];
+// Mirrors the sidecar's recent-result list so the menu-bar menu can offer
+// "Paste" for each without an async round trip while the menu is being built.
+let recentDictationResults: Array<{ text: string }> = [];
+let dictationPermissionSummary: string | null = null;
 
 function qaLog(message: string, payload?: unknown): void {
   if (process.env.PLAINSONG_QA_PACKAGED_HOTKEY === "1") {
@@ -102,6 +115,8 @@ type AppSettings = {
     toggleRecording?: string;
     toggleDictation?: string;
     openWindow?: string;
+    repasteLastDictation?: string;
+    recopyLastDictation?: string;
     quickExport?: string;
     focusSearch?: string;
   };
@@ -149,8 +164,61 @@ const TRAY_ICON_1X =
 const TRAY_ICON_2X =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACwAAAAsCAQAAAC0jZKKAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAACYktHRAAAqo0jMgAAAAd0SU1FB+oGFRMGN2ML3+kAAAAldEVYdGRhdGU6Y3JlYXRlADIwMjYtMDYtMjFUMTk6MDY6NTUrMDA6MDCUuYwtAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDI2LTA2LTIxVDE5OjA2OjU1KzAwOjAw5eQ0kQAAACh0RVh0ZGF0ZTp0aW1lc3RhbXAAMjAyNi0wNi0yMVQxOTowNjo1NSswMDowMLLxFU4AAAH0SURBVEjH7ZbPSxRhGMc/Mzs7s64/IK0upmjpJRCCokOX6JCIt+gSKCh4EU+BIJ0DEfwbvEh1LsiLCBERHQqy9BD+II1SsQ6rjq2u67peXl5HZ3bnfXdH8LDf9/Llfd/nM8/zzjMvAxWdtwzfzAuSVOFg4+DgECeOTQzIc0QGl7+s8oNvzLFZGGz5ZtJkyXOVDmw594E35IAEV2ijg/uY7LDMFC9Z0qnDpI5hMuTFGD2VyjX6+CJWFukPSK6o6pmV4DHfajOvxdp/numhLRkaBIbrzEt0b1DRhXTIdtEH/2RCuCQjtKqDYS+kphnZFTd5pAPOhoD/sCJcjIc64KMQcJoN6dt1wPkQcI5d6Wt0wOE6ic5ECbZpkH49SnC9p8k+Rwm+S4twW0xFB65mAEf4aT5GBTYYokv4Fcb9H5Pa9XG28S4zyAhxAH7zlK/+EDVwAzcwMbCpo5FbdHIHgAzvec6noBA18BO6AAMLhwQm+6yyxjzTvGMnOEQNPMOkeBs5DkjjkiKFWyxEDbzAW6V9Hql1RQm9U95dUQFfWLChTNEEm0q7SgBbAS4ScEI6JxykDo5RK32t/nkXBidplL7Jk33ZeowrfwpTdOuG+0t8gMUlbtPjyRh+8YpZtjngO1ulZeqS5lDm6h1Z9vjHvegOpaLydAxNI4W4NraiLwAAAABJRU5ErkJggg==";
 
+// Single line of the transcript, short enough to read in a menu.
+function summarizeTranscriptForMenu(text: string): string {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  return collapsed.length > 48 ? `${collapsed.slice(0, 47)}\u2026` : collapsed;
+}
+
+function isDictationLive(): boolean {
+  return dictationPhase === "primed" || dictationPhase === "recording";
+}
+
 function buildTrayMenu(): Menu {
+  const dictationAccelerator = convertShortcutToAccelerator(
+    latestShortcutSettings.shortcuts?.toggleDictation,
+  );
+  const live = isDictationLive();
+
+  const recentItems: Parameters<typeof Menu.buildFromTemplate>[0] =
+    recentDictationResults.length === 0
+      ? [{ label: "No dictation results yet", enabled: false }]
+      : recentDictationResults.map((result, index) => ({
+          label: `Paste "${summarizeTranscriptForMenu(result.text)}"`,
+          click: () => {
+            void ipcBridge
+              ?.invoke("repaste_dictation_result", { index })
+              .catch((error) => {
+                console.error("[tray] failed to re-paste dictation result", error);
+              });
+          },
+        }));
+
   return Menu.buildFromTemplate([
+    {
+      // The accelerator is display-only here: the real binding is registered
+      // through globalShortcut/the native helper, and letting the menu
+      // register it too would double-fire the toggle.
+      label: live ? "Stop Dictation" : "Start Dictation",
+      accelerator: dictationAccelerator ?? undefined,
+      registerAccelerator: false,
+      enabled: bootstrapComplete && ipcBridge !== null,
+      click: () => {
+        void ipcBridge
+          ?.invoke(live ? "stop_dictation" : "start_dictation", {})
+          .catch((error) => {
+            console.error("[tray] failed to toggle dictation", error);
+          });
+      },
+    },
+    { type: "separator" },
+    { label: "Recent results", enabled: false },
+    ...recentItems,
+    { type: "separator" },
+    {
+      label: dictationPermissionSummary ?? "Checking permissions\u2026",
+      enabled: false,
+    },
     {
       label: "Open Plainsong",
       click: () => {
@@ -170,6 +238,47 @@ function buildTrayMenu(): Menu {
   ]);
 }
 
+// A live microphone must be visible somewhere on screen even when the HUD is
+// hidden or the user is on another Space. The tray icon itself is a template
+// image the system recolors, so it cannot carry the gold "setting down" moment
+// — the neume beside it does, in the same notation vocabulary the HUD uses.
+function refreshTray(): void {
+  if (!tray) {
+    return;
+  }
+  const live = isDictationLive();
+  tray.setToolTip(live ? "Plainsong — dictation is live" : "Plainsong");
+  if (process.platform === "darwin") {
+    tray.setTitle(live ? "\u25C6" : "");
+  }
+  tray.setContextMenu(buildTrayMenu());
+}
+
+async function refreshDictationPermissionSummary(): Promise<void> {
+  if (!ipcBridge) {
+    return;
+  }
+  try {
+    const diagnostics = (await ipcBridge.invokeSidecar(
+      "get_permission_diagnostics",
+    )) as {
+      microphonePermissionReady?: boolean;
+      cursorInsertionReady?: boolean;
+    } | null;
+    const microphoneReady = diagnostics?.microphonePermissionReady === true;
+    const insertReady = diagnostics?.cursorInsertionReady === true;
+    dictationPermissionSummary = microphoneReady
+      ? insertReady
+        ? "Microphone and insertion ready"
+        : "Microphone ready · insertion needs permission"
+      : "Microphone permission not granted";
+  } catch (error) {
+    console.error("[tray] failed to read permission diagnostics", error);
+    dictationPermissionSummary = "Permission status unavailable";
+  }
+  refreshTray();
+}
+
 function createTray(): void {
   if (tray) {
     return;
@@ -178,9 +287,9 @@ function createTray(): void {
   icon.addRepresentation({ scaleFactor: 2, dataURL: TRAY_ICON_2X });
   icon.setTemplateImage(true);
   tray = new Tray(icon);
-  tray.setToolTip("Plainsong");
   // A menu (not a popover) on click, per Apple HIG for menu-bar extras.
-  tray.setContextMenu(buildTrayMenu());
+  refreshTray();
+  void refreshDictationPermissionSummary();
 }
 
 function broadcastRendererEvent(eventName: string, payload: unknown): void {
@@ -413,23 +522,182 @@ async function installUpdateInElectron(): Promise<void> {
   autoUpdater.quitAndInstall();
 }
 
+// ── Overlay placement ────────────────────────────────────────────────────────
+// The HUD is bottom-anchored: its bottom edge is what stays put, because the
+// window is resized from the renderer on every live partial while the user is
+// speaking. Anchors are stored as {bottom, left} for that reason — storing a
+// top-left would let the pill walk down the screen as the estimate grows.
+
+const OVERLAY_LABELS: Record<OverlayKind, string> = {
+  dictation: "dictation-overlay",
+  recording: "recording-overlay",
+};
+const overlayPlacements = new Map<OverlayKind, OverlayPlacement>();
+let overlayPlacementSaveTimer: NodeJS.Timeout | null = null;
+
+function getOverlayPlacementPath(): string {
+  return path.join(app.getPath("userData"), "overlay-placement.json");
+}
+
+function loadOverlayPlacements(): void {
+  const placementPath = getOverlayPlacementPath();
+  if (!existsSync(placementPath)) {
+    return;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(placementPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    for (const kind of ["dictation", "recording"] as OverlayKind[]) {
+      const entry = parsed[kind];
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      const { bottom, left, displayMode } = entry as Record<string, unknown>;
+      // A dragged anchor and a chosen display mode are saved independently:
+      // an entry may legitimately carry only one of them.
+      const hasAnchor = typeof bottom === "number" && typeof left === "number";
+      const hasDisplayMode = typeof displayMode === "string";
+      if (!hasAnchor && !hasDisplayMode) {
+        continue;
+      }
+      overlayPlacements.set(kind, {
+        ...(hasAnchor ? { bottom, left } : {}),
+        ...(hasDisplayMode ? { displayMode } : {}),
+      });
+    }
+  } catch (error) {
+    console.error("[main] Failed to read saved overlay placement:", error);
+  }
+}
+
+function scheduleOverlayPlacementSave(): void {
+  // The `moved` event fires continuously while a drag is in progress; only the
+  // resting position is worth writing to disk.
+  if (overlayPlacementSaveTimer) {
+    clearTimeout(overlayPlacementSaveTimer);
+  }
+  overlayPlacementSaveTimer = setTimeout(() => {
+    overlayPlacementSaveTimer = null;
+    try {
+      writeFileSync(
+        getOverlayPlacementPath(),
+        JSON.stringify(Object.fromEntries(overlayPlacements)),
+        "utf8",
+      );
+    } catch (error) {
+      console.error("[main] Failed to persist overlay placement:", error);
+    }
+  }, 400);
+}
+
+function getOverlayKind(win: BrowserWindow | null): OverlayKind | null {
+  const label = getWindowLabel(win);
+  if (label === OVERLAY_LABELS.dictation) {
+    return "dictation";
+  }
+  if (label === OVERLAY_LABELS.recording) {
+    return "recording";
+  }
+  return null;
+}
+
+function getWorkAreas(): OverlayWorkArea[] {
+  return screen.getAllDisplays().map((display) => display.workArea);
+}
+
 // Anchor the overlay on the display the user is actually working on (the one
 // under the cursor), inside that display's work area — which already excludes
 // the menu bar and the notch safe-area on notched Macs. Without this the HUD
 // always opens on the primary display even when work is on an external monitor.
+// A position the user DRAGGED the HUD to wins over the default anchor as long
+// as it is still on a connected display; a placement that only remembers a
+// display mode does not count as one (see `resolveSavedOverlayAnchor`).
+function resolveOverlayAnchor(
+  kind: OverlayKind,
+  size: { width: number; height: number },
+): { anchor: { bottom: number; left: number }; workArea: OverlayWorkArea } {
+  const savedAnchor = resolveSavedOverlayAnchor(
+    overlayPlacements.get(kind),
+    getWorkAreas(),
+  );
+  if (savedAnchor) {
+    return {
+      anchor: savedAnchor,
+      workArea: screen.getDisplayNearestPoint({
+        x: Math.round(savedAnchor.left),
+        y: Math.round(savedAnchor.bottom),
+      }).workArea,
+    };
+  }
+
+  const { workArea } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  return {
+    anchor: resolveInitialOverlayAnchor({ workArea, size, kind }),
+    workArea,
+  };
+}
+
+// Bounds this process set, per overlay. `moved` fires for programmatic moves
+// too, and treating those as "the user dragged it here" would pin the HUD to
+// whichever display it last opened on and stop it following the cursor.
+const lastProgrammaticOverlayOrigin = new Map<OverlayKind, { x: number; y: number }>();
+
+function applyOverlayBounds(
+  win: BrowserWindow,
+  kind: OverlayKind,
+  bounds: { x: number; y: number; width: number; height: number },
+): void {
+  lastProgrammaticOverlayOrigin.set(kind, { x: bounds.x, y: bounds.y });
+  win.setBounds(bounds);
+}
+
 function positionOverlayOnActiveDisplay(win: BrowserWindow): void {
+  const kind = getOverlayKind(win);
+  if (!kind) {
+    return;
+  }
+
   try {
-    const point = screen.getCursorScreenPoint();
-    const { workArea } = screen.getDisplayNearestPoint(point);
-    const [winWidth, winHeight] = win.getSize();
-    const isRecording = getWindowLabel(win) === "recording-overlay";
-    const x = isRecording
-      ? workArea.x + workArea.width - winWidth - 20
-      : workArea.x + Math.round(workArea.width / 2 - winWidth / 2);
-    const y = workArea.y + workArea.height - winHeight - (isRecording ? 20 : 40);
-    win.setPosition(Math.round(x), Math.round(y));
+    const [width, height] = win.getSize();
+    const { anchor, workArea } = resolveOverlayAnchor(kind, { width, height });
+    applyOverlayBounds(
+      win,
+      kind,
+      resolveOverlayBounds({ workArea, size: { width, height }, anchor }),
+    );
   } catch (error) {
     console.error("[main] Failed to position overlay on active display:", error);
+  }
+}
+
+// Pair every renderer-driven size change with a reposition so the pill's bottom
+// edge stays fixed and the window can never grow past the bottom of the work
+// area. Setting the size alone grows the HUD downward off screen while the user
+// is still speaking.
+function resizeOverlayKeepingBottomEdge(
+  win: BrowserWindow,
+  kind: OverlayKind,
+  size: { width: number; height: number },
+): void {
+  try {
+    const current = win.getBounds();
+    const { workArea } = screen.getDisplayNearestPoint({
+      x: Math.round(current.x + current.width / 2),
+      y: Math.round(current.y + current.height / 2),
+    });
+    applyOverlayBounds(
+      win,
+      kind,
+      resolveOverlayBounds({
+        workArea,
+        size,
+        anchor: { bottom: current.y + current.height, left: current.x },
+      }),
+    );
+  } catch (error) {
+    console.error("[main] Failed to resize overlay:", error);
   }
 }
 
@@ -442,32 +710,69 @@ function showOverlayWindow(win: BrowserWindow): void {
   win.showInactive();
 }
 
-function ensureDictationOverlayWindow(): { window: BrowserWindow; needsLoad: boolean } {
-  const existing = findWindowByLabel("dictation-overlay");
-  if (existing) {
-    configureWindowSecurity(existing);
-    showOverlayWindow(existing);
-    return { window: existing, needsLoad: false };
+function createOverlayWindow(kind: OverlayKind): BrowserWindow {
+  const overlay =
+    kind === "dictation"
+      ? createDictationOverlayWindow()
+      : createRecordingOverlayWindow();
+  (overlay as BrowserWindow & { _label?: string })._label = OVERLAY_LABELS[kind];
+  configureWindowSecurity(overlay);
+  // The dictation HUD is mostly transparent padding around a small card.
+  // Without click-through that band swallows clicks meant for the app
+  // underneath; hit testing is re-enabled from the renderer only while the
+  // pointer is over the card itself (see __window_set_ignore_mouse_events__).
+  // The recording chip has no such handler yet, so it stays hit-testable
+  // rather than becoming silently uninteractive.
+  if (kind === "dictation") {
+    overlay.setIgnoreMouseEvents(true, { forward: true });
   }
 
-  const overlay = createDictationOverlayWindow();
-  (overlay as BrowserWindow & { _label?: string })._label = "dictation-overlay";
-  configureWindowSecurity(overlay);
-  return { window: overlay, needsLoad: true };
+  overlay.on("moved", () => {
+    if (overlay.isDestroyed()) {
+      return;
+    }
+    const bounds = overlay.getBounds();
+    const programmatic = lastProgrammaticOverlayOrigin.get(kind);
+    if (programmatic && programmatic.x === bounds.x && programmatic.y === bounds.y) {
+      return;
+    }
+    overlayPlacements.set(kind, {
+      ...overlayPlacements.get(kind),
+      bottom: bounds.y + bounds.height,
+      left: bounds.x,
+    });
+    scheduleOverlayPlacementSave();
+  });
+
+  const query = { overlay: kind };
+  if (isDev && rendererMode === "server") {
+    void overlay.loadURL(`${devServerUrl}?overlay=${kind}`);
+  } else {
+    void overlay.loadFile(path.join(__dirname, "../dist/index.html"), { query });
+  }
+
+  return overlay;
 }
 
-function ensureRecordingOverlayWindow(): { window: BrowserWindow; needsLoad: boolean } {
-  const existing = findWindowByLabel("recording-overlay");
-  if (existing) {
-    configureWindowSecurity(existing);
-    showOverlayWindow(existing);
-    return { window: existing, needsLoad: false };
+// Both overlays are created (hidden) at bootstrap so the first hotkey press
+// shows an already-mounted React tree instead of waiting on a cold boot behind
+// did-finish-load.
+function getOrCreateOverlayWindow(kind: OverlayKind): BrowserWindow {
+  const existing = findWindowByLabel(OVERLAY_LABELS[kind]);
+  if (existing && !existing.isDestroyed()) {
+    return existing;
   }
+  return createOverlayWindow(kind);
+}
 
-  const overlay = createRecordingOverlayWindow();
-  (overlay as BrowserWindow & { _label?: string })._label = "recording-overlay";
-  configureWindowSecurity(overlay);
-  return { window: overlay, needsLoad: true };
+function prepareOverlayWindows(): void {
+  for (const kind of ["dictation", "recording"] as OverlayKind[]) {
+    try {
+      getOrCreateOverlayWindow(kind);
+    } catch (error) {
+      console.error(`[main] Failed to pre-create ${kind} overlay window:`, error);
+    }
+  }
 }
 
 async function handleLocalCommand(
@@ -484,7 +789,49 @@ async function handleLocalCommand(
       }
       const payload = (args ?? {}) as { width?: unknown; height?: unknown };
       if (typeof payload.width === "number" && typeof payload.height === "number") {
-        senderWindow.setSize(Math.round(payload.width), Math.round(payload.height), true);
+        const size = { width: payload.width, height: payload.height };
+        const overlayKind = getOverlayKind(senderWindow);
+        if (overlayKind) {
+          resizeOverlayKeepingBottomEdge(senderWindow, overlayKind, size);
+        } else {
+          senderWindow.setSize(Math.round(size.width), Math.round(size.height), true);
+        }
+      }
+      return { handled: true, result: null };
+    }
+    case "__window_set_ignore_mouse_events__": {
+      // The overlay is a transparent band around a small card; the renderer
+      // re-enables hit testing only while the pointer is over the card itself.
+      if (!senderWindow || !getOverlayKind(senderWindow)) {
+        return { handled: true, result: null };
+      }
+      const payload = (args ?? {}) as { ignore?: unknown };
+      senderWindow.setIgnoreMouseEvents(payload.ignore !== false, { forward: true });
+      return { handled: true, result: null };
+    }
+    case "__overlay_placement__": {
+      const kind = getOverlayKind(senderWindow);
+      return {
+        handled: true,
+        result: kind ? (overlayPlacements.get(kind) ?? null) : null,
+      };
+    }
+    case "__overlay_set_display_mode__": {
+      // Records the mode ONLY. Toggling Compact/Expand is cosmetic; inventing a
+      // {bottom,left} from the window's current bounds here would be
+      // indistinguishable from a drag afterwards and would pin the HUD to one
+      // display permanently.
+      const kind = getOverlayKind(senderWindow);
+      const payload = (args ?? {}) as { displayMode?: unknown };
+      if (kind && typeof payload.displayMode === "string") {
+        overlayPlacements.set(
+          kind,
+          withOverlayDisplayMode(
+            overlayPlacements.get(kind),
+            payload.displayMode,
+          ),
+        );
+        scheduleOverlayPlacementSave();
       }
       return { handled: true, result: null };
     }
@@ -652,7 +999,13 @@ async function handleDictationVadSignal(payload: unknown): Promise<void> {
       return;
     }
     qaLog("dictation hands-free auto-start", { phase: dictationPhase, signal });
-    await ipcBridge.invoke("start_dictation", {});
+    // `handsFreeTrigger` is what entitles this start — and only this start — to
+    // be seeded from the monitor's pre-roll ring. The sidecar stops the monitor
+    // on every start, so the ring is always fresh; without the flag a hotkey
+    // press would splice the two seconds before the press onto the transcript.
+    await ipcBridge.invoke("start_dictation", {
+      options: { handsFreeTrigger: true },
+    });
     return;
   }
 }
@@ -773,6 +1126,14 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
   const openWindowShortcut = skippedFields.has("openWindow")
     ? null
     : convertShortcutToAccelerator(settings.shortcuts?.openWindow);
+  // Recovery bindings: when an insert lands in the wrong app or silently
+  // fails, these put the last result back without the user re-speaking it.
+  const repasteShortcut = skippedFields.has("repasteLastDictation")
+    ? null
+    : convertShortcutToAccelerator(settings.shortcuts?.repasteLastDictation);
+  const recopyShortcut = skippedFields.has("recopyLastDictation")
+    ? null
+    : convertShortcutToAccelerator(settings.shortcuts?.recopyLastDictation);
   const behavior = resolveDictationShortcutBehavior(settings.transcription ?? {});
   const usesPressOnlyElectronFallback = behavior === "hold_to_talk";
 
@@ -811,6 +1172,35 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
       });
     }
   }
+
+  for (const [field, accelerator, command] of [
+    ["repasteLastDictation", repasteShortcut, "repaste_dictation_result"],
+    ["recopyLastDictation", recopyShortcut, "recopy_dictation_result"],
+  ] as const) {
+    if (!accelerator) {
+      continue;
+    }
+    const registered = globalShortcut.register(accelerator, () => {
+      void ipcBridge?.invoke(command, { index: 0 }).catch((error) => {
+        // A missing result (nothing dictated yet) is the common case here and
+        // is reported by the sidecar as an error; it is not worth a dialog.
+        console.warn("[shortcuts] dictation recovery shortcut failed", {
+          command,
+          error,
+        });
+      });
+    });
+
+    if (!registered) {
+      console.error("[shortcuts] failed to register dictation recovery shortcut", {
+        reason,
+        field,
+        accelerator,
+      });
+    }
+  }
+
+  refreshTray();
 }
 
 function getNativeShortcutHelperBinaryName(): string {
@@ -917,6 +1307,12 @@ function createMainWindow(): BrowserWindow {
 
   win.on("closed", () => {
     mainWindow = null;
+    // The overlay windows are created hidden at bootstrap and outlive the main
+    // window, so `window-all-closed` never fires; keep the non-macOS "closing
+    // the window quits the app" behavior explicit rather than relying on it.
+    if (process.platform !== "darwin" && !isQuitting) {
+      app.quit();
+    }
   });
 
   // Keep Plainsong alive in the menu-bar tray when the user opts in.
@@ -1085,6 +1481,7 @@ async function bootstrap() {
     if (dictationPhase !== "idle") {
       dictationPhase = "idle";
       broadcastRendererEvent("dictation-state-changed", { phase: "idle" });
+      refreshTray();
     }
   });
 
@@ -1097,6 +1494,7 @@ async function bootstrap() {
       typeof (payload as { phase?: unknown }).phase === "string"
     ) {
       dictationPhase = (payload as { phase: string }).phase;
+      refreshTray();
       const sessionId = (payload as { sessionId?: unknown }).sessionId;
       if (typeof sessionId === "number") {
         dictationSessionId = sessionId;
@@ -1105,6 +1503,16 @@ async function bootstrap() {
       // it is cleared as soon as the guarded session leaves "primed"/
       // "recording" through any path (VAD auto-stop, overlay stop, Escape).
       dictationShortcutSignalRuntime.onPhase(dictationPhase);
+    }
+
+    if (eventName === "dictation-text-ready") {
+      const text = (payload as { text?: unknown } | null)?.text;
+      if (typeof text === "string" && text.trim().length > 0) {
+        // Mirrors the sidecar's own capped list (it stays the source of truth
+        // for the re-paste itself; this copy only labels the menu items).
+        recentDictationResults = [{ text }, ...recentDictationResults].slice(0, 3);
+        refreshTray();
+      }
     }
 
     if (eventName === "dictation-vad-signal") {
@@ -1118,29 +1526,9 @@ async function bootstrap() {
 
   ipcBridge.onWindowCommand((command: string, payload: unknown) => {
     if (command === "show-dictation-overlay") {
-      const { window: overlay, needsLoad } = ensureDictationOverlayWindow();
-      if (needsLoad) {
-        overlay.webContents.once("did-finish-load", () => showOverlayWindow(overlay));
-        if (isDev && rendererMode === "server") {
-          void overlay.loadURL(`${devServerUrl}?overlay=dictation`);
-        } else {
-          void overlay.loadFile(path.join(__dirname, "../dist/index.html"), {
-            query: { overlay: "dictation" },
-          });
-        }
-      }
+      showOverlayWindow(getOrCreateOverlayWindow("dictation"));
     } else if (command === "show-recording-overlay") {
-      const { window: overlay, needsLoad } = ensureRecordingOverlayWindow();
-      if (needsLoad) {
-        overlay.webContents.once("did-finish-load", () => showOverlayWindow(overlay));
-        if (isDev && rendererMode === "server") {
-          void overlay.loadURL(`${devServerUrl}?overlay=recording`);
-        } else {
-          void overlay.loadFile(path.join(__dirname, "../dist/index.html"), {
-            query: { overlay: "recording" },
-          });
-        }
-      }
+      showOverlayWindow(getOrCreateOverlayWindow("recording"));
     } else if (command === "open-main") {
       showAndFocusMainWindow();
     } else if (command === "open-main-to") {
@@ -1174,6 +1562,8 @@ async function bootstrap() {
   }
 
   mainWindow = createMainWindow();
+  loadOverlayPlacements();
+  prepareOverlayWindows();
   createTray();
   bootstrapComplete = true;
 }

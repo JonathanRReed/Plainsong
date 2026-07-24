@@ -165,6 +165,8 @@ export type ShortcutFieldKey =
   | "toggleDictation"
   | "toggleRecording"
   | "openWindow"
+  | "repasteLastDictation"
+  | "recopyLastDictation"
   | "quickExport"
   | "focusSearch";
 
@@ -182,8 +184,9 @@ export type ShortcutConflictInfo = {
 // whichever field is listed first here "wins" and keeps the OS-level
 // registration; later fields are skipped. Dictation is the app's primary
 // interaction (per the OSS "Cursor Tab of voice" positioning) so it always
-// wins. Open window is the other field that is actually registered with
-// Electron's globalShortcut today, so it comes next. toggleRecording is a
+// wins. Open window, then the two dictation recovery bindings (re-paste and
+// re-copy the last result), are the other fields actually registered with
+// Electron's globalShortcut today, so they come next. toggleRecording is a
 // pre-existing settings field that is not wired to any registration path
 // (neither globalShortcut.register nor the native shortcut controller, which
 // only wires toggleDictation) — it is ranked below the shortcuts that really
@@ -195,6 +198,8 @@ export type ShortcutConflictInfo = {
 export const SHORTCUT_FIELD_PRECEDENCE: Array<{ key: ShortcutFieldKey; label: string }> = [
   { key: "toggleDictation", label: "Dictation" },
   { key: "openWindow", label: "Open window" },
+  { key: "repasteLastDictation", label: "Paste last result" },
+  { key: "recopyLastDictation", label: "Copy last result" },
   { key: "toggleRecording", label: "Recording" },
   { key: "quickExport", label: "Quick export" },
   { key: "focusSearch", label: "Search" },

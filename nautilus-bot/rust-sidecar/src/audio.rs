@@ -1,5 +1,6 @@
 pub mod enhance;
 pub mod mel;
+pub mod preroll;
 pub mod silero_vad;
 pub mod system_capture;
 pub mod utils;
@@ -7,6 +8,9 @@ pub mod vad;
 pub mod waveform;
 
 use crate::audio::enhance::AudioPreprocessor;
+use crate::audio::preroll::{
+    PreRollBuffer, PRE_ROLL_MAX_AGE_MS, PRE_ROLL_SECONDS, PRE_ROLL_SPEECH_LEAD_SECONDS,
+};
 use crate::audio::silero_vad::build_vad_gate;
 use crate::audio::system_capture::{MixedAudioCapture, MixedCaptureEvents};
 use crate::audio::vad::{VadBackendKind, VadConfig, VadEdge, VadGate, VoiceActivityDetector};
@@ -214,6 +218,17 @@ pub struct AudioCapture {
     /// Configuration the currently running hands-free monitor was started
     /// with (see [`HandsFreeMonitorConfig`]); `None` when it isn't running.
     hands_free_monitor_config: Option<HandsFreeMonitorConfig>,
+    /// Rolling pre-roll of the last couple of seconds the hands-free idle
+    /// monitor heard (see [`PreRollBuffer`]). `None` until a monitor has run.
+    /// Drained by `start_dictation` so a hands-free session starts with the
+    /// words the user already spoke instead of from the moment the fresh
+    /// capture stream happened to open.
+    dictation_pre_roll: Arc<std::sync::Mutex<Option<PreRollBuffer>>>,
+    /// Microseconds from `start_dictation` entry to the first sample the
+    /// capture callback delivered, or 0 while none has arrived yet. This is
+    /// the number that moves when microphone cold-open cost changes, so it is
+    /// measured rather than assumed.
+    dictation_first_sample_us: Arc<AtomicU64>,
 }
 
 struct ActiveRecordingSession {
@@ -439,6 +454,8 @@ impl AudioCapture {
             hands_free_monitor_active: Arc::new(AtomicBool::new(false)),
             hands_free_monitor_thread: None,
             hands_free_monitor_config: None,
+            dictation_pre_roll: Arc::new(std::sync::Mutex::new(None)),
+            dictation_first_sample_us: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -598,12 +615,21 @@ impl AudioCapture {
     /// disabled the callback does no extra VAD work. `event_handle`, if provided,
     /// is used to emit a `dictation-vad-signal` event over the existing JSON-RPC
     /// event channel when the gate detects sustained silence after speech.
+    ///
+    /// `seed_from_pre_roll` must be true ONLY when this start came from the
+    /// hands-free monitor's own `hands_free_start` signal. Every other
+    /// activation path (hotkey, native helper, the popup's "Start again") means
+    /// "begin now", and the caller stops the monitor immediately before calling
+    /// in — so the ring is always fresh and the age guard could never reject it.
+    /// Draining it unconditionally would splice the seconds *before* the user
+    /// pressed the key onto the head of their transcript.
     pub fn start_dictation(
         &mut self,
         preference: Option<&settings::AudioInputDevicePreference>,
         session_id: u64,
         auto_stop: DictationAutoStopConfig,
         event_handle: Option<SidecarHandle>,
+        seed_from_pre_roll: bool,
     ) -> Result<ResolvedAudioInputDevice> {
         if self.is_dictating.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("Dictation already in progress"));
@@ -621,6 +647,18 @@ impl AudioCapture {
         let channels = config.channels();
         self.dictation_sample_rate = sample_rate;
         self.dictation_channels = channels;
+
+        let pre_roll_samples = self.resolve_dictation_seed_samples(sample_rate, seed_from_pre_roll);
+        if !pre_roll_samples.is_empty() {
+            tracing::info!(
+                "Seeding dictation with {} pre-roll samples ({:.0}ms)",
+                pre_roll_samples.len(),
+                pre_roll_samples.len() as f32 / sample_rate.max(1) as f32 * 1000.0
+            );
+            for sample in pre_roll_samples {
+                self.dictation_buffer.push(sample);
+            }
+        }
 
         tracing::info!(
             "Starting dictation capture on '{}' : {} channels, {} Hz, format: {:?}",
@@ -677,6 +715,7 @@ impl AudioCapture {
 
         self.is_dictating.store(true, Ordering::SeqCst);
         self.dictation_callback_count.store(0, Ordering::SeqCst);
+        self.dictation_first_sample_us.store(0, Ordering::SeqCst);
 
         // Per-session stop flag: this session's capture thread and callbacks
         // park/act on this Arc, NOT on the shared `is_dictating`, so a
@@ -695,6 +734,8 @@ impl AudioCapture {
         let vad_session_id = Arc::clone(&self.dictation_vad_session_id);
         let vad_gate_active = Arc::clone(&self.dictation_vad_gate_active);
         let vad_event_handle = event_handle;
+        let first_sample_us = Arc::clone(&self.dictation_first_sample_us);
+        let capture_started_at = std::time::Instant::now();
 
         let capture_handle = std::thread::spawn(move || {
             let capture_flag = Arc::clone(&capture_stop);
@@ -732,12 +773,25 @@ impl AudioCapture {
                     let vad_session_id = Arc::clone(&vad_session_id);
                     let vad_gate_active = Arc::clone(&vad_gate_active);
                     let vad_event_handle = vad_event_handle.clone();
+                    let first_sample_us = Arc::clone(&first_sample_us);
 
                     device.build_input_stream(
                         stream_config.clone(),
                         move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
                             if !capture_stop.load(Ordering::SeqCst) {
                                 return;
+                            }
+
+                            // First sample of this session: record how long the
+                            // microphone took to actually deliver audio, so the
+                            // cold-open cost is measurable rather than assumed.
+                            if first_sample_us.load(Ordering::Relaxed) == 0 {
+                                let _ = first_sample_us.compare_exchange(
+                                    0,
+                                    (capture_started_at.elapsed().as_micros() as u64).max(1),
+                                    Ordering::Relaxed,
+                                    Ordering::Relaxed,
+                                );
                             }
 
                             callback_count.fetch_add(1, Ordering::Relaxed);
@@ -887,6 +941,83 @@ impl AudioCapture {
         }
     }
 
+    /// What a starting session should be seeded with.
+    ///
+    /// Only a start the hands-free monitor itself triggered (`seed` is
+    /// `options.hands_free_trigger`, threaded down from the `hands_free_start`
+    /// signal) may inherit the monitor's audio. Every other activation path
+    /// means "start now": the seconds before a hotkey press are not part of what
+    /// the user asked to dictate, and `take_dictation_pre_roll`'s age guard
+    /// cannot catch that on its own because the caller stops the monitor one
+    /// statement before starting, leaving the ring fresh by construction. The
+    /// ring is dropped rather than left resident when it is not being used.
+    fn resolve_dictation_seed_samples(&self, sample_rate: u32, seed: bool) -> Vec<f32> {
+        if !seed {
+            self.clear_dictation_pre_roll();
+            return Vec::new();
+        }
+        self.take_dictation_pre_roll(sample_rate)
+    }
+
+    /// Drain the hands-free monitor's pre-roll if it is usable for a session
+    /// opening at `sample_rate`. A ring recorded at a different rate (the input
+    /// device changed between the monitor and the session) or captured too long
+    /// ago is discarded rather than spliced onto the front of the user's words.
+    /// Either way the ring is emptied, so a pre-roll is never handed to two
+    /// sessions.
+    fn take_dictation_pre_roll(&self, sample_rate: u32) -> Vec<f32> {
+        let mut slot = match self.dictation_pre_roll.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let Some(pre_roll) = slot.as_mut() else {
+            return Vec::new();
+        };
+
+        let usable = pre_roll.sample_rate() == sample_rate
+            && pre_roll
+                .age_ms()
+                .is_some_and(|age| age <= PRE_ROLL_MAX_AGE_MS);
+        if !usable && !pre_roll.is_empty() {
+            tracing::info!(
+                "Discarding {} pre-roll samples ({} Hz, {:?}ms old) for a {} Hz session",
+                pre_roll.len(),
+                pre_roll.sample_rate(),
+                pre_roll.age_ms(),
+                sample_rate
+            );
+        }
+        let drained = pre_roll.take();
+        if usable {
+            drained
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Drop any pre-roll the hands-free monitor accumulated. Called when
+    /// hands-free is switched off for good -- as opposed to the monitor being
+    /// stopped so a starting session can take over the microphone, where the
+    /// pre-roll is exactly what that session needs -- so nothing the monitor
+    /// heard outlives the feature the user turned off.
+    pub fn clear_dictation_pre_roll(&self) {
+        let mut slot = match self.dictation_pre_roll.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = None;
+    }
+
+    /// Milliseconds from `start_dictation` entry to the first sample the
+    /// capture callback delivered for the most recent session, or `None` when
+    /// no sample has arrived yet.
+    pub fn dictation_first_sample_latency_ms(&self) -> Option<f64> {
+        match self.dictation_first_sample_us.load(Ordering::SeqCst) {
+            0 => None,
+            micros => Some(micros as f64 / 1000.0),
+        }
+    }
+
     /// Clear the auto-stop VAD gate slot so a finished session doesn't retain
     /// its gate (for the Silero backend that keeps a worker thread and its
     /// loaded ort session alive) until the next `start_dictation` replaces it.
@@ -944,6 +1075,12 @@ impl AudioCapture {
             samples.len(),
             self.dictation_sample_rate
         );
+        if let Some(latency_ms) = self.dictation_first_sample_latency_ms() {
+            tracing::info!(
+                "Dictation microphone open latency: {:.1}ms from start to first sample",
+                latency_ms
+            );
+        }
 
         if samples.is_empty() {
             let callback_count = self.dictation_callback_count.load(Ordering::Relaxed);
@@ -1536,7 +1673,8 @@ impl AudioCapture {
     /// gate (see `drive_dictation_auto_stop_gate`): that gate only runs once a
     /// dictation session's own capture stream is already open, whereas this monitor is the
     /// thing that runs *instead*, while idle, purely to decide when to call the existing
-    /// start-dictation path. It never appends to `dictation_buffer`, never touches
+    /// start-dictation path. It never appends to `dictation_buffer` (it fills a
+    /// bounded pre-roll ring that `start_dictation` drains instead), never touches
     /// `is_dictating`/`dictation_thread`, and never itself calls into `start_dictation` — it
     /// only emits a `dictation-vad-signal` event (`signal: "hands_free_start"`) for the caller
     /// (electron/main.ts) to route through the exact same `start_dictation` command every
@@ -1595,6 +1733,28 @@ impl AudioCapture {
             .round()
             .max(1.0) as usize;
 
+        // A fresh pre-roll ring per monitor run, sized for this stream's sample
+        // rate. `start_dictation` drains it, so the words spoken while the gate
+        // was still deciding "that's speech" survive the hand-off instead of
+        // being downmixed and dropped.
+        {
+            let mut slot = match self.dictation_pre_roll.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *slot = Some(PreRollBuffer::new(sample_rate, PRE_ROLL_SECONDS));
+        }
+        let pre_roll = Arc::clone(&self.dictation_pre_roll);
+
+        // How far back the gate's `SpeechStarted` edge actually sits: it only
+        // latches after `DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS` of sustained
+        // speech, so the ring is trimmed to that much audio plus a lead-in
+        // rather than handing over the whole two-second window.
+        let speech_onset_lookback = ((sample_rate as f32)
+            * (DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS + PRE_ROLL_SPEECH_LEAD_SECONDS))
+            .round()
+            .max(0.0) as usize;
+
         self.hands_free_monitor_active.store(true, Ordering::SeqCst);
         let monitor_active = Arc::clone(&self.hands_free_monitor_active);
         let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
@@ -1612,8 +1772,9 @@ impl AudioCapture {
                 }
             };
 
-            // Minimal per-frame work: no ring buffer, no partial-transcript
-            // accumulation, no allocation beyond the VAD gate itself. This must
+            // Minimal per-frame work: no partial-transcript accumulation and no
+            // allocation beyond the VAD gate and a fixed-size pre-roll ring (a
+            // couple of seconds of mono samples, written in place). This must
             // stay cheap since (when hands-free is enabled) it can run indefinitely
             // while the app is idle.
             //
@@ -1636,24 +1797,29 @@ impl AudioCapture {
                     silero_model_path.as_deref(),
                 )));
 
+            /// Returns the edge the gate reported so the caller can mark the
+            /// pre-roll's speech onset; `NoChange` whenever the gate was not
+            /// consulted at all.
             fn handle_frame(
                 mono: &[f32],
                 gate: &std::sync::Mutex<Box<dyn VadGate + Send>>,
                 running: &AtomicBool,
                 handle: &SidecarHandle,
-            ) {
+            ) -> VadEdge {
                 if !running.load(Ordering::SeqCst) {
-                    return;
+                    return VadEdge::NoChange;
                 }
                 let Ok(mut gate) = gate.lock() else {
-                    return;
+                    return VadEdge::NoChange;
                 };
-                if gate.push_samples(mono) == VadEdge::SpeechStarted {
+                let edge = gate.push_samples(mono);
+                if edge == VadEdge::SpeechStarted {
                     handle.emit(
                         "dictation-vad-signal",
                         serde_json::json!({ "signal": "hands_free_start" }),
                     );
                 }
+                edge
             }
 
             let sample_format = config.sample_format();
@@ -1665,6 +1831,7 @@ impl AudioCapture {
                     let gate = Arc::clone(&gate);
                     let handle = event_handle.clone();
                     let err_active = Arc::clone(&monitor_active);
+                    let pre_roll = Arc::clone(&pre_roll);
 
                     device.build_input_stream(
                         stream_config.clone(),
@@ -1673,7 +1840,27 @@ impl AudioCapture {
                                 return;
                             }
                             let mono = downmix_to_mono(data, num_channels);
-                            handle_frame(&mono, &gate, &running, &handle);
+                            // The frame is already downmixed for the gate; keep
+                            // it in the ring instead of dropping it, so the
+                            // session this monitor is about to trigger starts
+                            // with the user's opening words.
+                            if let Ok(mut slot) = pre_roll.lock() {
+                                if let Some(buffer) = slot.as_mut() {
+                                    buffer.push(&mono);
+                                }
+                            }
+                            // Mark where speech actually began (the gate latches
+                            // well after the fact) so the hand-off is the user's
+                            // opening words, not the whole ring.
+                            if handle_frame(&mono, &gate, &running, &handle)
+                                == VadEdge::SpeechStarted
+                            {
+                                if let Ok(mut slot) = pre_roll.lock() {
+                                    if let Some(buffer) = slot.as_mut() {
+                                        buffer.mark_speech_onset(speech_onset_lookback);
+                                    }
+                                }
+                            }
                         },
                         move |err| {
                             tracing::error!("Hands-free monitor stream error: {}", err);
@@ -2248,5 +2435,101 @@ mod hands_free_monitor_tests {
         audio.stop_hands_free_monitor();
 
         assert!(!audio.is_hands_free_monitor_active());
+    }
+
+    fn install_pre_roll(audio: &AudioCapture, sample_rate: u32, samples: &[f32]) {
+        let mut ring = crate::audio::preroll::PreRollBuffer::new(sample_rate, 2.0);
+        ring.push(samples);
+        *audio.dictation_pre_roll.lock().unwrap() = Some(ring);
+    }
+
+    /// The hand-off the whole pre-roll exists for: the monitor stops, the real
+    /// capture stream opens at the same rate, and the samples the monitor
+    /// already heard become the head of the session's audio.
+    #[test]
+    fn a_fresh_pre_roll_at_the_same_sample_rate_seeds_the_session() {
+        let audio = AudioCapture::new();
+        install_pre_roll(&audio, 48_000, &[0.1, 0.2, 0.3]);
+
+        assert_eq!(audio.take_dictation_pre_roll(48_000), vec![0.1, 0.2, 0.3]);
+        // Drained, so a second session can never inherit the first one's audio.
+        assert!(audio.take_dictation_pre_roll(48_000).is_empty());
+    }
+
+    /// A ring recorded at another rate (the input device changed between the
+    /// monitor and the session) would play back as pitch-shifted garbage
+    /// spliced onto the front of the transcript, so it is dropped, not resampled.
+    #[test]
+    fn a_pre_roll_from_a_different_sample_rate_is_discarded() {
+        let audio = AudioCapture::new();
+        install_pre_roll(&audio, 16_000, &[0.1, 0.2, 0.3]);
+
+        assert!(audio.take_dictation_pre_roll(48_000).is_empty());
+        // Still emptied: stale audio must not sit around waiting for a session
+        // that happens to open at the matching rate.
+        assert!(audio.take_dictation_pre_roll(16_000).is_empty());
+    }
+
+    #[test]
+    fn taking_a_pre_roll_that_was_never_recorded_is_empty_not_a_panic() {
+        let audio = AudioCapture::new();
+        assert!(audio.take_dictation_pre_roll(48_000).is_empty());
+    }
+
+    /// Turning hands-free off must not leave a couple of seconds of microphone
+    /// audio resident from the monitor that just stopped.
+    #[test]
+    fn clearing_the_pre_roll_drops_what_the_monitor_heard() {
+        let audio = AudioCapture::new();
+        install_pre_roll(&audio, 48_000, &[0.1, 0.2, 0.3]);
+
+        audio.clear_dictation_pre_roll();
+
+        assert!(audio.dictation_pre_roll.lock().unwrap().is_none());
+        assert!(audio.take_dictation_pre_roll(48_000).is_empty());
+    }
+
+    /// The activation path decides, not the ring's freshness. `dispatch_command`
+    /// stops the monitor one statement before every `start_dictation`, so the
+    /// ring is fresh on the hotkey path too and `take_dictation_pre_roll`'s age
+    /// guard can never fire there — a hotkey start that drained it would put the
+    /// two seconds *before* the press at the user's cursor.
+    #[test]
+    fn only_a_hands_free_start_inherits_the_monitors_audio() {
+        let audio = AudioCapture::new();
+        install_pre_roll(&audio, 48_000, &[0.1, 0.2, 0.3]);
+
+        assert!(
+            audio
+                .resolve_dictation_seed_samples(48_000, false)
+                .is_empty(),
+            "a hotkey/native-helper start must open the microphone cold"
+        );
+        // And the unused ring is dropped rather than left resident for the next
+        // start to pick up.
+        assert!(audio.dictation_pre_roll.lock().unwrap().is_none());
+
+        install_pre_roll(&audio, 48_000, &[0.1, 0.2, 0.3]);
+        assert_eq!(
+            audio.resolve_dictation_seed_samples(48_000, true),
+            vec![0.1, 0.2, 0.3],
+            "the hands-free path is the one that keeps the opening words"
+        );
+    }
+
+    /// Only the `hands_free_start` signal may set the flag, and it has to
+    /// survive the JSON round trip from electron/main.ts as camelCase.
+    #[test]
+    fn the_hands_free_trigger_flag_defaults_off_over_the_wire() {
+        let default_options = crate::models::DictationStartOptions::default();
+        assert!(!default_options.hands_free_trigger);
+
+        let from_empty: crate::models::DictationStartOptions =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!from_empty.hands_free_trigger);
+
+        let from_hands_free: crate::models::DictationStartOptions =
+            serde_json::from_value(serde_json::json!({ "handsFreeTrigger": true })).unwrap();
+        assert!(from_hands_free.hands_free_trigger);
     }
 }

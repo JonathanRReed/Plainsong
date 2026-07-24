@@ -8,6 +8,7 @@ const {
   getRelationshipMemory,
   searchTranscripts,
   requestMainView,
+  requestRecordingWorkspace,
   requestOnboarding,
   dashboardState,
 } = vi.hoisted(() => ({
@@ -16,6 +17,7 @@ const {
   analyzeRecordings: vi.fn(),
   searchTranscripts: vi.fn(),
   requestMainView: vi.fn(),
+  requestRecordingWorkspace: vi.fn(),
   requestOnboarding: vi.fn(),
   dashboardState: {
     setupStatus: {
@@ -75,6 +77,7 @@ vi.mock("@/hooks/use-setup-status", () => ({
 
 vi.mock("@/lib/navigation", () => ({
   requestMainView,
+  requestRecordingWorkspace,
 }));
 
 vi.mock("@/lib/onboarding", () => ({
@@ -289,5 +292,67 @@ describe("DashboardView memory chat", () => {
     expect(
       screen.getByText(/Search transcripts first, then select one or more matching meetings to analyze/i)
     ).toBeInTheDocument();
+  });
+
+  it("opens the meeting at the matched moment from a transcript hit", async () => {
+    searchTranscripts.mockResolvedValue([
+      {
+        recordingId: "rec-1",
+        recordingTitle: "ACME pricing review",
+        projectId: "project-1",
+        segmentId: "seg-9",
+        text: "Let's keep pricing flat through Q3.",
+        startTime: 92,
+        endTime: 98,
+        score: -4.1,
+      },
+    ]);
+
+    render(<DashboardView />);
+
+    const searchInput = await screen.findByPlaceholderText(/Search every transcript/);
+    fireEvent.change(searchInput, { target: { value: "pricing" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    const hit = await screen.findByText("Let's keep pricing flat through Q3.");
+    fireEvent.click(hit);
+
+    expect(requestRecordingWorkspace).toHaveBeenCalledWith({
+      recordingId: "rec-1",
+      focusSegmentTime: 92,
+      highlightQuery: "pricing",
+    });
+  });
+
+  it("keeps analysis selection separate from opening a hit", async () => {
+    searchTranscripts.mockResolvedValue([
+      {
+        recordingId: "rec-1",
+        recordingTitle: "ACME pricing review",
+        projectId: "project-1",
+        segmentId: "seg-9",
+        text: "Let's keep pricing flat through Q3.",
+        startTime: 92,
+        endTime: 98,
+        score: -4.1,
+      },
+    ]);
+
+    render(<DashboardView />);
+
+    fireEvent.change(await screen.findByPlaceholderText(/Search every transcript/), {
+      target: { value: "pricing" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    const checkbox = await screen.findByRole("button", {
+      name: "Include ACME pricing review in cross-meeting analysis",
+    });
+    expect(checkbox).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(checkbox);
+
+    expect(checkbox).toHaveAttribute("aria-pressed", "false");
+    expect(requestRecordingWorkspace).not.toHaveBeenCalled();
   });
 });

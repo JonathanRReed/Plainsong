@@ -468,6 +468,13 @@ pub struct KeyboardShortcuts {
     pub toggle_dictation_alternates: Vec<String>,
     /// Open main window
     pub open_window: String,
+    /// Re-insert the last dictation result at the cursor. The recovery path
+    /// when an insertion landed in the wrong app or silently failed. Empty
+    /// means unbound.
+    pub repaste_last_dictation: String,
+    /// Copy the last dictation result to the clipboard again. Empty means
+    /// unbound.
+    pub recopy_last_dictation: String,
 }
 
 impl Default for KeyboardShortcuts {
@@ -476,7 +483,35 @@ impl Default for KeyboardShortcuts {
             toggle_dictation: default_dictation_shortcut().to_string(),
             toggle_dictation_alternates: Vec::new(),
             open_window: "Ctrl+Shift+N".to_string(),
+            repaste_last_dictation: default_repaste_shortcut().to_string(),
+            recopy_last_dictation: default_recopy_shortcut().to_string(),
         }
+    }
+}
+
+// The de-facto convention for these two (Wispr Flow binds the same chords), so
+// a user arriving from another dictation app finds them where they expect.
+fn default_repaste_shortcut() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Cmd+Ctrl+V"
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        "Ctrl+Alt+V"
+    }
+}
+
+fn default_recopy_shortcut() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Cmd+Ctrl+C"
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        "Ctrl+Alt+C"
     }
 }
 
