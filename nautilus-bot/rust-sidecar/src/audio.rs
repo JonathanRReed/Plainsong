@@ -8,7 +8,7 @@ pub mod waveform;
 
 use crate::audio::enhance::AudioPreprocessor;
 use crate::audio::silero_vad::build_vad_gate;
-use crate::audio::system_capture::MixedAudioCapture;
+use crate::audio::system_capture::{MixedAudioCapture, MixedCaptureEvents};
 use crate::audio::vad::{VadBackendKind, VadConfig, VadEdge, VadGate, VoiceActivityDetector};
 use crate::models::RecordingOptions;
 use crate::settings;
@@ -1039,7 +1039,14 @@ impl AudioCapture {
         raw.sqrt()
     }
 
-    pub fn start_recording(&mut self, options: RecordingOptions) -> Result<String> {
+    /// `event_handle`, if provided, is used by the mixed ("Me + Them") capture
+    /// path to emit `meeting-audio-source-warning` when one of the two sources
+    /// goes silent mid-session; same shape as `start_dictation`'s handle.
+    pub fn start_recording(
+        &mut self,
+        options: RecordingOptions,
+        event_handle: Option<SidecarHandle>,
+    ) -> Result<String> {
         if self.active_recording.is_some() {
             return Err(anyhow::anyhow!("A recording session is already active"));
         }
@@ -1084,6 +1091,10 @@ impl AudioCapture {
                     preferred_mic_device,
                     Arc::clone(&waveform_buffer),
                     Some(Arc::clone(&streaming_queue)),
+                    event_handle.map(|handle| MixedCaptureEvents {
+                        handle,
+                        recording_id: id.clone(),
+                    }),
                 )
                 .context("Failed to start mixed audio capture")?;
             let sample_rate = capture_start.sample_rate;

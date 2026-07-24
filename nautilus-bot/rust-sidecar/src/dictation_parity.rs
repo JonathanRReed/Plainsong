@@ -416,22 +416,18 @@ pub fn apply_dictation_snippets_for_category(
             continue;
         }
 
-        if snippet.case_sensitive {
-            let matches = output.matches(snippet.trigger.as_str()).count();
-            if matches > 0 {
-                output = output.replace(snippet.trigger.as_str(), snippet.expansion.as_str());
-                applied_total += matches;
-            }
-        } else {
-            let (next, applied) = replace_case_insensitive_all(
-                output.as_str(),
-                snippet.trigger.as_str(),
-                snippet.expansion.as_str(),
-            );
-            if applied > 0 {
-                output = next;
-                applied_total += applied;
-            }
+        // Word-bounded, exactly like dictionary entries. A bare substring
+        // replace fired on any trigger that happened to sit inside a longer
+        // dictated word, so a "brb" snippet rewrote the middle of "brbecue".
+        let (next, applied) = replace_dictionary_word_bounded_all(
+            output.as_str(),
+            snippet.trigger.as_str(),
+            snippet.expansion.as_str(),
+            !snippet.case_sensitive,
+        );
+        if applied > 0 {
+            output = next;
+            applied_total += applied;
         }
     }
 
@@ -750,6 +746,35 @@ pub fn parse_dictation_command(
     }
 
     None
+}
+
+/// Whether `action` still needs selected/clipboard text to do anything.
+///
+/// Actions that carry their own spoken payload ("command rewrite shorter make
+/// this snappy") answer `false`, because `resolve_contextual_command_input`
+/// prefers the spoken text over any captured context. Used by the stop path to
+/// decide whether it is worth capturing the frontmost app's selection at
+/// execution time — capturing on every dictation would fire a synthetic copy
+/// into the target app and clobber the clipboard for no reason.
+pub fn dictation_command_action_needs_context(action: &DictationCommandAction) -> bool {
+    match action {
+        DictationCommandAction::InsertText(_)
+        | DictationCommandAction::UndoLastInsert
+        | DictationCommandAction::DeleteLastSentence
+        | DictationCommandAction::DeleteSelection => false,
+        DictationCommandAction::ReplaceEntireSelection(payload)
+        | DictationCommandAction::RewriteShorter(payload)
+        | DictationCommandAction::RewriteProfessional(payload)
+        | DictationCommandAction::Bulletize(payload) => payload.trim().is_empty(),
+        DictationCommandAction::ReplaceSelection { .. }
+        | DictationCommandAction::AppendToSelection(_)
+        | DictationCommandAction::PrependToSelection(_)
+        | DictationCommandAction::DeletePhrase(_)
+        | DictationCommandAction::UppercaseSelection
+        | DictationCommandAction::LowercaseSelection
+        | DictationCommandAction::TitleCaseSelection
+        | DictationCommandAction::SentenceCaseSelection => true,
+    }
 }
 
 pub fn resolve_contextual_command_input(
@@ -1239,6 +1264,58 @@ mod tests {
             apply_dictation_dictionary("please email open ai today", &rules, None);
         assert_eq!(output, "please email OpenAI today");
         assert_eq!(applied, 1);
+    }
+
+    #[test]
+    fn snippet_replacements_respect_word_boundaries() {
+        // Regression: snippets used a bare substring replace, so a "brb"
+        // snippet rewrote the middle of "brbecue" and any longer word that
+        // happened to contain the trigger.
+        let snippets = vec![
+            SnippetRule {
+                trigger: "brb".to_string(),
+                expansion: "be right back".to_string(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+                category_scope: None,
+            },
+            SnippetRule {
+                trigger: "IRL".to_string(),
+                expansion: "in real life".to_string(),
+                app_scope: None,
+                case_sensitive: true,
+                enabled: true,
+                category_scope: None,
+            },
+        ];
+
+        let (output, applied) =
+            apply_dictation_snippets("brb, the brbecue is IRL not IRLish", &snippets, None);
+        assert_eq!(
+            output,
+            "be right back, the brbecue is in real life not IRLish"
+        );
+        assert_eq!(applied, 2);
+    }
+
+    #[test]
+    fn command_actions_only_need_context_when_no_spoken_payload_carries_it() {
+        assert!(dictation_command_action_needs_context(
+            &DictationCommandAction::UppercaseSelection
+        ));
+        assert!(dictation_command_action_needs_context(
+            &DictationCommandAction::RewriteShorter(String::new())
+        ));
+        assert!(!dictation_command_action_needs_context(
+            &DictationCommandAction::RewriteShorter("make this snappy".to_string())
+        ));
+        assert!(!dictation_command_action_needs_context(
+            &DictationCommandAction::InsertText("\n".to_string())
+        ));
+        assert!(!dictation_command_action_needs_context(
+            &DictationCommandAction::UndoLastInsert
+        ));
     }
 
     #[test]

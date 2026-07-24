@@ -2114,7 +2114,7 @@ export function SettingsView() {
               </div>
               <Switch
                 checked={
-                  settings.transcription.dictationCopyToClipboard ?? true
+                  settings.transcription.dictationCopyToClipboard ?? false
                 }
                 onCheckedChange={(checked) =>
                   void updateSettings({

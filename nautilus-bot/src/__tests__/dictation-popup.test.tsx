@@ -483,6 +483,23 @@ describe("DictationPopup", () => {
       render(<DictationPopup />);
     });
 
+    // Dismissing does not stop capture, so the button is only offered once the
+    // microphone is closed — otherwise the HUD would vanish with no indicator
+    // anywhere that recording was still running.
+    expect(await screen.findByRole("button", { name: "Stop" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Hide" })).toBeNull();
+
+    await act(async () => {
+      popupMocks.listeners.get("dictation-state-changed")?.({
+        payload: {
+          phase: "done",
+          sessionId: 9,
+          outcome: "pasted",
+          preview: "Ship it tomorrow.",
+        },
+      });
+    });
+
     fireEvent.click(await screen.findByRole("button", { name: "Hide" }));
 
     await waitFor(() => {
@@ -491,6 +508,83 @@ describe("DictationPopup", () => {
       );
     });
     expect(popupMocks.windowHandle.hide).not.toHaveBeenCalled();
+  });
+
+  it("stops capture from the minimal pill instead of only hiding it", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    // full -> compact -> minimal
+    fireEvent.click(await screen.findByRole("button", { name: "Compact" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Expand" }));
+
+    expect(await screen.findByText("Listening")).toBeInTheDocument();
+    // The pill has no other control, so its one button must end the session.
+    // Dismissing alone would hide the last indicator of a live microphone.
+    expect(screen.queryByRole("button", { name: "Hide popup" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+
+    await waitFor(() => {
+      expect(popupMocks.stopDictation).toHaveBeenCalled();
+    });
+    expect(popupMocks.invoke).not.toHaveBeenCalledWith(
+      "dismiss_dictation_overlay",
+    );
+
+    await act(async () => {
+      popupMocks.listeners.get("dictation-state-changed")?.({
+        payload: {
+          phase: "done",
+          sessionId: 9,
+          outcome: "pasted",
+          preview: "Ship it tomorrow.",
+        },
+      });
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Hide popup" }));
+
+    await waitFor(() => {
+      expect(popupMocks.invoke).toHaveBeenCalledWith(
+        "dismiss_dictation_overlay",
+      );
+    });
+  });
+
+  it("does not promise a clipboard copy when the text was not left there", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    const stateHandler = popupMocks.listeners.get("dictation-state-changed");
+    const textReadyHandler = popupMocks.listeners.get("dictation-text-ready");
+
+    await act(async () => {
+      textReadyHandler?.({
+        payload: {
+          text: "Ship the launch update tomorrow morning.",
+          pasted: true,
+          copied: false,
+          appTarget: "Slack",
+        },
+      });
+      stateHandler?.({
+        payload: {
+          phase: "done",
+          sessionId: 9,
+          outcome: "pasted",
+          appTarget: "Slack",
+        },
+      });
+    });
+
+    // "Copy to clipboard" off restores the previous clipboard after the paste,
+    // so Cmd+V would hand back whatever the user had copied before dictating.
+    expect(
+      await screen.findByText("The result was inserted into Slack."),
+    ).toBeInTheDocument();
   });
 
   it("turns done state into a real review surface with command metadata and quick actions", async () => {

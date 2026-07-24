@@ -268,6 +268,7 @@ function formatDoneMessage(
   commandApplied: string | null,
   snippetAppliedCount: number,
   appTarget: string | null,
+  leftOnClipboard: boolean,
 ) {
   if (commandApplied === "backtrack_replace_last_insert") {
     return appTarget
@@ -297,6 +298,13 @@ function formatDoneMessage(
   }
 
   if (outcome === "pasted") {
+    // Only claim the clipboard when the text was actually left there;
+    // `dictationCopyToClipboard` off restores whatever was there before.
+    if (!leftOnClipboard) {
+      return appTarget
+        ? `The result was inserted into ${appTarget}.`
+        : "The result was inserted at your cursor.";
+    }
     return appTarget
       ? `The result was inserted into ${appTarget} and copied to your clipboard.`
       : "The result was inserted and copied to your clipboard.";
@@ -421,6 +429,7 @@ export function DictationPopup() {
     null,
   );
   const [finalSnippetAppliedCount, setFinalSnippetAppliedCount] = useState(0);
+  const [finalLeftOnClipboard, setFinalLeftOnClipboard] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [isSpeakingAloud, setIsSpeakingAloud] = useState(false);
   const [transcriptionLatencyMs, setTranscriptionLatencyMs] = useState<number | null>(null);
@@ -469,6 +478,7 @@ export function DictationPopup() {
     setFinalText(null);
     setFinalCommandApplied(null);
     setFinalSnippetAppliedCount(0);
+    setFinalLeftOnClipboard(false);
     setActionFeedback(null);
     setIsSpeakingAloud(false);
     setTranscriptionLatencyMs(null);
@@ -636,6 +646,10 @@ export function DictationPopup() {
     setFinalText(payload.text ?? null);
     setFinalCommandApplied(payload.commandApplied ?? null);
     setFinalSnippetAppliedCount(payload.snippetAppliedCount ?? 0);
+    // `copied` means the text is still on the clipboard once the session
+    // settles — with `dictationCopyToClipboard` off the staged copy is
+    // restored, so we must not promise a Cmd+V is waiting.
+    setFinalLeftOnClipboard(payload.copied === true);
     setActionFeedback(null);
     if (typeof payload.appTarget !== "undefined") {
       setRuntimeAppTarget(payload.appTarget ?? null);
@@ -912,6 +926,33 @@ export function DictationPopup() {
     }
   };
 
+  // Computed above every early return below: hooks must run in the same order
+  // on every render, and the minimal pill returns before this point.
+  const { doneTitle, doneMessage, commandLabel } = useMemo(() => ({
+    doneTitle: formatDoneTitle(
+      outcome,
+      finalCommandApplied,
+      runtimeAppTarget,
+    ),
+    doneMessage:
+      message ??
+      formatDoneMessage(
+        outcome,
+        finalCommandApplied,
+        finalSnippetAppliedCount,
+        runtimeAppTarget,
+        finalLeftOnClipboard,
+      ),
+    commandLabel: formatAppliedDictationCommandLabel(finalCommandApplied),
+  }), [
+    outcome,
+    finalCommandApplied,
+    runtimeAppTarget,
+    message,
+    finalSnippetAppliedCount,
+    finalLeftOnClipboard,
+  ]);
+
   // ── Minimal pill mode ────────────────────────────────────────────────────
   if (displayMode === "minimal") {
     const statusLabel =
@@ -947,14 +988,24 @@ export function DictationPopup() {
           <span className="text-[11px] font-medium tracking-[0.08em] text-foreground">
             {statusLabel}
           </span>
+          {/* The pill has no room for a separate Stop, so while capture is
+              live this button stops the session instead of only hiding the
+              HUD — dismissing alone would leave the microphone open with no
+              indicator anywhere on screen. */}
           <button
             type="button"
             className="inline-flex h-6 w-6 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/8 hover:text-foreground"
             onMouseDown={(event) => event.stopPropagation()}
-            onClick={() => void hidePopup()}
-            aria-label="Hide popup"
+            onClick={() =>
+              void (isCapturePhase ? handleStopFromPopup() : hidePopup())
+            }
+            aria-label={isCapturePhase ? "Stop" : "Hide popup"}
           >
-            <X className="h-3 w-3" />
+            {isCapturePhase ? (
+              <Square className="h-2.5 w-2.5 fill-current" />
+            ) : (
+              <X className="h-3 w-3" />
+            )}
           </button>
         </div>
       </div>
@@ -977,22 +1028,6 @@ export function DictationPopup() {
                 ? "Problem"
                 : "Working";
 
-  const { doneTitle, doneMessage, commandLabel } = useMemo(() => ({
-    doneTitle: formatDoneTitle(
-      outcome,
-      finalCommandApplied,
-      runtimeAppTarget,
-    ),
-    doneMessage:
-      message ??
-      formatDoneMessage(
-        outcome,
-        finalCommandApplied,
-        finalSnippetAppliedCount,
-        runtimeAppTarget,
-      ),
-    commandLabel: formatAppliedDictationCommandLabel(finalCommandApplied),
-  }), [outcome, finalCommandApplied, runtimeAppTarget, message, finalSnippetAppliedCount]);
   const spokenEditHints = [
     "scratch that",
     "actually ...",
@@ -1030,15 +1065,21 @@ export function DictationPopup() {
             >
               {compact ? <PanelsTopLeft className="h-3.5 w-3.5" /> : <Minimize2 className="h-3.5 w-3.5" />}
             </button>
-            <button
-              type="button"
-              className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-foreground/5 hover:text-foreground transition-colors"
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={() => void hidePopup()}
-              aria-label="Hide"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
+            {/* Hidden while capture is live: dismissing only hides this HUD,
+                it does not stop the microphone, and there would be nothing
+                left on screen to say recording was still running. The Stop
+                button below (and Escape) end the session properly. */}
+            {!isCapturePhase && (
+              <button
+                type="button"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-foreground/5 hover:text-foreground transition-colors"
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={() => void hidePopup()}
+                aria-label="Hide"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
         </div>
 

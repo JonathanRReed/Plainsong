@@ -102,5 +102,7 @@ describe("release-credentials-preflight.mjs", () => {
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }
-  });
+    // Spawns the preflight script in a subprocess, so it loses the default 5s
+    // race whenever the rest of the suite is running in parallel.
+  }, 30_000);
 });

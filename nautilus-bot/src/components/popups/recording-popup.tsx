@@ -24,6 +24,7 @@ import {
   MEETING_CONSENT_NOTICE_TEXT,
 } from "@/lib/meeting-consent";
 import { getMeetingTemplateOption } from "@/lib/meeting-templates";
+import { rebaseMeetingNotes } from "@/lib/meeting-notes";
 import { AudioWaveform } from "@/components/ui/audio-waveform";
 
 interface MeetingRecordingStateChangedEvent {
@@ -308,14 +309,34 @@ export function RecordingPopup() {
       return;
     }
 
+    // The main window edits the same record. Read what is stored first and
+    // rebase onto it, so a save from this window can never delete notes the
+    // meeting view wrote while the popup was open.
     const timeoutId = globalThis.setTimeout(() => {
-      void updateRecordingNotes(recordingId, meetingNotes)
-        .then(() => {
-          lastSavedMeetingNotesRef.current = meetingNotes;
-        })
-        .catch((error) => {
-          console.error("Failed to update popup meeting notes:", error);
+      void (async () => {
+        let stored = lastSavedMeetingNotesRef.current;
+        try {
+          stored = (await getRecording(recordingId))?.meetingNotes ?? "";
+        } catch (error) {
+          console.error("Failed to read stored meeting notes before autosave:", error);
+        }
+
+        const nextNotes = rebaseMeetingNotes({
+          base: lastSavedMeetingNotesRef.current,
+          local: meetingNotes,
+          stored,
         });
+
+        try {
+          await updateRecordingNotes(recordingId, nextNotes);
+          lastSavedMeetingNotesRef.current = nextNotes;
+          if (nextNotes !== meetingNotes) {
+            setMeetingNotes(nextNotes);
+          }
+        } catch (error) {
+          console.error("Failed to update popup meeting notes:", error);
+        }
+      })();
     }, 350);
 
     return () => globalThis.clearTimeout(timeoutId);
