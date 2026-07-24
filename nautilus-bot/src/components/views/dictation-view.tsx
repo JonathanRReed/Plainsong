@@ -1818,7 +1818,7 @@ export function DictationView() {
         const nextSaveToInbox = settings.transcription.dictationSaveToInbox;
         const nextProfile = settings.transcription.dictationProfile;
         const nextCopyToClipboard =
-          settings.transcription.dictationCopyToClipboard ?? true;
+          settings.transcription.dictationCopyToClipboard ?? false;
         const nextCommandModeEnabled =
           settings.transcription.dictationCommandModeEnabled ?? true;
         const nextRoutePreference =
@@ -2640,16 +2640,27 @@ export function DictationView() {
     setActivationMatcher(payload.activationMatcher ?? null);
     setContextChars(payload.contextChars ?? null);
     setDictationPhase("done");
+    // `copied` reports whether the text is still on the clipboard afterwards.
+    // With "Copy to clipboard" off (the default) the staged copy is restored,
+    // so an unconditional "also copied" would send the user to Cmd+V for
+    // whatever they had copied before dictating.
+    const leftOnClipboard = payload.copied === true;
     setDictationPhaseMessage(
       payload.pasted
-        ? "Inserted into the target app and copied to the clipboard."
-        : payload.copied
+        ? leftOnClipboard
+          ? "Inserted into the target app and copied to the clipboard."
+          : "Inserted into the target app."
+        : leftOnClipboard
           ? "Copied to the clipboard and ready to paste."
           : "Result is ready to review.",
     );
     setDictationPhasePreview(text || null);
     if (payload.pasted) {
-      setPasteStatus("Paste command sent (also copied to clipboard)");
+      setPasteStatus(
+        leftOnClipboard
+          ? "Paste command sent (also copied to clipboard)"
+          : "Paste command sent",
+      );
     } else if (payload.copied) {
       setPasteStatus(payload.pasteError ?? "Copied to clipboard");
     } else if (payload.pasteError) {

@@ -42,7 +42,10 @@ const popupMocks = vi.hoisted(() => {
     })),
     getWaveformData: vi.fn(async () => [0.1, 0.2, 0.3]),
     stopRecording: vi.fn(async () => {}),
-    updateRecordingNotes: vi.fn(async () => {}),
+    updateRecordingNotes: vi.fn(async (recordingId: string, meetingNotes: string) => {
+      void recordingId;
+      void meetingNotes;
+    }),
     windowHandle: {
       setSize: vi.fn(async () => {}),
       show: vi.fn(async () => {}),
@@ -118,6 +121,36 @@ describe("RecordingPopup", () => {
         "Updated note from popup"
       );
     });
+  });
+
+  it("does not overwrite notes the meeting view wrote while the popup was open", async () => {
+    await act(async () => {
+      render(<RecordingPopup />);
+    });
+
+    await screen.findByText("Board sync");
+
+    // The main window saved its own edit after the popup hydrated; the popup's
+    // pre-write read is the next getRecording call.
+    const hydrated = await popupMocks.getRecording();
+    popupMocks.getRecording.mockResolvedValueOnce({
+      ...hydrated,
+      meetingNotes: "Initial note\nfrom the meeting view",
+    });
+
+    fireEvent.change(
+      screen.getByPlaceholderText(/Capture decisions, blockers, names, and next steps/i),
+      { target: { value: "Initial note\nfrom the popup" } }
+    );
+
+    await waitFor(() => {
+      expect(popupMocks.updateRecordingNotes).toHaveBeenCalled();
+    });
+
+    const writes = popupMocks.updateRecordingNotes.mock.calls;
+    const written = writes[writes.length - 1][1];
+    expect(written).toContain("from the meeting view");
+    expect(written).toContain("from the popup");
   });
 
   it("keeps meeting-view access in minimal mode", async () => {

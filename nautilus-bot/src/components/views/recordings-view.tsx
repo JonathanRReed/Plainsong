@@ -55,6 +55,13 @@ import {
   MEETING_TEMPLATES,
 } from "@/lib/meeting-templates";
 import {
+  getNextMeetingSectionTitle,
+  parseMeetingNoteSections,
+  rebaseMeetingNotes,
+  serializeMeetingNoteSections,
+  type MeetingNoteSection,
+} from "@/lib/meeting-notes";
+import {
   describeMeetingConsent,
   MEETING_CONSENT_NOTICE_TEXT,
 } from "@/lib/meeting-consent";
@@ -203,166 +210,17 @@ function buildEnhancedMeetingNotesDraftText(args: {
   actionItems: string[];
   rawNotes: string;
 }): string {
+  // Headings the note parser did not invent get the explicit markdown marker so
+  // an applied draft still reads back as three sections.
   const sections = [
-    args.summary.trim() ? `Summary\n${args.summary.trim()}` : null,
+    args.summary.trim() ? `## Summary\n${args.summary.trim()}` : null,
     args.actionItems.length > 0
-      ? `Action Items\n${args.actionItems.map((item) => `- ${item}`).join("\n")}`
+      ? `## Action Items\n${args.actionItems.map((item) => `- ${item}`).join("\n")}`
       : null,
-    args.rawNotes.trim() ? `Raw Notes Context\n${args.rawNotes.trim()}` : null,
+    args.rawNotes.trim() ? `## Raw Notes Context\n${args.rawNotes.trim()}` : null,
   ].filter(Boolean);
 
   return sections.join("\n\n").trim();
-}
-
-type MeetingNoteSection = {
-  title: string;
-  body: string;
-  isTemplateSection: boolean;
-  hasExplicitPlaceholder: boolean;
-};
-
-function normalizeMeetingSectionTitle(value: string): string {
-  return value.trim().toLowerCase();
-}
-
-function looksLikeMeetingSectionHeading(value: string): boolean {
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return false;
-  }
-  if (/^[-*•]\s/.test(trimmed) || /^\d+[.)]\s/.test(trimmed)) {
-    return false;
-  }
-  if (trimmed.length > 72) {
-    return false;
-  }
-  if (/[.!?]$/.test(trimmed)) {
-    return false;
-  }
-  return trimmed.split(/\s+/).length <= 10;
-}
-
-function serializeMeetingNoteSections(sections: MeetingNoteSection[]): string {
-  return sections
-    .flatMap((section) => {
-      const title = section.title.trim();
-      if (!title) {
-        return [];
-      }
-
-      const body = section.body.trimEnd();
-      if (!body && !section.hasExplicitPlaceholder) {
-        return [];
-      }
-
-      return [body ? `${title}\n${body}` : `${title}\n- `];
-    })
-    .join("\n\n");
-}
-
-function parseMeetingNoteSections(
-  notes: string,
-  templateId: string | null | undefined
-): MeetingNoteSection[] {
-  const template = getMeetingTemplateOption(templateId);
-  const templateTitles = new Set(
-    template.notesOutline.map((title) => normalizeMeetingSectionTitle(title))
-  );
-  const parsedSections: MeetingNoteSection[] = [];
-  const generalBlocks: string[] = [];
-
-  for (const block of notes.split(/\n{2,}/)) {
-    const trimmedBlock = block.trim();
-    if (!trimmedBlock) {
-      continue;
-    }
-
-    const lines = trimmedBlock.split("\n");
-    const title = lines[0]?.trim() ?? "";
-    const bodyText = lines.slice(1).join("\n").trimEnd();
-    const normalizedTitle = normalizeMeetingSectionTitle(title);
-
-    if (
-      title &&
-      (templateTitles.has(normalizedTitle) || looksLikeMeetingSectionHeading(title))
-    ) {
-      const hasExplicitPlaceholder = bodyText.trim() === "-";
-      parsedSections.push({
-        title,
-        body: hasExplicitPlaceholder ? "" : bodyText,
-        isTemplateSection: templateTitles.has(normalizedTitle),
-        hasExplicitPlaceholder,
-      });
-      continue;
-    }
-
-    generalBlocks.push(trimmedBlock);
-  }
-
-  const sections: MeetingNoteSection[] = [];
-
-  if (generalBlocks.length > 0) {
-    sections.push({
-      title: "General notes",
-      body: generalBlocks.join("\n\n"),
-      isTemplateSection: false,
-      hasExplicitPlaceholder: false,
-    });
-  }
-
-  for (const title of template.notesOutline) {
-    const normalizedTitle = normalizeMeetingSectionTitle(title);
-    const matchedSection = parsedSections.find(
-      (section) => normalizeMeetingSectionTitle(section.title) === normalizedTitle
-    );
-    sections.push(
-      matchedSection ?? {
-        title,
-        body: "",
-        isTemplateSection: true,
-        hasExplicitPlaceholder: false,
-      }
-    );
-  }
-
-  for (const section of parsedSections) {
-    if (templateTitles.has(normalizeMeetingSectionTitle(section.title))) {
-      continue;
-    }
-    sections.push({
-      ...section,
-      isTemplateSection: false,
-    });
-  }
-
-  if (sections.length > 0) {
-    return sections;
-  }
-
-  return template.notesOutline.map((title) => ({
-    title,
-    body: "",
-    isTemplateSection: true,
-    hasExplicitPlaceholder: false,
-  }));
-}
-
-function getNextMeetingSectionTitle(sections: MeetingNoteSection[]): string {
-  const baseTitle = "Custom section";
-  const usedTitles = new Set(
-    sections.map((section) => normalizeMeetingSectionTitle(section.title))
-  );
-
-  if (!usedTitles.has(normalizeMeetingSectionTitle(baseTitle))) {
-    return baseTitle;
-  }
-
-  let index = 2;
-  while (usedTitles.has(normalizeMeetingSectionTitle(`${baseTitle} ${index}`))) {
-    index += 1;
-  }
-
-  return `${baseTitle} ${index}`;
 }
 
 function formatTranscriptQuality(details: MeetingTranscriptDetails | null): {
@@ -399,6 +257,8 @@ function formatCaptureMode(systemAudio: boolean): string {
   return systemAudio ? "Me + Them" : "Mic only";
 }
 
+// The verbatim transcript only travels when the caller asks for it. A recap
+// pasted into a chat window must not carry the whole meeting with it.
 function buildMeetingShareMarkdown(args: {
   recording: Recording;
   summary: string;
@@ -408,6 +268,7 @@ function buildMeetingShareMarkdown(args: {
   captureMode: string;
   consentLabel: string;
   templateLabel: string;
+  includeTranscript: boolean;
 }): string {
   const sections = [
     `# ${args.recording.title}`,
@@ -423,7 +284,9 @@ function buildMeetingShareMarkdown(args: {
       ? `## Action Items\n${args.actionItems.map((item) => `- ${item}`).join("\n")}`
       : null,
     args.notes.trim() ? `## Notes\n${args.notes.trim()}` : null,
-    args.transcript.trim() ? `## Transcript\n${args.transcript.trim()}` : null,
+    args.includeTranscript && args.transcript.trim()
+      ? `## Transcript\n${args.transcript.trim()}`
+      : null,
   ].filter(Boolean);
 
   return [...sections, ...body].join("\n\n").trim();
@@ -763,6 +626,14 @@ export function RecordingsView() {
   const lastRecordingState = useRef(false);
   const lastSavedLiveMeetingNotesRef = useRef("");
   const lastSavedMeetingNotesRef = useRef("");
+  // Three surfaces edit the same meeting note: the live capture panel, the
+  // review canvas, and the recording popup (its own window). Every write goes
+  // through persistMeetingNotes, which carries a revision so a response that
+  // lands out of order can't walk local state backwards, and rebases against
+  // what is actually stored instead of clobbering it.
+  const meetingNotesWriteRevisionRef = useRef(0);
+  const pendingMeetingNotesWritesRef = useRef(0);
+  const meetingNotesRef = useRef("");
   const lastSavedMeetingTemplateRef = useRef("auto");
   const lastSavedMeetingSummaryRef = useRef("");
   const lastSavedMeetingActionItemsRef = useRef("[]");
@@ -824,7 +695,22 @@ export function RecordingsView() {
     isOpen: showRecordingDetail,
     onRecordingLoaded: (recording) => {
       if (recording.id === meetingNotesTargetId) {
-        lastSavedMeetingNotesRef.current = recording.meetingNotes ?? "";
+        // Moving the saved marker without moving the buffer is how another
+        // window's notes used to disappear: the next keystroke here would
+        // overwrite them. Rebase the buffer instead — unless one of our own
+        // writes is still in flight, in which case this read is the stale one.
+        if (pendingMeetingNotesWritesRef.current === 0) {
+          const storedNotes = recording.meetingNotes ?? "";
+          const rebased = rebaseMeetingNotes({
+            base: lastSavedMeetingNotesRef.current,
+            local: meetingNotesRef.current,
+            stored: storedNotes,
+          });
+          lastSavedMeetingNotesRef.current = storedNotes;
+          if (rebased !== meetingNotesRef.current) {
+            setMeetingNotes(rebased);
+          }
+        }
         lastSavedMeetingTemplateRef.current = recording.meetingTemplateId ?? "auto";
         lastSavedMeetingSummaryRef.current = recording.summary ?? "";
         lastSavedMeetingActionItemsRef.current = JSON.stringify(
@@ -833,6 +719,65 @@ export function RecordingsView() {
       }
     },
   });
+
+  useEffect(() => {
+    meetingNotesRef.current = meetingNotes;
+  }, [meetingNotes]);
+
+  // The one place meeting notes are written. Callers hand over the buffer they
+  // hold plus the marker for the text that buffer was based on; if the record
+  // moved underneath us the write is rebased and the buffer is pulled forward,
+  // so no surface can silently delete another's text.
+  const persistMeetingNotes = useCallback(
+    async (target: {
+      recordingId: string;
+      notes: string;
+      savedRef: { current: string };
+      onRebase: (notes: string) => void;
+    }) => {
+      const revision = (meetingNotesWriteRevisionRef.current += 1);
+      pendingMeetingNotesWritesRef.current += 1;
+      try {
+        let stored = target.savedRef.current;
+        try {
+          stored = (await getRecording(target.recordingId))?.meetingNotes ?? "";
+        } catch (error) {
+          // A read failure must not block the save; fall back to a plain write.
+          console.error("Failed to read stored meeting notes before autosave:", error);
+        }
+
+        const nextNotes = rebaseMeetingNotes({
+          base: target.savedRef.current,
+          local: target.notes,
+          stored,
+        });
+        await updateRecordingNotes(target.recordingId, nextNotes);
+
+        if (revision !== meetingNotesWriteRevisionRef.current) {
+          return;
+        }
+        target.savedRef.current = nextNotes;
+        if (nextNotes !== target.notes) {
+          target.onRebase(nextNotes);
+        }
+        setSelectedRecording((current) =>
+          current?.id === target.recordingId
+            ? {
+                ...current,
+                meetingNotes: nextNotes.trim() ? nextNotes : null,
+                notesUpdatedAt: new Date().toISOString(),
+              }
+            : current
+        );
+      } catch (error) {
+        console.error("Failed to update meeting notes:", error);
+        notifyAutosaveFailure("Meeting notes");
+      } finally {
+        pendingMeetingNotesWritesRef.current -= 1;
+      }
+    },
+    [notifyAutosaveFailure, setSelectedRecording]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -947,27 +892,16 @@ export function RecordingsView() {
     }
 
     const timeoutId = window.setTimeout(() => {
-      void updateRecordingNotes(recordingId, liveMeetingNotes)
-        .then(() => {
-          lastSavedLiveMeetingNotesRef.current = liveMeetingNotes;
-          setSelectedRecording((current) =>
-            current?.id === recordingId
-              ? {
-                  ...current,
-                  meetingNotes: normalizedNotes ? liveMeetingNotes : null,
-                  notesUpdatedAt: new Date().toISOString(),
-                }
-              : current
-          );
-        })
-        .catch((error) => {
-          console.error("Failed to update live meeting notes:", error);
-          notifyAutosaveFailure("Meeting notes");
-        });
+      void persistMeetingNotes({
+        recordingId,
+        notes: liveMeetingNotes,
+        savedRef: lastSavedLiveMeetingNotesRef,
+        onRebase: setLiveMeetingNotes,
+      });
     }, 350);
 
     return () => window.clearTimeout(timeoutId);
-  }, [isRecording, liveMeetingNotes, notifyAutosaveFailure, recordingId, setSelectedRecording]);
+  }, [isRecording, liveMeetingNotes, persistMeetingNotes, recordingId]);
 
   useEffect(() => {
     if (!meetingNotesTargetId) {
@@ -980,27 +914,16 @@ export function RecordingsView() {
     }
 
     const timeoutId = window.setTimeout(() => {
-      void updateRecordingNotes(meetingNotesTargetId, meetingNotes)
-        .then(() => {
-          lastSavedMeetingNotesRef.current = meetingNotes;
-          setSelectedRecording((current) =>
-            current?.id === meetingNotesTargetId
-              ? {
-                  ...current,
-                  meetingNotes: normalizedNotes ? meetingNotes : null,
-                  notesUpdatedAt: new Date().toISOString(),
-                }
-              : current
-          );
-        })
-        .catch((error) => {
-          console.error("Failed to update meeting notes:", error);
-          notifyAutosaveFailure("Meeting notes");
-        });
+      void persistMeetingNotes({
+        recordingId: meetingNotesTargetId,
+        notes: meetingNotes,
+        savedRef: lastSavedMeetingNotesRef,
+        onRebase: setMeetingNotes,
+      });
     }, 350);
 
     return () => window.clearTimeout(timeoutId);
-  }, [meetingNotes, meetingNotesTargetId, notifyAutosaveFailure]);
+  }, [meetingNotes, meetingNotesTargetId, persistMeetingNotes]);
 
   useEffect(() => {
     if (!meetingNotesTargetId) {
@@ -1185,8 +1108,19 @@ export function RecordingsView() {
       return;
     }
 
+    // The popup edits the same record, so this can arrive mid-sentence. Rebase
+    // onto whatever is stored rather than replacing the buffer outright, which
+    // used to drop the keystrokes typed since the last save.
     const nextNotes = selectedRecording.meetingNotes ?? "";
-    setLiveMeetingNotes((current) => (current === nextNotes ? current : nextNotes));
+    setLiveMeetingNotes((current) =>
+      current === nextNotes
+        ? current
+        : rebaseMeetingNotes({
+            base: lastSavedLiveMeetingNotesRef.current,
+            local: current,
+            stored: nextNotes,
+          })
+    );
     setLiveMeetingTemplateId((current) => {
       const nextTemplateId = selectedRecording.meetingTemplateId ?? "auto";
       return current === nextTemplateId ? current : nextTemplateId;
@@ -1396,7 +1330,9 @@ export function RecordingsView() {
     }
 
     setMeetingNotes((current) => {
-      const nextBlock = `${heading}\n${trimmedBody}`;
+      // Explicit marker so the appended block reads back as its own section
+      // instead of dissolving into whatever came before it.
+      const nextBlock = `## ${heading}\n${trimmedBody}`;
       const trimmedCurrent = current.trim();
       if (!trimmedCurrent) {
         return nextBlock;
@@ -1644,6 +1580,10 @@ export function RecordingsView() {
 
     try {
       const nextNotes = enhancedMeetingNotesDraft.text.trim();
+      // An explicit apply replaces the note, so it is not rebased — but it still
+      // claims the newest revision so an autosave already in flight cannot land
+      // on top of it.
+      meetingNotesWriteRevisionRef.current += 1;
       await updateRecordingNotes(selectedRecording.id, nextNotes);
       const updatedAt = new Date().toISOString();
       setMeetingNotes(nextNotes);
@@ -1666,17 +1606,35 @@ export function RecordingsView() {
     }
   };
 
-  const handleCopyMeetingShareMarkdown = async () => {
-    if (!selectedRecording || !selectedMeetingShareMarkdown.trim()) {
+  // Two separate actions on purpose: the recap is the thing you paste into a
+  // chat window, the full record is the thing that carries the transcript. The
+  // toast names which one left the app.
+  const handleCopyMeetingRecap = async () => {
+    if (!selectedRecording || !selectedMeetingRecapMarkdown.trim()) {
       return;
     }
 
     try {
-      await navigator.clipboard.writeText(selectedMeetingShareMarkdown);
-      toast("Meeting recap copied as markdown.", "success");
+      await navigator.clipboard.writeText(selectedMeetingRecapMarkdown);
+      toast("Recap copied — summary, action items, and notes. No transcript.", "success");
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to copy the meeting recap.";
+      toast(message, "error");
+    }
+  };
+
+  const handleCopyMeetingFullRecord = async () => {
+    if (!selectedRecording || !selectedMeetingFullRecordMarkdown.trim()) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(selectedMeetingFullRecordMarkdown);
+      toast("Full record copied — includes the verbatim transcript.", "success");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to copy the full meeting record.";
       toast(message, "error");
     }
   };
@@ -2062,8 +2020,8 @@ export function RecordingsView() {
       ),
     [liveMeetingConsentShown, recordingId, selectedRecording]
   );
-  const selectedMeetingShareMarkdown = useMemo(
-    () =>
+  const buildSelectedMeetingMarkdown = useCallback(
+    (includeTranscript: boolean) =>
       selectedRecording
         ? buildMeetingShareMarkdown({
             recording: selectedRecording,
@@ -2074,12 +2032,12 @@ export function RecordingsView() {
             captureMode: selectedMeetingCaptureMode,
             consentLabel: selectedMeetingConsent.shareLabel,
             templateLabel: selectedTemplateOption.label,
+            includeTranscript,
           })
         : "",
     [
       meetingNotes,
       meetingSummary,
-      recordingId,
       selectedMeetingActionItems,
       selectedMeetingCaptureMode,
       selectedMeetingConsent.shareLabel,
@@ -2087,6 +2045,14 @@ export function RecordingsView() {
       selectedTemplateOption.label,
       selectedTranscript?.fullText,
     ]
+  );
+  const selectedMeetingRecapMarkdown = useMemo(
+    () => buildSelectedMeetingMarkdown(false),
+    [buildSelectedMeetingMarkdown]
+  );
+  const selectedMeetingFullRecordMarkdown = useMemo(
+    () => buildSelectedMeetingMarkdown(true),
+    [buildSelectedMeetingMarkdown]
   );
   const selectedMeetingReadyState = useMemo(
     () =>
@@ -2264,6 +2230,10 @@ export function RecordingsView() {
               ...section,
               body: "",
               hasExplicitPlaceholder: false,
+              // Clearing a template heading puts the scaffold back so the note
+              // text holds nothing; a hand-made section keeps its heading so
+              // the section itself doesn't disappear from under the user.
+              isFromNotes: section.isTemplateSection ? false : section.isFromNotes,
             }
           : section
       )
@@ -2278,6 +2248,7 @@ export function RecordingsView() {
         body: "",
         isTemplateSection: false,
         hasExplicitPlaceholder: true,
+        isFromNotes: true,
       },
     ]);
   };
@@ -3085,35 +3056,11 @@ export function RecordingsView() {
                             </div>
                           ))}
                         </div>
+                        {/* Refresh and copy-recap live on the surfaces they act
+                            on — the Summary card, the Action Items card, and
+                            Share & export. Restating them here only duplicated
+                            the same handlers under the same names. */}
                         <div className="mt-3 flex flex-wrap gap-2">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={handleRefreshSummary}
-                            disabled={!selectedRecording || isRefreshingSummary}
-                          >
-                            {isRefreshingSummary ? (
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            ) : (
-                              <RefreshCw className="mr-2 h-4 w-4" />
-                            )}
-                            Refresh Summary
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={handleRefreshActionItems}
-                            disabled={!selectedRecording || isRefreshingActionItems}
-                          >
-                            {isRefreshingActionItems ? (
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            ) : (
-                              <RefreshCw className="mr-2 h-4 w-4" />
-                            )}
-                            Refresh Action Items
-                          </Button>
                           <Button
                             type="button"
                             size="sm"
@@ -3146,16 +3093,6 @@ export function RecordingsView() {
                             {activeSpeechTarget === "meeting-follow-up"
                               ? "Stop reading"
                               : "Read Follow-up"}
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={() => void handleCopyMeetingShareMarkdown()}
-                            disabled={!selectedRecording || !selectedMeetingShareMarkdown.trim()}
-                          >
-                            <Copy className="mr-2 h-4 w-4" />
-                            Copy Summary + Actions
                           </Button>
                         </div>
                       </div>
@@ -3833,11 +3770,11 @@ export function RecordingsView() {
                     <div className="rounded-lg border bg-muted/20 p-4">
                       <div className="flex items-start justify-between gap-3">
                         <div>
-                          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                            Share & export
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            Copy a clean markdown recap or export this meeting as markdown, text, or an evidence bundle without leaving review.
+                          <p className="section-heading">Share &amp; export</p>
+                          <p className="mt-1 text-sm text-muted-foreground">
+                            The recap carries the summary, action items, and your notes. The full
+                            record adds the verbatim transcript — only copy that where the whole
+                            meeting is allowed to go.
                           </p>
                         </div>
                         <Badge variant="outline" className="bg-background/80">
@@ -3849,11 +3786,23 @@ export function RecordingsView() {
                           type="button"
                           size="sm"
                           variant="outline"
-                          onClick={() => void handleCopyMeetingShareMarkdown()}
-                          disabled={!selectedRecording || !selectedMeetingShareMarkdown.trim()}
+                          onClick={() => void handleCopyMeetingRecap()}
+                          disabled={!selectedRecording || !selectedMeetingRecapMarkdown.trim()}
                         >
                           <Copy className="mr-2 h-4 w-4" />
-                          Copy Markdown
+                          Copy recap
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void handleCopyMeetingFullRecord()}
+                          disabled={
+                            !selectedRecording || !selectedTranscript?.fullText?.trim()
+                          }
+                        >
+                          <Copy className="mr-2 h-4 w-4" />
+                          Copy full record (includes transcript)
                         </Button>
                         <Button
                           type="button"

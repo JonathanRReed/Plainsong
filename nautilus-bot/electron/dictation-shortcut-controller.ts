@@ -34,6 +34,22 @@ function isIdleLikePhase(phase: DictationShortcutPhase): boolean {
   return phase === "idle" || phase === "done" || phase === "error";
 }
 
+// Escape is the user's way out of a session that is still running, so it has
+// to cover every phase between the start ack and a terminal phase — not just
+// "recording". "primed" is the window where the start was acked but the
+// recording event has not arrived yet (the microphone can already be live),
+// and "stopping"/"transcribing" is where a slow model would otherwise leave
+// Escape doing nothing at all. The sidecar discards a session cancelled this
+// way instead of inserting its text.
+function isCancellablePhase(phase: DictationShortcutPhase): boolean {
+  return (
+    phase === "primed" ||
+    phase === "recording" ||
+    phase === "stopping" ||
+    phase === "transcribing"
+  );
+}
+
 export function resolveDictationShortcutBehavior(settings: {
   dictationPushToTalk?: boolean;
   dictationHandsFreeEnabled?: boolean;
@@ -91,7 +107,7 @@ export function resolveDictationShortcutDecision(input: {
   }
 
   if (signal === "cancelled") {
-    return phase === "recording"
+    return isCancellablePhase(phase)
       ? {
           action: "cancel",
           stopReason: "cancelled",

@@ -51,4 +51,8 @@ pub struct DictationTextReadyEvent {
     pub resolved_route: Option<String>,
     pub resolved_hosting: Option<String>,
     pub provider_model_label: Option<String>,
+    /// Non-fatal degradations the session recovered from (an LLM pass that
+    /// failed or timed out, a command with no text to work on). The text was
+    /// still delivered; these explain why it is not what the user expected.
+    pub warnings: Vec<String>,
 }

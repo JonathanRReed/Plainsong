@@ -280,7 +280,14 @@ impl Default for TranscriptionSettings {
             enable_diarization: true,
             language: None,
             silence_skip_enabled: false,
-            dictation_copy_to_clipboard: true,
+            // Off by default: the paste path stages the dictated text on the
+            // clipboard and restores the user's previous clipboard ~900ms
+            // later, and that restore only runs when this is false. Defaulting
+            // it to true meant every dictation permanently destroyed whatever
+            // the user had copied. Settings files that already carry an
+            // explicit value keep it (serde only falls back to this default
+            // for an absent key).
+            dictation_copy_to_clipboard: false,
             dictation_auto_request_permissions: true,
             // Toggle mode is safer for new users and avoids silent hold-to-talk confusion.
             dictation_push_to_talk: false,
@@ -1198,6 +1205,23 @@ mod tests {
         assert_eq!(settings.transcription.dictation_insertion_mode, "paste");
         assert!(settings.transcription.dictation_snippets_enabled);
         assert!(settings.transcription.dictation_auto_learn_corrections);
+    }
+
+    #[test]
+    fn dictation_clipboard_default_is_off_and_saved_values_survive() {
+        // Default off so the guarded post-paste clipboard restore actually
+        // runs; an existing settings file that turned it on must still load
+        // as on.
+        assert!(
+            !Settings::default()
+                .transcription
+                .dictation_copy_to_clipboard
+        );
+
+        let parsed: TranscriptionSettings =
+            serde_json::from_str(r#"{"dictationCopyToClipboard": true}"#)
+                .expect("saved transcription settings should deserialize");
+        assert!(parsed.dictation_copy_to_clipboard);
     }
 
     #[test]

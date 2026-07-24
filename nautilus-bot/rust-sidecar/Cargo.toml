@@ -53,8 +53,11 @@ candle-transformers = { version = "0.10", optional = true }
 # Tokenizers for HuggingFace models
 tokenizers = { version = "0.23", optional = true }
 
-# Audio preprocessing
-rubato = { version = "3.0", optional = true }
+# Audio preprocessing. Not optional: the mixed ("Me + Them") capture path
+# resamples whichever of the mic/loopback devices is running at the lower rate
+# onto the session's target rate, so this has to be present in every build, not
+# only the ones that happen to enable an ASR provider.
+rubato = "3.0"
 
 # FFT for FBank feature extraction in diarization
 rustfft = { version = "6.2", optional = true }
@@ -116,7 +119,9 @@ sqlcipher = ["rusqlite/sqlcipher", "libsqlite3-sys/bundled-sqlcipher"]
 
 # Supporting features
 download-manager = ["indicatif"]
-audio-processing = ["rubato"]
+# Retained so the ASR provider features keep their existing shape; `rubato` is
+# now an unconditional dependency, so this no longer gates anything.
+audio-processing = []
 export-pdf = ["genpdf", "base64"]
 desktop-shell = []
 

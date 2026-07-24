@@ -869,6 +869,51 @@ describe("DictationView modes", () => {
     expect(items[1]).toHaveTextContent("John");
   });
 
+  it("only claims a clipboard copy when the text was left on the clipboard", async () => {
+    render(<DictationView />);
+
+    await screen.findByText("Profiles");
+    const handler = backendMocks.eventListeners.get("dictation-text-ready");
+    expect(handler).toBeTruthy();
+
+    // "Copy to clipboard" off (the default) restores the previous clipboard
+    // after the paste, so promising a copy sends the user to Cmd+V for
+    // whatever they had copied before dictating.
+    await act(async () => {
+      handler?.({
+        payload: {
+          text: "Ship it",
+          pasted: true,
+          copied: false,
+          actualProvider: "distil_whisper",
+        },
+      });
+    });
+
+    expect(
+      (await screen.findAllByText("Paste command sent")).length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.queryByText("Paste command sent (also copied to clipboard)"),
+    ).toBeNull();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          text: "Ship it again",
+          pasted: true,
+          copied: true,
+          actualProvider: "distil_whisper",
+        },
+      });
+    });
+
+    expect(
+      (await screen.findAllByText("Paste command sent (also copied to clipboard)"))
+        .length,
+    ).toBeGreaterThan(0);
+  });
+
   it("shows Fix capitalization only for a case-only diff of the latest result", async () => {
     render(<DictationView />);
 

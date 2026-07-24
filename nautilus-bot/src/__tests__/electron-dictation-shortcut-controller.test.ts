@@ -123,18 +123,39 @@ describe("resolveDictationShortcutDecision", () => {
     });
   });
 
+  it("cancels from every phase a live session can be sitting in", () => {
+    // Escape used to require phase "recording", so it did nothing during the
+    // primed window (start acked, microphone already live) and did nothing at
+    // all while a slow model held the session in stopping/transcribing.
+    for (const phase of ["primed", "stopping", "transcribing"] as const) {
+      expect(
+        resolveDictationShortcutDecision({
+          phase,
+          behavior: "hold_to_talk",
+          capability: "press_and_release",
+          signal: "cancelled",
+        }),
+      ).toMatchObject({
+        action: "cancel",
+        stopReason: "cancelled",
+      });
+    }
+  });
+
   it("ignores a cancelled signal outside of an active recording", () => {
-    expect(
-      resolveDictationShortcutDecision({
-        phase: "idle",
-        behavior: "hold_to_talk",
-        capability: "press_and_release",
-        signal: "cancelled",
-      }),
-    ).toMatchObject({
-      action: "ignore",
-      stopReason: null,
-    });
+    for (const phase of ["idle", "done", "error"] as const) {
+      expect(
+        resolveDictationShortcutDecision({
+          phase,
+          behavior: "hold_to_talk",
+          capability: "press_and_release",
+          signal: "cancelled",
+        }),
+      ).toMatchObject({
+        action: "ignore",
+        stopReason: null,
+      });
+    }
   });
 });
 

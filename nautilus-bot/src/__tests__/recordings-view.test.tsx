@@ -571,7 +571,11 @@ describe("RecordingsView", () => {
 
     expect(await screen.findByText("Review workflow")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy Follow-up Draft" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Copy Summary + Actions" })).toBeInTheDocument();
+    // Refresh and copy-recap are not restated here; they belong to the cards
+    // they act on.
+    expect(screen.getAllByRole("button", { name: "Refresh Summary" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Refresh Action Items" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: /^Copy recap$/ })).toHaveLength(1);
     expect(await screen.findByText("Prep notes")).toBeInTheDocument();
     expect(screen.getByText("Cross-meeting Recall")).toBeInTheDocument();
     expect(screen.getByText("Follow-up tools")).toBeInTheDocument();
@@ -651,6 +655,37 @@ describe("RecordingsView", () => {
         "Goals\nAlign launch scope and decide owners"
       );
     });
+  });
+
+  it("keeps a terse note in one section while another section is typed in", async () => {
+    // A short unbulleted line used to be promoted to an empty heading and then
+    // dropped by the next keystroke anywhere else on the canvas.
+    const notes =
+      "Goals\nAgree the launch order\n\nDecisions\nlegal signed off\n\nship date slipped";
+    recordings[0] = { ...recordings[0], meetingNotes: notes };
+    backend.getRecording.mockResolvedValue({ ...recordings[0] });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Goals notes");
+    expect(screen.getByLabelText("Decisions notes")).toHaveValue(
+      "legal signed off\n\nship date slipped"
+    );
+
+    fireEvent.change(screen.getByLabelText("Goals notes"), {
+      target: { value: "Agree the launch order and the owners" },
+    });
+
+    await waitFor(() => {
+      expect(backend.updateRecordingNotes).toHaveBeenCalledWith(
+        "r1",
+        "Goals\nAgree the launch order and the owners\n\nDecisions\nlegal signed off\n\nship date slipped"
+      );
+    });
+    expect(screen.getByLabelText("Decisions notes")).toHaveValue(
+      "legal signed off\n\nship date slipped"
+    );
   });
 
   it("adds and removes custom meeting note sections", async () => {
@@ -748,7 +783,7 @@ describe("RecordingsView", () => {
     await waitFor(() => {
       expect(backend.updateRecordingNotes).toHaveBeenCalledWith(
         "r1",
-        "Follow-up draft\nThanks all. Next steps: Jon will send the launch plan by Friday."
+        "## Follow-up draft\nThanks all. Next steps: Jon will send the launch plan by Friday."
       );
     });
   });
@@ -807,11 +842,11 @@ describe("RecordingsView", () => {
     });
 
     const expectedDraft =
-      "Summary\n" +
+      "## Summary\n" +
       "Launch is on track with one open dependency.\n\n" +
-      "Action Items\n" +
+      "## Action Items\n" +
       "- Send legal review packet (Owner: Jon · Due: Friday)\n\n" +
-      "Raw Notes Context\n" +
+      "## Raw Notes Context\n" +
       "Goals\nKeep the launch blocked only on legal approval.";
 
     await waitFor(() => {
@@ -833,7 +868,7 @@ describe("RecordingsView", () => {
     );
   });
 
-  it("copies a markdown recap from the meeting review workspace", async () => {
+  it("copies a recap without the verbatim transcript", async () => {
     render(<RecordingsView />);
 
     fireEvent.click(screen.getByText("Weekly sync"));
@@ -846,12 +881,43 @@ describe("RecordingsView", () => {
       target: { value: "Ship launch checklist" },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Copy Markdown" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy recap" }));
 
     await waitFor(() => {
       expect(navigator.clipboard.writeText).toHaveBeenCalled();
     });
-    expect(toast).toHaveBeenCalledWith("Meeting recap copied as markdown.", "success");
+    const copied = navigator.clipboard.writeText.mock.calls.at(-1)[0];
+    expect(copied).toContain("## Summary");
+    expect(copied).toContain("Tight weekly recap");
+    expect(copied).not.toContain("## Transcript");
+    expect(toast).toHaveBeenCalledWith(
+      "Recap copied — summary, action items, and notes. No transcript.",
+      "success"
+    );
+  });
+
+  it("only ships the verbatim transcript from the named full-record action", async () => {
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("Meeting notes");
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Copy full record (includes transcript)",
+      })
+    );
+
+    await waitFor(() => {
+      expect(navigator.clipboard.writeText).toHaveBeenCalled();
+    });
+    const copied = navigator.clipboard.writeText.mock.calls.at(-1)[0];
+    expect(copied).toContain("## Transcript");
+    expect(copied).toContain("Transcript");
+    expect(toast).toHaveBeenCalledWith(
+      "Full record copied — includes the verbatim transcript.",
+      "success"
+    );
   });
 
   it("uses persisted consent state in review metadata and markdown exports", async () => {
@@ -876,7 +942,7 @@ describe("RecordingsView", () => {
       screen.getByText("Manual reminder only. Copy the consent notice from Plainsong before you continue.")
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Copy Markdown" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy recap" }));
 
     await waitFor(() => {
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith(

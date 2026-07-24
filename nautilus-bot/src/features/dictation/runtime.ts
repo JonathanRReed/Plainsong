@@ -94,6 +94,12 @@ interface DictationTextReadyEvent {
   resolvedRoute?: string | null;
   resolvedHosting?: DictationRoutePreference | null;
   providerModelLabel?: string | null;
+  /**
+   * Non-fatal degradations the session recovered from (an AI pass that failed
+   * or timed out, a command with no text to work on). The text was still
+   * delivered.
+   */
+  warnings?: string[];
 }
 
 function normalizeStateEvent(payload: DictationStateChangedEvent): DictationStateChangedEvent {

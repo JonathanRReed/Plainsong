@@ -100,6 +100,19 @@ const MAX_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 30.0;
 const HANDS_FREE_DEFAULT_SILENCE_TIMEOUT_SECONDS: f32 = 1.8;
 const DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
 const DICTATION_IDLE_RESET_SUCCESS_MS: u64 = 1800;
+/// Cap on how long any pre-insert LLM pass may delay insertion. The local
+/// pipeline output is already a good result, so on timeout we insert that
+/// rather than making the user wait on a slow or stuck model.
+const DICTATION_FORMAT_TIMEOUT: Duration = Duration::from_secs(6);
+/// Shown when a pre-insert LLM pass could not run. The user still gets their
+/// words — the locally formatted text — so this is a warning, not an error.
+/// These describe the formatting pass ONLY: they are appended to whatever the
+/// delivery outcome turned out to be (see `dictation_done_message`), so they
+/// must not assert that the text was inserted — insertion can still fail.
+const DICTATION_FORMAT_FAILED_WARNING: &str =
+    "AI formatting could not run, so the text was left unformatted.";
+const DICTATION_FORMAT_TIMEOUT_WARNING: &str =
+    "AI formatting took too long, so the text was left unformatted.";
 #[cfg(target_os = "macos")]
 const HOTKEY_TARGET_MAX_AGE_MS: i64 = 5_000;
 #[cfg(target_os = "macos")]
@@ -2527,7 +2540,9 @@ async fn tracker_insertion_mode(state: &AppState) -> String {
 
 async fn tracker_copy_to_clipboard(state: &AppState) -> bool {
     let tracker = state.dictation_session_tracker.lock().await;
-    tracker.copy_to_clipboard_at_start.unwrap_or(true)
+    // Matches `dictation_copy_to_clipboard`'s default: without an explicit
+    // opt-in, do not leave the dictated text sitting on the user's clipboard.
+    tracker.copy_to_clipboard_at_start.unwrap_or(false)
 }
 
 async fn reprocess_dictation_text_impl(
@@ -4211,20 +4226,28 @@ fn resolve_contextual_command_input(
     )
 }
 
-fn rewrite_shorter_text(text: &str) -> String {
-    let mut output = strip_light_dictation_disfluencies(text);
-    if output.is_empty() {
-        return output;
-    }
+/// Whether an LLM pass may run against the local pipeline output before it is
+/// inserted. Smart Format is opt-in, and the Power Rewrite profile opts in for
+/// the session regardless of the toggle. Every pre-insert LLM branch in
+/// `stop_dictation_for_sidecar` shares this gate: the mode-transform branch
+/// used to skip it and reach for the network on every single dictation.
+fn dictation_llm_formatting_enabled(
+    settings: &settings::Settings,
+    options: &models::DictationStartOptions,
+) -> bool {
+    settings.transcription.dictation_ai_formatting
+        || matches!(options.profile, models::DictationProfile::PowerRewrite)
+}
 
-    let words: Vec<&str> = output.split_whitespace().collect();
-    if words.len() > 22 {
-        output = words[..22].join(" ");
-        if !output.ends_with('.') {
-            output.push_str("...");
-        }
-    }
-    output
+/// Local "make it shorter" fallback used when the LLM transform is
+/// unavailable: drop filler words, keep every word the user meant.
+///
+/// It deliberately drops no content. An earlier version cut the text off at
+/// the first 22 words and appended an ellipsis, so anything longer was
+/// silently mutilated while the result was still reported to the user as
+/// inserted.
+fn rewrite_shorter_text(text: &str) -> String {
+    strip_light_dictation_disfluencies(text)
 }
 
 fn strip_light_dictation_disfluencies(text: &str) -> String {
@@ -4262,10 +4285,14 @@ fn rewrite_professional_text(text: &str) -> String {
     output
 }
 
+/// Local "turn this into bullets" fallback.
+///
+/// Splits only on separators the speaker actually voiced as list breaks. It
+/// used to also split on every " and ", which tore ordinary phrases ("bread
+/// and butter", "Jill and I agreed") into two bullets.
 fn bulletize_text(text: &str) -> String {
     let mut items: Vec<String> = text
         .split([',', ';', '\n'])
-        .flat_map(|part| part.split(" and "))
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .map(|part| format!("- {}", part))
@@ -4451,6 +4478,7 @@ fn build_dictation_text_ready_payload(
     resolved_route: Option<&str>,
     resolved_hosting: Option<&str>,
     provider_model_label: Option<&str>,
+    warnings: &[String],
 ) -> DictationTextReadyEvent {
     let has_fallback_reason = result
         .fallback_reason
@@ -4496,6 +4524,7 @@ fn build_dictation_text_ready_payload(
         resolved_route: resolved_route.map(str::to_string),
         resolved_hosting: resolved_hosting.map(str::to_string),
         provider_model_label: provider_model_label.map(str::to_string),
+        warnings: warnings.to_vec(),
     }
 }
 
@@ -6548,6 +6577,280 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_shorter_never_truncates_long_dictation() {
+        // Regression: the local fallback used to keep only the first 22 words
+        // and append an ellipsis, so anything longer was silently cut off
+        // while the result was still reported to the user as inserted.
+        let long_input = (1..=40)
+            .map(|index| format!("word{}", index))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let output = rewrite_shorter_text(&long_input);
+
+        assert_eq!(output, long_input);
+        assert!(!output.ends_with("..."));
+        assert_eq!(output.split_whitespace().count(), 40);
+    }
+
+    #[test]
+    fn bulletize_keeps_conjunctions_inside_a_single_bullet() {
+        // Regression: splitting on every " and " tore ordinary phrases apart.
+        assert_eq!(
+            bulletize_text("bread and butter, milk"),
+            "- bread and butter\n- milk"
+        );
+    }
+
+    #[test]
+    fn pre_insert_llm_pass_is_gated_on_smart_format_or_power_rewrite() {
+        let mut settings = settings::Settings::default();
+        let mut options = models::DictationStartOptions::default();
+        assert!(!settings.transcription.dictation_ai_formatting);
+        assert!(!dictation_llm_formatting_enabled(&settings, &options));
+
+        settings.transcription.dictation_ai_formatting = true;
+        assert!(dictation_llm_formatting_enabled(&settings, &options));
+
+        settings.transcription.dictation_ai_formatting = false;
+        options.profile = models::DictationProfile::PowerRewrite;
+        assert!(dictation_llm_formatting_enabled(&settings, &options));
+    }
+
+    #[test]
+    fn dictation_session_runtime_reset_returns_to_idle_from_every_state() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("current-thread runtime");
+
+        for state in [
+            DictationSessionState::Idle,
+            DictationSessionState::Starting,
+            DictationSessionState::Recording,
+        ] {
+            let runtime_state = Mutex::new(state);
+            let tracker = Mutex::new(DictationSessionTracker {
+                active_session_id: Some(7),
+                started_at: Some(std::time::Instant::now()),
+                started_at_epoch_ms: Some(1_700_000_000_000),
+                startup_latency_ms: Some(120),
+                ..Default::default()
+            });
+            let start_options = Mutex::new(models::DictationStartOptions {
+                captured_context_text: Some("stale selection".to_string()),
+                ..Default::default()
+            });
+
+            runtime.block_on(reset_dictation_session_runtime(
+                &runtime_state,
+                &tracker,
+                &start_options,
+            ));
+
+            runtime.block_on(async {
+                assert_eq!(*runtime_state.lock().await, DictationSessionState::Idle);
+                let tracker = tracker.lock().await;
+                assert!(tracker.active_session_id.is_none());
+                assert!(tracker.started_at.is_none());
+                assert!(tracker.started_at_epoch_ms.is_none());
+                assert!(tracker.startup_latency_ms.is_none());
+                assert!(start_options.lock().await.captured_context_text.is_none());
+            });
+        }
+    }
+
+    /// Source of `stop_dictation_for_sidecar` from the point where the active
+    /// session becomes owned. The function needs a live `AppState` (database,
+    /// audio device, ASR manager) to run, so the invariants that keep it from
+    /// wedging dictation are asserted against its shape instead.
+    fn owned_stop_dictation_body() -> &'static str {
+        const SOURCE: &str = include_str!("lib.rs");
+        const ANCHOR: &str =
+            "let dictation_options = state.dictation_start_options.lock().await.clone();";
+
+        let start = SOURCE
+            .find("\nasync fn stop_dictation_for_sidecar(")
+            .expect("stop_dictation_for_sidecar must exist");
+        let end = start
+            + SOURCE[start..]
+                .find("\n}\n")
+                .expect("stop_dictation_for_sidecar must be closed");
+        let body = &SOURCE[start..end];
+        &body[body
+            .find(ANCHOR)
+            .expect("session ownership anchor must exist")..]
+    }
+
+    #[test]
+    fn stop_dictation_error_paths_never_bypass_cleanup() {
+        // Any `?` past the ownership anchor returns without resetting
+        // `dictation_runtime_state` and without emitting a terminal phase,
+        // which leaves the sidecar on `Recording`, Electron's mirrored phase on
+        // "stopping", and the hotkey wedged until the app restarts. Every
+        // failure must go through `fail_dictation_stop`.
+        let body = owned_stop_dictation_body();
+        let escaping = body
+            .lines()
+            .filter(|line| line.split("//").next().unwrap_or_default().contains('?'))
+            .collect::<Vec<_>>();
+
+        assert!(
+            escaping.is_empty(),
+            "these lines short-circuit out of stop_dictation_for_sidecar without running the \
+             cleanup in fail_dictation_stop: {:#?}",
+            escaping
+        );
+        assert!(
+            body.contains("fail_dictation_stop("),
+            "stop_dictation_for_sidecar must route its failures through fail_dictation_stop"
+        );
+    }
+
+    #[test]
+    fn done_message_leads_with_the_delivery_outcome_not_the_warning() {
+        // A formatting warning used to replace the whole done message, so a
+        // session that fell back to the clipboard — or failed to deliver at
+        // all — reported only "AI formatting took too long...". The user was
+        // never told where their words ended up. The outcome comes first now
+        // and the warning qualifies it.
+        let warnings = vec![DICTATION_FORMAT_TIMEOUT_WARNING.to_string()];
+
+        let copied = dictation_done_message("copied", false, &warnings);
+        assert!(
+            copied.starts_with("Copied to the clipboard"),
+            "a clipboard-only delivery must still be reported: {}",
+            copied
+        );
+        assert!(copied.contains(DICTATION_FORMAT_TIMEOUT_WARNING));
+
+        let failed = dictation_done_message("error", false, &warnings);
+        assert!(
+            !failed.contains("Inserted"),
+            "a failed delivery must never claim insertion: {}",
+            failed
+        );
+        assert!(failed.contains(DICTATION_FORMAT_TIMEOUT_WARNING));
+
+        assert_eq!(
+            dictation_done_message("pasted", false, &[]),
+            "Inserted into the target app."
+        );
+        assert_eq!(dictation_done_message("undone", true, &[]), "Undo applied.");
+        assert_eq!(
+            dictation_done_message("empty", true, &[]),
+            "No speech detected."
+        );
+
+        // Every warning is kept, not just the first one.
+        let both = dictation_done_message(
+            "pasted",
+            false,
+            &[
+                "Nothing was selected, so the command ran on the transcript.".to_string(),
+                DICTATION_FORMAT_FAILED_WARNING.to_string(),
+            ],
+        );
+        assert!(both.contains("Nothing was selected"));
+        assert!(both.contains(DICTATION_FORMAT_FAILED_WARNING));
+    }
+
+    #[test]
+    fn formatting_warnings_describe_only_the_formatting_pass() {
+        // Both warnings are pushed while formatting runs, long before
+        // insertion is attempted, so neither may assert that the text was
+        // inserted — insertion can still fail after them.
+        for warning in [
+            DICTATION_FORMAT_FAILED_WARNING,
+            DICTATION_FORMAT_TIMEOUT_WARNING,
+        ] {
+            assert!(
+                !warning.to_ascii_lowercase().contains("insert"),
+                "formatting warning must not claim insertion: {}",
+                warning
+            );
+        }
+    }
+
+    #[test]
+    fn paste_success_reports_clipboard_state_after_the_restore() {
+        // `copied` is what the UI turns into "...and copied to the clipboard".
+        // A successful paste with "keep text in clipboard" off schedules the
+        // previous clipboard back, so the dictated text is NOT waiting there
+        // and no arm may hard-code the flag. The non-macOS branch cannot run
+        // on this platform, hence the source check.
+        const SOURCE: &str = include_str!("lib.rs");
+        let body = SOURCE
+            .split_once("\nfn paste_text_systemwide(")
+            .expect("paste_text_systemwide must exist")
+            .1;
+        let body = body
+            .split_once("\nfn ")
+            .map(|parts| parts.0)
+            .unwrap_or(body);
+        let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            !normalized.contains("pasted: true, copied: true,"),
+            "a successful paste must not hard-code copied: true — whether the \
+             text survives on the clipboard depends on the restore"
+        );
+    }
+
+    #[test]
+    fn pre_insert_llm_passes_are_gated_and_time_boxed() {
+        // Both pre-insert LLM branches must sit behind the same opt-in gate and
+        // the same insertion-delay cap. The mode-transform branch had neither,
+        // so messages/email/meeting-follow-up called a model on every single
+        // dictation and could stall insertion for as long as the model took.
+        let body = owned_stop_dictation_body();
+        let provider_calls = body.matches("_with_selected_provider(").count();
+
+        assert!(provider_calls > 0);
+        assert_eq!(
+            body.matches("dictation_llm_formatting_enabled(").count(),
+            provider_calls,
+            "every pre-insert LLM call must be gated by dictation_llm_formatting_enabled"
+        );
+        assert_eq!(
+            body.matches("DICTATION_FORMAT_TIMEOUT,").count(),
+            provider_calls,
+            "every pre-insert LLM call must be wrapped in DICTATION_FORMAT_TIMEOUT"
+        );
+    }
+
+    #[test]
+    fn missing_command_context_never_fails_the_stop() {
+        // A selection-scoped command spoken with nothing selected is a soft
+        // failure: the raw transcript is still inserted and the reason is
+        // reported as a warning. It used to propagate as `Err` straight past
+        // the cleanup, which killed dictation until the app restarted.
+        let error = resolve_contextual_command_input("", None, "none", "Uppercase Selection")
+            .map_err(DictationCommandError::MissingContext)
+            .expect_err("missing context should not resolve");
+        assert!(matches!(error, DictationCommandError::MissingContext(_)));
+        assert!(matches!(
+            DictationCommandError::from("prompt lookup failed".to_string()),
+            DictationCommandError::Failed(_)
+        ));
+
+        let body = owned_stop_dictation_body();
+        let missing_context_arm = body
+            .split_once("Err(DictationCommandError::MissingContext(")
+            .expect("the stop path must handle a missing-context command error")
+            .1
+            .split_once("Err(DictationCommandError::Failed(")
+            .expect("the stop path must still treat other command errors as terminal")
+            .0;
+        assert!(
+            missing_context_arm.contains("warnings.push("),
+            "a missing-context command must record a warning"
+        );
+        assert!(
+            !missing_context_arm.contains("return Err("),
+            "a missing-context command must not fail the stop"
+        );
+    }
+
+    #[test]
     fn dictation_silence_timeout_normalization_preserves_disabled_state() {
         assert_eq!(normalize_dictation_silence_timeout_seconds(0.0), 0.0);
         assert_eq!(normalize_dictation_silence_timeout_seconds(-3.0), 0.0);
@@ -7206,6 +7509,7 @@ mod tests {
             Some("best_available"),
             Some("local"),
             Some("distil-large-v3.5"),
+            &["AI formatting could not run.".to_string()],
         );
         let payload = serde_json::to_value(payload).expect("payload should serialize");
 
@@ -7226,6 +7530,7 @@ mod tests {
             "actualProvider",
             "fallbackReason",
             "isFallback",
+            "warnings",
         ] {
             assert!(payload.get(key).is_some(), "missing payload field: {}", key);
         }
@@ -7282,6 +7587,7 @@ mod tests {
             Some("best_available"),
             Some("local"),
             Some("Whisper base.en (MLX)"),
+            &[],
         );
         let payload = serde_json::to_value(payload).expect("payload should serialize");
 
@@ -10647,6 +10953,32 @@ fn build_provider_fallback_message(
     ))
 }
 
+/// Compose the done-phase message for a finished dictation session.
+///
+/// A session that degraded (an LLM pass that failed or timed out, a command
+/// with no text to work on) still reports as done, but the warning describes
+/// the *formatting* pass while the outcome describes where the text actually
+/// went. Leading with the warning alone used to hide the outcome entirely —
+/// so a clipboard-only fallback, or a delivery that failed outright, read as
+/// an ordinary success. Say what happened to the text first, then why it is
+/// not quite what was asked for.
+fn dictation_done_message(outcome: &str, final_text_is_empty: bool, warnings: &[String]) -> String {
+    let outcome_message = match outcome {
+        "pasted" | "replaced" => "Inserted into the target app.",
+        "copied" | "copied_replacement" => "Copied to the clipboard and ready to paste.",
+        "undone" => "Undo applied.",
+        "error" => "Could not deliver the text. It is saved in your dictation history.",
+        _ if final_text_is_empty => "No speech detected.",
+        _ => "Result ready.",
+    };
+
+    if warnings.is_empty() {
+        outcome_message.to_string()
+    } else {
+        format!("{} {}", outcome_message, warnings.join(" "))
+    }
+}
+
 fn build_models_transcript_from_asr_result(
     recording_id: &str,
     result: asr::TranscriptionResult,
@@ -13562,14 +13894,21 @@ fn paste_text_systemwide(
 
         match paste_dispatch {
             Ok(strategy) => {
+                // `copied` reports whether the dictated text is still on the
+                // clipboard once the session settles, which is what the UI
+                // promises the user. The staging copy above does not count:
+                // with `keep_text_in_clipboard` off it is restored again.
+                let mut left_on_clipboard = keep_text_in_clipboard;
                 if !keep_text_in_clipboard {
-                    if let Some(previous) = original_clipboard {
-                        schedule_clipboard_restore(previous, text.to_string());
+                    match original_clipboard {
+                        Some(previous) => schedule_clipboard_restore(previous, text.to_string()),
+                        // Nothing to restore, so the staged text stays put.
+                        None => left_on_clipboard = true,
                     }
                 }
                 PasteOutcome {
                     pasted: true,
-                    copied: true,
+                    copied: left_on_clipboard,
                     direct_accessibility: false,
                     successful_strategy: Some(strategy),
                     error: None,
@@ -13583,6 +13922,27 @@ fn paste_text_systemwide(
                 error: Some(format!("Copied to clipboard. {}", error)),
             },
         }
+    }
+}
+
+/// Why `execute_dictation_command_action` could not produce a result.
+#[derive(Debug)]
+enum DictationCommandError {
+    /// The command needed selected or clipboard text and there was none.
+    /// Non-fatal: the caller drops back to the ordinary dictation pipeline on
+    /// the raw transcript and reports this as a warning, so a selection-scoped
+    /// command spoken with nothing selected never costs the user their words
+    /// (and never fails the whole stop, which used to wedge the hotkey).
+    MissingContext(String),
+    /// Anything else — prompt lookup, a transform helper rejecting its input.
+    /// Still terminal, but routed through the same cleanup as every other
+    /// stop failure.
+    Failed(String),
+}
+
+impl From<String> for DictationCommandError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
     }
 }
 
@@ -13684,7 +14044,7 @@ async fn execute_dictation_command_action(
     action: DictationCommandAction,
     captured_context_text: Option<&str>,
     context_source: &str,
-) -> Result<DictationCommandExecutionResult, String> {
+) -> Result<DictationCommandExecutionResult, DictationCommandError> {
     use crate::dictation_parity::{
         append_to_context_selection, delete_phrase_from_context, lowercase_context_selection,
         prepend_to_context_selection, replace_context_selection, sentence_case_context_selection,
@@ -13714,7 +14074,8 @@ async fn execute_dictation_command_action(
                 captured_context_text,
                 context_source,
                 "Replace Text",
-            )?;
+            )
+            .map_err(DictationCommandError::MissingContext)?;
             let output_text = replace_context_selection(&contextual_input, &replacement)?;
             DictationCommandExecutionResult {
                 output_text,
@@ -13733,7 +14094,8 @@ async fn execute_dictation_command_action(
                 captured_context_text,
                 context_source,
                 "Replace Text",
-            )?;
+            )
+            .map_err(DictationCommandError::MissingContext)?;
             let (output_text, _) =
                 apply_contextual_phrase_replacement(&contextual_input, &target, &replacement)?;
             DictationCommandExecutionResult {
@@ -13750,7 +14112,8 @@ async fn execute_dictation_command_action(
                 captured_context_text,
                 context_source,
                 "Append Text",
-            )?;
+            )
+            .map_err(DictationCommandError::MissingContext)?;
             let output_text = append_to_context_selection(&contextual_input, &suffix)?;
             DictationCommandExecutionResult {
                 output_text,
@@ -13766,7 +14129,8 @@ async fn execute_dictation_command_action(
                 captured_context_text,
                 context_source,
                 "Prepend Text",
-            )?;
+            )
+            .map_err(DictationCommandError::MissingContext)?;
             let output_text = prepend_to_context_selection(&contextual_input, &prefix)?;
             DictationCommandExecutionResult {
                 output_text,
@@ -13782,7 +14146,8 @@ async fn execute_dictation_command_action(
                 captured_context_text,
                 context_source,
                 "Delete Phrase",
-            )?;
+            )
+            .map_err(DictationCommandError::MissingContext)?;
             let (output_text, _) = delete_phrase_from_context(&contextual_input, &target)?;
             DictationCommandExecutionResult {
                 output_text,
@@ -13805,7 +14170,8 @@ async fn execute_dictation_command_action(
                 captured_context_text,
                 context_source,
                 "Uppercase Selection",
-            )?;
+            )
+            .map_err(DictationCommandError::MissingContext)?;
             let output_text = uppercase_context_selection(&contextual_input)?;
             DictationCommandExecutionResult {
                 output_text,
@@ -13821,7 +14187,8 @@ async fn execute_dictation_command_action(
                 captured_context_text,
                 context_source,
                 "Lowercase Selection",
-            )?;
+            )
+            .map_err(DictationCommandError::MissingContext)?;
             let output_text = lowercase_context_selection(&contextual_input)?;
             DictationCommandExecutionResult {
                 output_text,
@@ -13837,7 +14204,8 @@ async fn execute_dictation_command_action(
                 captured_context_text,
                 context_source,
                 "Title Case Selection",
-            )?;
+            )
+            .map_err(DictationCommandError::MissingContext)?;
             let output_text = title_case_context_selection(&contextual_input)?;
             DictationCommandExecutionResult {
                 output_text,
@@ -13853,7 +14221,8 @@ async fn execute_dictation_command_action(
                 captured_context_text,
                 context_source,
                 "Sentence Case Selection",
-            )?;
+            )
+            .map_err(DictationCommandError::MissingContext)?;
             let output_text = sentence_case_context_selection(&contextual_input)?;
             DictationCommandExecutionResult {
                 output_text,
@@ -13877,7 +14246,8 @@ async fn execute_dictation_command_action(
                 captured_context_text,
                 context_source,
                 action_label,
-            )?;
+            )
+            .map_err(DictationCommandError::MissingContext)?;
             let prompt = resolve_dictation_command_prompt(state, command_key).await?;
             let output_text = match command_key {
                 "rewrite_shorter" => run_custom_dictation_transform_with_selected_provider(
@@ -15020,6 +15390,100 @@ async fn start_dictation_for_sidecar(
     Ok(session_id)
 }
 
+/// Drop every piece of per-session dictation state, so the next hotkey press
+/// starts a fresh session instead of stopping one that no longer exists.
+///
+/// Takes the individual handles rather than `&AppState` so it can be unit
+/// tested without a database, audio device, or ASR manager.
+async fn reset_dictation_session_runtime(
+    runtime_state: &Mutex<DictationSessionState>,
+    session_tracker: &Mutex<DictationSessionTracker>,
+    start_options: &Mutex<models::DictationStartOptions>,
+) {
+    {
+        let mut runtime_state = runtime_state.lock().await;
+        *runtime_state = DictationSessionState::Idle;
+    }
+    {
+        let mut tracker = session_tracker.lock().await;
+        tracker.active_session_id = None;
+        tracker.started_at = None;
+        tracker.started_at_epoch_ms = None;
+        tracker.startup_latency_ms = None;
+    }
+    {
+        let mut active_options = start_options.lock().await;
+        *active_options = models::DictationStartOptions::default();
+    }
+}
+
+/// Session metadata every terminal dictation-stop error event carries.
+/// Captured once so each failure site reports the same shape.
+struct DictationStopFailureContext {
+    session_id: u64,
+    requested_provider: &'static str,
+    actual_provider: &'static str,
+    requested_model_id: Option<String>,
+    actual_model_id: Option<String>,
+    app_target: Option<String>,
+    insertion_mode: String,
+    resolved_route: Option<String>,
+    route_preference: Option<String>,
+}
+
+/// The one terminal error path for `stop_dictation_for_sidecar`.
+///
+/// Every failure after the active session is resolved must come through here.
+/// An early return that skips it leaves `dictation_runtime_state` on
+/// `Recording` and never emits a terminal phase, so Electron's mirrored phase
+/// stays "stopping", the hotkey resolves to "ignore", Escape (which only
+/// cancels from a live phase) has nothing to act on, and dictation is dead
+/// until the app is restarted. Returns the message to hand back as `Err`.
+async fn fail_dictation_stop(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    context: &DictationStopFailureContext,
+    fallback_reason: Option<String>,
+    message: String,
+) -> String {
+    reset_dictation_session_runtime(
+        &state.dictation_runtime_state,
+        &state.dictation_session_tracker,
+        &state.dictation_start_options,
+    )
+    .await;
+
+    if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
+        overlay.phase = "error".to_string();
+        overlay.message = Some(message.clone());
+        overlay.requested_provider = Some(context.requested_provider.to_string());
+        overlay.actual_provider = Some(context.actual_provider.to_string());
+        overlay.requested_model_id = context.requested_model_id.clone();
+        overlay.actual_model_id = context.actual_model_id.clone();
+        overlay.fallback_reason = fallback_reason.clone();
+        overlay.target_app = context.app_target.clone();
+    }
+    handle.emit_event(
+        "dictation-state-changed",
+        serde_json::json!({
+            "phase": "error",
+            "sessionId": context.session_id,
+            "message": message,
+            "requestedProvider": context.requested_provider,
+            "actualProvider": context.actual_provider,
+            "requestedModelId": context.requested_model_id,
+            "actualModelId": context.actual_model_id,
+            "fallbackReason": fallback_reason,
+            "targetApp": context.app_target,
+            "insertionMode": context.insertion_mode,
+            "resolvedRoute": context.resolved_route,
+            "routePreference": context.route_preference,
+        }),
+    );
+
+    message
+}
+
 /// Sidecar-compatible stop_dictation.
 ///
 /// `expected_session_id`, when provided, scopes the stop to a specific
@@ -15074,6 +15538,20 @@ async fn stop_dictation_for_sidecar(
     let app_target = dictation_options.context_app_name.clone();
     let app_bundle_id = dictation_options.context_app_bundle_id.clone();
     let requested_insertion_mode = tracker_insertion_mode(state).await;
+    // From here on the session is owned: every exit path must be either the
+    // terminal "done" emit at the bottom or `fail_dictation_stop`.
+    let failure_context = DictationStopFailureContext {
+        session_id,
+        requested_provider: asr_provider_to_settings_value(requested_provider_type),
+        actual_provider: asr_provider_to_settings_value(provider_type),
+        requested_model_id: requested_model_id.clone(),
+        actual_model_id: actual_model_id.clone(),
+        app_target: app_target.clone(),
+        insertion_mode: requested_insertion_mode.clone(),
+        resolved_route: dictation_options.resolved_route.clone(),
+        route_preference: dictation_options.route_preference.clone(),
+    };
+    let mut warnings: Vec<String> = Vec::new();
 
     if let Some(model_id) = actual_model_id.as_ref() {
         state
@@ -15112,42 +15590,14 @@ async fn stop_dictation_for_sidecar(
         match audio.stop_dictation() {
             Ok(audio_bytes) => audio_bytes,
             Err(error) => {
-                {
-                    let mut runtime_state = state.dictation_runtime_state.lock().await;
-                    *runtime_state = DictationSessionState::Idle;
-                }
-                {
-                    let mut tracker = state.dictation_session_tracker.lock().await;
-                    tracker.active_session_id = None;
-                    tracker.started_at = None;
-                    tracker.started_at_epoch_ms = None;
-                    tracker.startup_latency_ms = None;
-                }
-                {
-                    let mut active_options = state.dictation_start_options.lock().await;
-                    *active_options = models::DictationStartOptions::default();
-                }
-                if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
-                    overlay.phase = "error".to_string();
-                    overlay.message = Some(format!("Failed to stop dictation audio: {}", error));
-                }
-                handle.emit_event(
-                    "dictation-state-changed",
-                    serde_json::json!({
-                        "phase": "error",
-                        "sessionId": session_id,
-                        "message": format!("Failed to stop dictation audio: {}", error),
-                        "requestedProvider": asr_provider_to_settings_value(requested_provider_type),
-                        "actualProvider": asr_provider_to_settings_value(provider_type),
-                        "requestedModelId": requested_model_id.clone(),
-                        "actualModelId": actual_model_id.clone(),
-                        "targetApp": app_target.clone(),
-                        "insertionMode": requested_insertion_mode,
-                        "resolvedRoute": dictation_options.resolved_route,
-                        "routePreference": dictation_options.route_preference,
-                    }),
-                );
-                return Err(format!("Failed to stop dictation audio: {}", error));
+                return Err(fail_dictation_stop(
+                    state,
+                    handle,
+                    &failure_context,
+                    None,
+                    format!("Failed to stop dictation audio: {}", error),
+                )
+                .await);
             }
         }
     };
@@ -15196,51 +15646,14 @@ async fn stop_dictation_for_sidecar(
                 "Dictation transcription failed on {}: {}",
                 route_label, error
             );
-            {
-                let mut runtime_state = state.dictation_runtime_state.lock().await;
-                *runtime_state = DictationSessionState::Idle;
-            }
-            {
-                let mut tracker = state.dictation_session_tracker.lock().await;
-                tracker.active_session_id = None;
-                tracker.started_at = None;
-                tracker.started_at_epoch_ms = None;
-                tracker.startup_latency_ms = None;
-            }
-            {
-                let mut active_options = state.dictation_start_options.lock().await;
-                *active_options = models::DictationStartOptions::default();
-            }
-            if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
-                overlay.phase = "error".to_string();
-                overlay.message = Some(user_message.clone());
-                overlay.requested_provider =
-                    Some(asr_provider_to_settings_value(requested_provider_type).to_string());
-                overlay.actual_provider =
-                    Some(asr_provider_to_settings_value(provider_type).to_string());
-                overlay.requested_model_id = requested_model_id.clone();
-                overlay.actual_model_id = actual_model_id.clone();
-                overlay.fallback_reason = Some(error.to_string());
-                overlay.target_app = app_target.clone();
-            }
-            handle.emit_event(
-                "dictation-state-changed",
-                serde_json::json!({
-                    "phase": "error",
-                    "sessionId": session_id,
-                    "message": user_message,
-                    "requestedProvider": asr_provider_to_settings_value(requested_provider_type),
-                    "actualProvider": asr_provider_to_settings_value(provider_type),
-                    "requestedModelId": requested_model_id.clone(),
-                    "actualModelId": actual_model_id.clone(),
-                    "fallbackReason": error.to_string(),
-                    "targetApp": app_target.clone(),
-                    "insertionMode": requested_insertion_mode,
-                    "resolvedRoute": dictation_options.resolved_route,
-                    "routePreference": dictation_options.route_preference,
-                }),
-            );
-            return Err(user_message);
+            return Err(fail_dictation_stop(
+                state,
+                handle,
+                &failure_context,
+                Some(error.to_string()),
+                user_message,
+            )
+            .await);
         }
     };
 
@@ -15268,13 +15681,37 @@ async fn stop_dictation_for_sidecar(
     // CSV-imported, or previously learned — are used.
     let dictionary_entries = {
         let db = state.db.lock().await;
-        db.list_dictation_dictionary_entries()
-            .map_err(|error| error.to_string())?
+        match db.list_dictation_dictionary_entries() {
+            Ok(entries) => entries,
+            Err(error) => {
+                drop(db);
+                return Err(fail_dictation_stop(
+                    state,
+                    handle,
+                    &failure_context,
+                    None,
+                    format!("Failed to read the dictation dictionary: {}", error),
+                )
+                .await);
+            }
+        }
     };
     let snippets = if settings_snapshot.transcription.dictation_snippets_enabled {
         let db = state.db.lock().await;
-        db.list_dictation_snippets()
-            .map_err(|error| error.to_string())?
+        match db.list_dictation_snippets() {
+            Ok(snippets) => snippets,
+            Err(error) => {
+                drop(db);
+                return Err(fail_dictation_stop(
+                    state,
+                    handle,
+                    &failure_context,
+                    None,
+                    format!("Failed to read dictation snippets: {}", error),
+                )
+                .await);
+            }
+        }
     } else {
         Vec::new()
     };
@@ -15305,20 +15742,71 @@ async fn stop_dictation_for_sidecar(
             raw_transcribed_text.as_str(),
             &settings_snapshot.transcription.dictation_command_prefix,
         ) {
-            let execution = execute_dictation_command_action(
+            // Command mode ships on while the text-context source defaults to
+            // "none", so every selection-scoped command would otherwise have
+            // nothing to work on. Capture the selection here — only once a
+            // command actually parsed — instead of defaulting the context
+            // source to "selected_text", which would fire a synthetic copy
+            // into the frontmost app (and clobber the clipboard) on every
+            // ordinary dictation.
+            let mut command_context_text = dictation_options.captured_context_text.clone();
+            let mut command_context_source =
+                normalize_dictation_context_source(&dictation_options.context_source).to_string();
+            let needs_context =
+                crate::dictation_parity::dictation_command_action_needs_context(&action);
+            if needs_context
+                && command_context_source == "none"
+                && command_context_text
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .is_empty()
+            {
+                command_context_source = "selected_text".to_string();
+                match capture_dictation_context_text("selected_text", app_target.as_deref()) {
+                    Ok(captured) => command_context_text = captured,
+                    Err(error) => tracing::info!(
+                        "Selection capture for dictation command '{}' failed: {}",
+                        command_key,
+                        error
+                    ),
+                }
+            }
+
+            match execute_dictation_command_action(
                 state,
                 &command_key,
                 action,
-                dictation_options.captured_context_text.as_deref(),
-                &dictation_options.context_source,
+                command_context_text.as_deref(),
+                &command_context_source,
             )
-            .await?;
-            final_text = execution.output_text.trim().to_string();
-            command_applied = Some(execution.command_applied);
-            prompt_source = execution.prompt_source;
-            prompt_preview = execution.prompt_preview;
-            undo_previous_insert = execution.undo_previous_insert;
-            pipeline_stage_keys.push("command".to_string());
+            .await
+            {
+                Ok(execution) => {
+                    final_text = execution.output_text.trim().to_string();
+                    command_applied = Some(execution.command_applied);
+                    prompt_source = execution.prompt_source;
+                    prompt_preview = execution.prompt_preview;
+                    undo_previous_insert = execution.undo_previous_insert;
+                    pipeline_stage_keys.push("command".to_string());
+                }
+                Err(DictationCommandError::MissingContext(warning)) => {
+                    // Non-fatal: leave `command_applied` unset so the ordinary
+                    // pipeline below runs on the raw transcript. The user gets
+                    // their words plus an explanation, instead of a failed stop.
+                    tracing::warn!(
+                        "Dictation command '{}' had no text to work on: {}",
+                        command_key,
+                        warning
+                    );
+                    warnings.push(warning);
+                }
+                Err(DictationCommandError::Failed(error)) => {
+                    return Err(
+                        fail_dictation_stop(state, handle, &failure_context, None, error).await,
+                    );
+                }
+            }
         }
     }
 
@@ -15357,16 +15845,27 @@ async fn stop_dictation_for_sidecar(
 
     if !final_text.is_empty() && command_applied.is_none() {
         match effective_mode.as_str() {
+            // Same gate and the same insertion-delay cap as the Smart Format
+            // branch below: this arm used to call the model on every single
+            // dictation with no opt-in and no timeout, then quietly replace the
+            // result with a crude local rewrite whenever the call failed.
             "messages" | "email" | "meeting_follow_up" => {
-                if let Some(prompt) = dictation_mode_transform_prompt(&effective_mode) {
-                    match run_custom_dictation_transform_with_selected_provider(
-                        state,
-                        final_text.as_str(),
-                        prompt,
+                if let Some(prompt) =
+                    dictation_mode_transform_prompt(&effective_mode).filter(|_| {
+                        dictation_llm_formatting_enabled(&settings_snapshot, &dictation_options)
+                    })
+                {
+                    let transform = tokio::time::timeout(
+                        DICTATION_FORMAT_TIMEOUT,
+                        run_custom_dictation_transform_with_selected_provider(
+                            state,
+                            final_text.as_str(),
+                            prompt,
+                        ),
                     )
-                    .await
-                    {
-                        Ok((output, _, _)) => {
+                    .await;
+                    match transform {
+                        Ok(Ok((output, _, _))) => {
                             final_text =
                                 sanitize_dictation_output(output.trim(), final_text.as_str())
                                     .trim()
@@ -15375,19 +15874,24 @@ async fn stop_dictation_for_sidecar(
                             prompt_preview = truncate_for_audit_preview(Some(prompt), 180);
                             pipeline_stage_keys.push("mode_transform".to_string());
                         }
-                        Err(error) => {
+                        Ok(Err(error)) => {
+                            // Keep the local pipeline output verbatim: it is
+                            // the user's words, correctly formatted.
                             tracing::warn!(
-                                "Dictation mode transform fell back to local handling for '{}': {}",
+                                "Dictation mode transform for '{}' failed, keeping local pipeline output: {}",
                                 effective_mode,
                                 error
                             );
-                            final_text = match effective_mode.as_str() {
-                                "messages" => rewrite_shorter_text(final_text.as_str()),
-                                "email" | "meeting_follow_up" => {
-                                    rewrite_professional_text(final_text.as_str())
-                                }
-                                _ => final_text,
-                            };
+                            warnings.push(DICTATION_FORMAT_FAILED_WARNING.to_string());
+                            pipeline_stage_keys.push("mode_transform_fallback".to_string());
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "Dictation mode transform for '{}' timed out after {}s, keeping local pipeline output",
+                                effective_mode,
+                                DICTATION_FORMAT_TIMEOUT.as_secs()
+                            );
+                            warnings.push(DICTATION_FORMAT_TIMEOUT_WARNING.to_string());
                             pipeline_stage_keys.push("mode_transform_fallback".to_string());
                         }
                     }
@@ -15401,18 +15905,7 @@ async fn stop_dictation_for_sidecar(
                 }
             }
             _ => {
-                if settings_snapshot.transcription.dictation_ai_formatting
-                    || matches!(
-                        dictation_options.profile,
-                        models::DictationProfile::PowerRewrite
-                    )
-                {
-                    // Cap how long AI formatting may delay insertion. The local
-                    // pipeline output in `final_text` is already a good result,
-                    // so on timeout or error we insert that rather than making
-                    // the user wait on a slow/stuck LLM.
-                    const DICTATION_FORMAT_TIMEOUT: std::time::Duration =
-                        std::time::Duration::from_secs(6);
+                if dictation_llm_formatting_enabled(&settings_snapshot, &dictation_options) {
                     let formatting = tokio::time::timeout(
                         DICTATION_FORMAT_TIMEOUT,
                         run_dictation_formatting_with_selected_provider(
@@ -15446,12 +15939,14 @@ async fn stop_dictation_for_sidecar(
                                 "LLM dictation formatting failed, keeping local pipeline output: {}",
                                 error
                             );
+                            warnings.push(DICTATION_FORMAT_FAILED_WARNING.to_string());
                         }
                         Err(_) => {
                             tracing::warn!(
                                 "LLM dictation formatting timed out after {}s, keeping local pipeline output",
                                 DICTATION_FORMAT_TIMEOUT.as_secs()
                             );
+                            warnings.push(DICTATION_FORMAT_TIMEOUT_WARNING.to_string());
                         }
                     }
                 }
@@ -15462,6 +15957,19 @@ async fn stop_dictation_for_sidecar(
     final_text = sanitize_dictation_output(final_text.as_str(), raw_transcribed_text.as_str())
         .trim()
         .to_string();
+
+    // Escape (force_stop_dictation) clears the active session while this stop
+    // is still transcribing or formatting. Honor it: a cancel that let the
+    // text land anyway would be a lie, and force_stop has already reset the
+    // runtime and emitted its terminal phase, so there is nothing left to
+    // clean up here.
+    if active_dictation_session_id(state).await != Some(session_id) {
+        tracing::info!(
+            "Dictation session {} was cancelled before insertion; discarding the result",
+            session_id
+        );
+        return Ok(String::new());
+    }
 
     let startup_latency_ms = {
         let tracker = state.dictation_session_tracker.lock().await;
@@ -15732,6 +16240,7 @@ async fn stop_dictation_for_sidecar(
             "insert_latency_ms": insert_latency_ms,
             "end_to_end_ms": end_to_end_ms,
             "outcome": outcome,
+            "warnings": warnings,
         });
         let _ = db.log_audit_event("dictation_completed", Some(audit_details), "info");
     }
@@ -15750,36 +16259,19 @@ async fn stop_dictation_for_sidecar(
         }
     }
 
-    {
-        let mut runtime_state = state.dictation_runtime_state.lock().await;
-        *runtime_state = DictationSessionState::Idle;
-    }
-    {
-        let mut tracker = state.dictation_session_tracker.lock().await;
-        tracker.active_session_id = None;
-        tracker.started_at = None;
-        tracker.started_at_epoch_ms = None;
-        tracker.startup_latency_ms = None;
-    }
-    {
-        let mut active_options = state.dictation_start_options.lock().await;
-        *active_options = models::DictationStartOptions::default();
-    }
+    reset_dictation_session_runtime(
+        &state.dictation_runtime_state,
+        &state.dictation_session_tracker,
+        &state.dictation_start_options,
+    )
+    .await;
+
+    let done_message = dictation_done_message(&outcome, final_text.is_empty(), &warnings);
 
     // Emit done phase so the popup shows the result, then idle to dismiss it.
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         overlay.phase = "done".to_string();
-        overlay.message = Some(if pasted {
-            "Inserted into the target app".to_string()
-        } else if copied {
-            "Copied to the clipboard".to_string()
-        } else if undo_performed {
-            "Undo applied".to_string()
-        } else if final_text.is_empty() {
-            "No speech detected".to_string()
-        } else {
-            "Result ready".to_string()
-        });
+        overlay.message = Some(done_message.clone());
         overlay.preview = Some(final_text.clone());
         overlay.stop_reason = Some(stop_reason.to_string());
         overlay.outcome = Some(outcome.clone());
@@ -15817,8 +16309,21 @@ async fn stop_dictation_for_sidecar(
         dictation_options.resolved_route.as_deref(),
         dictation_options.resolved_hosting.as_deref(),
         dictation_options.provider_model_label.as_deref(),
+        &warnings,
     );
-    let mut payload_value = serde_json::to_value(payload).map_err(|error| error.to_string())?;
+    let mut payload_value = match serde_json::to_value(payload) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(fail_dictation_stop(
+                state,
+                handle,
+                &failure_context,
+                None,
+                format!("Failed to build the dictation result event: {}", error),
+            )
+            .await);
+        }
+    };
     if let Some(object) = payload_value.as_object_mut() {
         object.insert(
             "text".to_string(),
@@ -15834,17 +16339,7 @@ async fn stop_dictation_for_sidecar(
             "stopReason": stop_reason,
             "outcome": outcome,
             "preview": &final_text,
-            "message": if pasted {
-                "Inserted into the target app"
-            } else if copied {
-                "Copied to the clipboard"
-            } else if undo_performed {
-                "Undo applied"
-            } else if final_text.is_empty() {
-                "No speech detected"
-            } else {
-                "Result ready"
-            },
+            "message": done_message,
             "resolvedModePreset": dictation_options.resolved_mode_preset,
             "resolvedCustomModeId": dictation_options.resolved_custom_mode_id,
             "resolvedModeLabel": dictation_options.resolved_mode_label,
@@ -15966,7 +16461,7 @@ async fn start_recording_for_sidecar(
 
     let mut audio = state.audio_capture.lock().await;
     let recording_id = audio
-        .start_recording(options.clone())
+        .start_recording(options.clone(), Some(handle.clone()))
         .map_err(|e| e.to_string())?;
     let maybe_stream_info = audio.get_streaming_queue(&recording_id);
     drop(audio);
@@ -18942,9 +19437,14 @@ pub async fn dispatch_command(
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "dismiss_dictation_overlay" => {
+            // Dismissal hides the HUD; it does not stop capture. Reporting it
+            // as phase "idle" made Electron mirror an idle phase while the
+            // microphone was still live, so the next hotkey press resolved to
+            // "start" against a session that was already running. Carry only
+            // the dismissal flag — every renderer that cares already keys off
+            // it, and the phase mirror is left untouched.
             if let Ok(mut s) = state.dictation_overlay_state.lock() {
                 s.dismissed = true;
-                s.phase = "idle".to_string();
                 s.message = None;
                 s.preview = None;
                 s.partial_text = None;
@@ -18952,7 +19452,6 @@ pub async fn dispatch_command(
             handle.emit_event(
                 "dictation-state-changed",
                 serde_json::json!({
-                    "phase": "idle",
                     "dismissed": true,
                 }),
             );
