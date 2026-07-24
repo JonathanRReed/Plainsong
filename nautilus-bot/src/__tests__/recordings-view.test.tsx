@@ -93,10 +93,56 @@ vi.mock("@/components/recording-overlay", () => ({
     ) : null,
 }));
 
-vi.mock("@/components/transcript-viewer", () => ({
-  TranscriptViewer: () => null,
-  TranscriptSearch: () => null,
-}));
+// Kept thin, but the props are recorded: the transcript panel's contract with
+// this view (what it renders, where the reading position is, what provenance it
+// may claim) is the thing several of these tests are about.
+const transcriptViewerProps = vi.hoisted(() => ({ current: null as any }));
+
+vi.mock("@/components/transcript-viewer", async () => {
+  const { useEffect } = await import("react");
+  return {
+    TranscriptViewer: (props: any) => {
+      transcriptViewerProps.current = props;
+      // The real viewer reports every hit for the live query in reading order,
+      // and it reports them only once the transcript has actually landed. Which
+      // of those hits the view then makes current is the thing the deep-link
+      // tests are about, so the stand-in has to report them the same way.
+      const query = props.highlightQuery?.trim().toLowerCase() ?? "";
+      const matchKey = JSON.stringify(
+        query
+          ? props.segments
+              .filter((segment: any) => segment.text.toLowerCase().includes(query))
+              .map((segment: any) => ({
+                segmentId: segment.id,
+                startTime: segment.startTime,
+              }))
+          : []
+      );
+      const { onMatchesChange } = props;
+      useEffect(() => {
+        onMatchesChange?.(JSON.parse(matchKey));
+      }, [matchKey, onMatchesChange]);
+      return (
+        <div>
+          <span>{props.segments.length} segments rendered</span>
+          <span>provenance: {props.provenance?.source ?? "unset"}</span>
+        </div>
+      );
+    },
+    TranscriptSearch: (props: any) => (
+      <div>
+        <input
+          aria-label="Find in transcript"
+          value={props.query}
+          onChange={(event) => props.onQueryChange(event.target.value)}
+        />
+        <span>
+          {props.activeMatchIndex + 1} of {props.matchCount}
+        </span>
+      </div>
+    ),
+  };
+});
 
 vi.mock("@/components/waveform-visualizer", () => ({
   RecordingWaveform: () => null,
@@ -197,6 +243,7 @@ vi.mock("@/lib/backend", () => ({
   extractActionItemsGrounded: vi.fn(async () => ({})) as any,
   exportRecordingV2: vi.fn(async () => ({})) as any,
   openExportPath: vi.fn() as any,
+  searchTranscripts: vi.fn(async () => []) as any,
 }));
 
 function deferred<T>() {
@@ -213,6 +260,7 @@ describe("RecordingsView", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     eventListeners.clear();
+    transcriptViewerProps.current = null;
     speechSynthesisMock.speak.mockClear();
     speechSynthesisMock.cancel.mockClear();
     Object.assign(navigator, {
@@ -286,6 +334,8 @@ describe("RecordingsView", () => {
       hasSourceAwareSpeakers: true,
       hasSpeakerLabels: true,
     });
+    backend.searchTranscripts.mockResolvedValue([]);
+    backend.getRelationshipMemory.mockResolvedValue(null);
     backend.getMeetingChatMessages.mockResolvedValue([]);
     backend.updateMeetingChatMessages.mockResolvedValue(undefined);
     backend.updateRecordingNotes.mockResolvedValue(undefined);
@@ -853,7 +903,7 @@ describe("RecordingsView", () => {
       expect(
         screen.getByRole("button", { name: /Enhance Notes|Regenerate/i })
       ).toBeInTheDocument();
-      expect(screen.getByText("Launch is on track with one open dependency.")).toBeInTheDocument();
+      expect(screen.getByLabelText("Enhanced meeting notes draft")).toHaveValue(expectedDraft);
       expect(screen.getByRole("button", { name: "Apply to Notes" })).not.toBeDisabled();
     });
 
@@ -1134,6 +1184,456 @@ describe("RecordingsView", () => {
     await waitFor(() => {
       expect(stopMeeting).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("searches meeting notes, recaps, and action items, not just the title and date", async () => {
+    recordings = [
+      {
+        ...recordings[0],
+        id: "r1",
+        title: "Weekly sync",
+        summary: "Pricing stays flat through Q3.",
+        actionItems: ["Send the renewal packet"],
+        meetingNotes: "Goals\nDecide the renewal path",
+      },
+      {
+        ...recordings[0],
+        id: "r2",
+        title: "Design review",
+        createdAt: "2026-03-05T12:00:00Z",
+        summary: "",
+        actionItems: [],
+        meetingNotes: "",
+      },
+    ] as Recording[];
+
+    render(<RecordingsView />);
+
+    fireEvent.change(screen.getByLabelText("Search meetings"), {
+      target: { value: "renewal packet" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Weekly sync")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Design review")).not.toBeInTheDocument();
+  });
+
+  it("opens a transcript search hit at the moment it was found", async () => {
+    backend.searchTranscripts.mockResolvedValue([
+      {
+        recordingId: "r1",
+        recordingTitle: "Weekly sync",
+        projectId: "default",
+        segmentId: "s7",
+        text: "We should push the launch review to Monday.",
+        startTime: 92.5,
+        endTime: 96,
+        score: -3.2,
+      },
+    ]);
+
+    render(<RecordingsView />);
+
+    fireEvent.change(screen.getByLabelText("Search meetings"), {
+      target: { value: "launch review" },
+    });
+
+    await waitFor(() => {
+      expect(backend.searchTranscripts).toHaveBeenCalledWith("launch review", 25);
+    });
+
+    const hit = await screen.findByText("We should push the launch review to Monday.");
+    fireEvent.click(hit);
+
+    // The workspace opens on the transcript, positioned at the hit, with the
+    // query carried across so the match is highlighted where it was found.
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.currentTime).toBe(92.5);
+    });
+    expect(transcriptViewerProps.current?.highlightQuery).toBe("launch review");
+    expect(screen.getByLabelText("Find in transcript")).toHaveValue("launch review");
+  });
+
+  it("makes the hit nearest the deep-linked moment current, not the first in the meeting", async () => {
+    const segments = Array.from({ length: 6 }, (_, index) => ({
+      id: `s${index}`,
+      startTime: index * 10,
+      endTime: index * 10 + 5,
+      text: `Filler line ${index}: push the launch review out.`,
+      confidence: 0.9,
+    }));
+    backend.getTranscript.mockResolvedValue({
+      id: "t1",
+      recordingId: "r1",
+      segments,
+      fullText: segments.map((segment) => segment.text).join(" "),
+      language: "en",
+      confidence: 0.9,
+      model: "distil-whisper",
+    });
+    backend.searchTranscripts.mockResolvedValue([
+      {
+        recordingId: "r1",
+        recordingTitle: "Weekly sync",
+        projectId: "default",
+        segmentId: "s4",
+        text: "Filler line 4: push the launch review out.",
+        startTime: 40,
+        endTime: 45,
+        score: -3.2,
+      },
+    ]);
+
+    render(<RecordingsView />);
+
+    fireEvent.change(screen.getByLabelText("Search meetings"), {
+      target: { value: "launch review" },
+    });
+
+    fireEvent.click(await screen.findByText("Filler line 4: push the launch review out."));
+
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.segments).toHaveLength(6);
+    });
+
+    // Every turn carries the phrase. The hit the user asked for is the one at
+    // 0:40 they clicked, not the first occurrence in the file.
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.activeMatchIndex).toBe(4);
+    });
+    expect(screen.getByText("5 of 6")).toBeInTheDocument();
+  });
+
+  it("keeps every transcript segment rendered while searching in the meeting", async () => {
+    backend.getTranscript.mockResolvedValue({
+      id: "t1",
+      recordingId: "r1",
+      segments: [
+        { id: "s1", startTime: 0, endTime: 5, text: "We opened with the roadmap.", confidence: 0.9 },
+        { id: "s2", startTime: 5, endTime: 9, text: "Legal signed off.", confidence: 0.9 },
+      ],
+      fullText: "We opened with the roadmap. Legal signed off.",
+      language: "en",
+      confidence: 0.9,
+      model: "distil-whisper",
+    });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    fireEvent.mouseDown(await screen.findByRole("tab", { name: "Transcript" }), { button: 0 });
+    await screen.findByLabelText("Find in transcript");
+
+    fireEvent.change(screen.getByLabelText("Find in transcript"), {
+      target: { value: "nothing in this meeting" },
+    });
+
+    // Filtering used to drop every segment, which made the viewer render its
+    // "No transcript available" empty state and read as data loss.
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.highlightQuery).toBe("nothing in this meeting");
+    });
+    expect(transcriptViewerProps.current?.segments).toHaveLength(2);
+    expect(screen.getByText("2 segments rendered")).toBeInTheDocument();
+  });
+
+  it("derives transcript provenance from the provider that actually ran", async () => {
+    backend.getMeetingTranscriptDetails.mockResolvedValue({
+      segmentCount: 1,
+      model: "Whisper Large v3",
+      modelId: "whisper-large-v3",
+      requestedProvider: "distil_whisper",
+      actualProvider: "groq",
+      qualityScore: 0.92,
+      transcriptionLatencyMs: 880,
+      sourceMode: "me_them",
+      hasSourceAwareSpeakers: true,
+      hasSpeakerLabels: true,
+    });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    fireEvent.mouseDown(await screen.findByRole("tab", { name: "Transcript" }), { button: 0 });
+
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.provenance).toEqual({
+        source: "cloud",
+        provider: "Groq",
+      });
+    });
+  });
+
+  it("passes the backend's locked-vault message through with a route to unlock", async () => {
+    recordings = [{ ...recordings[0] }] as Recording[];
+    backend.openRecordingAudio.mockRejectedValue(
+      new Error("Vault is locked. Unlock vault before opening encrypted recordings.")
+    );
+    const mainViewRequests: string[] = [];
+    const listener = (event: Event) => {
+      mainViewRequests.push((event as CustomEvent<{ view: string }>).detail.view);
+    };
+    window.addEventListener("nautilus-open-main-view", listener);
+
+    try {
+      render(<RecordingsView />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Play audio recording" }));
+
+      expect(
+        await screen.findByText(
+          "Vault is locked. Unlock vault before opening encrypted recordings."
+        )
+      ).toBeInTheDocument();
+      expect(toast).toHaveBeenCalledWith(
+        "Vault is locked. Unlock vault before opening encrypted recordings.",
+        "error"
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Unlock vault" }));
+      expect(mainViewRequests).toContain("settings");
+    } finally {
+      window.removeEventListener("nautilus-open-main-view", listener);
+    }
+  });
+
+  it("reports a failed meeting honestly instead of capture in progress", async () => {
+    recordings = [{ ...recordings[0], status: "error" as const }] as Recording[];
+    backend.getRecording.mockResolvedValue({
+      ...recordings[0],
+      summary: undefined,
+      actionItems: [],
+      meetingNotes: null,
+    });
+    backend.getTranscript.mockResolvedValue(null);
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+
+    expect(await screen.findByText("Transcription failed")).toBeInTheDocument();
+    expect(screen.queryByText("Capture in progress")).not.toBeInTheDocument();
+  });
+
+  it("labels cross-meeting recall buttons instead of slicing the prompt apart", async () => {
+    backend.getRelationshipMemory.mockResolvedValue({
+      people: [
+        {
+          id: "p1",
+          name: "Dana",
+          recordingCount: 3,
+          lastSeenAt: "2026-03-05T12:00:00Z",
+          relatedCompanies: [],
+          recentMeetings: [],
+        },
+      ],
+      companies: [],
+    });
+    recordings = [
+      { ...recordings[0], summary: "Dana wants the renewal packet." },
+    ] as Recording[];
+    backend.getRecording.mockResolvedValue(recordings[0]);
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+
+    expect(await screen.findByRole("button", { name: "Ask about Dana" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open commitments" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /cared about across recent meetings/i })
+    ).not.toBeInTheDocument();
+  });
+
+  it("uses the honest consent label on the live capture card", async () => {
+    recordingState = {
+      isRecording: true,
+      recordingId: "r1",
+      formattedDuration: "02:04",
+    };
+    recordings = [
+      { ...recordings[0], status: "recording", consentPromptShown: true },
+    ] as Recording[];
+    backend.getRecording.mockResolvedValue(recordings[0]);
+
+    render(<RecordingsView />);
+
+    // The app knows the prompt was shown; it does not know anyone was told.
+    expect(await screen.findByText("Prompt shown")).toBeInTheDocument();
+    expect(screen.queryByText("Consent confirmed")).not.toBeInTheDocument();
+  });
+
+  it("shows citation-backed provenance for a generated recap and jumps to the source", async () => {
+    backend.summarizeRecordingGrounded.mockResolvedValue({
+      summary: "Launch is on track pending legal sign-off.",
+      citations: [
+        {
+          text: "We are on track for launch, pending legal approval.",
+          startTime: 15,
+          endTime: 21,
+          recordingId: "r1",
+          certainty: 0.97,
+        },
+      ],
+      model: "test-model",
+      processingTimeMs: 1200,
+    });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Meeting summary");
+
+    // Before any generation, the recap makes no evidence claim at all.
+    expect(
+      screen.getByText(/Nothing on this recap was generated in this session/i)
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Refresh Summary" })[0]);
+
+    const citationRow = await screen.findByText(
+      "We are on track for launch, pending legal approval."
+    );
+    fireEvent.click(citationRow);
+
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.currentTime).toBe(15);
+    });
+  });
+
+  it("marks machine-set recap text apart from the user's own, and hands it back on edit", async () => {
+    backend.summarizeRecordingGrounded.mockResolvedValue({
+      summary: "Launch is on track pending legal sign-off.",
+      citations: [
+        {
+          text: "We are on track for launch, pending legal approval.",
+          startTime: 15,
+          endTime: 21,
+          recordingId: "r1",
+          certainty: 0.97,
+        },
+      ],
+      model: "test-model",
+      processingTimeMs: 1200,
+    });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Meeting summary");
+    await waitFor(() => {
+      expect(screen.getByLabelText("Meeting summary")).toHaveValue("Test summary");
+    });
+
+    // The stored recap could have been written by anyone — a model in an
+    // earlier session, or the reader. Nothing recorded which, so neither claim
+    // is made and the reader is not handed the model's words as their own.
+    expect(screen.getByLabelText("Meeting summary")).toHaveClass("text-foreground/70");
+    expect(screen.getAllByText(/Authorship not recorded/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/^Your text\./i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Refresh Summary" })[0]);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Written by Plainsong this session from transcript and notes\./i)
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("Meeting summary")).toHaveClass("text-muted-foreground");
+
+    // One keystroke and the words are the user's again — including the evidence
+    // claim, which no longer describes what is on screen.
+    fireEvent.change(screen.getByLabelText("Meeting summary"), {
+      target: { value: "Launch is on track pending legal sign-off, and pricing is settled." },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Meeting summary")).toHaveClass("text-foreground");
+    });
+    expect(
+      screen.getByText(/Your text\. Refresh to have Plainsong rewrite it from the transcript\./i)
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("We are on track for launch, pending legal approval.")
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not call a reopened machine-written recap the reader's own text", async () => {
+    backend.summarizeRecordingGrounded.mockResolvedValue({
+      summary: "Launch is on track pending legal sign-off.",
+      citations: [
+        {
+          text: "We are on track for launch, pending legal approval.",
+          startTime: 15,
+          endTime: 21,
+          recordingId: "r1",
+          certainty: 0.97,
+        },
+      ],
+      model: "test-model",
+      processingTimeMs: 1200,
+    });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Meeting summary");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Refresh Summary" })[0]);
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Written by Plainsong this session from transcript and notes\./i)
+      ).toBeInTheDocument();
+    });
+
+    // Close the meeting and open it again, the way a restart would. The recap
+    // is now persisted machine text with no recorded author.
+    backend.getRecording.mockResolvedValue({
+      ...recordings[0],
+      summary: "Launch is on track pending legal sign-off.",
+      actionItems: ["Ship launch checklist"],
+    });
+    fireEvent.click(screen.getAllByRole("button", { name: "Close" })[0]);
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Meeting summary")).not.toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Meeting summary");
+    await waitFor(() => {
+      expect(screen.getByLabelText("Meeting summary")).toHaveValue(
+        "Launch is on track pending legal sign-off."
+      );
+    });
+
+    // These are the model's words. They must not come back in the reader's ink
+    // under a caption that calls them theirs.
+    expect(screen.queryByText(/^Your text\./i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Meeting summary")).not.toHaveClass("text-foreground");
+    expect(screen.getAllByText(/Authorship not recorded/i).length).toBeGreaterThan(0);
+  });
+
+  it("says plainly when a generated line has no transcript citation", async () => {
+    backend.summarizeRecordingGrounded.mockResolvedValue({
+      summary: "Launch is on track pending legal sign-off.",
+      citations: [],
+      model: "test-model",
+      processingTimeMs: 1200,
+    });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Meeting summary");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Refresh Summary" })[0]);
+
+    expect(
+      await screen.findByText(
+        /Not grounded — the model returned no transcript citation for this summary\./i
+      )
+    ).toBeInTheDocument();
   });
 
   it("explains unavailable speaker identification and can run diarization when available", async () => {

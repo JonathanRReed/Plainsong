@@ -2,8 +2,14 @@ import { BrowserWindow } from "electron";
 import path from "path";
 
 // Initial bounds are placeholders — the windows are created hidden (show: false)
-// and showOverlayWindow() repositions them onto the active display (the one under
-// the cursor, inside its notch-safe work area) before they are ever shown.
+// at bootstrap (see prepareOverlayWindows in main.ts, so the first hotkey press
+// does not wait on a React cold boot) and showOverlayWindow() bottom-anchors them
+// on the active display (the one under the cursor, inside its notch-safe work
+// area) before they are ever shown.
+//
+// `focusable: false` plus showInactive() everywhere is what keeps these
+// non-activating: the caret must keep blinking in the user's target field for
+// the whole session, and any focus flicker reads as a wrapper app.
 export function createDictationOverlayWindow(): BrowserWindow {
   return new BrowserWindow({
     width: 420,

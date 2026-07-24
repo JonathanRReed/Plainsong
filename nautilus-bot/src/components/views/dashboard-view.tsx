@@ -22,7 +22,7 @@ import type {
   RelationshipMemory,
 } from "@/lib/backend/ai";
 import { useSetupStatus } from "@/hooks/use-setup-status";
-import { requestMainView } from "@/lib/navigation";
+import { requestMainView, requestRecordingWorkspace } from "@/lib/navigation";
 import { requestOnboarding } from "@/lib/onboarding";
 import { cn } from "@/lib/utils";
 import {
@@ -40,6 +40,13 @@ import {
   Building2,
   Zap,
 } from "lucide-react";
+
+/** m:ss for a transcript offset, so a hit reads like a place in the meeting. */
+function formatHitTimestamp(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  return `${minutes}:${(safeSeconds % 60).toString().padStart(2, "0")}`;
+}
 
 export function DashboardView() {
   const { projects } = useProjects();
@@ -586,39 +593,64 @@ export function DashboardView() {
               </div>
 
               {searchResults.length > 0 && (
-                <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border bg-muted/10 p-2">
+                <div className="max-h-64 space-y-1 overflow-y-auto rounded-lg border bg-muted/10 p-2">
+                  {/* Two jobs, two controls: the checkbox picks meetings for
+                      cross-meeting analysis, the row opens the meeting at the
+                      moment the hit was found. Previously a hit could only
+                      toggle the checkbox and never opened anything. */}
                   {searchResults.map((hit) => {
                     const isSelected = selectedRecordingIds.includes(hit.recordingId);
                     return (
-                      <button
-                        type="button"
+                      <div
                         key={`${hit.recordingId}-${hit.segmentId}`}
                         className={cn(
-                          "flex w-full items-start gap-3 rounded-md px-2.5 py-2 text-left text-sm transition-colors",
-                          isSelected ? "bg-primary/10 border border-primary/20" : "hover:bg-muted/40"
+                          "flex w-full items-start gap-2 rounded-md transition-colors",
+                          isSelected ? "border border-primary/20 bg-primary/10" : "border border-transparent"
                         )}
-                        onClick={() => {
-                          setSelectedRecordingIds((prev) => {
-                            if (isSelected) {
-                              return prev.filter((id) => id !== hit.recordingId);
-                            }
-                            return [...new Set([...prev, hit.recordingId])];
-                          });
-                        }}
                       >
-                        <div className={cn(
-                          "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors",
-                          isSelected ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/30"
-                        )}>
-                          {isSelected && <CheckCircle2 className="h-3 w-3" />}
-                        </div>
-                        <div className="min-w-0">
-                          <p className="font-medium truncate">{hit.recordingTitle}</p>
-                          <p className="text-xs text-muted-foreground line-clamp-1">
-                            {hit.startTime.toFixed(1)}s–{hit.endTime.toFixed(1)}s · {hit.text}
-                          </p>
-                        </div>
-                      </button>
+                        <button
+                          type="button"
+                          aria-label={`Include ${hit.recordingTitle} in cross-meeting analysis`}
+                          aria-pressed={isSelected}
+                          className="mt-2 ml-2 flex h-6 w-6 shrink-0 items-center justify-center rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          onClick={() => {
+                            setSelectedRecordingIds((prev) => {
+                              if (isSelected) {
+                                return prev.filter((id) => id !== hit.recordingId);
+                              }
+                              return [...new Set([...prev, hit.recordingId])];
+                            });
+                          }}
+                        >
+                          <span className={cn(
+                            "flex h-4 w-4 items-center justify-center rounded border transition-colors",
+                            isSelected ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/30"
+                          )}>
+                            {isSelected && <CheckCircle2 className="h-3 w-3" />}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 rounded-md px-2 py-2 text-left text-sm transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          onClick={() =>
+                            requestRecordingWorkspace({
+                              recordingId: hit.recordingId,
+                              focusSegmentTime: hit.startTime,
+                              highlightQuery: lastSearchQuery,
+                            })
+                          }
+                        >
+                          <span className="flex items-baseline gap-2">
+                            <span className="truncate font-medium">{hit.recordingTitle}</span>
+                            <span className="rubric-muted time-spec shrink-0">
+                              {formatHitTimestamp(hit.startTime)}
+                            </span>
+                          </span>
+                          <span className="mt-0.5 line-clamp-2 block text-sm text-muted-foreground">
+                            {hit.text}
+                          </span>
+                        </button>
+                      </div>
                     );
                   })}
                 </div>

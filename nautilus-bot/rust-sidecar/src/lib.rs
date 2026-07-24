@@ -88,6 +88,12 @@ pub struct AppState {
     recording_stream_stop: Arc<AtomicBool>,
     /// Per-recording template (standup, 1on1, sales, interview, brainstorm, auto)
     recording_templates: Arc<StdMutex<std::collections::HashMap<String, String>>>,
+    /// The last few completed dictation results, newest first, for the
+    /// re-paste/re-copy recovery hotkeys and the menu-bar menu. When insertion
+    /// silently fails this is the path that keeps the user from losing thirty
+    /// seconds of speech, so it is kept in memory even when history retention
+    /// is set to discard transcripts.
+    recent_dictation_results: Arc<StdMutex<Vec<RecentDictationResult>>>,
 }
 
 const MIN_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 0.8;
@@ -100,6 +106,11 @@ const MAX_DICTATION_SILENCE_TIMEOUT_SECONDS: f32 = 30.0;
 const HANDS_FREE_DEFAULT_SILENCE_TIMEOUT_SECONDS: f32 = 1.8;
 const DICTATION_PASTE_CLIPBOARD_RESTORE_DELAY_MS: u64 = 900;
 const DICTATION_IDLE_RESET_SUCCESS_MS: u64 = 1800;
+/// How long a failed dictation's error panel stays up before it resets itself.
+/// Longer than the success window because the user has to read it, but bounded:
+/// without a reset the error parked an always-on-top panel on screen forever
+/// (only the success path ever scheduled one), and nothing else took it down.
+const DICTATION_IDLE_RESET_ERROR_MS: u64 = 9000;
 /// Cap on how long any pre-insert LLM pass may delay insertion. The local
 /// pipeline output is already a good result, so on timeout we insert that
 /// rather than making the user wait on a slow or stuck model.
@@ -221,6 +232,22 @@ struct RecentDictationDelivery {
 }
 
 const RECENT_DICTATION_DELIVERY_WINDOW_SECS: i64 = 45;
+
+/// One completed dictation result, kept so the user can re-paste or re-copy it
+/// after a failed or mis-targeted insertion.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecentDictationResult {
+    text: String,
+    app_target: Option<String>,
+    app_bundle_id: Option<String>,
+    at_ms: i64,
+}
+
+/// How many results the recovery list keeps. Three is what fits in a menu-bar
+/// menu without turning it into a history browser (the full history lives in
+/// the app).
+const RECENT_DICTATION_RESULT_LIMIT: usize = 3;
 
 #[derive(Debug, Clone)]
 struct AnalysisContextSegment {
@@ -5827,6 +5854,140 @@ fn is_generic_speaker_name(name: &str) -> bool {
 }
 
 #[cfg(test)]
+mod dictation_idle_reset_tests {
+    use super::dictation_idle_reset_applies;
+
+    /// The timer scheduled for the session that is still on screen must fire;
+    /// this is what stops a failed dictation from parking an always-on-top
+    /// panel over the user's work until they hunt down the close button.
+    #[test]
+    fn a_reset_applies_to_the_session_it_was_scheduled_for() {
+        assert!(dictation_idle_reset_applies(Some(7), 7));
+        assert!(dictation_idle_reset_applies(None, 7));
+    }
+
+    /// ...but a timer from an older session must not hide the HUD of a session
+    /// the user just started.
+    #[test]
+    fn a_stale_reset_never_hides_a_newer_sessions_hud() {
+        assert!(!dictation_idle_reset_applies(Some(8), 7));
+    }
+
+    /// `fail_dictation_stop` needs a live `AppState` to run, so the invariant
+    /// that made a failed dictation park an always-on-top panel forever --- it
+    /// emitted a terminal `error` phase and scheduled no reset, unlike the
+    /// success path --- is asserted against its shape instead.
+    #[test]
+    fn the_terminal_error_path_schedules_its_own_idle_reset() {
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("\nasync fn fail_dictation_stop(")
+            .expect("fail_dictation_stop must exist");
+        let end = start
+            + SOURCE[start..]
+                .find("\n}\n")
+                .expect("fail_dictation_stop must be closed");
+        let body = &SOURCE[start..end];
+
+        assert!(
+            body.contains("schedule_dictation_overlay_idle_reset("),
+            "fail_dictation_stop must schedule an idle reset; without one the error HUD stays \
+             on screen, always on top, until the user finds the close button"
+        );
+        assert!(
+            body.contains("DICTATION_IDLE_RESET_ERROR_MS"),
+            "the error path must use the longer error window, not the success one"
+        );
+    }
+}
+
+#[cfg(test)]
+mod recent_dictation_result_tests {
+    use super::{
+        push_recent_dictation_result, RecentDictationResult, RECENT_DICTATION_RESULT_LIMIT,
+    };
+
+    fn result(text: &str) -> RecentDictationResult {
+        RecentDictationResult {
+            text: text.to_string(),
+            app_target: None,
+            app_bundle_id: None,
+            at_ms: 0,
+        }
+    }
+
+    /// The recovery hotkeys bind to index 0, so "most recent" has to be the
+    /// first entry — re-pasting the oldest of three results would be worse
+    /// than doing nothing.
+    #[test]
+    fn newest_result_is_first_and_the_list_is_capped() {
+        let mut results = Vec::new();
+        for index in 0..6 {
+            push_recent_dictation_result(&mut results, result(&format!("result {index}")));
+        }
+
+        assert_eq!(results.len(), RECENT_DICTATION_RESULT_LIMIT);
+        assert_eq!(results[0].text, "result 5");
+        assert_eq!(results[2].text, "result 3");
+    }
+
+    /// A session that produced nothing (silence, a cancelled command) must not
+    /// push a blank entry that shadows the last result the user actually wants
+    /// back.
+    #[test]
+    fn blank_results_are_not_offered_for_recovery() {
+        let mut results = vec![result("keep me")];
+
+        push_recent_dictation_result(&mut results, result(""));
+        push_recent_dictation_result(&mut results, result("   \n  "));
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].text, "keep me");
+    }
+
+    /// Source of `reuse_recent_dictation_result`. It needs a live `AppState`
+    /// and a real macOS window server to run, so the invariant that keeps the
+    /// recovery hotkey from hijacking the user's frontmost app is asserted
+    /// against its shape — the same approach `owned_stop_dictation_body` takes.
+    fn reuse_recent_dictation_result_body() -> &'static str {
+        const SOURCE: &str = include_str!("lib.rs");
+
+        let start = SOURCE
+            .find("\nfn reuse_recent_dictation_result(")
+            .expect("reuse_recent_dictation_result must exist");
+        let end = start
+            + SOURCE[start..]
+                .find("\n}\n")
+                .expect("reuse_recent_dictation_result must be closed");
+        &SOURCE[start..end]
+    }
+
+    /// The recovery hotkey is pressed *after* the user has moved on — that is
+    /// what it is for. Handing the stored session's app back to
+    /// `paste_text_systemwide` makes `reactivate_target_application` shell
+    /// `open -b <bundle>`, which raises (or relaunches, since nothing expires
+    /// this list) the old app and inserts there instead of at the caret the
+    /// user is actually looking at.
+    #[test]
+    fn repaste_targets_the_current_frontmost_app_not_the_original_one() {
+        let body = reuse_recent_dictation_result_body();
+
+        assert!(
+            body.contains("resolve_recent_dictation_repaste_target()"),
+            "the re-paste target must be re-resolved at re-paste time"
+        );
+        assert!(
+            !body.contains("result.app_target"),
+            "the stored session's app must not be reactivated by the recovery hotkey"
+        );
+        assert!(
+            !body.contains("result.app_bundle_id"),
+            "the stored session's bundle id must not be reactivated by the recovery hotkey"
+        );
+    }
+}
+
+#[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
@@ -6704,6 +6865,25 @@ mod tests {
             body.contains("fail_dictation_stop("),
             "stop_dictation_for_sidecar must route its failures through fail_dictation_stop"
         );
+    }
+
+    #[test]
+    fn a_failed_delivery_holds_the_done_hud_longer_than_a_successful_one() {
+        // The done path used to schedule the 1.8s success reset regardless of
+        // outcome. When delivery fails the words exist only in dictation
+        // history, so that window was not long enough to notice and act.
+        assert_eq!(
+            dictation_overlay_idle_reset_delay_ms("error"),
+            DICTATION_IDLE_RESET_ERROR_MS
+        );
+        for delivered in ["pasted", "copied", "undone", ""] {
+            assert_eq!(
+                dictation_overlay_idle_reset_delay_ms(delivered),
+                DICTATION_IDLE_RESET_SUCCESS_MS,
+                "{} is a delivered outcome and keeps the short window",
+                delivered
+            );
+        }
     }
 
     #[test]
@@ -8755,6 +8935,10 @@ fn dictation_options_from_settings(settings: &settings::Settings) -> models::Dic
             .filter(|_| settings.audio.dictation_input_override_enabled)
             .or(settings.audio.preferred_input_device.as_ref())
             .map(|device| device.device_id.clone()),
+        // Never inferred from settings: this is a property of how a specific
+        // start was triggered, and only the caller that received the
+        // `hands_free_start` signal knows it.
+        hands_free_trigger: false,
     }
 }
 
@@ -14409,6 +14593,7 @@ pub async fn build_app_state() -> Result<AppState, String> {
         vault_state: Arc::new(Mutex::new(VaultRuntimeState::default())),
         recording_stream_stop: Arc::new(AtomicBool::new(false)),
         recording_templates: Arc::new(StdMutex::new(std::collections::HashMap::new())),
+        recent_dictation_results: Arc::new(StdMutex::new(Vec::new())),
     })
 }
 
@@ -14883,6 +15068,12 @@ async fn reconcile_hands_free_monitor(
 
     if !hands_free_monitor_should_run(hands_free_enabled, session_state) {
         audio.stop_hands_free_monitor();
+        if !hands_free_enabled {
+            // The monitor is off for good here, not just yielding the microphone
+            // to a session that is about to drain the pre-roll, so nothing it
+            // heard should outlive the feature the user turned off.
+            audio.clear_dictation_pre_roll();
+        }
         return;
     }
 
@@ -15233,6 +15424,12 @@ async fn start_dictation_for_sidecar(
             session_id,
             auto_stop_config,
             Some(handle.clone()),
+            // Only a start the hands-free monitor itself asked for may inherit
+            // the monitor's pre-roll. `dispatch_command` stops the monitor
+            // immediately before every start, so the ring is always fresh
+            // enough to pass `take_dictation_pre_roll`'s age guard — this flag
+            // is what keeps a hotkey press from picking it up.
+            options.hands_free_trigger,
         ) {
             Ok(resolved_input) => {
                 if let Some(advisory) = resolved_input.advisory.as_deref() {
@@ -15481,7 +15678,127 @@ async fn fail_dictation_stop(
         }),
     );
 
+    schedule_dictation_overlay_idle_reset(
+        state,
+        handle,
+        context.session_id,
+        "error",
+        DICTATION_IDLE_RESET_ERROR_MS,
+    );
+
     message
+}
+
+/// Remember a completed result for the re-paste/re-copy recovery hotkeys and
+/// the menu-bar menu. Empty results are not worth offering to re-paste.
+fn record_recent_dictation_result(
+    state: &AppState,
+    text: &str,
+    app_target: Option<&str>,
+    app_bundle_id: Option<&str>,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+
+    let Ok(mut results) = state.recent_dictation_results.lock() else {
+        return;
+    };
+    push_recent_dictation_result(
+        &mut results,
+        RecentDictationResult {
+            text: text.to_string(),
+            app_target: app_target.map(str::to_string),
+            app_bundle_id: app_bundle_id.map(str::to_string),
+            at_ms: chrono::Utc::now().timestamp_millis(),
+        },
+    );
+}
+
+/// Newest first, capped at [`RECENT_DICTATION_RESULT_LIMIT`]. Split out from
+/// the state-holding caller so the ordering and the cap are testable without
+/// standing up an `AppState`.
+fn push_recent_dictation_result(
+    results: &mut Vec<RecentDictationResult>,
+    candidate: RecentDictationResult,
+) {
+    if candidate.text.trim().is_empty() {
+        return;
+    }
+    results.insert(0, candidate);
+    results.truncate(RECENT_DICTATION_RESULT_LIMIT);
+}
+
+/// Where a re-paste should land: whatever is frontmost *now*, never the app the
+/// original session targeted.
+///
+/// The recovery hotkey exists because the first insert went somewhere the user
+/// did not want, so by the time it is pressed the frontmost app is usually a
+/// different one — that is the whole point of the path. Replaying the stored
+/// target would send `reactivate_target_application` off to `open -b <bundle>`,
+/// which raises the app the user just left (and can relaunch one they have
+/// since quit, since nothing expires `recent_dictation_results`) and inserts
+/// there instead of at their caret. Re-resolving instead of passing `None`
+/// keeps the frontmost-app logging and the self/transient filtering in
+/// `sanitize_dictation_target` intact.
+fn resolve_recent_dictation_repaste_target() -> (Option<String>, Option<String>) {
+    #[cfg(target_os = "macos")]
+    {
+        sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        (None, None)
+    }
+}
+
+/// Re-insert (or just re-copy) one of the recent results. `index` defaults to
+/// the newest, which is what both recovery hotkeys bind to.
+fn reuse_recent_dictation_result(
+    state: &AppState,
+    params: &serde_json::Value,
+    paste: bool,
+) -> Result<serde_json::Value, String> {
+    let index = params
+        .get("index")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as usize;
+    let Some(result) = recent_dictation_result_at(state, index) else {
+        return Err("No recent dictation result is available to reuse.".to_string());
+    };
+
+    if !paste {
+        copy_to_clipboard(&result.text)?;
+        return Ok(serde_json::json!({ "pasted": false, "copied": true }));
+    }
+
+    let (target_app, target_app_bundle_id) = resolve_recent_dictation_repaste_target();
+    let outcome = paste_text_systemwide(
+        state,
+        &result.text,
+        true,
+        target_app.as_deref(),
+        target_app_bundle_id.as_deref(),
+    );
+    if !outcome.pasted && !outcome.copied {
+        return Err(outcome
+            .error
+            .unwrap_or_else(|| "Could not re-insert the last dictation result.".to_string()));
+    }
+    Ok(serde_json::json!({
+        "pasted": outcome.pasted,
+        "copied": outcome.copied,
+        "error": outcome.error,
+    }))
+}
+
+fn recent_dictation_result_at(state: &AppState, index: usize) -> Option<RecentDictationResult> {
+    state
+        .recent_dictation_results
+        .lock()
+        .ok()
+        .and_then(|results| results.get(index).cloned())
 }
 
 /// Sidecar-compatible stop_dictation.
@@ -16330,6 +16647,12 @@ async fn stop_dictation_for_sidecar(
             serde_json::Value::String(final_text.clone()),
         );
     }
+    record_recent_dictation_result(
+        state,
+        &final_text,
+        app_target.as_deref(),
+        dictation_options.context_app_bundle_id.as_deref(),
+    );
     handle.emit_event("dictation-text-ready", payload_value);
     handle.emit_event(
         "dictation-state-changed",
@@ -16378,31 +16701,80 @@ async fn stop_dictation_for_sidecar(
     // detached task so this command returns immediately. Otherwise the stop
     // handler blocks for ~1.8s, which (a) delays the response and (b) prevented
     // starting the next dictation until the display window elapsed.
+    //
+    // A delivery failure lands here too, and it needs the longer error window:
+    // the words exist only in dictation history, so 1.8s is not enough time to
+    // notice that nothing arrived and act on it.
+    schedule_dictation_overlay_idle_reset(
+        state,
+        handle,
+        session_id,
+        stop_reason,
+        dictation_overlay_idle_reset_delay_ms(&outcome),
+    );
+
+    Ok(final_text)
+}
+
+/// How long the done HUD stays up before resetting to idle. A successful
+/// delivery is self-evident and gets the short window; a failed one leaves the
+/// text only in dictation history, so the user needs long enough to notice and
+/// reach for it.
+fn dictation_overlay_idle_reset_delay_ms(outcome: &str) -> u64 {
+    if outcome == "error" {
+        DICTATION_IDLE_RESET_ERROR_MS
+    } else {
+        DICTATION_IDLE_RESET_SUCCESS_MS
+    }
+}
+
+/// Whether a scheduled idle reset still owns the overlay it was scheduled for.
+/// `None` means no session has claimed the overlay, so the reset is safe.
+fn dictation_idle_reset_applies(overlay_session_id: Option<u64>, scheduled_for: u64) -> bool {
+    match overlay_session_id {
+        Some(active) => active == scheduled_for,
+        None => true,
+    }
+}
+
+/// Take the always-on-top dictation HUD down after `delay_ms` and put the
+/// overlay state back to idle. Detached so the caller returns immediately.
+///
+/// Every terminal phase must schedule one of these. A phase that emits `done`
+/// or `error` and schedules nothing leaves a floating panel on screen with no
+/// timer behind it, which is exactly how a failed dictation used to park the
+/// HUD over the user's work until they found the close button.
+fn schedule_dictation_overlay_idle_reset(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    session_id: u64,
+    stop_reason: &str,
+    delay_ms: u64,
+) {
     let overlay_state = Arc::clone(&state.dictation_overlay_state);
     let idle_handle = handle.clone();
-    let idle_session_id = session_id;
     let idle_stop_reason = stop_reason.to_string();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(
-            DICTATION_IDLE_RESET_SUCCESS_MS,
-        ))
-        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
 
         if let Ok(mut overlay) = overlay_state.lock() {
+            // A newer session may have claimed the overlay while this timer
+            // ran; resetting then would hide a HUD that is legitimately live.
+            if !dictation_idle_reset_applies(overlay.session_id, session_id) {
+                return;
+            }
             *overlay = DictationOverlayState::default();
         }
         idle_handle.emit_event(
             "dictation-state-changed",
             serde_json::json!({
                 "phase": "idle",
-                "sessionId": idle_session_id,
+                "sessionId": session_id,
                 "stopReason": idle_stop_reason,
             }),
         );
         idle_handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
     });
-
-    Ok(final_text)
 }
 
 /// Sidecar-compatible start_recording. Emits state events via SidecarHandle.
@@ -19391,6 +19763,20 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["commandKey"].clone()).map_err(|e| e.to_string())?;
             transform_selected_text_impl(state.as_ref(), &command_key).await
         }
+        "get_recent_dictation_results" => {
+            let results = state
+                .recent_dictation_results
+                .lock()
+                .map(|results| results.clone())
+                .unwrap_or_default();
+            serde_json::to_value(results).map_err(|e| e.to_string())
+        }
+        // Recovery path for an insertion that landed in the wrong place or
+        // silently failed: put the words back without making the user speak
+        // them again. Deliberately reuses a result the sidecar produced itself
+        // rather than accepting arbitrary text from the renderer.
+        "repaste_dictation_result" => reuse_recent_dictation_result(state.as_ref(), &params, true),
+        "recopy_dictation_result" => reuse_recent_dictation_result(state.as_ref(), &params, false),
         "transform_dictation_text" => {
             let text: String =
                 serde_json::from_value(params["text"].clone()).map_err(|e| e.to_string())?;

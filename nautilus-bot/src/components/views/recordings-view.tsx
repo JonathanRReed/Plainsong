@@ -14,7 +14,14 @@ import { useRecordingDetail } from "@/hooks/use-recording-detail";
 import { useScopedRequestGuard } from "@/hooks/use-scoped-request-guard";
 import { useToast } from "@/components/toast";
 import { ConsentDialog } from "@/components/recording-overlay";
-import { TranscriptViewer, TranscriptSearch } from "@/components/transcript-viewer";
+import {
+  TranscriptViewer,
+  TranscriptSearch,
+  type TranscriptMatch,
+  type TranscriptProvenance,
+} from "@/components/transcript-viewer";
+import { isCloudProvider, providerHostingPreference } from "@/lib/asr-capabilities";
+import { cn } from "@/lib/utils";
 import { RecordingWaveform, WaveformVisualizer } from "@/components/waveform-visualizer";
 import { AiAnalysisPanel } from "@/components/ai-analysis-panel";
 import {
@@ -22,6 +29,7 @@ import {
   extractActionItemsGrounded,
   askMemory,
   getRelationshipMemory,
+  searchTranscripts,
 } from "@/lib/backend/ai";
 import {
   deleteRecording,
@@ -66,7 +74,9 @@ import {
   MEETING_CONSENT_NOTICE_TEXT,
 } from "@/lib/meeting-consent";
 import {
+  consumePendingRecordingWorkspace,
   OPEN_RECORDING_WORKSPACE_EVENT,
+  requestMainView,
   type OpenRecordingWorkspaceDetail,
 } from "@/lib/navigation";
 import { listen } from "@/lib/electron";
@@ -94,9 +104,11 @@ import {
   ClipboardList,
   CalendarClock,
   Volume2,
+  Quote,
+  Lock,
 } from "lucide-react";
 import type { AnalysisTemplate } from "@/types";
-import type { LlmCitation } from "@/types";
+import type { AsrProviderType, LlmCitation, SearchHit } from "@/types";
 
 const MEETING_ASK_TEMPLATES: AnalysisTemplate[] = [
   {
@@ -179,6 +191,39 @@ type EnhancedMeetingNotesDraft = {
   }>;
 };
 
+/**
+ * Which hand set a recap field down, as far as this session can actually tell.
+ * Nothing persists authorship alongside the summary or the action items, so
+ * text that came back from storage gets its own state — calling it the user's
+ * would hand them the model's words as their own.
+ */
+type RecapAuthorship = "plainsong" | "user" | "unrecorded";
+
+/**
+ * Two hands, three treatments: machine-set text sits in the quieter ink behind
+ * a bronze rule, the user's own keeps full ink and no rule, and text with no
+ * recorded author gets a neutral rule and neither claim.
+ */
+const RECAP_AUTHORSHIP_TREATMENT: Record<RecapAuthorship, string> = {
+  plainsong: "border-l-2 border-l-gold-ambient/60 text-muted-foreground",
+  user: "text-foreground",
+  unrecorded: "border-l-2 border-l-border text-foreground/70",
+};
+
+const SUMMARY_AUTHORSHIP_CAPTION: Record<RecapAuthorship, string> = {
+  plainsong: "Written by Plainsong this session from transcript and notes.",
+  user: "Your text. Refresh to have Plainsong rewrite it from the transcript.",
+  unrecorded:
+    "Authorship not recorded — nothing stored says whether you or Plainsong wrote this. Refresh to have Plainsong rewrite it from the transcript.",
+};
+
+const ACTION_ITEMS_AUTHORSHIP_CAPTION: Record<RecapAuthorship, string> = {
+  plainsong: "Extracted by Plainsong this session from transcript and notes.",
+  user: "Your text. Refresh to have Plainsong extract them from the transcript.",
+  unrecorded:
+    "Authorship not recorded — nothing stored says whether you or Plainsong wrote these. Refresh to have Plainsong extract them from the transcript.",
+};
+
 function formatCitationTimeRange(citation: LlmCitation): string | null {
   if (
     typeof citation.startTime !== "number" &&
@@ -238,6 +283,58 @@ function formatTranscriptQuality(details: MeetingTranscriptDetails | null): {
     return { label: "Needs review", tone: "warn" };
   }
   return { label: "Low confidence", tone: "warn" };
+}
+
+// Every provider Plainsong knows how to run. A name outside this list is a
+// name we cannot classify, and an unclassified name is never called "local".
+const KNOWN_ASR_PROVIDERS = new Set<AsrProviderType>([
+  "whisper",
+  "parakeet",
+  "whisper_candle",
+  "distil_whisper",
+  "mlx_audio",
+  "macos_apple_speech",
+  "moonshine",
+  "voxtral",
+  "windows_sdk_dictation",
+  "elevenlabs_scribe",
+  "openai_cloud",
+  "groq",
+  "cohere_transcribe",
+]);
+
+const CLOUD_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  elevenlabs_scribe: "ElevenLabs Scribe",
+  openai_cloud: "OpenAI",
+  groq: "Groq",
+  cohere_transcribe: "Cohere",
+  voxtral: "Voxtral Cloud",
+};
+
+/**
+ * What the transcript badge is allowed to claim. Derived from the provider the
+ * backend says actually ran — never defaulted to "local", because a cloud
+ * provider named in the panel above and a gold "Local transcript" badge below
+ * it cannot both be true.
+ */
+function describeTranscriptProvenance(
+  provider: string | null | undefined,
+  modelId: string | null | undefined
+): TranscriptProvenance {
+  const normalized = provider?.trim();
+  if (!normalized || !KNOWN_ASR_PROVIDERS.has(normalized as AsrProviderType)) {
+    return { source: "unknown" };
+  }
+
+  const providerType = normalized as AsrProviderType;
+  const hosting = providerHostingPreference(providerType, modelId);
+  if (hosting === "cloud" || isCloudProvider(providerType)) {
+    return {
+      source: "cloud",
+      provider: CLOUD_PROVIDER_DISPLAY_NAMES[providerType] ?? providerType,
+    };
+  }
+  return { source: "local" };
 }
 
 function formatSourceMode(details: MeetingTranscriptDetails | null): string {
@@ -531,7 +628,27 @@ function buildMeetingReadyState(args: {
   actionItems: string[];
   notes: string;
   transcriptSegments: number;
+  status: Recording["status"] | undefined;
+  isLive: boolean;
 }): { label: string; tone: "good" | "warn" | "muted"; detail: string } {
+  // Status comes first: a failed or still-processing meeting cannot be
+  // described by what its notes contain, and a week-old failure must never
+  // report "Capture in progress".
+  if (args.status === "error") {
+    return {
+      label: "Transcription failed",
+      tone: "warn",
+      detail:
+        "This meeting has no grounded transcript. Retry transcription from the Transcript tab before relying on a recap.",
+    };
+  }
+  if (args.status === "processing") {
+    return {
+      label: "Transcribing",
+      tone: "muted",
+      detail: "Transcript lines are still landing. Keep notes current in the meantime.",
+    };
+  }
   if (args.summary.trim() && args.actionItems.length > 0) {
     return {
       label: "Ready to send follow-up",
@@ -553,31 +670,53 @@ function buildMeetingReadyState(args: {
       detail: "Start filling notes or run summary/action item refresh next.",
     };
   }
+  if (args.isLive || args.status === "recording") {
+    return {
+      label: "Capture in progress",
+      tone: "muted",
+      detail: "Keep notes current while the meeting is still live.",
+    };
+  }
   return {
-    label: "Capture in progress",
+    label: "Nothing captured yet",
     tone: "muted",
-    detail: "Keep notes current while the meeting is still live.",
+    detail: "This meeting has no transcript, notes, or recap attached to it.",
   };
 }
 
+/**
+ * Cross-meeting recall suggestions. The label is written for the button; it is
+ * never derived by cutting the prompt apart, which produced buttons reading
+ * "Dana cared about across recent meetings".
+ */
 function buildRelationshipRecallPrompts(args: {
   title: string;
   people: PersonMemoryProfile[];
   companies: CompanyMemoryProfile[];
-}): string[] {
+}): Array<{ label: string; prompt: string }> {
   const prompts = [
-    `What commitments and deadlines from prior meetings matter before the next ${args.title} follow-up?`,
-    ...args.people.slice(0, 2).map(
-      (person) =>
-        `What has ${person.name} cared about across recent meetings? Include priorities, open questions, and what I owe them.`
-    ),
-    ...args.companies.slice(0, 1).map(
-      (company) =>
-        `What has ${company.name} pushed on across recent meetings? Include risks, asks, and deadlines.`
-    ),
+    {
+      label: "Open commitments",
+      prompt: `What commitments and deadlines from prior meetings matter before the next ${args.title} follow-up?`,
+    },
+    ...args.people.slice(0, 2).map((person) => ({
+      label: `Ask about ${person.name}`,
+      prompt: `What has ${person.name} cared about across recent meetings? Include priorities, open questions, and what I owe them.`,
+    })),
+    ...args.companies.slice(0, 1).map((company) => ({
+      label: `Ask about ${company.name}`,
+      prompt: `What has ${company.name} pushed on across recent meetings? Include risks, asks, and deadlines.`,
+    })),
   ];
 
-  return [...new Set(prompts)];
+  const seen = new Set<string>();
+  return prompts.filter((entry) => {
+    if (seen.has(entry.prompt)) {
+      return false;
+    }
+    seen.add(entry.prompt);
+    return true;
+  });
 }
 
 export function RecordingsView() {
@@ -589,7 +728,22 @@ export function RecordingsView() {
   >({});
   const [showConsent, setShowConsent] = useState(false);
   const [showRecordingDetail, setShowRecordingDetail] = useState(false);
+  const [meetingTab, setMeetingTab] = useState("notes");
   const [searchQuery, setSearchQuery] = useState("");
+  const [transcriptMatches, setTranscriptMatches] = useState<TranscriptMatch[]>([]);
+  const [activeTranscriptMatchIndex, setActiveTranscriptMatchIndex] = useState(0);
+  // Where the reader is in the transcript. Set by a segment click, by keyboard
+  // stepping, by a search hit, and by a citation's "jump to source" — it is a
+  // reading position, not audio playback, which this build cannot drive.
+  const [transcriptCueTime, setTranscriptCueTime] = useState<number | undefined>(undefined);
+  // A deep link names both a query and the moment it was found at. The hits
+  // only exist once the transcript has loaded, so the requested moment is
+  // parked here and spent on the first report that actually has hits in it.
+  const pendingMatchFocusTimeRef = useRef<number | null>(null);
+  const [audioPlaybackIssue, setAudioPlaybackIssue] = useState<{
+    recordingId: string;
+    message: string;
+  } | null>(null);
   const [isRunningDiarization, setIsRunningDiarization] = useState(false);
   const [diarizationMessage, setDiarizationMessage] = useState<string | null>(null);
   const [diarizationError, setDiarizationError] = useState<string | null>(null);
@@ -608,6 +762,25 @@ export function RecordingsView() {
   const [meetingActionItemsText, setMeetingActionItemsText] = useState("");
   const [enhancedMeetingNotesDraft, setEnhancedMeetingNotesDraft] =
     useState<EnhancedMeetingNotesDraft | null>(null);
+  // Provenance for the recap the user is looking at: which transcript lines the
+  // model cited for the summary, and for each action item. Held only for text
+  // this session generated — a hand-typed or previously saved line has no
+  // citations and must say so rather than borrow someone else's.
+  const [meetingSummaryProvenance, setMeetingSummaryProvenance] = useState<{
+    summary: string;
+    citations: LlmCitation[];
+  } | null>(null);
+  const [meetingActionItemProvenance, setMeetingActionItemProvenance] = useState<
+    Array<{ item: string; citations: LlmCitation[] }>
+  >([]);
+  // The recap text the reader typed in this session, held the same way the
+  // citations above are: the claim "Your text." only stands while what is on
+  // screen is still what they left. Text that arrived from the store was
+  // written by nobody this session could name.
+  const [userEditedSummary, setUserEditedSummary] = useState<string | null>(null);
+  const [userEditedActionItemsText, setUserEditedActionItemsText] = useState<
+    string | null
+  >(null);
   const [isEnhancingMeetingNotes, setIsEnhancingMeetingNotes] = useState(false);
   const [meetingChatMessages, setMeetingChatMessages] = useState<MeetingChatMessage[]>([]);
   const [meetingRecallQuery, setMeetingRecallQuery] = useState("");
@@ -664,6 +837,13 @@ export function RecordingsView() {
     message: string;
   } | null>(null);
   const [meetingSearch, setMeetingSearch] = useState("");
+  // Transcript hits for the meetings-list search. Titles, notes, summaries, and
+  // action items are matched here in the renderer; the transcript body is
+  // matched by the backend's bm25 FTS index, which is the only thing that can
+  // rank it.
+  const [meetingSearchHits, setMeetingSearchHits] = useState<SearchHit[]>([]);
+  const [isSearchingMeetingTranscripts, setIsSearchingMeetingTranscripts] = useState(false);
+  const [meetingSearchError, setMeetingSearchError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<
     "all" | "completed" | "recording" | "processing" | "error"
   >(
@@ -1047,6 +1227,10 @@ export function RecordingsView() {
       setMeetingSummary("");
       setMeetingActionItemsText("");
       setEnhancedMeetingNotesDraft(null);
+      setMeetingSummaryProvenance(null);
+      setMeetingActionItemProvenance([]);
+      setUserEditedSummary(null);
+      setUserEditedActionItemsText(null);
       setIsEnhancingMeetingNotes(false);
       setMeetingChatMessages([]);
       setIsRefreshingSummary(false);
@@ -1089,6 +1273,12 @@ export function RecordingsView() {
     setMeetingActionItemsText(nextActionItemsText);
     if (lastSelectedMeetingIdRef.current !== selectedRecording.id) {
       setEnhancedMeetingNotesDraft(null);
+      // Evidence and authorship belong to one meeting's text; neither may
+      // follow the reader into the next meeting.
+      setMeetingSummaryProvenance(null);
+      setMeetingActionItemProvenance([]);
+      setUserEditedSummary(null);
+      setUserEditedActionItemsText(null);
       lastSelectedMeetingIdRef.current = selectedRecording.id;
     }
     lastSavedMeetingTemplateRef.current = nextTemplateId;
@@ -1232,7 +1422,10 @@ export function RecordingsView() {
     };
   }, [refetch]);
 
-  const openMeetingWorkspace = (recording: Recording) => {
+  const openMeetingWorkspace = (
+    recording: Recording,
+    focus?: { segmentTime?: number; highlightQuery?: string }
+  ) => {
     meetingChatRequestGuard.setScope(recording.id);
     setMeetingNotes(recording.meetingNotes ?? "");
     setMeetingNotesTargetId(recording.id);
@@ -1249,7 +1442,22 @@ export function RecordingsView() {
     lastSavedMeetingChatRef.current = "[]";
     setLastMeetingExportPath(null);
     setShowRecordingDetail(true);
-    setSearchQuery("");
+    setSearchQuery(focus?.highlightQuery ?? "");
+    setTranscriptMatches([]);
+    setActiveTranscriptMatchIndex(0);
+    setTranscriptCueTime(focus?.segmentTime);
+    // Which hit the reader asked for: the one at the moment they clicked, not
+    // whichever occurrence happens to come first in the meeting.
+    pendingMatchFocusTimeRef.current =
+      focus?.highlightQuery && focus.segmentTime !== undefined ? focus.segmentTime : null;
+    // A deep link lands on the moment it named; a plain open still starts on
+    // the note canvas.
+    setMeetingTab(focus?.segmentTime !== undefined || focus?.highlightQuery ? "transcript" : "notes");
+    setAudioPlaybackIssue(null);
+    setMeetingSummaryProvenance(null);
+    setMeetingActionItemProvenance([]);
+    setUserEditedSummary(null);
+    setUserEditedActionItemsText(null);
     setDiarizationMessage(null);
     setDiarizationError(null);
     setIsRefreshingSummary(false);
@@ -1403,6 +1611,12 @@ export function RecordingsView() {
         return;
       }
       setMeetingSummary(nextSummary);
+      // Keep the evidence beside the text it produced, so the recap can say
+      // which transcript lines it came from — and admit when it has none.
+      setMeetingSummaryProvenance({
+        summary: nextSummary,
+        citations: result.citations ?? [],
+      });
       lastSavedMeetingSummaryRef.current = nextSummary;
       lastSavedMeetingActionItemsRef.current = JSON.stringify(currentActionItems);
       setSelectedRecording((current) =>
@@ -1456,6 +1670,12 @@ export function RecordingsView() {
         return;
       }
       setMeetingActionItemsText(nextActionItemsText);
+      setMeetingActionItemProvenance(
+        result.items.map((item, index) => ({
+          item: nextActionItems[index] ?? item.task,
+          citations: item.citations ?? [],
+        }))
+      );
       lastSavedMeetingSummaryRef.current = normalizedSummary;
       lastSavedMeetingActionItemsRef.current = JSON.stringify(nextActionItems);
       setSelectedRecording((current) =>
@@ -1514,6 +1734,16 @@ export function RecordingsView() {
       }
       setMeetingSummary(nextSummary);
       setMeetingActionItemsText(nextActionItemsText);
+      setMeetingSummaryProvenance({
+        summary: nextSummary,
+        citations: summaryResult.citations ?? [],
+      });
+      setMeetingActionItemProvenance(
+        actionItemsResult.items.map((item, index) => ({
+          item: nextActionItems[index] ?? item.task,
+          citations: item.citations ?? [],
+        }))
+      );
       lastSavedMeetingSummaryRef.current = nextSummary;
       lastSavedMeetingActionItemsRef.current = JSON.stringify(nextActionItems);
       setSelectedRecording((current) =>
@@ -1777,7 +2007,7 @@ export function RecordingsView() {
       const available = await isDiarizationModelAvailable();
       if (!available) {
         setDiarizationError(
-          "Speaker diarization is not yet available as a local model. Use the Analysis tab for AI-powered meeting summaries, action items, and speaker attribution."
+          "Speaker diarization is not yet available as a local model. Use the Ask tab for AI-powered meeting summaries, action items, and speaker attribution."
         );
         setIsRunningDiarization(false);
         return;
@@ -1794,7 +2024,7 @@ export function RecordingsView() {
           ? error.message
           : typeof error === "string"
             ? error
-            : "Speaker identification failed. Use the Analysis tab for AI-powered features.";
+            : "Speaker identification failed. Use the Ask tab for AI-powered features.";
       setDiarizationError(msg);
     } finally {
       setIsRunningDiarization(false);
@@ -1803,14 +2033,27 @@ export function RecordingsView() {
 
 
 
+  // The backend's failure is the actionable one ("Vault is locked. Unlock vault
+  // before opening encrypted recordings."). Swallowing it behind a generic
+  // toast left the user with no next step, so it is surfaced verbatim and, when
+  // it is the locked vault, alongside the control that fixes it.
   const handlePlayAudio = async (recording: Recording) => {
-    if (recording.audioPath) {
-      try {
-        await openRecordingAudio(recording.id);
-      } catch (err) {
-        console.error("Failed to open audio file:", err);
-        toast("Couldn't open the audio file for this meeting.", "error");
-      }
+    if (!recording.audioPath) {
+      return;
+    }
+    setAudioPlaybackIssue(null);
+    try {
+      await openRecordingAudio(recording.id);
+    } catch (err) {
+      console.error("Failed to open audio file:", err);
+      const message =
+        err instanceof Error
+          ? err.message
+          : typeof err === "string"
+            ? err
+            : "Couldn't open the audio file for this meeting.";
+      setAudioPlaybackIssue({ recordingId: recording.id, message });
+      toast(message, "error");
     }
   };
 
@@ -1841,22 +2084,65 @@ export function RecordingsView() {
     }
   };
 
-  const filteredSegments = useMemo(() => {
-    if (!selectedTranscript) {
-      return [];
+  // Every segment is always rendered. Search highlights in place instead of
+  // filtering, because a filtered-to-nothing transcript rendered the viewer's
+  // "No transcript available" empty state and read as data loss.
+  // Memoised so an empty transcript does not hand the viewer a fresh array on
+  // every render, which would re-fire its match callback in a loop.
+  const transcriptSegments = useMemo(
+    () => selectedTranscript?.segments ?? [],
+    [selectedTranscript]
+  );
+
+  const stepTranscriptMatch = useCallback(
+    (direction: 1 | -1) => {
+      if (transcriptMatches.length === 0) {
+        return;
+      }
+      const nextIndex =
+        (activeTranscriptMatchIndex + direction + transcriptMatches.length) %
+        transcriptMatches.length;
+      setActiveTranscriptMatchIndex(nextIndex);
+      setTranscriptCueTime(transcriptMatches[nextIndex].startTime);
+    },
+    [activeTranscriptMatchIndex, transcriptMatches]
+  );
+
+  const handleTranscriptMatchesChange = useCallback((matches: TranscriptMatch[]) => {
+    // Keep the existing array when the hits are unchanged, so an equal-but-new
+    // list can never bounce state back and forth with the viewer.
+    setTranscriptMatches((current) =>
+      current.length === matches.length &&
+      current.every(
+        (entry, index) =>
+          entry.segmentId === matches[index].segmentId &&
+          entry.startTime === matches[index].startTime
+      )
+        ? current
+        : matches
+    );
+    // A parked deep-link moment claims the nearest hit the moment there are
+    // hits to choose from, and is spent once — later searches in this meeting
+    // are the reader's own and start at the top.
+    const focusTime = pendingMatchFocusTimeRef.current;
+    if (focusTime !== null && matches.length > 0) {
+      pendingMatchFocusTimeRef.current = null;
+      let nearest = 0;
+      for (let index = 1; index < matches.length; index += 1) {
+        if (
+          Math.abs(matches[index].startTime - focusTime) <
+          Math.abs(matches[nearest].startTime - focusTime)
+        ) {
+          nearest = index;
+        }
+      }
+      setActiveTranscriptMatchIndex(nearest);
+      return;
     }
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) {
-      return selectedTranscript.segments;
-    }
-    return selectedTranscript.segments.filter((segment) => {
-      const speaker = segment.speakerId?.toLowerCase() ?? "";
-      return (
-        segment.text.toLowerCase().includes(query) ||
-        speaker.includes(query)
-      );
-    });
-  }, [selectedTranscript, searchQuery]);
+    setActiveTranscriptMatchIndex((current) =>
+      current < matches.length ? current : 0
+    );
+  }, []);
 
   const hasSpeakerLabels = useMemo(
     () => Boolean(selectedTranscript?.segments.some((segment) => Boolean(segment.speakerId))),
@@ -1865,6 +2151,19 @@ export function RecordingsView() {
   const transcriptQuality = useMemo(
     () => formatTranscriptQuality(selectedTranscriptDetails),
     [selectedTranscriptDetails]
+  );
+  const selectedTranscriptProvenance = useMemo(
+    () =>
+      describeTranscriptProvenance(
+        selectedTranscriptDetails?.actualProvider ?? selectedTranscript?.actualProvider,
+        selectedTranscriptDetails?.modelId ?? selectedTranscript?.modelId
+      ),
+    [
+      selectedTranscript?.actualProvider,
+      selectedTranscript?.modelId,
+      selectedTranscriptDetails?.actualProvider,
+      selectedTranscriptDetails?.modelId,
+    ]
   );
   const effectiveRecordings = useMemo(
     () =>
@@ -1882,19 +2181,86 @@ export function RecordingsView() {
     () => meetings.find((meeting) => meeting.id === recordingId) ?? null,
     [meetings, recordingId]
   );
+  // Transcript bodies are not held in the meetings list, so the FTS index does
+  // that half. Debounced so typing does not fire a query per keystroke.
+  useEffect(() => {
+    const query = meetingSearch.trim();
+    if (query.length < 2) {
+      setMeetingSearchHits([]);
+      setMeetingSearchError(null);
+      setIsSearchingMeetingTranscripts(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsSearchingMeetingTranscripts(true);
+    const timeoutId = window.setTimeout(() => {
+      void searchTranscripts(query, 25)
+        .then((hits) => {
+          if (cancelled) return;
+          setMeetingSearchHits(hits);
+          setMeetingSearchError(null);
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          console.error("Failed to search meeting transcripts:", error);
+          setMeetingSearchHits([]);
+          setMeetingSearchError(
+            error instanceof Error
+              ? error.message
+              : "Transcript search is unavailable. Titles, notes, and recaps are still searched."
+          );
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setIsSearchingMeetingTranscripts(false);
+          }
+        });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [meetingSearch]);
+
+  // Only transcript hits that belong to a meeting, and only while the query
+  // they were fetched for is still the one on screen.
+  const meetingTranscriptHits = useMemo(() => {
+    if (meetingSearch.trim().length < 2) {
+      return [] as Array<SearchHit & { recording: Recording }>;
+    }
+    return meetingSearchHits.flatMap((hit) => {
+      const recording = meetings.find((meeting) => meeting.id === hit.recordingId);
+      return recording ? [{ ...hit, recording }] : [];
+    });
+  }, [meetingSearch, meetingSearchHits, meetings]);
+
   const filteredMeetings = useMemo(() => {
     const query = meetingSearch.trim().toLowerCase();
+    const transcriptMatchIds = new Set(meetingTranscriptHits.map((hit) => hit.recordingId));
     return meetings
       .filter((meeting) => {
         if (statusFilter !== "all" && meeting.status !== statusFilter) {
           return false;
         }
         if (!query) return true;
-        const haystack = `${meeting.title} ${new Date(meeting.createdAt).toLocaleString()}`.toLowerCase();
+        if (transcriptMatchIds.has(meeting.id)) return true;
+        // Everything the meeting record itself carries — not just the title and
+        // a formatted date, which is all this used to look at.
+        const haystack = [
+          meeting.title,
+          new Date(meeting.createdAt).toLocaleString(),
+          meeting.meetingNotes ?? "",
+          meeting.summary ?? "",
+          ...(meeting.actionItems ?? []),
+        ]
+          .join(" ")
+          .toLowerCase();
         return haystack.includes(query);
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [meetingSearch, meetings, statusFilter]);
+  }, [meetingSearch, meetingTranscriptHits, meetings, statusFilter]);
 
   const meetingStats = useMemo(() => {
     const total = meetings.length;
@@ -1950,6 +2316,63 @@ export function RecordingsView() {
     () => prepPromptsForTemplate(meetingTemplateId),
     [meetingTemplateId]
   );
+  // Provenance only holds for the exact text the model produced. The moment the
+  // user edits a line it is their text again, and no evidence is claimed for it.
+  const summaryProvenance = useMemo(() => {
+    if (!meetingSummaryProvenance) {
+      return null;
+    }
+    return meetingSummaryProvenance.summary.trim() === meetingSummary.trim()
+      ? meetingSummaryProvenance
+      : null;
+  }, [meetingSummary, meetingSummaryProvenance]);
+  const actionItemProvenance = useMemo(() => {
+    const byItem = new Map(
+      meetingActionItemProvenance.map((entry) => [entry.item.trim(), entry.citations])
+    );
+    return selectedMeetingActionItems.map((item) => ({
+      item,
+      citations: byItem.get(item.trim()) ?? null,
+    }));
+  }, [meetingActionItemProvenance, selectedMeetingActionItems]);
+  // Only the action items still matching text the model produced this session
+  // carry evidence; the rest are the user's own and are left alone.
+  const generatedActionItemProvenance = useMemo(
+    () =>
+      actionItemProvenance.flatMap((entry) =>
+        entry.citations ? [{ item: entry.item, citations: entry.citations }] : []
+      ),
+    [actionItemProvenance]
+  );
+  const hasRecapProvenance =
+    Boolean(summaryProvenance) || generatedActionItemProvenance.length > 0;
+  // Three states, and the third is the honest one: text that was already stored
+  // when the meeting opened has no recorded author, so it is neither claimed as
+  // the model's nor handed back to the reader as their own.
+  const summaryAuthorship: RecapAuthorship = summaryProvenance
+    ? "plainsong"
+    : userEditedSummary !== null && userEditedSummary.trim() === meetingSummary.trim()
+      ? "user"
+      : "unrecorded";
+  const actionItemsAuthorship: RecapAuthorship = actionItemProvenance.some(
+    (entry) => entry.citations !== null
+  )
+    ? "plainsong"
+    : userEditedActionItemsText !== null &&
+        actionItemsFromText(userEditedActionItemsText).join("\n") ===
+          selectedMeetingActionItems.join("\n")
+      ? "user"
+      : "unrecorded";
+
+  // A citation is only useful if it can take you to the moment it names.
+  const jumpToTranscriptMoment = useCallback((startTime?: number) => {
+    setSearchQuery("");
+    setTranscriptMatches([]);
+    setActiveTranscriptMatchIndex(0);
+    pendingMatchFocusTimeRef.current = null;
+    setTranscriptCueTime(typeof startTime === "number" ? startTime : undefined);
+    setMeetingTab("transcript");
+  }, []);
   const selectedMeetingRelationshipMatches = useMemo(() => {
     if (!selectedRecording || !relationshipMemory) {
       return { people: [] as PersonMemoryProfile[], companies: [] as CompanyMemoryProfile[] };
@@ -2020,6 +2443,10 @@ export function RecordingsView() {
       ),
     [liveMeetingConsentShown, recordingId, selectedRecording]
   );
+  const activeMeetingConsent = useMemo(
+    () => describeMeetingConsent(activeMeeting, liveMeetingConsentShown),
+    [activeMeeting, liveMeetingConsentShown]
+  );
   const buildSelectedMeetingMarkdown = useCallback(
     (includeTranscript: boolean) =>
       selectedRecording
@@ -2061,8 +2488,19 @@ export function RecordingsView() {
         actionItems: selectedMeetingActionItems,
         notes: meetingNotes,
         transcriptSegments: selectedTranscript?.segments?.length ?? 0,
+        status: selectedRecording?.status,
+        isLive: selectedRecording?.id === recordingId && isRecording,
       }),
-    [meetingNotes, meetingSummary, selectedMeetingActionItems, selectedTranscript?.segments?.length]
+    [
+      isRecording,
+      meetingNotes,
+      meetingSummary,
+      recordingId,
+      selectedMeetingActionItems,
+      selectedRecording?.id,
+      selectedRecording?.status,
+      selectedTranscript?.segments?.length,
+    ]
   );
   const selectedMeetingReviewPath = useMemo(
     () => [
@@ -2311,30 +2749,57 @@ export function RecordingsView() {
     return `${mins}:${secs.toString().padStart(2, "0")}`;
   };
 
-  useEffect(() => {
-    const handleOpenRecordingWorkspace = (event: Event) => {
-      const detail = (event as CustomEvent<OpenRecordingWorkspaceDetail>).detail;
+  const openRequestedWorkspace = useCallback(
+    (detail: OpenRecordingWorkspaceDetail | null | undefined) => {
       const requestedRecordingId = detail?.recordingId?.trim();
-      if (!requestedRecordingId) {
+      if (!detail || !requestedRecordingId) {
         return;
       }
 
+      const focus = {
+        segmentTime: detail.focusSegmentTime,
+        highlightQuery: detail.highlightQuery,
+      };
       const existingRecording =
         effectiveRecordings.find((recording) => recording.id === requestedRecordingId) ?? null;
       if (existingRecording) {
-        openMeetingWorkspace(existingRecording);
+        openMeetingWorkspace(existingRecording, focus);
         return;
       }
 
       void getRecording(requestedRecordingId)
         .then((recording) => {
           if (recording?.sourceType === "meeting") {
-            openMeetingWorkspace(recording);
+            openMeetingWorkspace(recording, focus);
           }
         })
         .catch((error) => {
           console.error("Failed to open requested meeting view:", error);
         });
+    },
+    // openMeetingWorkspace only reads its own arguments plus stable setters and
+    // hook callbacks, so it is deliberately left out; the meeting list is the
+    // part that actually has to be current.
+    [effectiveRecordings]
+  );
+
+  // A request made from another view is emitted before this lazy view mounts,
+  // so the emitted event can land on nobody. Take the parked request instead.
+  // Mount only: every later request arrives as an event.
+  const hasConsumedPendingWorkspaceRef = useRef(false);
+  useEffect(() => {
+    if (hasConsumedPendingWorkspaceRef.current) {
+      return;
+    }
+    hasConsumedPendingWorkspaceRef.current = true;
+    openRequestedWorkspace(consumePendingRecordingWorkspace());
+  }, [openRequestedWorkspace]);
+
+  useEffect(() => {
+    const handleOpenRecordingWorkspace = (event: Event) => {
+      // Clear the parked copy so the mount path cannot open it a second time.
+      consumePendingRecordingWorkspace();
+      openRequestedWorkspace((event as CustomEvent<OpenRecordingWorkspaceDetail>).detail);
     };
 
     window.addEventListener(
@@ -2347,7 +2812,7 @@ export function RecordingsView() {
         handleOpenRecordingWorkspace as EventListener
       );
     };
-  }, [effectiveRecordings]);
+  }, [openRequestedWorkspace]);
 
   return (
     <div className="h-full flex flex-col">
@@ -2447,7 +2912,8 @@ export function RecordingsView() {
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     className="pl-9"
-                    placeholder="Search meetings by title or date"
+                    placeholder="Search titles, notes, recaps, action items, and transcripts"
+                    aria-label="Search meetings"
                     value={meetingSearch}
                     onChange={(event) => setMeetingSearch(event.target.value)}
                   />
@@ -2507,10 +2973,105 @@ export function RecordingsView() {
                   </Button>
                 </div>
               </div>
-              <p className="mt-3 text-xs text-muted-foreground">
+              <p className="mt-3 text-sm text-muted-foreground">
                 Seeing a dictation in this list? Use the row menu and choose Mark as Dictation to move it out of Meetings.
               </p>
+
+              {/* Transcript hits are ranked by the backend's bm25 index and open
+                  the meeting at the moment they were found. */}
+              {meetingSearch.trim().length >= 2 && (
+                <div className="mt-4 border-t border-border/60 pt-4">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <p className="section-heading text-sm">Transcript matches</p>
+                    <span className="rubric-muted time-spec">
+                      {isSearchingMeetingTranscripts
+                        ? "Searching"
+                        : `${meetingTranscriptHits.length} found`}
+                    </span>
+                  </div>
+                  {meetingSearchError ? (
+                    <p className="mt-2 text-sm text-rust">{meetingSearchError}</p>
+                  ) : meetingTranscriptHits.length === 0 ? (
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      {isSearchingMeetingTranscripts
+                        ? "Looking through every transcript…"
+                        : "No transcript lines matched. Meetings matching on title, notes, recap, or action items are still listed below."}
+                    </p>
+                  ) : (
+                    <div className="mt-2 grid gap-1.5">
+                      {meetingTranscriptHits.slice(0, 8).map((hit) => (
+                        <button
+                          key={`${hit.recordingId}-${hit.segmentId}`}
+                          type="button"
+                          className="rounded-md border border-border/70 bg-background/60 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          onClick={() =>
+                            openMeetingWorkspace(hit.recording, {
+                              segmentTime: hit.startTime,
+                              highlightQuery: meetingSearch.trim(),
+                            })
+                          }
+                        >
+                          <div className="flex items-baseline gap-2">
+                            <span className="truncate text-sm font-medium">
+                              {hit.recordingTitle || hit.recording.title}
+                            </span>
+                            <span className="rubric-muted time-spec shrink-0">
+                              {formatDuration(Math.floor(hit.startTime))}
+                            </span>
+                          </div>
+                          <p className="manuscript mt-1 line-clamp-2 text-sm text-muted-foreground">
+                            {hit.text}
+                          </p>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
           </section>
+
+          {audioPlaybackIssue && (
+            <Card className="mb-4 border-rust/40 bg-rust/5">
+              <CardContent className="p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-rust">
+                      Couldn't open the audio for{" "}
+                      {meetings.find((meeting) => meeting.id === audioPlaybackIssue.recordingId)
+                        ?.title ?? "this meeting"}
+                    </p>
+                    {/* The backend already said what went wrong and what to do
+                        about it; pass that through instead of a generic line. */}
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {audioPlaybackIssue.message}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    {/vault is locked/i.test(audioPlaybackIssue.message) && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setAudioPlaybackIssue(null);
+                          requestMainView("settings");
+                        }}
+                      >
+                        <Lock className="mr-2 h-4 w-4" />
+                        Unlock vault
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setAudioPlaybackIssue(null)}
+                    >
+                      Dismiss
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {isRecording && recordingId && (
             <Card className="mb-4 border-gold/40 bg-gold/5">
@@ -2535,10 +3096,15 @@ export function RecordingsView() {
                       <Badge variant="outline" className="bg-background/70">
                         Playbook: {liveMeetingTemplateOption.label}
                       </Badge>
-                      {liveMeetingConsentShown ? (
-                        <Badge variant="outline" className="border-gold/30 bg-gold/10 text-gold-text">
-                          <CheckCircle2 className="mr-1 h-3 w-3" />
-                          Consent confirmed
+                      {/* The app knows the prompt was shown; it does not know a
+                          notice reached anyone. Use the same words the review
+                          surface uses, and reserve "sent" for a sent notice.
+                          Driven by the meeting's own consent state so it also
+                          survives a reload mid-capture. */}
+                      {activeMeetingConsent.tracked ? (
+                        <Badge variant="outline" className="border-border bg-muted/30 text-foreground">
+                          <span className="neume neume-hollow mr-1.5" aria-hidden="true" />
+                          {activeMeetingConsent.label}
                         </Badge>
                       ) : null}
                     </div>
@@ -2866,7 +3432,11 @@ export function RecordingsView() {
             </DialogDescription>
           </DialogHeader>
 
-          <Tabs defaultValue="notes" className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <Tabs
+            value={meetingTab}
+            onValueChange={setMeetingTab}
+            className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          >
             <TabsList className="grid w-full grid-cols-4">
               <TabsTrigger value="notes" className="flex items-center gap-2">
                 <Edit3 className="h-4 w-4" />
@@ -3105,10 +3675,17 @@ export function RecordingsView() {
                               <span className="neume neume-rust" aria-hidden="true" />
                               Summary
                             </p>
-                            <p className="rubric-muted mt-1 normal-case tracking-normal text-[10px]">
-                              AI-generated from transcript + notes
+                            {/* The old line claimed "AI-generated" even for text
+                                the user typed, and the line after it called
+                                every reopened recap theirs. Say which hand
+                                actually set these words down — or say that
+                                nothing recorded it. */}
+                            <p className="mt-1 text-sm text-muted-foreground">
+                              {meetingSummary.trim()
+                                ? SUMMARY_AUTHORSHIP_CAPTION[summaryAuthorship]
+                                : "No summary yet. Refresh to have Plainsong write it from the transcript."}
                             </p>
-                            <p className="text-xs text-muted-foreground">
+                            <p className="text-sm text-muted-foreground">
                               Keep the meeting recap editable. Regenerate when your notes change.
                             </p>
                           </div>
@@ -3141,13 +3718,26 @@ export function RecordingsView() {
                               : "Read aloud"}
                           </Button>
                         </div>
+                        {/* Machine-set text sits in the quieter ink behind a
+                            bronze rule; the reader's own keeps full ink; text
+                            whose author was never recorded gets a neutral rule
+                            and neither claim. The moment it is edited here it
+                            is the reader's again. */}
                         <textarea
                           value={meetingSummary}
-                          onChange={(event) => setMeetingSummary(event.target.value)}
+                          onChange={(event) => {
+                            setMeetingSummary(event.target.value);
+                            setUserEditedSummary(event.target.value);
+                          }}
                           aria-label="Meeting summary"
                           placeholder="Summary will appear here after transcription and analysis finish."
                           rows={8}
-                          className="w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-rust"
+                          className={cn(
+                            "w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-rust",
+                            meetingSummary.trim()
+                              ? RECAP_AUTHORSHIP_TREATMENT[summaryAuthorship]
+                              : RECAP_AUTHORSHIP_TREATMENT.user
+                          )}
                         />
                       </div>
 
@@ -3158,10 +3748,12 @@ export function RecordingsView() {
                               <span className="neume neume-rust" aria-hidden="true" />
                               Action Items
                             </p>
-                            <p className="rubric-muted mt-1 normal-case tracking-normal text-[10px]">
-                              AI-extracted from transcript + notes
+                            <p className="mt-1 text-sm text-muted-foreground">
+                              {meetingActionItemsText.trim()
+                                ? ACTION_ITEMS_AUTHORSHIP_CAPTION[actionItemsAuthorship]
+                                : "No action items yet. Refresh to have Plainsong extract them from the transcript."}
                             </p>
-                            <p className="text-xs text-muted-foreground">
+                            <p className="text-sm text-muted-foreground">
                               One line per follow-up. Owners and dates can stay inline.
                             </p>
                           </div>
@@ -3199,14 +3791,145 @@ export function RecordingsView() {
                         </div>
                         <textarea
                           value={meetingActionItemsText}
-                          onChange={(event) => setMeetingActionItemsText(event.target.value)}
+                          onChange={(event) => {
+                            setMeetingActionItemsText(event.target.value);
+                            setUserEditedActionItemsText(event.target.value);
+                          }}
                           aria-label="Meeting action items"
                           placeholder="Action items will appear here after transcription and analysis finish."
                           rows={8}
-                          className="w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-rust"
+                          className={cn(
+                            "w-full resize-none rounded-lg border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-rust",
+                            meetingActionItemsText.trim()
+                              ? RECAP_AUTHORSHIP_TREATMENT[actionItemsAuthorship]
+                              : RECAP_AUTHORSHIP_TREATMENT.user
+                          )}
                         />
                       </div>
                     </div>
+
+                    {/* Provenance. The boxes above carry the authorship mark —
+                        machine-set text in the quieter ink behind a bronze
+                        rule, the reader's own in full ink, text with no
+                        recorded author behind a neutral rule. This is the
+                        evidence for the machine-set lines: each one either
+                        names the transcript moment it came from, in a row big
+                        enough to hit, or says plainly that it has none. */}
+                    <div className="mt-4 border-t pt-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="section-heading">Where this recap came from</p>
+                          <p className="mt-1 max-w-prose text-sm text-muted-foreground">
+                            Evidence for the lines Plainsong wrote this session. Text you typed here
+                            is your own; text that came back from storage has no recorded author.
+                            Neither is listed below — Plainsong makes no evidence claim about
+                            either.
+                          </p>
+                        </div>
+                      </div>
+
+                      {!hasRecapProvenance ? (
+                        <p className="mt-3 text-sm text-muted-foreground">
+                          Nothing on this recap was generated in this session, so there is no
+                          evidence to show. Refresh the summary or action items to attach
+                          transcript citations.
+                        </p>
+                      ) : (
+                        <div className="mt-3 space-y-4">
+                          {summaryProvenance ? (
+                            <div>
+                              <p className="rubric-muted">Summary</p>
+                              {summaryProvenance.citations.length === 0 ? (
+                                <p className="mt-1.5 inline-flex items-center gap-1.5 text-sm text-rust">
+                                  <span className="neume neume-hollow" aria-hidden="true" />
+                                  Not grounded — the model returned no transcript citation for this
+                                  summary.
+                                </p>
+                              ) : (
+                                <div className="mt-2 grid gap-1.5">
+                                  {summaryProvenance.citations.map((citation, index) => (
+                                    <button
+                                      key={`summary-citation-${index}`}
+                                      type="button"
+                                      className="rounded-md border border-border/70 bg-background/70 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                      onClick={() => jumpToTranscriptMoment(citation.startTime)}
+                                    >
+                                      <span className="flex items-baseline gap-2">
+                                        <Quote
+                                          className="h-3.5 w-3.5 shrink-0 translate-y-0.5 text-muted-foreground"
+                                          aria-hidden="true"
+                                        />
+                                        <span className="rubric-muted time-spec shrink-0">
+                                          {formatCitationTimeRange(citation) ?? "No timestamp"}
+                                        </span>
+                                      </span>
+                                      <span className="manuscript mt-1 block text-sm">
+                                        {citation.text}
+                                      </span>
+                                      <span className="mt-1 block text-sm text-muted-foreground">
+                                        Jump to this moment in the transcript
+                                      </span>
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ) : null}
+
+                          {generatedActionItemProvenance.length > 0 ? (
+                            <div>
+                              <p className="rubric-muted">Action items</p>
+                              <div className="mt-1.5 space-y-3">
+                                {generatedActionItemProvenance.map((entry, entryIndex) => (
+                                  <div key={`action-provenance-${entryIndex}`}>
+                                    <p className="manuscript max-w-prose border-l-2 border-gold-ambient/50 pl-3 text-sm leading-relaxed text-muted-foreground">
+                                      {entry.item}
+                                    </p>
+                                    {entry.citations.length === 0 ? (
+                                      <p className="mt-1 inline-flex items-center gap-1.5 text-sm text-rust">
+                                        <span className="neume neume-hollow" aria-hidden="true" />
+                                        Not grounded — no transcript citation was returned for this
+                                        follow-up.
+                                      </p>
+                                    ) : (
+                                      <div className="mt-1.5 grid gap-1.5">
+                                        {entry.citations.map((citation, citationIndex) => (
+                                          <button
+                                            key={`action-citation-${entryIndex}-${citationIndex}`}
+                                            type="button"
+                                            className="rounded-md border border-border/70 bg-background/70 px-3 py-2.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                                            onClick={() =>
+                                              jumpToTranscriptMoment(citation.startTime)
+                                            }
+                                          >
+                                            <span className="flex items-baseline gap-2">
+                                              <Quote
+                                                className="h-3.5 w-3.5 shrink-0 translate-y-0.5 text-muted-foreground"
+                                                aria-hidden="true"
+                                              />
+                                              <span className="rubric-muted time-spec shrink-0">
+                                                {formatCitationTimeRange(citation) ?? "No timestamp"}
+                                              </span>
+                                            </span>
+                                            <span className="manuscript mt-1 block text-sm">
+                                              {citation.text}
+                                            </span>
+                                            <span className="mt-1 block text-sm text-muted-foreground">
+                                              Jump to this moment in the transcript
+                                            </span>
+                                          </button>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      )}
+                    </div>
+
                     <div className="mt-4 flex flex-wrap items-center gap-2">
                       <label className="text-xs font-medium text-muted-foreground" htmlFor="meeting-template">
                         Playbook
@@ -3674,18 +4397,17 @@ export function RecordingsView() {
                       </div>
                       <div className="mt-3 space-y-3">
                         <div className="flex flex-wrap gap-2">
-                          {selectedMeetingRecallPrompts.map((prompt) => (
+                          {selectedMeetingRecallPrompts.map((suggestion) => (
                             <Button
-                              key={prompt}
+                              key={suggestion.prompt}
                               type="button"
                               size="sm"
                               variant="outline"
-                              onClick={() => void runMeetingRecall(prompt)}
+                              title={suggestion.prompt}
+                              onClick={() => void runMeetingRecall(suggestion.prompt)}
                               disabled={meetingRecallLoading}
                             >
-                              {prompt.includes("What has")
-                                ? prompt.replace(/^What has /, "").split("?")[0]
-                                : "Recall next follow-up"}
+                              {suggestion.label}
                             </Button>
                           ))}
                         </div>
@@ -4039,8 +4761,10 @@ export function RecordingsView() {
                       )}
                     </div>
                   )}
-                  <div className="mb-3 rounded-lg border bg-muted/20 p-3 text-xs text-muted-foreground">
-                    Edit transcript paragraphs in place, or remove a paragraph if it should not be part of the meeting record.
+                  <div className="mb-3 rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
+                    Click a paragraph to set your place; the text stays selectable. Double-click
+                    it, or use the Edit button, to correct it. Up and down arrows walk the
+                    transcript.
                   </div>
                   <div className="mb-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                     <div className="rounded-lg border bg-muted/20 p-3">
@@ -4097,13 +4821,29 @@ export function RecordingsView() {
                     </div>
                   </div>
                   <TranscriptSearch
-                    onSearch={setSearchQuery}
+                    query={searchQuery}
+                    onQueryChange={(query) => {
+                      setSearchQuery(query);
+                      setActiveTranscriptMatchIndex(0);
+                      // A search the reader types is their own; it must not
+                      // inherit a deep link's moment.
+                      pendingMatchFocusTimeRef.current = null;
+                    }}
+                    matchCount={transcriptMatches.length}
+                    activeMatchIndex={activeTranscriptMatchIndex}
+                    onStepMatch={stepTranscriptMatch}
                     className="mb-4 shrink-0"
                   />
                   <div className="min-h-0 flex-1 rounded-lg border overflow-hidden">
                     <TranscriptViewer
-                      segments={filteredSegments}
+                      segments={transcriptSegments}
                       speakerNames={speakerNames}
+                      provenance={selectedTranscriptProvenance}
+                      currentTime={transcriptCueTime}
+                      onSegmentClick={(segment) => setTranscriptCueTime(segment.startTime)}
+                      highlightQuery={searchQuery}
+                      activeMatchIndex={activeTranscriptMatchIndex}
+                      onMatchesChange={handleTranscriptMatchesChange}
                       onRenameSpeaker={handleRenameSpeaker}
                       onEditSegment={async (segmentIds, newText) => {
                         if (!selectedRecording || segmentIds.length === 0) return;

@@ -161,6 +161,13 @@ pub struct DictationStartOptions {
     pub activation_matcher: Option<String>,
     #[serde(default)]
     pub preferred_input_device_id: Option<String>,
+    /// True only when the hands-free idle monitor's own `hands_free_start`
+    /// signal triggered this start. It is the one activation path allowed to be
+    /// seeded from the monitor's pre-roll ring; a hotkey press means "start
+    /// now", and prepending the audio from before the press would put words the
+    /// user never meant to dictate at their cursor.
+    #[serde(default)]
+    pub hands_free_trigger: bool,
 }
 
 impl Default for DictationStartOptions {
@@ -188,6 +195,7 @@ impl Default for DictationStartOptions {
             resolved_mode_label: None,
             activation_matcher: None,
             preferred_input_device_id: None,
+            hands_free_trigger: false,
         }
     }
 }

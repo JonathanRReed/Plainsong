@@ -23,7 +23,10 @@ function extractSidecarCommands(source) {
 }
 
 const electronLocalCommands = new Set([
+  "__overlay_placement__",
+  "__overlay_set_display_mode__",
   "__window_hide__",
+  "__window_set_ignore_mouse_events__",
   "__window_set_position__",
   "__window_set_size__",
   "__window_show__",
